@@ -633,6 +633,15 @@ fn validate_observed_settings(
                 .ok_or(SessionSetupError::ConfigurationMismatch)
         })
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    let temporary_writes_excluded = access != RouterAccess::WriteRestricted
+        || (response
+            .pointer("/sandbox/excludeTmpdirEnvVar")
+            .and_then(Value::as_bool)
+            == Some(true)
+            && response
+                .pointer("/sandbox/excludeSlashTmp")
+                .and_then(Value::as_bool)
+                == Some(true));
     let mut expected = std::collections::BTreeSet::from([scratch
         .to_str()
         .ok_or(SessionSetupError::ConfigurationMismatch)?
@@ -650,10 +659,12 @@ fn validate_observed_settings(
             );
         }
     }
-    if profile_id != profile || actual != expected {
+    if profile_id != profile || actual != expected || !temporary_writes_excluded {
         return Err(SessionSetupError::AccessMismatch {
             requested: access_name(access).to_owned(),
-            effective: format!("profile={profile_id}, roots={actual:?}"),
+            effective: format!(
+                "profile={profile_id}, roots={actual:?}, temporary_writes_excluded={temporary_writes_excluded}"
+            ),
         });
     }
     Ok(())
@@ -736,6 +747,28 @@ mod access_validation_tests {
         assert!(
             validate_observed_settings(
                 &wrong,
+                RouterAccess::WriteRestricted,
+                cwd,
+                scratch,
+                "router-write-restricted"
+            )
+            .is_err()
+        );
+        let broad_temporary_access = json!({
+            "activePermissionProfile":{"id":"router-write-restricted"},
+            "sandbox":{
+                "writableRoots":[
+                    "/owner/scratch/root",
+                    "/repo/docs/wip",
+                    "/repo/tmp"
+                ],
+                "excludeTmpdirEnvVar":false,
+                "excludeSlashTmp":false
+            }
+        });
+        assert!(
+            validate_observed_settings(
+                &broad_temporary_access,
                 RouterAccess::WriteRestricted,
                 cwd,
                 scratch,

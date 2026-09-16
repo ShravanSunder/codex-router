@@ -104,7 +104,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                 assert_eq!(request["method"], "thread/resume");
                 assert_eq!(request["params"], json!({"threadId":"new-thread"}));
             }
-            server.send(Message::Text(json!({"id":request["id"],"result":{"cwd":effective_cwd,"model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":effective_reviewer,"activePermissionProfile":{"id":"router-write-restricted","extends":":read-only"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work/project/docs/wip","/work/project/tmp"]},"thread":{"id":"new-thread","cwd":effective_cwd,"turns":[{"id":"old-turn","items":[{"type":"agentMessage","id":"message","text":"previous answer"}]}]}}}).to_string().into())).await.unwrap_or_else(|error| panic!("send: {error}"));
+            server.send(Message::Text(json!({"id":request["id"],"result":{"cwd":effective_cwd,"model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":effective_reviewer,"activePermissionProfile":{"id":"router-write-restricted","extends":":read-only"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work/project/docs/wip","/work/project/tmp"],"excludeTmpdirEnvVar":true,"excludeSlashTmp":true},"thread":{"id":"new-thread","cwd":effective_cwd,"turns":[{"id":"old-turn","items":[{"type":"agentMessage","id":"message","text":"previous answer"}]}]}}}).to_string().into())).await.unwrap_or_else(|error| panic!("send: {error}"));
         });
         let result = if creating {
             AcpSessionBinding::create(
