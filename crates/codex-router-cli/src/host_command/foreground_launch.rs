@@ -44,6 +44,7 @@ pub(super) async fn run_foreground_host(
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
     stdout: &mut (impl std::io::Write + Send),
 ) -> Result<(), HostCommandError> {
+    let launch_started_at = std::time::Instant::now();
     let isolated_debug = cfg!(all(debug_assertions, not(test)))
         && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none();
     if isolated_debug {
@@ -74,8 +75,10 @@ pub(super) async fn run_foreground_host(
     } else {
         app_server_spec
     };
+    codex_router_host::record_debug_readiness_timing("profileAndSpec", launch_started_at);
     // Validate the native destination before touching state or launch policy.
     tokio::fs::create_dir_all(&router_root).await?;
+    codex_router_host::record_debug_readiness_timing("routerRootReady", launch_started_at);
     if !isolated_debug {
         let started_at = std::time::Instant::now();
         DesktopLaunchPolicyCommand::new(launchctl_executable(context)?)
@@ -89,6 +92,7 @@ pub(super) async fn run_foreground_host(
         None => HostInstance::acquire(coordination_paths.clone()),
     }
     .map_err(codex_router_host::HostError::from)?;
+    codex_router_host::record_debug_readiness_timing("singletonAcquired", launch_started_at);
     let identity_started_at = std::time::Instant::now();
     let running_identity =
         codex_native_integration::executable_identity(&codex_paths.managed_executable()).await?;
@@ -110,6 +114,7 @@ pub(super) async fn run_foreground_host(
     let app_server =
         AppServerLaunchPlan::new(app_server_command, running_identity, running_version)
             .with_schema_directory(router_root.join("agent-communication"));
+    codex_router_host::record_debug_readiness_timing("appServerPlanBuilt", launch_started_at);
     // Schema export is optional raw-native enrichment; do not delay app-server
     // socket startup on this best-effort operation.
     let current_executable = std::env::current_exe()?;
