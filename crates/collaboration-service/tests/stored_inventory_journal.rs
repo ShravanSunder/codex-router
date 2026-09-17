@@ -188,13 +188,17 @@ mod tests {
         ));
     }
 
-    /// Runs one stored listing against a fixture catalog through the real Control service.
-    async fn stored_listing(
+    /// Pages one stored listing to exhaustion through the real Control service.
+    ///
+    /// Returns every page in order so a caller can assert both the row content and that
+    /// paging never loses a row across a cursor boundary.
+    async fn stored_listing_pages(
         root: &std::path::Path,
         scope: collaboration_protocol::NativeSessionScope,
         source: collaboration_protocol::NativeSessionSource,
         query: Option<&str>,
-    ) -> collaboration_protocol::NativeSessionListResult {
+        page_size: u32,
+    ) -> Vec<collaboration_protocol::NativeSessionListResult> {
         let home = root.join("native-home");
         let id = "00000000-0000-4000-8000-000000000011";
         let epoch = "00000000-0000-4000-8000-000000000012";
@@ -228,18 +232,27 @@ mod tests {
         let mut client = ControlClient::connect(root, "scoped-listing-test", "1")
             .await
             .unwrap();
-        let page = client
-            .list_sessions(NativeSessionListParams {
-                endpoint: endpoint.clone(),
-                view: NativeSessionView::Stored,
-                scope,
-                source,
-                query: query.map(str::to_owned),
-                page_size: 100,
-                cursor: None,
-            })
-            .await
-            .unwrap();
+        let mut pages = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = client
+                .list_sessions(NativeSessionListParams {
+                    endpoint: endpoint.clone(),
+                    view: NativeSessionView::Stored,
+                    scope: scope.clone(),
+                    source,
+                    query: query.map(str::to_owned),
+                    page_size,
+                    cursor: cursor.take(),
+                })
+                .await
+                .unwrap();
+            cursor = page.next_cursor.clone();
+            pages.push(page);
+            if cursor.is_none() {
+                break;
+            }
+        }
         client.close().await.unwrap();
         stop.cancel();
         server.await.unwrap().unwrap();
@@ -249,7 +262,15 @@ mod tests {
             .close()
             .await;
         std::fs::remove_file(root.join("journal.sqlite")).unwrap();
-        page
+        pages
+    }
+
+    fn session_ids(pages: &[collaboration_protocol::NativeSessionListResult]) -> Vec<String> {
+        pages
+            .iter()
+            .flat_map(|page| page.sessions.iter())
+            .map(|session| String::from(session.target.session_id.clone()))
+            .collect()
     }
 
     #[tokio::test]
@@ -310,6 +331,17 @@ mod tests {
                 "review seat in the fork",
                 100,
             ),
+            // A different repository whose origin differs only by letter case. SQLite
+            // LIKE admits it; only the canonical predicate on the decoded row rejects it.
+            (
+                "case-only-origin",
+                "/elsewhere/mirror",
+                Some("https://github.com/Shravan/AI-Tools.git"),
+                Some("medium"),
+                "user",
+                "review seat in the mirror",
+                250,
+            ),
         ] {
             sqlx::query("INSERT INTO threads (id,cwd,model,reasoning_effort,source,thread_source,git_origin_url,name,title,updated_at_ms,recency_at_ms,archived) VALUES (?, ?, 'gpt-5.6-sol', ?, 'cli', ?, ?, ?, 'derived', ?, ?, 0)")
                 .bind(id).bind(cwd).bind(effort).bind(thread_source).bind(origin).bind(name).bind(time).bind(time)
@@ -324,18 +356,29 @@ mod tests {
         };
 
         // Act
-        let interactive = stored_listing(
+        let interactive = stored_listing_pages(
             &root,
             scope.clone(),
             collaboration_protocol::NativeSessionSource::Interactive,
             Some("REVIEW"),
+            100,
         )
         .await;
-        let everything = stored_listing(
+        let everything = stored_listing_pages(
+            &root,
+            scope.clone(),
+            collaboration_protocol::NativeSessionSource::All,
+            None,
+            100,
+        )
+        .await;
+        // One row per page, so every rejected row sits on a cursor boundary.
+        let one_at_a_time = stored_listing_pages(
             &root,
             scope,
             collaboration_protocol::NativeSessionSource::All,
             None,
+            1,
         )
         .await;
 
@@ -344,38 +387,38 @@ mod tests {
         std::fs::remove_dir(root).unwrap();
 
         // Assert: the work fork never enters a repository-scoped listing.
-        let interactive_ids = interactive
-            .sessions
-            .iter()
-            .map(|session| String::from(session.target.session_id.clone()))
-            .collect::<Vec<_>>();
+        let interactive_ids = session_ids(&interactive);
         assert_eq!(
             interactive_ids,
             ["in-repo-known-effort", "in-repo-unknown-effort"]
         );
-        let all_ids = everything
-            .sessions
-            .iter()
-            .map(|session| String::from(session.target.session_id.clone()))
-            .collect::<Vec<_>>();
+        let all_ids = session_ids(&everything);
         assert_eq!(
             all_ids,
             [
                 "in-repo-known-effort",
                 "in-repo-unknown-effort",
                 "in-repo-subagent"
-            ]
+            ],
+            "the Control page resolves --repo through the canonical predicate, so neither \
+             the work fork nor a case-only origin difference can enter it"
+        );
+        // Assert: paging one row at a time crosses every rejected row without a gap.
+        assert_eq!(
+            session_ids(&one_at_a_time),
+            all_ids,
+            "a page may be short after the predicate rejects a row, but never skip one"
         );
         // Assert: the effort is read, never guessed, and absent when the column is NULL.
         assert_eq!(
-            everything
+            everything[0]
                 .sessions
                 .iter()
                 .map(|session| session.reasoning_effort.clone())
                 .collect::<Vec<_>>(),
             [Some("high".to_owned()), None, Some("low".to_owned())]
         );
-        let encoded = serde_json::to_value(&everything.sessions[1]).unwrap();
+        let encoded = serde_json::to_value(&everything[0].sessions[1]).unwrap();
         assert!(
             encoded.get("reasoningEffort").is_none(),
             "an unknown effort must be absent, not null"

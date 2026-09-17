@@ -160,6 +160,11 @@ mod tests {
         // An origin present while the caller has none, inside a live root.
         ThreadRow::new("origin-inside-live-root", "/dev/ai-tools/docs", 40)
             .with_origin("https://github.com/shravan/ai-tools.git"),
+        // A different repository whose origin differs from the caller's only by letter
+        // case. SQLite LIKE is case-insensitive, so the SQL prefilter admits it; only the
+        // canonical predicate, which lowercases the host but not the path, rejects it.
+        ThreadRow::new("case-only-origin", "/elsewhere/mirror", 30)
+            .with_origin("https://github.com/Shravan/AI-Tools.git"),
     ];
 
     fn identity_with_origin() -> RepositoryIdentity {
@@ -181,7 +186,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repo_scope_sql_admits_exactly_the_rows_the_human_catalog_admits() {
+    async fn repo_scope_sql_bounds_the_scan_without_dropping_a_canonical_match() {
         // Arrange
         let home = catalog_home("repo-scope-truth-table", SCOPE_ROWS).await;
 
@@ -191,23 +196,24 @@ mod tests {
         ] {
             // Act
             let sql_ids = matching_ids(&home, &repo_query(&identity, 100)).await;
+            let canonical = canonical_ids(&identity, SCOPE_ROWS);
 
-            // Assert
-            assert_eq!(
-                sql_ids,
-                canonical_ids(&identity, SCOPE_ROWS),
-                "{case}: SQL scope diverged from repository_contains_session"
-            );
+            // Assert: the SQL is a prefilter, so it may only ever admit extra rows.
+            for id in &canonical {
+                assert!(
+                    sql_ids.contains(id),
+                    "{case}: SQL dropped `{id}`, which the human catalog admits"
+                );
+            }
         }
 
-        // The work fork is the divergence this test exists to pin.
+        // The work fork is the divergence this test exists to pin: a different origin is
+        // never rescued by a matching directory leaf, in SQL or in the predicate.
         let with_origin = matching_ids(&home, &repo_query(&identity_with_origin(), 100)).await;
-        assert!(
-            !with_origin.contains(&"other-origin-matching-leaf".to_owned()),
-            "a different origin must not be rescued by a matching directory leaf"
-        );
+        assert!(!with_origin.contains(&"other-origin-matching-leaf".to_owned()));
         assert!(with_origin.contains(&"same-origin-ssh".to_owned()));
         assert!(with_origin.contains(&"no-origin-suffixed-leaf".to_owned()));
+        assert!(!with_origin.contains(&"no-origin-unrelated".to_owned()));
 
         let without_origin =
             matching_ids(&home, &repo_query(&identity_without_origin(), 100)).await;
@@ -216,6 +222,29 @@ mod tests {
             "a row that carries an origin may only match through a live worktree root"
         );
         assert!(without_origin.contains(&"origin-inside-live-root".to_owned()));
+
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_case_only_origin_difference_passes_the_sql_and_is_rejected_by_the_predicate() {
+        // Arrange: the one row whose verdict the two layers cannot agree on in SQL alone.
+        let home = catalog_home("repo-scope-case-only-origin", SCOPE_ROWS).await;
+        let identity = identity_with_origin();
+
+        // Act
+        let sql_ids = matching_ids(&home, &repo_query(&identity, 100)).await;
+        let canonical = canonical_ids(&identity, SCOPE_ROWS);
+
+        // Assert: SQLite LIKE cannot tell the two origins apart, so the predicate must.
+        assert!(
+            sql_ids.contains(&"case-only-origin".to_owned()),
+            "the SQL prefilter is expected to be a superset here"
+        );
+        assert!(
+            !canonical.contains(&"case-only-origin".to_owned()),
+            "the canonical predicate rejects an origin that differs by path case"
+        );
 
         std::fs::remove_dir_all(home).unwrap();
     }
