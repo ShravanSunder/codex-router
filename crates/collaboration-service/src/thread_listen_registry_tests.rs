@@ -669,19 +669,28 @@ fn describe_record(record: &ListenDeliveryRecord) -> String {
     }
 }
 
-/// Drives a spawned session delivery under paused time.
+/// Drives a spawned session delivery under paused time until it has produced
+/// the record a proof reads, or until the simulated minutes run out.
 ///
-/// Auto-advance races task startup: a single long sleep can jump the clock past
-/// the delivery task's first poll, so its debounce window would open after the
-/// observation window closed. Yield until the task has registered its timers,
-/// then step the clock by less than one debounce at a time.
-async fn drive_session_delivery(minutes: u64) {
-    for _ in 0..16 {
+/// Two things paused time cannot do on its own. Auto-advance races task startup,
+/// so a single long sleep can jump the clock past the delivery task's first poll
+/// and leave its debounce window opening after the observation window closed.
+/// And the storage calls behind a Batch set complete on a background thread the
+/// paused clock cannot advance, so each step yields repeatedly instead of once.
+async fn drive_session_delivery(
+    records: &Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
+    minutes: u64,
+    settled: impl Fn(&[ListenDeliveryRecord]) -> bool,
+) {
+    for _ in 0..32 {
         tokio::task::yield_now().await;
     }
     for _ in 0..minutes {
+        if settled(&records.lock().await) {
+            return;
+        }
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
-        for _ in 0..4 {
+        for _ in 0..32 {
             tokio::task::yield_now().await;
         }
     }
@@ -713,7 +722,10 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
             rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(2)),
         }),
     );
-    drive_session_delivery(90).await;
+    drive_session_delivery(&records, 90, |seen| {
+        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
+    })
+    .await;
 
     // Assert: the listen reached its lifetime instead of failing, and the
     // rejection it survived is still reported.
@@ -750,7 +762,13 @@ async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
         Arc::clone(&fixture.store),
         RecordingSink::accepting(&records),
     );
-    drive_session_delivery(90).await;
+    // Run past the second mark, which proves the first passed silently.
+    drive_session_delivery(&records, 90, |seen| {
+        seen.iter().any(
+            |record| matches!(record, ListenDeliveryRecord::Heartbeat(value) if value.mark == 2),
+        )
+    })
+    .await;
 
     // Assert: the Batch set stood in for that mark's heartbeat.
     let seen = records.lock().await;
@@ -766,6 +784,13 @@ async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
         "a mark with a delivery must not also emit a heartbeat"
     );
     drop(seen);
+
+    // Release the delivery task before the fixture reclaims the store.
+    let _cancelled = registry.cancel(&listen.listen_id).await;
+    drive_session_delivery(&records, 5, |seen| {
+        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
+    })
+    .await;
     fixture.finish().await;
 }
 
@@ -795,7 +820,10 @@ async fn a_third_consecutive_rejection_ends_the_listen_with_its_evidence() {
             rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(u8::MAX)),
         }),
     );
-    drive_session_delivery(90).await;
+    drive_session_delivery(&records, 90, |seen| {
+        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
+    })
+    .await;
 
     // Assert: the listen ended on the third refusal, carrying the last evidence.
     let seen = records.lock().await;
