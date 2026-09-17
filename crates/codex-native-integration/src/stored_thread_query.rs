@@ -157,38 +157,134 @@ fn append_root_filter(builder: &mut QueryBuilder<Sqlite>, root_filter: &StoredTh
                     has_clause = true;
                 }
             } else {
-                if let Some(origin) = normalized_origin {
-                    builder.push("git_origin_url = ").push_bind(origin.clone());
-                    has_clause = true;
-                }
-                for root in live_roots {
-                    if has_clause {
-                        builder.push(" OR ");
+                // Mirrors `repository_contains_session`: an origin on the row decides the
+                // match on its own, and the path and basename clauses only rescue a row
+                // that carries no origin at all.
+                if normalized_origin.is_some() {
+                    append_origin_match(builder, normalized_origin.as_deref());
+                    builder.push(" OR (");
+                    append_row_has_no_origin(builder);
+                    builder.push(" AND (");
+                    has_clause = append_path_and_basename_clauses(builder, live_roots, basename);
+                    if !has_clause {
+                        builder.push("0");
                     }
-                    append_path_scope_filter(builder, root);
+                    builder.push("))");
                     has_clause = true;
-                }
-                if !basename.is_empty() {
-                    if has_clause {
-                        builder.push(" OR ");
+                } else {
+                    for root in live_roots {
+                        if has_clause {
+                            builder.push(" OR ");
+                        }
+                        append_path_scope_filter(builder, root);
+                        has_clause = true;
                     }
-                    let escaped = escape_like(basename);
-                    builder
-                        .push("cwd LIKE ")
-                        .push_bind(format!("%/{escaped}"))
-                        .push(" ESCAPE '\\' OR cwd LIKE ")
-                        .push_bind(format!("%/{escaped}.%"))
-                        .push(" ESCAPE '\\' OR cwd LIKE ")
-                        .push_bind(format!("%/{escaped}-%"))
-                        .push(" ESCAPE '\\'");
+                    if !basename.is_empty() {
+                        if has_clause {
+                            builder.push(" OR ");
+                        }
+                        builder.push("(");
+                        append_row_has_no_origin(builder);
+                        builder.push(" AND (");
+                        append_basename_clauses(builder, basename);
+                        builder.push("))");
+                        has_clause = true;
+                    }
                 }
             }
-            if !has_clause && basename.is_empty() {
+            if !has_clause {
                 builder.push("0");
             }
             builder.push(")");
         }
     }
+}
+
+/// A row with no origin is the only row the path and basename clauses may rescue once the
+/// caller's repository has an origin of its own.
+fn append_row_has_no_origin(builder: &mut QueryBuilder<Sqlite>) {
+    builder.push("(git_origin_url IS NULL OR TRIM(git_origin_url) = '')");
+}
+
+/// Matches stored origins against a normalized `host/path` identity.
+///
+/// Codex stores the raw remote URL, and `normalize_git_origin_url` strips the scheme,
+/// any user prefix, a `.git` suffix, trailing slashes and query or fragment parts before
+/// lowercasing the host. SQLite cannot reproduce that rewrite, so this clause is a
+/// deliberate superset: it requires the host and the repository path to appear in the
+/// stored URL with the path at its end. A row for a different repository — the work fork
+/// whose directory leaf matches the basename — is excluded, which is the behaviour the
+/// canonical predicate demands.
+fn append_origin_match(builder: &mut QueryBuilder<Sqlite>, normalized_origin: Option<&str>) {
+    let Some(origin) = normalized_origin else {
+        builder.push("0");
+        return;
+    };
+    builder
+        .push("(git_origin_url = ")
+        .push_bind(origin.to_owned());
+    let (host, repository_path) = match origin.split_once('/') {
+        Some((host, repository_path)) if !host.is_empty() && !repository_path.is_empty() => {
+            (host, repository_path)
+        }
+        _ => {
+            builder.push(")");
+            return;
+        }
+    };
+    let escaped_host = escape_like(host);
+    let escaped_path = escape_like(repository_path);
+    builder
+        .push(" OR (git_origin_url LIKE ")
+        .push_bind(format!("%{escaped_host}%"))
+        .push(" ESCAPE '\\' AND (");
+    for (index, suffix) in ["", ".git", "/", ".git/"].into_iter().enumerate() {
+        if index > 0 {
+            builder.push(" OR ");
+        }
+        builder
+            .push("git_origin_url LIKE ")
+            .push_bind(format!("%{escaped_path}{suffix}"))
+            .push(" ESCAPE '\\'");
+    }
+    builder.push(")))");
+}
+
+/// Appends the live-worktree and historical-basename clauses shared by both origin cases.
+fn append_path_and_basename_clauses(
+    builder: &mut QueryBuilder<Sqlite>,
+    live_roots: &[PathBuf],
+    basename: &str,
+) -> bool {
+    let mut has_clause = false;
+    for root in live_roots {
+        if has_clause {
+            builder.push(" OR ");
+        }
+        append_path_scope_filter(builder, root);
+        has_clause = true;
+    }
+    if !basename.is_empty() {
+        if has_clause {
+            builder.push(" OR ");
+        }
+        append_basename_clauses(builder, basename);
+        has_clause = true;
+    }
+    has_clause
+}
+
+/// Historical worktree leaves: the repository name itself, or that name followed by `.` or `-`.
+fn append_basename_clauses(builder: &mut QueryBuilder<Sqlite>, basename: &str) {
+    let escaped = escape_like(basename);
+    builder
+        .push("cwd LIKE ")
+        .push_bind(format!("%/{escaped}"))
+        .push(" ESCAPE '\\' OR cwd LIKE ")
+        .push_bind(format!("%/{escaped}.%"))
+        .push(" ESCAPE '\\' OR cwd LIKE ")
+        .push_bind(format!("%/{escaped}-%"))
+        .push(" ESCAPE '\\'");
 }
 
 fn append_path_scope_filter(builder: &mut QueryBuilder<Sqlite>, root: &Path) {
