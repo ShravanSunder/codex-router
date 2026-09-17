@@ -1,10 +1,9 @@
 # Isolated live-proof status
 
-Residual proof notes: the process-lifecycle fixtures cover `Killed` outcome and
-process-group escalation, but there is not yet an operator-socket integration
-case that observes the `AppServerKilled` progress frame. `TimedOutStillRunning`
-resume/re-kill behavior also remains unchanged and is intentionally recorded for
-owner disposition rather than adding a new recovery path here.
+Residual proof notes: process-lifecycle fixtures cover the `Killed` outcome and
+process-group escalation, and the runtime restart integration now observes the
+`AppServerKilled` progress frame over the operator socket. A resumed
+`TimedOutStillRunning` shutdown reissues the process-group KILL backstop.
 
 Re-exec timing comparison: the pre-instrumentation live sample reported
 `re-executing Host (4.62s)` to router readiness. The post-instrumentation
