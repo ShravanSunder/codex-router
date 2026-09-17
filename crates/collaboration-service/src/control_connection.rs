@@ -476,6 +476,7 @@ pub async fn serve_control_connection(
                                         observer_id: &identity.service_epoch,
                                     }
                                 }),
+                                access_routes: identity.approval_broker.as_deref(),
                             },
                         )
                         .await;

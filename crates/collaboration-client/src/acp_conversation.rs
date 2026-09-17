@@ -138,8 +138,7 @@ impl AcpConversation {
                 .ok_or(ClientError::Protocol("service directory has no owner root"))?
                 .join("scratch")
                 .join(&scratch_scope);
-            std::fs::create_dir_all(cwd.join("tmp"))?;
-            std::fs::create_dir_all(cwd.join("docs/wip"))?;
+            prepare_project_write_areas(cwd, request.access)?;
             create_private_scratch(&scratch_path)?;
             router_metadata.insert("rootMessageId".into(), json!(request.root_message_id));
             router_metadata.insert("scratchScope".into(), json!(scratch_scope));
@@ -434,6 +433,18 @@ fn create_private_scratch(path: &Path) -> Result<(), ClientError> {
     Ok(())
 }
 
+/// Creates the project directories write-restricted access declares writable.
+///
+/// Workspace-write already owns the worktree, so Router must not materialize
+/// `tmp/` or `docs/wip/` in it on that path.
+fn prepare_project_write_areas(cwd: &Path, access: Option<&str>) -> std::io::Result<()> {
+    if access != Some("write-restricted") {
+        return Ok(());
+    }
+    std::fs::create_dir_all(cwd.join("tmp"))?;
+    std::fs::create_dir_all(cwd.join("docs/wip"))
+}
+
 fn session_scratch_scope() -> String {
     format!("session-{}", uuid::Uuid::now_v7())
 }
@@ -442,6 +453,27 @@ fn session_scratch_scope() -> String {
 mod access_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn only_write_restricted_access_creates_project_write_areas() {
+        // Arrange: one empty project directory per access selection.
+        let root =
+            std::env::temp_dir().join(format!("router-client-access-{}", uuid::Uuid::now_v7()));
+        let restricted = root.join("restricted");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&restricted).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // Act.
+        prepare_project_write_areas(&restricted, Some("write-restricted")).unwrap();
+        prepare_project_write_areas(&workspace, Some("workspace-write")).unwrap();
+
+        // Assert: workspace-write leaves the worktree exactly as it found it.
+        assert!(restricted.join("tmp").is_dir());
+        assert!(restricted.join("docs/wip").is_dir());
+        assert!(!workspace.join("tmp").exists());
+        assert!(!workspace.join("docs").exists());
+    }
 
     #[test]
     fn session_scratch_scopes_are_unique_and_owner_private() {

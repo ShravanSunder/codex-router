@@ -7,7 +7,6 @@ use codex_native_integration::{NativeConnectionError, NativeOperation};
 use serde_json::{Value, json};
 
 pub enum PromptEvent {
-    PermissionRequest(Value),
     Update(Value),
     Terminal(Value),
     /// The connection dispatcher must translate and correlate this callback; never auto-approve.
@@ -30,14 +29,24 @@ pub enum PromptExecutionError {
         requested: String,
         effective: String,
     },
-    #[error("requested access {requested} but native runtime reported {effective}")]
-    AccessMismatch {
-        requested: String,
-        effective: String,
-    },
 }
+/// Seconds since the thread's own recency, taken from the read Router already made.
+///
+/// The native Thread schema requires `updatedAt` as unix seconds. A response
+/// without it is only idle-free when the thread was never updated, so zero is a
+/// fact there; anything else must fail rather than invent a recency.
+fn thread_idle_seconds(thread: &Value) -> Result<u64, PromptExecutionError> {
+    match thread.get("updatedAt").and_then(Value::as_i64) {
+        Some(updated_at) => Ok(u64::try_from(
+            chrono::Utc::now().timestamp().saturating_sub(updated_at),
+        )
+        .unwrap_or(0)),
+        None if thread.get("createdAt").and_then(Value::as_i64).is_some() => Ok(0),
+        None => Err(PromptExecutionError::ReceiptProjection("recency")),
+    }
+}
+
 pub struct PendingAcpPrompt {
-    permissions: std::collections::BTreeMap<String, crate::PendingPermission>,
     next_permission: u64,
     detached: bool,
     session: AcpSessionBinding,
@@ -66,7 +75,6 @@ impl PendingAcpPrompt {
             return Err(PromptExecutionError::InvalidPrompt);
         }
         let mut pending = Self {
-            permissions: std::collections::BTreeMap::new(),
             next_permission: 0,
             detached: false,
             session,
@@ -130,9 +138,6 @@ impl PendingAcpPrompt {
                     || params.get("turnId").and_then(Value::as_str) != self.settlement.turn_id()
                 {
                     return Ok(None);
-                }
-                if self.permissions.len() >= 64 {
-                    return Err(PromptExecutionError::Projection);
                 }
                 let id = crate::permission_address::permission_id(
                     &self.session.session_id,
@@ -268,6 +273,7 @@ impl PendingAcpPrompt {
                         effective: effective_effort.to_owned(),
                     });
                 }
+                let idle_seconds = thread_idle_seconds(thread)?;
                 let result = response
                     .get_mut("result")
                     .and_then(Value::as_object_mut)
@@ -287,7 +293,7 @@ impl PendingAcpPrompt {
                         "effectiveEffort": effective_effort,
                         "effectiveAccess": self.session.requested_access,
                         "settingsObservation": &self.session.settings_observation,
-                        "idleSeconds": 0
+                        "idleSeconds": idle_seconds
                     }),
                 );
             }
@@ -304,23 +310,12 @@ impl PendingAcpPrompt {
             Ok(response) => response,
             Err(_) => {
                 self.detached = true;
-                self.permissions.clear();
                 self.settlement
                     .settle_cancel(NativeInterruptionState::Unknown)
             }
         }
     }
     async fn cancel_inner(&mut self) -> Option<Value> {
-        for (_, permission) in std::mem::take(&mut self.permissions) {
-            let response = permission.cancel();
-            if let (Some(id), Some(result)) = (response.get("id"), response.get("result")) {
-                let _submitted = self
-                    .session
-                    .connection
-                    .submit_callback_response(id.clone(), result.clone())
-                    .await;
-            }
-        }
         let target = self.settlement.request_cancel().map(str::to_owned);
         let outcome = if let Some(turn_id) = target {
             match self
@@ -341,50 +336,6 @@ impl PendingAcpPrompt {
             NativeInterruptionState::Unknown
         };
         self.settlement.settle_cancel(outcome)
-    }
-    pub async fn respond_permission(
-        &mut self,
-        catalog: &mut AcpSchemaCatalog,
-        response: &Value,
-    ) -> Result<Option<Value>, PromptExecutionError> {
-        let id = response
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or(PromptExecutionError::Projection)?;
-        let Some(permission) = self.permissions.remove(id) else {
-            return Ok(None);
-        };
-        let reply = permission
-            .resolve(catalog, &self.session.generation, response)
-            .map_err(|_| PromptExecutionError::Projection)?;
-        let native_id = reply
-            .native_response
-            .get("id")
-            .ok_or(PromptExecutionError::Projection)?
-            .clone();
-        let result = reply
-            .native_response
-            .get("result")
-            .ok_or(PromptExecutionError::Projection)?
-            .clone();
-        self.session
-            .connection
-            .submit_callback_response(native_id, result)
-            .await?;
-        if reply.invalid_selection {
-            self.detached = true;
-            let turn = self.settlement.turn_id().map(str::to_owned);
-            let mut terminal = self
-                .settlement
-                .observe_terminal(turn.as_deref(), NativePromptTerminal::Failed);
-            if let Some(response) = &mut terminal
-                && let Some(error) = response.get_mut("error").and_then(Value::as_object_mut)
-            {
-                error.insert("message".into(), json!("Invalid permission option"));
-            }
-            return Ok(terminal);
-        }
-        Ok(None)
     }
     #[must_use]
     pub fn blocks_next_prompt(&self) -> bool {

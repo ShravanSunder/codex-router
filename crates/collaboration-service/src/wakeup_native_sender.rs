@@ -110,6 +110,7 @@ impl WakeNativeSender {
                     backend: self.backend.as_ref(),
                     endpoints: &endpoints,
                     stored_observation: None,
+                    access_routes: None,
                 },
             )
             .await;

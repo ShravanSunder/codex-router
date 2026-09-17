@@ -227,3 +227,61 @@ async fn malformed_persisted_routes_fail_closed() {
     .await;
     assert!(matches!(loaded, Err(ApprovalBrokerError::Unavailable)));
 }
+
+#[tokio::test]
+async fn malformed_persisted_history_fails_closed_while_absence_stays_empty() {
+    // Arrange: valid routes beside an unreadable decision history.
+    let service_id = crate::new_service_uuid().unwrap();
+    let generation: CodexGeneration = serde_json::from_value(json!({
+        "serviceEpoch": String::from(service_id.clone()), "generation": 1
+    }))
+    .unwrap();
+    let gate = crate::NativeGenerationGate::default();
+    gate.activate(
+        generation,
+        PathBuf::from("/tmp/approval-history-corrupt.sock"),
+        None,
+    )
+    .unwrap();
+    let endpoint = EndpointRef {
+        service_id: service_id.clone(),
+        endpoint_id: "codex-local".to_owned().try_into().unwrap(),
+    };
+    let directory = std::env::temp_dir().join(format!(
+        "approval-history-corrupt-{}",
+        String::from(crate::new_service_uuid().unwrap())
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let routes = directory.join("approval-routes.json");
+    std::fs::write(&routes, b"[]").unwrap();
+    let backend = |directory: PathBuf| NativeControlBackend {
+        endpoint: endpoint.clone(),
+        gate: gate.clone(),
+        codex_home: directory,
+    };
+
+    // Act: a missing history file is an empty history.
+    let absent = ServiceApprovalBroker::load(
+        service_id.clone(),
+        EndpointDirectory::new(service_id.clone()),
+        backend(directory.clone()),
+        routes.clone(),
+    )
+    .await;
+
+    // Assert.
+    assert!(absent.is_ok());
+
+    // Act: a malformed history file refuses to load.
+    std::fs::write(directory.join("approval-history.json"), b"{not json").unwrap();
+    let corrupt = ServiceApprovalBroker::load(
+        service_id.clone(),
+        EndpointDirectory::new(service_id),
+        backend(directory),
+        routes,
+    )
+    .await;
+
+    // Assert.
+    assert!(matches!(corrupt, Err(ApprovalBrokerError::Unavailable)));
+}

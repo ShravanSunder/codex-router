@@ -23,6 +23,9 @@ pub(crate) struct NativeControlRequest<'a> {
     pub endpoints: &'a [EndpointDescription],
     pub stored_observation:
         Option<crate::stored_inventory_observation::StoredInventoryObservation<'a>>,
+    /// Recorded Router access routes. `session inspect` reports the access the
+    /// broker holds for a thread; a thread without a route has none to report.
+    pub access_routes: Option<&'a crate::ServiceApprovalBroker>,
 }
 pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value {
     if request.method == "codex/sessionList" {
@@ -41,6 +44,7 @@ pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value 
         service_id,
         backend,
         endpoints,
+        access_routes,
         ..
     } = request;
     let stage = if method == "codex/sessionInspect" {
@@ -141,6 +145,12 @@ pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value 
         result = connection.request_validated(&schemas, operation, native_params) => result,
         _ = retired.cancelled() => Err(NativeConnectionError::OutcomeUnknown),
     };
+    let effective_access = match access_routes {
+        Some(routes) if stage == "inspect" => {
+            recorded_access(routes, String::from(target.session_id.clone()).as_str()).await
+        }
+        _ => None,
+    };
     match result {
         Ok(result) => success(NativeControlSuccess {
             id,
@@ -149,6 +159,7 @@ pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value 
             generation: admission.generation().clone(),
             turn_id,
             result,
+            effective_access,
         }),
         Err(NativeConnectionError::InvalidInput) => invalid(id),
         Err(NativeConnectionError::Rejected { .. }) => failure(id, "nativeRejected", stage),
@@ -268,6 +279,20 @@ async fn dispatch_rename(request: NativeControlRequest<'_>) -> Value {
     json!({"jsonrpc":"2.0","id":request.id,"result":result})
 }
 
+/// Returns the access Router recorded for this thread, if the broker holds one.
+async fn recorded_access(
+    routes: &crate::ServiceApprovalBroker,
+    thread_id: &str,
+) -> Option<collaboration_protocol::RouterAccess> {
+    use codex_acp_adapter::ApprovalBroker;
+    routes
+        .route(thread_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|route| route.access)
+}
+
 struct NativeControlSuccess {
     id: Value,
     stage: &'static str,
@@ -275,6 +300,7 @@ struct NativeControlSuccess {
     generation: CodexGeneration,
     turn_id: Option<collaboration_protocol::NonEmptyText>,
     result: Value,
+    effective_access: Option<collaboration_protocol::RouterAccess>,
 }
 fn success(success: NativeControlSuccess) -> Value {
     let NativeControlSuccess {
@@ -284,6 +310,7 @@ fn success(success: NativeControlSuccess) -> Value {
         generation,
         turn_id,
         result,
+        effective_access,
     } = success;
     let result = if stage == "inspect" {
         let Some(thread) = result.get("thread") else {
@@ -297,7 +324,7 @@ fn success(success: NativeControlSuccess) -> Value {
         json!(collaboration_protocol::NativeInspectResult {
             target,
             generation,
-            effective_access: None,
+            effective_access,
             settings_observation: collaboration_protocol::SettingsObservation::Unavailable {
                 reason: collaboration_protocol::SettingsUnavailableReason::ThreadReadOmitsSettings,
             },

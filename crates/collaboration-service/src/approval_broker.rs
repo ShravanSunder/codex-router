@@ -49,9 +49,13 @@ impl ServiceApprovalBroker {
             Err(_) => return Err(ApprovalBrokerError::Unavailable),
         };
         let history_path = routes_path.with_file_name("approval-history.json");
+        // Corrupt history is a lost decision record, not an empty one: fail closed
+        // exactly as the routes file does. Only an absent file starts empty.
         let history = match tokio::fs::read(&history_path).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => Vec::new(),
+            Ok(bytes) => serde_json::from_slice::<Vec<ApprovalRequestRecord>>(&bytes)
+                .map_err(|_| ApprovalBrokerError::Unavailable)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Err(ApprovalBrokerError::Unavailable),
         };
         Ok(Arc::new(Self {
             service_id,
@@ -273,6 +277,7 @@ impl ServiceApprovalBroker {
                 backend: Some(&self.backend),
                 endpoints: &endpoints,
                 stored_observation: None,
+                access_routes: None,
             },
         )
         .await;

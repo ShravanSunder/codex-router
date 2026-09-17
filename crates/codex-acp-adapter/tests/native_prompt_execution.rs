@@ -12,6 +12,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::Role},
 };
 
+/// Fixture recency: the thread's last update sits this far in the past.
+const IDLE_FIXTURE_SECONDS: i64 = 90;
 const TEST_SCRATCH: &str =
     "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
 fn ensure_test_scratch() {
@@ -69,6 +71,9 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
         let connection = NativeProtocolConnection::from_websocket(
             WebSocketStream::from_raw_socket(client, Role::Client, None).await,
         );
+        // The thread's own recency, not the prompt's, sets idleSeconds.
+        let thread_updated_at = chrono::Utc::now().timestamp() - IDLE_FIXTURE_SECONDS;
+        let thread_created_at = thread_updated_at - 600;
         let fixture = tokio::spawn(async move {
             let mut socket = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
             for method in ["thread/start", "turn/start"] {
@@ -133,7 +138,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             )
             .unwrap_or_else(|error| panic!("thread read JSON: {error}"));
             assert_eq!(request["method"], "thread/read");
-            socket.send(Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"thread-a","model":"gpt-5.6-sol","reasoningEffort":"medium","sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("thread read response: {error}"));
+            socket.send(Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"thread-a","model":"gpt-5.6-sol","reasoningEffort":"medium","createdAt":thread_created_at,"updatedAt":thread_updated_at,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("thread read response: {error}"));
         });
         let session = AcpSessionBinding::create(
             &mut catalog,
@@ -213,7 +218,17 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 .await
                 .unwrap_or_else(|error| panic!("terminal: {error}"));
             assert!(
-                matches!(terminal,Some(PromptEvent::Terminal(value)) if value["id"]=="acp-prompt" && value["result"]["stopReason"]=="end_turn" && value["result"]["_meta"]["codexRouter"]["effectiveAccess"]=="workspace-write")
+                matches!(&terminal,Some(PromptEvent::Terminal(value)) if value["id"]=="acp-prompt" && value["result"]["stopReason"]=="end_turn" && value["result"]["_meta"]["codexRouter"]["effectiveAccess"]=="workspace-write")
+            );
+            let Some(PromptEvent::Terminal(terminal)) = &terminal else {
+                panic!("terminal receipt")
+            };
+            let idle_seconds = terminal["result"]["_meta"]["codexRouter"]["idleSeconds"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("idleSeconds"));
+            assert!(
+                (IDLE_FIXTURE_SECONDS..IDLE_FIXTURE_SECONDS + 60).contains(&idle_seconds),
+                "idleSeconds {idle_seconds} must follow the thread's updatedAt"
             );
             assert!(!prompt.blocks_next_prompt());
             assert!(prompt.cancel().await.is_none());

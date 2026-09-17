@@ -20,8 +20,3 @@ pub(crate) fn permission_id(
         })?
     ))
 }
-pub(crate) fn permission_session(id: &str) -> Option<String> {
-    serde_json::from_str::<PermissionAddress>(id.strip_prefix("permission:")?)
-        .ok()
-        .map(|address| address.session)
-}

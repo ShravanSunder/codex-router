@@ -106,19 +106,6 @@ impl AcpSessionRegistry {
             None => Err(SessionRegistryError::NotLoaded),
         }
     }
-    pub fn permission_response(&self, response: Value) -> Result<(), SessionRegistryError> {
-        let session = response
-            .get("id")
-            .and_then(Value::as_str)
-            .and_then(crate::permission_address::permission_session)
-            .ok_or(SessionRegistryError::InvalidParameters)?;
-        if let Some(SessionSlot::Busy(sender)) = self.sessions.get(&session) {
-            sender
-                .try_send(PromptCommand::PermissionResponse(response))
-                .map_err(|_| SessionRegistryError::Capacity)?;
-        }
-        Ok(())
-    }
     #[must_use]
     pub fn has_pending(&self) -> bool {
         !self.prompts.is_empty()

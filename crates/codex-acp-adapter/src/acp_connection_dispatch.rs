@@ -85,10 +85,11 @@ async fn route_connection(
                 frame=router.input.recv()=>match frame {Some(frame)=>frame,None=>break Ok(())},
             };
             if frame.get("jsonrpc")!=Some(&json!("2.0")) {router.output.send(error(Value::Null,-32600,"Invalid ACP envelope")).await?;continue;}
-            if frame.get("method").is_none() {
-                if negotiation.is_initialized() {let _routed=sessions.permission_response((*frame).clone());}
-                continue;
-            }
+            // Router sends the client no requests, so a response frame is
+            // unsolicited; JSON-RPC forbids answering it. A client-sent
+            // session/request_permission carries a method and falls through to
+            // the unsupported-method reply below.
+            if frame.get("method").is_none() {continue;}
             let method=frame.get("method").and_then(Value::as_str).unwrap_or("");
             let params=frame.get("params").cloned().unwrap_or_else(||json!({}));
             let Some(id)=frame.get("id").cloned() else {

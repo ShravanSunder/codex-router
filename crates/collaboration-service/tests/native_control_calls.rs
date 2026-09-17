@@ -71,6 +71,41 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     let gate = NativeGenerationGate::default();
     gate.activate(generation.clone(), backend_path.clone(), Some(schemas))
         .unwrap_or_else(|error| panic!("activate: {error}"));
+    // A recorded Router route makes inspect report the access Router selected.
+    let routes_path = root.join("approval-routes.json");
+    std::fs::write(
+        &routes_path,
+        serde_json::to_vec(&json!([{
+            "threadId":"proof-thread",
+            "createdBy":target,
+            "approver":target,
+            "access":"workspace-write",
+            "scratchPath":"/tmp/native-control-scratch",
+            "rootMessageId":null
+        }]))
+        .unwrap_or_else(|error| panic!("routes: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("routes file: {error}"));
+    let broker = collaboration_service::ServiceApprovalBroker::load(
+        service_id
+            .to_owned()
+            .try_into()
+            .unwrap_or_else(|error| panic!("service id: {error}")),
+        collaboration_service::EndpointDirectory::new(
+            service_id
+                .to_owned()
+                .try_into()
+                .unwrap_or_else(|error| panic!("service id: {error}")),
+        ),
+        NativeControlBackend {
+            codex_home: root.clone(),
+            endpoint: target.endpoint.clone(),
+            gate: gate.clone(),
+        },
+        routes_path.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("broker: {error}"));
     let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
         .unwrap_or_else(|error| panic!("identity: {error}"))
         .with_endpoints(vec![description.clone()])
@@ -80,7 +115,8 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             endpoint: target.endpoint.clone(),
             gate,
         })
-        .unwrap_or_else(|error| panic!("binding: {error}"));
+        .unwrap_or_else(|error| panic!("binding: {error}"))
+        .with_approval_broker(broker);
     let (client, server) =
         tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("pair: {error}"));
     let service = tokio::spawn(serve_control_connection(server, identity.clone()));
@@ -203,7 +239,17 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .inspect_session(&target)
         .await
         .unwrap_or_else(|error| panic!("inspect: {error}"));
-    assert_eq!(inspection.effective_access, None);
+    assert_eq!(
+        inspection.effective_access,
+        Some(collaboration_protocol::RouterAccess::WorkspaceWrite),
+        "inspect reports the access recorded for this thread"
+    );
+    assert!(matches!(
+        inspection.settings_observation,
+        collaboration_protocol::SettingsObservation::Unavailable {
+            reason: collaboration_protocol::SettingsUnavailableReason::ThreadReadOmitsSettings
+        }
+    ));
     let message = client
         .send_agent_message(collaboration_protocol::NativeSendParams {
             target: target.clone(),
@@ -309,6 +355,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .unwrap_or_else(|error| panic!("second service: {error}"))
         .unwrap_or_else(|error| panic!("second serve: {error}"));
     std::fs::remove_file(backend_path).unwrap_or_else(|error| panic!("socket cleanup: {error}"));
+    std::fs::remove_file(routes_path).unwrap_or_else(|error| panic!("routes cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
     // Assert.
     assert_eq!(inspection.target, target);

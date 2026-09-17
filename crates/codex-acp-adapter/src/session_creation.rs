@@ -401,9 +401,11 @@ impl AcpSessionBinding {
             requested_access: route
                 .as_ref()
                 .map(|route| access_name(route.access).to_owned()),
-            settings_observation: unavailable_settings(
-                SettingsUnavailableReason::NotObservedBeforeResume,
-            ),
+            settings_observation: unavailable_settings(if route.is_some() {
+                SettingsUnavailableReason::NotObservedBeforeResume
+            } else {
+                SettingsUnavailableReason::NoRecordedAccessRoute
+            }),
             access_route: route,
             approval_broker: inputs.approval_broker,
         };
@@ -549,7 +551,13 @@ fn observe_settings(
         && approvals_reviewer.is_none()
         && permission_profile.is_none()
     {
-        return unavailable_settings(SettingsUnavailableReason::NativeResponseOmittedSettings);
+        // Without a recorded route the receipt must say access is inherited,
+        // not that the native response withheld settings Router selected.
+        return unavailable_settings(
+            router_access.map_or(SettingsUnavailableReason::NoRecordedAccessRoute, |_| {
+                SettingsUnavailableReason::NativeResponseOmittedSettings
+            }),
+        );
     }
     SettingsObservation::Observed {
         source,
