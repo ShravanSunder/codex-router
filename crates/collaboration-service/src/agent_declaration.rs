@@ -23,6 +23,15 @@ pub(crate) fn render_message(
             MessageInputKind::Agent,
             MessageRepresentation::DeclaredAgentText,
         ),
+        MessageContent::Router { text } => (
+            format!(
+                "Router delivery\nIntended recipient: {}\n\n{}",
+                serde_json::to_string(target)?,
+                text.as_str()
+            ),
+            MessageInputKind::Agent,
+            MessageRepresentation::DeclaredAgentText,
+        ),
         MessageContent::HumanUser { text } => (
             text.as_str().to_owned(),
             MessageInputKind::HumanUser,

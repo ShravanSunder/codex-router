@@ -4,7 +4,7 @@ use message_board_storage::BoardStore;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -25,6 +25,9 @@ struct ThreadListenState {
     last_sequence: AtomicU64,
     catch_up: AtomicBool,
     acknowledged: AtomicBool,
+    consecutive_rejections: AtomicU8,
+    /// Never held across an await: set and read in one statement.
+    last_rejection: std::sync::Mutex<Value>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -61,6 +64,13 @@ impl ThreadListenState {
             last_sequence: nonzero_sequence(self.last_sequence.load(Ordering::Relaxed)),
             catch_up: self.catch_up.load(Ordering::Relaxed),
             acknowledged: self.acknowledged.load(Ordering::Relaxed),
+            consecutive_rejections: self.consecutive_rejections.load(Ordering::Relaxed),
+            last_rejection: self
+                .last_rejection
+                .lock()
+                .ok()
+                .map(|rejection| rejection.clone())
+                .filter(|rejection| !rejection.is_null()),
         }
     }
 }
@@ -136,8 +146,11 @@ impl ThreadListenRegistry {
             batches_delivered: AtomicU64::new(0),
             first_sequence: AtomicU64::new(0),
             last_sequence: AtomicU64::new(0),
-            catch_up: AtomicBool::new(request.from_activity_sequence.is_some()),
+            // Set from the first delivered Batch set, never from --from.
+            catch_up: AtomicBool::new(false),
             acknowledged: AtomicBool::new(false),
+            consecutive_rejections: AtomicU8::new(0),
+            last_rejection: std::sync::Mutex::new(Value::Null),
             _permit: permit,
         });
         let snapshot = state.snapshot(listen_id.clone());
@@ -227,6 +240,7 @@ impl ThreadListenRegistry {
                                 record_batch_progress(&state, &batch_set);
                                 delivered_since_mark = true;
                                 consecutive_rejections = 0;
+                                publish_rejection_state(&state, consecutive_rejections, &last_rejection);
                                 if state.acknowledge {
                                     for batch in &batch_set.batches {
                                         if store.lock().await.acknowledge_inbox(InboxAcknowledgeRequest {
@@ -243,7 +257,9 @@ impl ThreadListenRegistry {
                                 }
                             }
                             Err(BatchSinkFailure::Rejected { evidence }) => {
-                                if record_rejection(&mut consecutive_rejections, &mut last_rejection, evidence) {
+                                let terminal = record_rejection(&mut consecutive_rejections, &mut last_rejection, evidence);
+                                publish_rejection_state(&state, consecutive_rejections, &last_rejection);
+                                if terminal {
                                     self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, last_rejection).await;
                                     return;
                                 }
@@ -291,7 +307,9 @@ impl ThreadListenRegistry {
                         match sink.deliver(ListenDeliveryRecord::Heartbeat(heartbeat)).await {
                             Ok(()) => consecutive_rejections = 0,
                             Err(BatchSinkFailure::Rejected { evidence }) => {
-                                if record_rejection(&mut consecutive_rejections, &mut last_rejection, evidence) {
+                                let terminal = record_rejection(&mut consecutive_rejections, &mut last_rejection, evidence);
+                                publish_rejection_state(&state, consecutive_rejections, &last_rejection);
+                                if terminal {
                                     self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, last_rejection).await;
                                     return;
                                 }
@@ -328,7 +346,9 @@ impl ThreadListenRegistry {
             last_sequence: snapshot.last_sequence,
             catch_up: snapshot.catch_up,
             acknowledged: snapshot.acknowledged,
-            last_rejection: (!rejection.is_null()).then_some(rejection),
+            last_rejection: (!rejection.is_null())
+                .then_some(rejection)
+                .or(snapshot.last_rejection),
         };
         let _ = sink
             .deliver(ListenDeliveryRecord::Finalization(finalization))
@@ -544,7 +564,20 @@ fn nonzero_sequence(value: u64) -> Option<ActivitySequence> {
         .flatten()
 }
 
+/// Makes non-terminal rejections observable through `listen show` and every finalization.
+fn publish_rejection_state(state: &ThreadListenState, consecutive: u8, last: &Value) {
+    state
+        .consecutive_rejections
+        .store(consecutive, Ordering::Relaxed);
+    if let Ok(mut stored) = state.last_rejection.lock() {
+        *stored = last.clone();
+    }
+}
+
 fn record_batch_progress(state: &ThreadListenState, batch_set: &ThreadListenBatchSet) {
+    if state.batches_delivered.load(Ordering::Relaxed) == 0 {
+        state.catch_up.store(batch_set.catch_up, Ordering::Relaxed);
+    }
     let first = batch_set
         .batches
         .iter()

@@ -34,8 +34,8 @@ impl SessionDeliverySink {
             .map(|admission| admission.generation().clone())
             .ok_or(BatchSinkFailure::Unavailable)?;
         let text = render_record(&record).map_err(|_| BatchSinkFailure::Unavailable)?;
-        let message = MessageContent::Agent {
-            sender: self.target.clone(),
+        // A delivery is Router's own record; the target session did not send it.
+        let message = MessageContent::Router {
             text: text.try_into().map_err(|_| BatchSinkFailure::Unavailable)?,
         };
         let params = NativeSendParams {

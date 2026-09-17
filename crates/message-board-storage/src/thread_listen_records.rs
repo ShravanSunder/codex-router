@@ -10,7 +10,16 @@ use crate::storage_support::{
 };
 use message_board::*;
 use sqlx::Connection;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+
+/// How a Thread entered a listen's selection. Only a Thread the Reader watches
+/// directly carries the per-Thread Participant gate; a Topic Watch contributes
+/// Threads on the Topic's own read terms.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootOrigin {
+    ThreadWatch,
+    TopicWatch,
+}
 
 const THREAD_BATCH_MESSAGE_LIMIT: i64 = 100;
 
@@ -144,21 +153,44 @@ impl BoardStore {
                 .into_iter()
                 .map(|topic| TopicId::try_from(topic).map_err(|_| invalid_record()))
                 .collect::<Result<Vec<_>, _>>()?;
-                sqlx::query_scalar!(
-                "SELECT root_id FROM thread_watches WHERE reader_key=? AND active=1 \
-                 UNION SELECT threads.root_id FROM topic_watches topic_watch \
-                 JOIN board_messages roots ON roots.topic_id=topic_watch.topic_id AND roots.root_id IS NULL \
-                 JOIN board_threads threads ON threads.root_id=roots.message_id \
-                 WHERE topic_watch.reader_key=? AND topic_watch.active=1 ORDER BY root_id",
-                reader_key,
-                reader_key,
-            )
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(storage_error)?
-            .into_iter()
-            .map(|root| MessageId::try_from(root).map_err(|_| invalid_record()))
-            .collect::<Result<Vec<_>, _>>()?
+                // Origin decides the Participant gate, so the two sources stay
+                // separate: a Thread reached through a Topic Watch is readable on
+                // the Topic's terms, exactly as Topic selection treats it.
+                let thread_watched = sqlx::query_scalar!(
+                    "SELECT root_id FROM thread_watches WHERE reader_key=? AND active=1 ORDER BY root_id",
+                    reader_key,
+                )
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                let topic_watched = sqlx::query_scalar!(
+                    "SELECT threads.root_id FROM topic_watches topic_watch \
+                     JOIN board_messages roots ON roots.topic_id=topic_watch.topic_id AND roots.root_id IS NULL \
+                     JOIN board_threads threads ON threads.root_id=roots.message_id \
+                     WHERE topic_watch.reader_key=? AND topic_watch.active=1 ORDER BY threads.root_id",
+                    reader_key,
+                )
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                let mut watched: BTreeMap<MessageId, RootOrigin> = BTreeMap::new();
+                for root in thread_watched {
+                    watched.insert(
+                        MessageId::try_from(root).map_err(|_| invalid_record())?,
+                        RootOrigin::ThreadWatch,
+                    );
+                }
+                // An active Topic Watch wins the overlap. Arming any listen
+                // activates a Thread Watch for each delivered root, so a Thread
+                // Watch row is not evidence that the Reader claimed that Thread
+                // directly; an active Topic Watch is evidence that it may read it.
+                for root in topic_watched {
+                    watched.insert(
+                        MessageId::try_from(root).map_err(|_| invalid_record())?,
+                        RootOrigin::TopicWatch,
+                    );
+                }
+                watched.into_iter().collect::<Vec<_>>()
             }
             ThreadListenSelection::Roots { root_message_ids } => {
                 if root_message_ids.is_empty() {
@@ -176,7 +208,10 @@ impl BoardStore {
                         ));
                     }
                 }
-                root_message_ids.clone()
+                root_message_ids
+                    .iter()
+                    .map(|root_message_id| (root_message_id.clone(), RootOrigin::ThreadWatch))
+                    .collect::<Vec<_>>()
             }
             ThreadListenSelection::Topic { topic_id } => {
                 selected_topic_ids.push(topic_id.clone());
@@ -201,7 +236,11 @@ impl BoardStore {
                 .await
                 .map_err(storage_error)?
                 .into_iter()
-                .map(|root| MessageId::try_from(root).map_err(|_| invalid_record()))
+                .map(|root| {
+                    MessageId::try_from(root)
+                        .map(|root| (root, RootOrigin::TopicWatch))
+                        .map_err(|_| invalid_record())
+                })
                 .collect::<Result<Vec<_>, _>>()?
             }
         };
@@ -209,10 +248,10 @@ impl BoardStore {
         let mut selected_project: Option<ProjectId> = None;
         let mut selected_threads = Vec::with_capacity(roots.len());
         let mut missing_root_message_ids = Vec::new();
-        for root_message_id in roots {
+        for (root_message_id, origin) in roots {
             let location = require_thread(&mut transaction, &root_message_id).await?;
             if matches!(request.reader, Identity::Session { .. })
-                && !matches!(request.selection, ThreadListenSelection::Topic { .. })
+                && origin == RootOrigin::ThreadWatch
             {
                 let participant =
                     load_participant(&mut transaction, &request.reader, &root_message_id).await?;

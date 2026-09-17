@@ -155,6 +155,45 @@ async fn debounce_coalesces_a_burst_into_one_batch_set() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn catch_up_follows_the_first_batch_set_on_the_set_and_the_finalization() {
+    // Arrange: activity lands before the listen is armed, so the stored
+    // Delivered position precedes the armed sequence.
+    let fixture = ListenFixture::create("catch-up").await;
+    let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
+    fixture.reply("Older than the listen").await;
+    let listen = fixture
+        .register(
+            &registry,
+            ThreadListenMode::Repeating {
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
+            },
+        )
+        .await;
+    assert!(!listen.catch_up, "arming alone proves no catch-up");
+
+    // Act.
+    let waiting_registry = registry.clone();
+    let waiting_store = Arc::clone(&fixture.store);
+    let listen_id = listen.listen_id.clone();
+    let wait = tokio::spawn(async move {
+        waiting_registry
+            .wait(&listen_id, &waiting_store, usize::MAX)
+            .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(THREAD_LISTEN_DEBOUNCE).await;
+    let result = wait.await.unwrap().unwrap();
+
+    // Assert: the Batch set and the listen state that feeds every finalization agree.
+    assert!(result.batch_set.as_ref().unwrap().catch_up);
+    assert!(
+        registry.show(&listen.listen_id).await.unwrap().catch_up,
+        "the finalization must report the delivered set, not the --from proxy"
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn debounce_cap_emits_during_continuous_activity() {
     let fixture = ListenFixture::create("cap").await;
     let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
@@ -524,6 +563,18 @@ fn description(value: &str) -> Description {
 struct RecordingSink {
     records: Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
     reject_batches: bool,
+    /// Rejects this many records before accepting anything, for reset proofs.
+    rejections_remaining: Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl RecordingSink {
+    fn accepting(records: &Arc<TokioMutex<Vec<ListenDeliveryRecord>>>) -> Arc<Self> {
+        Arc::new(Self {
+            records: Arc::clone(records),
+            reject_batches: false,
+            rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        })
+    }
 }
 
 impl BatchSink for RecordingSink {
@@ -534,7 +585,12 @@ impl BatchSink for RecordingSink {
         Box<dyn std::future::Future<Output = Result<(), BatchSinkFailure>> + Send + 'a>,
     > {
         Box::pin(async move {
-            if self.reject_batches && matches!(record, ListenDeliveryRecord::Batch(_)) {
+            let remaining = self.rejections_remaining.load(Ordering::Relaxed);
+            if (self.reject_batches && matches!(record, ListenDeliveryRecord::Batch(_)))
+                || remaining > 0
+            {
+                self.rejections_remaining
+                    .store(remaining.saturating_sub(1), Ordering::Relaxed);
                 return Err(BatchSinkFailure::Rejected {
                     evidence: serde_json::json!({"kind":"nativeRejected","reason":"busy"}),
                 });
@@ -561,10 +617,7 @@ async fn long_session_delivery_heartbeats_only_at_silent_marks_then_finalizes() 
     registry.spawn_session_delivery(
         listen.listen_id,
         Arc::clone(&fixture.store),
-        Arc::new(RecordingSink {
-            records: Arc::clone(&records),
-            reject_batches: false,
-        }),
+        RecordingSink::accepting(&records),
     );
     tokio::task::yield_now().await;
     for _ in 0..3 {
@@ -603,4 +656,48 @@ fn three_consecutive_session_rejections_end_with_error_evidence() {
     ));
     assert_eq!(count, 3);
     assert_eq!(evidence["reason"], "childThread");
+}
+
+/// Long enough for every mark of a long listen to pass under paused time.
+const LISTEN_OBSERVATION_WINDOW: std::time::Duration = std::time::Duration::from_secs(90 * 60);
+
+#[tokio::test(start_paused = true)]
+async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() {
+    // Arrange: a sink that rejects twice, then accepts.
+    let fixture = ListenFixture::create("rejection-reset").await;
+    let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
+    let listen = fixture
+        .register(
+            &registry,
+            ThreadListenMode::Repeating {
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
+            },
+        )
+        .await;
+    fixture.reply("Rejected activity").await;
+    let records = Arc::new(TokioMutex::new(Vec::new()));
+
+    // Act.
+    registry.spawn_session_delivery(
+        listen.listen_id.clone(),
+        Arc::clone(&fixture.store),
+        Arc::new(RecordingSink {
+            records: Arc::clone(&records),
+            reject_batches: false,
+            rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(2)),
+        }),
+    );
+    tokio::time::sleep(LISTEN_OBSERVATION_WINDOW).await;
+
+    // Assert: the listen reached its lifetime instead of failing, and the
+    // rejection it survived is still reported.
+    let seen = records.lock().await;
+    assert!(matches!(
+        seen.last(),
+        Some(ListenDeliveryRecord::Finalization(value))
+            if value.reason == ThreadListenEndReason::Lifetime
+                && value.last_rejection.is_some()
+    ));
+    drop(seen);
+    fixture.finish().await;
 }

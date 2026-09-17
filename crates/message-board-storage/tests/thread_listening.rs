@@ -7,6 +7,7 @@ struct ThreadListenFixture {
     path: std::path::PathBuf,
     store: BoardStore,
     project_id: ProjectId,
+    board_id: BoardId,
     topic_id: TopicId,
     root_message_id: MessageId,
     reader: Identity,
@@ -47,7 +48,7 @@ impl ThreadListenFixture {
         store
             .create_topic(TopicCreateRequest {
                 topic_id: topic_id.clone(),
-                board_id,
+                board_id: board_id.clone(),
                 name: name("Listen topic"),
                 description: description("Storage proof"),
                 actor: owner.clone(),
@@ -77,6 +78,7 @@ impl ThreadListenFixture {
             path,
             store,
             project_id,
+            board_id,
             topic_id,
             root_message_id: root.message.message_id,
             reader,
@@ -199,6 +201,123 @@ async fn watched_selection_groups_each_thread_and_named_selection_creates_a_watc
         .await
         .unwrap();
     assert!(watched.watch_status.unwrap().watching);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn topic_watched_roots_skip_the_participant_gate_for_a_session_reader() {
+    // Arrange: a session Reader that has joined nothing arms a Topic listen.
+    let mut fixture = ThreadListenFixture::create("topic-watched-session").await;
+    let reader = session_reader("listening-session");
+    let topic_request = ThreadListenRequest {
+        reader: reader.clone(),
+        selection: ThreadListenSelection::Topic {
+            topic_id: fixture.topic_id.clone(),
+        },
+        mode: ThreadListenMode::Once {
+            max_wait_seconds: ThreadListenLifetime::Short.seconds(),
+        },
+        from_activity_sequence: None,
+        acknowledge: false,
+        delivery: ThreadListenDelivery::Stdout,
+    };
+    fixture
+        .store
+        .prepare_thread_listen(&topic_request)
+        .await
+        .unwrap();
+    let posted = post(
+        &mut fixture.store,
+        Placement::Thread {
+            root_message_id: fixture.root_message_id.clone(),
+        },
+        actor("other"),
+        "Topic activity",
+    )
+    .await
+    .message;
+
+    // Act: the same session arms --watched, reaching the Thread only through its Topic Watch.
+    let watched = fixture
+        .store
+        .prepare_thread_listen(&ThreadListenRequest {
+            reader: reader.clone(),
+            selection: ThreadListenSelection::Watched,
+            mode: ThreadListenMode::Once {
+                max_wait_seconds: ThreadListenLifetime::Short.seconds(),
+            },
+            from_activity_sequence: None,
+            acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
+        })
+        .await
+        .unwrap();
+    let batch = fixture
+        .store
+        .select_thread_listen_batch_set(ListenId::generate(), &watched, usize::MAX)
+        .await
+        .unwrap();
+
+    // Assert: batches, not a participants_required refusal.
+    assert!(batch.batches.iter().any(|record| {
+        record
+            .messages
+            .iter()
+            .any(|message| message.message_id == posted.message_id)
+    }));
+
+    // Act: a Thread Watch on a Thread outside every watched Topic keeps its gate.
+    let other_topic = TopicId::generate();
+    fixture
+        .store
+        .create_topic(TopicCreateRequest {
+            topic_id: other_topic.clone(),
+            board_id: fixture.board_id.clone(),
+            name: name("Unwatched topic"),
+            description: description("Storage proof"),
+            actor: actor("owner"),
+            acting_for: None,
+        })
+        .await
+        .unwrap();
+    let unjoined = post(
+        &mut fixture.store,
+        Placement::Topic {
+            topic_id: other_topic,
+        },
+        actor("other"),
+        "Another root",
+    )
+    .await
+    .message;
+    fixture
+        .store
+        .watch_thread(ThreadWatchRequest {
+            root_message_id: unjoined.message_id.clone(),
+            actor: reader.clone(),
+            acting_for: None,
+        })
+        .await
+        .unwrap();
+    let refused = fixture
+        .store
+        .prepare_thread_listen(&ThreadListenRequest {
+            reader,
+            selection: ThreadListenSelection::Watched,
+            mode: ThreadListenMode::Once {
+                max_wait_seconds: ThreadListenLifetime::Short.seconds(),
+            },
+            from_activity_sequence: None,
+            acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
+        })
+        .await;
+
+    // Assert.
+    assert!(
+        refused.is_err(),
+        "a directly watched unjoined Thread still refuses"
+    );
     fixture.finish().await;
 }
 
@@ -720,6 +839,19 @@ async fn post(
         })
         .await
         .unwrap()
+}
+
+fn session_reader(value: &str) -> Identity {
+    Identity::Session {
+        session: SessionRef {
+            endpoint: SessionEndpointRef {
+                service_id: ServiceId::try_from("550e8400-e29b-41d4-a716-446655440000".to_owned())
+                    .unwrap(),
+                endpoint_id: EndpointId::try_from("codex-local".to_owned()).unwrap(),
+            },
+            session_id: SessionId::try_from(value.to_owned()).unwrap(),
+        },
+    }
 }
 
 fn actor(value: &str) -> Identity {

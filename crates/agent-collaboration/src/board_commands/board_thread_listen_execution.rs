@@ -148,7 +148,8 @@ pub(super) async fn run_with_client(
         .unwrap_or(Duration::MAX);
     let should_acknowledge = request.acknowledge;
     let reader = request.reader.clone();
-    let catch_up = request.from_activity_sequence.is_some();
+    // The first delivered Batch set decides catchUp; --from is not a proxy for it.
+    let mut catch_up = false;
     let delivery = request.delivery;
     let listen = match client.board_thread_listen(request).await {
         Ok(result) => result.listen,
@@ -194,6 +195,9 @@ pub(super) async fn run_with_client(
             }
         };
         if let Some(batch_set) = result.batch_set {
+            if !emitted {
+                catch_up = batch_set.catch_up;
+            }
             if write_batch_set(&batch_set).is_err() {
                 return 1;
             }

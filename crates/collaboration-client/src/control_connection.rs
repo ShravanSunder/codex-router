@@ -163,7 +163,7 @@ impl ControlClient {
             ));
         };
         let (kind, representation) = match params.message {
-            MessageContent::Agent { .. } => (
+            MessageContent::Agent { .. } | MessageContent::Router { .. } => (
                 MessageInputKind::Agent,
                 MessageRepresentation::DeclaredAgentText,
             ),

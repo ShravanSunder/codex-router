@@ -207,6 +207,11 @@ pub struct ThreadListenSnapshot {
     pub last_sequence: Option<ActivitySequence>,
     pub catch_up: bool,
     pub acknowledged: bool,
+    /// Session deliveries rejected in a row, reset by any accepted record.
+    /// Visible before the third rejection ends the listen.
+    pub consecutive_rejections: u8,
+    /// Evidence from the most recent rejection, kept even when delivery resumed.
+    pub last_rejection: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]

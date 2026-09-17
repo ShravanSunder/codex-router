@@ -60,6 +60,11 @@ pub enum MessageContent {
     HumanUser {
         text: MessageText,
     },
+    /// Router's own delivery to a session, authored by the service rather than
+    /// by any agent. It names no sender because none exists.
+    Router {
+        text: MessageText,
+    },
 }
 
 #[derive(JsonSchema, Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
