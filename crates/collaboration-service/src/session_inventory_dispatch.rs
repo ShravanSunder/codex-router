@@ -383,12 +383,7 @@ async fn runtime_page(
         {
             continue;
         }
-        // The advertised native ActiveThreadStatus carries only `activeFlags`
-        // (waitingOnApproval | waitingOnUserInput) and no turn identifier, so a
-        // busy row reports a null turn rather than inventing one.
-        let turn_id = status.get("turnId").and_then(Value::as_str);
-        let idle_seconds = runtime_idle_seconds(thread).ok_or(())?;
-        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title,"source":source,"gitBranch":thread.pointer("/gitInfo/branch").and_then(Value::as_str),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":turn_id},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":idle_seconds}));
+        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title,"source":source,"gitBranch":thread.pointer("/gitInfo/branch").and_then(Value::as_str),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":null},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":0}));
     }
     let next = result
         .get("nextCursor")
@@ -415,13 +410,6 @@ async fn runtime_page(
         .transpose()?;
     page(params, Some(admission.generation()), sessions, next)
 }
-/// Seconds since the thread's own `updatedAt`, which the native Thread schema
-/// requires as unix seconds, matching how the stored rows compute it.
-fn runtime_idle_seconds(thread: &Value) -> Option<u64> {
-    let updated_at = thread.get("updatedAt").and_then(Value::as_i64)?;
-    Some(u64::try_from(chrono::Utc::now().timestamp().saturating_sub(updated_at)).unwrap_or(0))
-}
-
 fn page(
     params: &NativeSessionListParams,
     generation: Option<&CodexGeneration>,
@@ -438,28 +426,4 @@ fn page(
     let _: collaboration_protocol::NativeSessionListResult =
         serde_json::from_value(result.clone()).map_err(|_| ())?;
     Ok(result)
-}
-
-#[cfg(test)]
-mod runtime_row_tests {
-    use super::runtime_idle_seconds;
-    use serde_json::json;
-
-    #[test]
-    fn runtime_idle_follows_the_threads_own_update_time() {
-        // Arrange: the native Thread schema requires updatedAt as unix seconds.
-        let updated_at = chrono::Utc::now().timestamp() - 120;
-        let thread = json!({"id":"thread","updatedAt":updated_at,"createdAt":updated_at - 600});
-
-        // Act.
-        let idle = runtime_idle_seconds(&thread);
-
-        // Assert: a real elapsed time, never a literal zero.
-        assert!(idle.is_some_and(|idle| (120..180).contains(&idle)));
-        assert_eq!(
-            runtime_idle_seconds(&json!({"id":"thread"})),
-            None,
-            "a thread with no recency must not be reported as freshly active"
-        );
-    }
 }

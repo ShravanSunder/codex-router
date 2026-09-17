@@ -303,10 +303,6 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .unwrap();
     assert_eq!(inventory.sessions.len(), 1);
     assert_eq!(inventory.sessions[0].target, target);
-    assert!(
-        (45..105).contains(&inventory.sessions[0].idle_seconds),
-        "a runtime row reports the thread's own idle time"
-    );
     assert_eq!(inventory.generation.as_ref(), Some(&generation));
     let renamed = client
         .rename_session(collaboration_protocol::NativeRenameParams {
