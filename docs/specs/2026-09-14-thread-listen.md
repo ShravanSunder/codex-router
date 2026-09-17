@@ -171,3 +171,5 @@ Listener and wake sender share one dispatcher (test double sees both); debounce 
 ### Topic selection **(owner, 2026-09-16)**
 
 Listen and watch gain a third selection: `--topic-id <id>`. A topic listen covers every Thread under that Topic and any root created in it during the listen; a new root is delivered as a Batch for its own Thread. A topic Watch is stored per reader and topic and is honored by `--watched`. Join gates apply per Thread as before: a session may listen on a Topic it can read, but posting on any Thread in it still requires joining that Thread. Proof: a root created mid-listen arrives in the next Batch set; a topic Watch appears under `--watched`.
+
+Precedence under `--watched` (review amendment, 2026-09-17): a Thread reached through an active Topic Watch is read observation and skips the Participant gate even when the Reader also holds a Thread Watch on it (delivery activates a Thread Watch for every delivered root, so the overlap is the normal case). A Thread Watch on a Thread outside every watched Topic still requires an open Participant. Posting stays join-gated everywhere.

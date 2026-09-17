@@ -79,6 +79,10 @@ Rename result: `{"target":…,"name":"headless-tools review","previousName":null
 - Rename: native path test sends `thread/name/set` with exactly `threadId` and `name`; echo mismatch refused; live proof renames a real stored session and the next scoped list shows the name.
 - Repo checks: fmt, clippy, tests, `git diff --check`; Control schema document regenerated.
 
+## 7a. Picker resume restores the session's model and effort **(owner, 2026-09-17)**
+
+The human picker (`agent-session`, and `agent-collaboration sessions` launch paths) resumes a selected session with the model and reasoning effort that session last ran with. Today it launches `codex --profile codex-router resume <id>`, and the TUI applies the profile defaults, which the owner described as "switches to default, confusing, hard to remember." The stored record already carries `model` and `reasoningEffort` (§3 invariant 4). On resume and fork of a selected record the launch adds `-c model="<model>"` and `-c model_reasoning_effort="<effort>"` before `resume`/`fork`, each only when the row value is present and only when the caller's own Codex arguments do not already set that key (`-m`/`--model`, or a `-c model=…` / `-c model_reasoning_effort=…` override); caller arguments win. Dry-run output shows the injected arguments. A row without a stored model or effort launches as before. This amends §8's "no change to the human picker" for this one behavior; the picker binary is `agent-session` from the `agent-collaboration` crate (the retired `agent-sessions` 0.1.19 install predates it).
+
 ## 8. Boundaries
 
 - No change to the human `codex-router sessions --list` picker beyond sharing extended query code.

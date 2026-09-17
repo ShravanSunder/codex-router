@@ -35,6 +35,14 @@ Agents using the CLI on 2026-09-15 and 2026-09-16 failed on the same shapes: two
 - Text: write with a control byte is refused; a pre-existing row with one reads back escaped and parses with `jq`.
 - Repo checks: fmt, clippy, tests, `git diff --check`.
 
+### 4a. Skill-to-CLI contract **(owner, 2026-09-17: "make sure the skills and cli are not divergent")**
+
+The canonical skill under `agent-skills/agent-collaboration/` is pinned to the CLI by a repository test (`crates/agent-collaboration/tests/skill_cli_contract.rs`): every `agent-collaboration …` invocation in the skill's code fences and inline spans is parsed, the built binary is asked for `--help` on that subcommand path, and every documented flag and closed enum value must appear. A skill that names a flag the CLI lacks, or a CLI change that drops a documented flag, fails the workspace suite. The reverse direction, an implemented capability the skill omits, stays a review question on each release.
+
+### 4b. Envelope status after review (2026-09-17)
+
+Single reads return the entity itself as `result.record` (the former `message`, `thread`, and `listen` wrapper keys are gone on show and on listen cancel; a thread read carries `watchStatus` inside the record). Mutations whose result carries no outcome marker (`session rename`, `turn interrupt`, `board thread listen cancel`) state their envelope kind at the call site and publish `effects`. The envelope kind is still classified by one shared normalizer that inspects the result's fields; replacing that with explicit list/read/mutation constructors at every command site, renaming collection fields at the wire contracts, and sweeping every command through the schema test is deferred to a follow-up PR. Until then a result carrying an incidental `data`, `updated`, `created`, `entries`, or `outcome` field would be misclassified; no current command does.
+
 ## 5. Boundaries
 
 - No change to listen, participants, or model-choice semantics.
