@@ -77,3 +77,25 @@ fn picker_repository_matching_normalizes_persisted_origin_exactly_once() {
         std::path::Path::new(picker_record.cwd.as_deref().expect("record cwd")),
     ));
 }
+
+#[test]
+fn picker_record_carries_the_stored_model_and_reasoning_effort() {
+    // Arrange: the picker resumes from these values, so it must project both.
+    let mut record = search_consistency_record(None, None);
+    record.model = Some("gpt-5.6-sol".to_owned());
+    record.reasoning_effort = Some("low".to_owned());
+
+    // Act
+    let picker_record = SessionPickerRecord::from_record(&record);
+
+    // Assert
+    assert_eq!(picker_record.model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(picker_record.reasoning_effort.as_deref(), Some("low"));
+
+    // Arrange / Act / Assert: an unknown effort is never invented.
+    record.reasoning_effort = None;
+    assert_eq!(
+        SessionPickerRecord::from_record(&record).reasoning_effort,
+        None
+    );
+}

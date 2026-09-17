@@ -42,6 +42,8 @@ pub use session_command_failures::SessionsCommandError;
 mod session_display_text;
 #[cfg(test)]
 use session_display_text::format_duration_ms;
+#[cfg(test)]
+use session_display_text::session_model_choice;
 use session_display_text::{
     display_title_from_session_fields, format_recency_at_ms, human_session_row,
     session_context_from_cwd, truncate_end,
@@ -67,6 +69,7 @@ mod picker_runtime_inventory;
 
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
+const SESSION_MODEL_CHOICE_MAX_CHARS: usize = 32;
 const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
 const DEFAULT_SESSION_RECORD_LIMIT: usize = 100;
 
@@ -274,17 +277,35 @@ fn run_interactive_session(
     match outcome {
         SessionsPickerOutcome::ResumeSession(session_id) => {
             validate_resume_session_id(&session_id)?;
-            let model_choice = stored_model_choice_for_session(context, &session_id);
+            let model_choice = selected_model_choice(context, &records, &session_id);
             runner.run_codex_resume(&command.codex_args, &session_id, &model_choice)
         }
         SessionsPickerOutcome::ForkSession(session_id) => {
             validate_resume_session_id(&session_id)?;
-            let model_choice = stored_model_choice_for_session(context, &session_id);
+            let model_choice = selected_model_choice(context, &records, &session_id);
             runner.run_codex_fork(&command.codex_args, &session_id, &model_choice)
         }
         SessionsPickerOutcome::StartNewSession => runner.run_codex_new(&command.codex_args),
         SessionsPickerOutcome::TerminalTooNarrow => Err(SessionsCommandError::TerminalTooNarrow),
     }
+}
+
+/// Reads the selected row's model and effort, preferring the records already offered.
+///
+/// The picker can page in rows beyond the first load, so a selection that is not in the
+/// offered set falls back to a direct catalog read rather than resuming with no choice.
+fn selected_model_choice(
+    context: &CliContext,
+    offered_records: &[SessionRecord],
+    session_id: &str,
+) -> ResumeModelChoice {
+    offered_records
+        .iter()
+        .find(|record| record.session_id == session_id)
+        .map_or_else(
+            || stored_model_choice_for_session(context, session_id),
+            stored_model_choice_from_record,
+        )
 }
 
 fn session_picker_record_loader(

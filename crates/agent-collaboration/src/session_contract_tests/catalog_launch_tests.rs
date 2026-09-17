@@ -23,6 +23,7 @@ fn sessions_list_table_renders_human_title_and_metadata() {
             1000,
         )
         .with_search_fields(DERIVED_TITLE, "derived preview", "derived message")
+        .with_reasoning_effort("high")
         .with_name(EXPLICIT_NAME)],
     );
 
@@ -39,6 +40,10 @@ fn sessions_list_table_renders_human_title_and_metadata() {
         output
             .stdout
             .contains("Fix session table display | Derived session title")
+    );
+    assert!(
+        output.stdout.contains("gpt-5.4-mini/high"),
+        "the table row must show the model and effort a resume would restore"
     );
     assert!(output.stdout.contains("main"));
     assert!(output.stdout.contains("thread-…"));

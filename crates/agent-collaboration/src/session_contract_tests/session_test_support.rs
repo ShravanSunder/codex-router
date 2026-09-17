@@ -345,7 +345,8 @@ pub(super) fn create_codex_state_db_with_threads(state_database_path: &Path, pro
                 "cli",
                 "main",
                 2000,
-            ),
+            )
+            .with_reasoning_effort("medium"),
         ],
     );
 }
