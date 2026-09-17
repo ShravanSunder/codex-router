@@ -23,7 +23,7 @@ pub(crate) mod replacement_outcome;
 
 const DEFAULT_HOST_PORT: u16 = 8787;
 const STATUS_REQUEST_DEADLINE: Duration = Duration::from_secs(40);
-const APP_SERVER_RESTART_DEADLINE: Duration = Duration::from_secs(120);
+const APP_SERVER_RESTART_DEADLINE: Duration = Duration::from_secs(40);
 const ROUTER_RESTART_DEADLINE: Duration = Duration::from_secs(30);
 const UPDATE_REQUEST_DEADLINE: Duration = Duration::from_secs(17 * 60);
 
@@ -242,8 +242,15 @@ mod tests {
     #[test]
     fn operator_deadlines_cover_their_owned_lifecycle_bounds() {
         assert!(
-            operator_request_deadline(HostAction::Restart) > Duration::from_secs(70),
-            "app-server restart must outlive upstream's complete shutdown bound"
+            operator_request_deadline(HostAction::Restart)
+                > codex_router_host::APP_SERVER_SHUTDOWN_TIMEOUT,
+            "whole-Host restart must outlive the app-server shutdown bound"
+        );
+        assert!(
+            operator_request_deadline(HostAction::AppServer {
+                action: AppServerAction::Restart
+            }) > codex_router_host::APP_SERVER_SHUTDOWN_TIMEOUT,
+            "app-server restart must outlive its complete shutdown bound"
         );
         assert!(
             operator_request_deadline(HostAction::AppServer {

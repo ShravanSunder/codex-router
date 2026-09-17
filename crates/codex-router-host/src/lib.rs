@@ -21,8 +21,8 @@ mod router_compatibility;
 
 pub use app_server_endpoint_guard::AppServerEndpointError;
 pub use app_server_endpoint_guard::require_unowned_app_server_endpoint;
-pub use app_server_shutdown::APP_SERVER_FORCE_AFTER;
-pub use app_server_shutdown::APP_SERVER_SHUTDOWN_TOTAL;
+pub use app_server_shutdown::APP_SERVER_GRACE_PERIOD;
+pub use app_server_shutdown::APP_SERVER_SHUTDOWN_TIMEOUT;
 pub use app_server_shutdown::AppServerShutdownDeadlines;
 pub use app_server_shutdown::AppServerShutdownError;
 pub use app_server_shutdown::ExpectedExit;

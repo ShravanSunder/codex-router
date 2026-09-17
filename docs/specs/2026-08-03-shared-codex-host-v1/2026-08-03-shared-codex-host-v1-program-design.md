@@ -248,7 +248,7 @@ codex-router-host
     owns: fail-closed foreign endpoint exclusion before launch/replacement
 
   App-server Shutdown Progression
-    owns: expected-exit identity, one-signal invariant, pinned escalation,
+    owns: expected-exit identity, one-signal invariant, bounded escalation,
           retained progress, and terminal shutdown classification
 
   Explicit App-server Restart
@@ -883,19 +883,19 @@ classification; it neither opens another connection, duplicates framing, nor
 retains a background observer.
 
 One shutdown routine is shared by explicit restart, changed-version update,
-host cancellation, and cleanup after a failed launch. It signals only the
-retained app-server child PID:
+host cancellation, and cleanup after a failed launch. It first signals the
+retained app-server child PID, then forces its complete isolated process group:
 
 1. send `SIGTERM` and wait on the child handle while Codex drains running turns;
-2. at the pinned upstream daemon's 60-second grace boundary, send `SIGKILL` if
-   the child remains alive;
-3. stop waiting at the pinned upstream daemon's 70-second total boundary; and
+2. after a one-second grace period, send `SIGKILL` to the app-server process
+   group if the child remains alive;
+3. stop waiting at the five-second total shutdown boundary; and
 4. classify the result as `graceful`, `forced`, or `timed out with old child
    still observed`.
 
 The expected-exit token also records the shutdown progress for that exact
-child: whether SIGTERM and the pinned SIGKILL escalation have already been
-sent. A 70-second timeout retains the child handle and that progress. A later
+child: whether SIGTERM and the SIGKILL escalation have already been sent. A
+five-second timeout retains the child handle and that progress. A later
 restart or foreground stop first performs a non-signalling child-handle
 observation: if the child has exited, it reaps the handle and may continue; if
 the child remains, it returns a specific blocked/manual-cleanup result and
@@ -903,16 +903,16 @@ does not signal again or spawn a replacement. The shared shutdown routine is
 entered only for a retained child that has not already been signalled.
 
 A replacement is never spawned until the old child has exited and released the
-native socket. These values are the exact accepted Codex-version contract, not
-an independent host policy; changing the supported Codex boundary requires
-rechecking the upstream daemon constants and signal behavior.
+native socket. The one-second grace is the Host replacement policy: upstream
+Codex receives SIGTERM first so it can drain, while the reconnect window keeps
+the tolerated grace deliberately short.
 
 Because the app-server is in its own process group, this routine is also the
 only shutdown-signal path during foreground cancellation. The host sends
 SIGTERM exactly once to a retained app-server child. If a lifecycle shutdown is
 already in progress, foreground stop only latches `no replacement`; it does not
-send a second forceable signal. SIGKILL at the pinned 60-second boundary is the
-only force escalation.
+send a second forceable signal. Process-group SIGKILL after the one-second grace
+is the only force escalation.
 
 Foreground cleanup is ordered by dependency: stop accepting new operator
 mutations; wait for an already-started updater to exit or contain it at its
@@ -1272,7 +1272,7 @@ codex-router host restart
       ├─ yes, not previously signalled
       │   → App-server Shutdown Progression installs expected-exit token
       │     immediately before SIGTERM
-      │   → run pinned 60/70-second shutdown routine
+      │   → run bounded one/five-second shutdown routine
       │       ├─ old child still observed at timeout
       │       │     ──► retain signal progress; no replacement;
       │       │         restart blocked; budget unchanged
@@ -1344,7 +1344,7 @@ proved changed identity
   → Changed-update Activation latches whole-host replacement;
     Lifecycle Owner Task rejects new mutations
   → send `replacement-starting` to caller
-  → stop app-server through the shared 60/70-second routine
+  → stop app-server through the shared one/five-second routine
       ├─ timeout ─► no re-exec; return replacement-failed on old connection;
       │             keep socket, lock, child handle, and shutdown progress;
       │             enter failed steady state; explicit `host restart`
@@ -1426,7 +1426,7 @@ terminal SIGINT, or host SIGTERM/SIGHUP
   → app-server shutdown state
       ├─ not previously signalled
       │   → install expected-exit token
-      │   → send exactly one SIGTERM → pinned 60/70-second convergence
+      │   → send exactly one SIGTERM → bounded one/five-second convergence
       └─ prior shutdown timed out
           → observe/reap retained handle without another signal
               ├─ exited ─► clear child and continue
@@ -1569,7 +1569,7 @@ launchd, both outside this boundary.
 | U2, U4, U5 | R3 | Direct Session Launch Projection attaches CLI; Foreground Launch Composer applies Desktop Launch Policy before host authority is exposed; Desktop remains an external exact-version native-attachment gate; App-server Launch Projection enables Remote Control on the same child | V2, V4, V9 | exact launch-session command and pre-publication ordering, socket/process correlation, plus exact-version real CLI/Desktop/Remote Control acceptance |
 | U1, U3, U10 | R4 | Router Compatibility Observer and Owned Router Child consume the `codex-router-core` schema; Router Profile Projection supplies the app-server model path | V3 | projection equality, compatible/incompatible/auth-required/absent router cases, static/prohibited-data compatibility-response checks, router-condition transitions, router-restart isolation, and router request observation |
 | U5, U10 | R5 | App-server Launch Projection enables Remote Control; Remote Control Observation consumes App-server Control Protocol's initialized experimental exchange and preserves observed server/environment identity for the short-lived upstream read; Codex owns remote state | V4 | Connected/degraded fixture and identity-projection cases plus one real Remote Control attachment or operation against the same app-server before/after restart |
-| U6 | R6 | Host Singleton Authority, Operator Connection Boundary, Lifecycle Owner Task, Process-group Child, App-server Shutdown Progression, Explicit App-server Restart, and Explicit Router Restart own the bounded lifecycle | V5 | pinned-upstream source verification for shutdown constants and signal semantics; fake-clock and real-Unix integration evidence for host policy, singleton, stale-socket recovery, child descriptor exclusion, and host-death relaunch; exact-release native restart evidence; immediate busy serialization, each startup bound, one-signal foreground cancellation, graceful/forced/timeout classification, no second signal after timeout, reaping after later exit, router-restart success/failure, cleanup order, status, and owned-router transition cases |
+| U6 | R6 | Host Singleton Authority, Operator Connection Boundary, Lifecycle Owner Task, Process-group Child, App-server Shutdown Progression, Explicit App-server Restart, and Explicit Router Restart own the bounded lifecycle | V5 | upstream source verification for SIGTERM drain and forced-shutdown semantics; fake-clock and real-Unix integration evidence for the Host's one/five-second policy, process-group force escalation, singleton, stale-socket recovery, child descriptor exclusion, and host-death relaunch; exact-release native restart evidence; immediate busy serialization, each startup bound, one-signal foreground cancellation, graceful/forced/timeout classification, no second signal after timeout, reaping after later exit, router-restart success/failure, cleanup order, status, and owned-router transition cases |
 | U7 | R7 | Managed Codex Update Preparation owns identity/updater comparison; Changed-update Activation owns teardown and re-exec; Update Outcome Observer owns the one bounded post-EOF exchange and four caller-visible outcomes | V6 | four-result update matrix covering exact updater executable/argv despite differing PATH, initial/post-updater identity failure or timeout with hash drainage and child preservation, updater failure/no-change preservation, timeout reap and single-flight exclusion, teardown-failure retained authority and explicit restart, no second signal after teardown timeout, telemetry failure/timeout without a fifth result or blocked activation, continuous exclusion through clear/exec/restore descriptor handling, inherited-lock consumption, induced exec failure with later manual acquisition, socket-before-readiness convergence, and the 40-second total replacement bound |
 | U8 | R8 | Lifecycle Owner Task handles steady-state child-exit events and its automatic-recovery operation performs the single permitted replacement; Host Lifecycle State owns the one-attempt budget; App-server Shutdown Progression owns expected exits | V7 | deterministic child fixture proving one steady-state recovery, visible exhaustion, lifecycle-operation failure without nested recovery, and explicit restart reset for both Remote Control connected and degraded outcomes |
 | U3, U5, U6, U7, U8, U9, U10 | R9 | the Lifecycle Owner Task's status-observation operation derives mandatory and optional fields including observed Remote identity; Host Command Presenter renders snapshots, Desktop attachment/relaunch guidance, and progress; Update Outcome Observer reports cross-exec results; Lifecycle Telemetry owns redaction and existing OTel export | V8 | mandatory live availability/recovery/Remote-identity and Desktop-guidance status, deterministic non-interactive rendering plus iocraft/indicatif presentation coverage where used, optional match/drift/unknown and current-lifetime outcome comparison, update-caller result, Victoria trace/metric observation when exported, pre-exec telemetry success/failure/timeout observation, and secret/private-content canaries |
@@ -1586,9 +1586,10 @@ replacing the external installer unless the update acceptance case explicitly
 requires the managed standalone installation. Exact CLI/Desktop and Remote
 Control acceptance must remain real because mocks cannot prove attachment or
 the upstream remote path before and after restart.
-The pinned upstream Codex checkout is inspected as a separate static proof seam
-for the daemon's SIGTERM, 60-second grace, SIGKILL, and 70-second total timeout.
-Deterministic fixtures prove that the host follows that pinned policy, while an
+The upstream Codex checkout is inspected as a separate static proof seam for
+the daemon's SIGTERM drain and forced-shutdown behavior. Deterministic fixtures
+prove the Host's one-second grace, five-second total bound, and process-group
+force escalation, while an
 exact-release native restart proves the real integration boundary. The runtime
 observation does not claim that every active turn is guaranteed to drain within
 the upstream window.
