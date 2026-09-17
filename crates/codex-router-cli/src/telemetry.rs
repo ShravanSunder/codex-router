@@ -103,7 +103,15 @@ impl Drop for TelemetryGuard {
 }
 
 pub(crate) fn init_from_env(mode: TelemetryMode) -> TelemetryGuard {
-    let filter = env::var("RUST_LOG").unwrap_or_else(|_error| DEFAULT_LOG_FILTER.to_owned());
+    let filter = env::var("RUST_LOG")
+        .map(|configured| {
+            if configured.contains("codex_router_host") {
+                configured
+            } else {
+                format!("{configured},codex_router_host=info")
+            }
+        })
+        .unwrap_or_else(|_error| DEFAULT_LOG_FILTER.to_owned());
     let Some(endpoint) = otlp_endpoint(mode) else {
         let _ = tracing_subscriber::registry()
             .with(EnvFilter::new(filter))
@@ -439,6 +447,18 @@ mod tests {
     #[test]
     fn default_filter_enables_host_lifecycle_events() {
         assert!(DEFAULT_LOG_FILTER.contains("codex_router_host=info"));
+    }
+
+    #[test]
+    fn configured_filter_retains_host_lifecycle_events() {
+        let configured = "warn,codex_router_cli=info";
+        let effective = if configured.contains("codex_router_host") {
+            configured.to_owned()
+        } else {
+            format!("{configured},codex_router_host=info")
+        };
+        assert!(effective.contains("codex_router_host=info"));
+        assert!(effective.contains("codex_router_cli=info"));
     }
 
     #[test]
