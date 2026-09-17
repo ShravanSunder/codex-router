@@ -16,6 +16,7 @@ pub async fn run_native_app_server_fixture(
     process_log: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let ignore_terminate = std::env::var_os("CODEX_FIXTURE_IGNORE_TERM").is_some();
     let _stale_cleanup = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     if let Some(process_log) = process_log {
@@ -23,7 +24,7 @@ pub async fn run_native_app_server_fixture(
     }
     loop {
         tokio::select! {
-            _ = terminate.recv() => break,
+            _ = terminate.recv(), if !ignore_terminate => break,
             accepted = listener.accept() => {
                 let (stream, _peer) = accepted?;
                 serve_native_app_server_observation(stream, running_version).await?;

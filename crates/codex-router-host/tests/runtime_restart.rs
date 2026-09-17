@@ -67,6 +67,7 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
             ])
             .with_environment("CODEX_HOST_RESTART_APP_SOCKET", &app_server_socket)
             .with_environment("CODEX_HOST_RESTART_APP_LOG", &app_server_process_log)
+            .with_environment("CODEX_FIXTURE_IGNORE_TERM", "1")
             .with_output(ChildOutput::Null),
         identity,
         "1.2.3".to_owned(),
@@ -235,6 +236,11 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
             matches!(
                 frame,
                 OperatorFrame::Progress(codex_router_host::HostProgress::AppServerReady)
+            )
+        }) && restart_result.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::AppServerKilled)
             )
         }),
         "app-server restart must stream stopping and ready phases",
