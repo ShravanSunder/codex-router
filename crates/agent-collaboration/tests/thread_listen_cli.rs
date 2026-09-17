@@ -362,11 +362,30 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
             .cloned()
             .ok_or("session listen omitted listenId")?,
     )?;
-    client
-        .board_thread_listen_cancel(ThreadListenCancelRequest {
-            listen_id: listen_id.clone(),
-        })
+    // Retiring through the CLI reads back the same record shape listen show does.
+    let cancelled = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["board", "thread", "listen", "cancel", "--listen-id"])
+        .arg(listen_id.as_str())
+        .args(["--json", "--service-directory"])
+        .arg(&root)
+        .kill_on_drop(true)
+        .output()
         .await?;
+    if !cancelled.status.success() {
+        return Err(format!(
+            "listen cancel failed: {}",
+            String::from_utf8_lossy(&cancelled.stdout)
+        )
+        .into());
+    }
+    let cancelled: serde_json::Value = serde_json::from_slice(&cancelled.stdout)?;
+    if cancelled.pointer("/result/record/listenId") != Some(&serde_json::json!(listen_id.as_str()))
+    {
+        return Err(format!(
+            "listen cancel did not return the snapshot as the record: {cancelled}"
+        )
+        .into());
+    }
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             if client

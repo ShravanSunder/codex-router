@@ -126,6 +126,12 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
             );
         }
     };
+    // The envelope kind is the command's own, not a guess from the result's fields.
+    let operation_kind = match &operation {
+        RequestedOperation::Inspect => "inspect",
+        RequestedOperation::Rename(_) => "rename",
+        RequestedOperation::Interrupt(_) => "interrupt",
+    };
     let mut mutation_started = false;
     let result = runtime.block_on(async {
         let mut client =
@@ -178,7 +184,18 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
     match result {
         Ok(result) => {
             let result = if machine_output {
-                crate::endpoint_commands::result_envelope(json!(result)).to_string()
+                match operation_kind {
+                    "rename" => crate::endpoint_commands::mutation_envelope(
+                        json!(result),
+                        json!({"previousName": result.get("previousName")}),
+                    ),
+                    "interrupt" => crate::endpoint_commands::mutation_envelope(
+                        json!(result),
+                        json!({"kind": result.get("kind")}),
+                    ),
+                    _ => crate::endpoint_commands::result_envelope(json!(result)),
+                }
+                .to_string()
             } else {
                 serde_json::to_string_pretty(&result)
                     .unwrap_or_else(|_| "Result encoding failed".into())

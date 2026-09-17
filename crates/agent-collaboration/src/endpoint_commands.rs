@@ -24,6 +24,26 @@ pub(crate) fn result_envelope(result: serde_json::Value) -> serde_json::Value {
     }
     envelope
 }
+/// Publishes one mutation whose wire type carries no effect field of its own,
+/// so the command states its effects instead of the envelope inferring them.
+pub(crate) fn mutation_envelope(
+    record: serde_json::Value,
+    effects: serde_json::Value,
+) -> serde_json::Value {
+    let mut envelope = serde_json::json!({"kind":"result","cliVersion":env!("CARGO_PKG_VERSION"),
+        "result":{"record":record,"effects":effects}});
+    if let (Some(fields), Some(service_version)) = (
+        envelope.as_object_mut(),
+        collaboration_client::observed_service_version(),
+    ) {
+        fields.insert(
+            "serviceVersion".to_owned(),
+            serde_json::json!(service_version),
+        );
+    }
+    envelope
+}
+
 fn normalize_result(result: serde_json::Value) -> serde_json::Value {
     let Some(fields) = result.as_object() else {
         return serde_json::json!({"record":result});

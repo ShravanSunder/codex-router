@@ -59,6 +59,21 @@ fn published_envelopes_carry_pages_records_and_effects_without_wrapper_keys() {
             serde_json::json!({"record":{"rootMessageId":"01a0a9aa-0393-7a30-aeca-c7c77d679774"},
                 "effects":{"outcome":"joined"}}),
         ),
+        // Mutations whose wire type carries no effect field still publish effects.
+        (
+            "sessionRename",
+            serde_json::json!({"record":{"name":"🔎 Review","previousName":"Old name"},
+                "effects":{"previousName":"Old name"}}),
+        ),
+        (
+            "turnInterrupt",
+            serde_json::json!({"record":{"turnId":"turn-a","kind":"interruptCompleted"},
+                "effects":{"kind":"interruptCompleted"}}),
+        ),
+        (
+            "listenCancel",
+            serde_json::json!({"record":&listen,"effects":{"reason":"cancelled"}}),
+        ),
     ];
 
     for (kind, result) in samples {
@@ -89,6 +104,8 @@ fn published_envelopes_carry_pages_records_and_effects_without_wrapper_keys() {
         r#""MessageShowResult":{"properties":{"message""#,
         r#""ThreadShowResult":{"properties":{"thread""#,
         r#""ThreadListenShowResult":{"properties":{"listen""#,
+        r#""ThreadListenCancelResult":{"properties":{"listen""#,
+        r#""ThreadListenResult":{"properties":{"listen""#,
     ] {
         assert!(
             !definitions.contains(wrapper),

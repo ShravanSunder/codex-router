@@ -112,7 +112,13 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 .unwrap_or_else(|error| panic!("JSON: {error}"));
                 assert_eq!(request["method"], method);
                 let result = if method == setup_method {
-                    json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","reasoningEffort":persisted_effort,"turns":[]}})
+                    if resumed {
+                        // A thread created before routes were recorded: the native
+                        // resume reports no settings and the broker holds no route.
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-a","cwd":"/work","reasoningEffort":persisted_effort,"turns":[]}})
+                    } else {
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","reasoningEffort":persisted_effort,"turns":[]}})
+                    }
                 } else {
                     assert_eq!(request["params"]["input"][0]["text"], "hello");
                     // Without a requested effort the key is absent, not null.

@@ -81,7 +81,7 @@ pub(crate) async fn dispatch(
                 .thread_listens
                 .cancel(&request.listen_id)
                 .await
-                .map(|listen| serde_json::to_value(ThreadListenCancelResult { listen }))
+                .map(|listen| serde_json::to_value(ThreadListenCancelResult(listen)))
         }
         _ => {
             return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unknown Thread Listen operation"}});

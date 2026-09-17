@@ -237,11 +237,10 @@ pub struct ThreadListenCancelRequest {
     pub listen_id: ListenId,
 }
 
+/// Retiring a listener reads back the same snapshot shape `listen show` does.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ThreadListenCancelResult {
-    pub listen: ThreadListenSnapshot,
-}
+#[serde(transparent)]
+pub struct ThreadListenCancelResult(pub ThreadListenSnapshot);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

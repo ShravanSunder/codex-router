@@ -22,7 +22,7 @@ pub(super) fn execute(pending: PendingThreadListen, context: CommandContext) -> 
 }
 
 pub(super) fn execute_show(request: ThreadListenShowRequest, context: CommandContext) -> i32 {
-    execute_control(context, |client| {
+    execute_control(context, None, |client| {
         Box::pin(async move {
             client
                 .board_thread_listen_show(request)
@@ -33,7 +33,7 @@ pub(super) fn execute_show(request: ThreadListenShowRequest, context: CommandCon
 }
 
 pub(super) fn execute_cancel(request: ThreadListenCancelRequest, context: CommandContext) -> i32 {
-    execute_control(context, |client| {
+    execute_control(context, Some(json!({"reason":"cancelled"})), |client| {
         Box::pin(async move {
             client
                 .board_thread_listen_cancel(request)
@@ -43,7 +43,13 @@ pub(super) fn execute_cancel(request: ThreadListenCancelRequest, context: Comman
     })
 }
 
-fn execute_control<TAction>(context: CommandContext, action: TAction) -> i32
+/// Publishes one Control result. A command that changes state names its effects;
+/// a read passes `None`.
+fn execute_control<TAction>(
+    context: CommandContext,
+    effects: Option<serde_json::Value>,
+    action: TAction,
+) -> i32
 where
     TAction: for<'client> FnOnce(
         &'client mut ControlClient,
@@ -79,7 +85,12 @@ where
         let _closed = client.close().await;
         match result {
             Ok(result) => {
-                let value = crate::endpoint_commands::result_envelope(json!(result));
+                let value = match effects {
+                    Some(effects) => {
+                        crate::endpoint_commands::mutation_envelope(json!(result), effects)
+                    }
+                    None => crate::endpoint_commands::result_envelope(json!(result)),
+                };
                 if writeln!(io::stdout().lock(), "{value}").is_ok() {
                     0
                 } else {
