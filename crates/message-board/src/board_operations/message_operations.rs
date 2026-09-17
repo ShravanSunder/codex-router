@@ -1,8 +1,8 @@
 use crate::{
-    ActingForIdentity, ActivitySequence, Identity, Message, MessageId, MessageListScope,
-    MessagePage, MessageReferences, MessageSelection, MessageText, OrchestratorHolder, Page,
-    PageRequest, Participant, ParticipantNote, ParticipantRole, Placement, ProjectId, Thread,
-    TopicId, WatchStatus,
+    ActingForIdentity, ActivitySequence, Identity, ImplementerHolder, Message, MessageId,
+    MessageListScope, MessagePage, MessageReferences, MessageSelection, MessageText,
+    OrchestratorHolder, Page, PageRequest, Participant, ParticipantNote, ParticipantRole,
+    Placement, ProjectId, Thread, TopicId, WatchStatus,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,10 @@ contract!(MessagePostResult {
 contract!(MessageShowRequest {
     message_id: MessageId
 });
-contract!(MessageShowResult { message: Message });
+/// A single read returns the message itself as the record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct MessageShowResult(pub Message);
 contract!(MessageListRequest {
     scope: MessageListScope,
     selection: MessageSelection,
@@ -42,7 +45,15 @@ contract!(MessageListRequest {
 contract!(MessageListResult { page: MessagePage });
 
 contract!(ThreadShowRequest { root_message_id: MessageId, reader: Option<Identity> });
-contract!(ThreadShowResult { thread: Thread, watch_status: Option<WatchStatus> });
+/// A single read returns the thread itself as the record, carrying the reader's
+/// watch status alongside the thread's own fields.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadShowResult {
+    #[serde(flatten)]
+    pub thread: Thread,
+    pub watch_status: Option<WatchStatus>,
+}
 contract!(ThreadResolveRequest { root_message_id: MessageId, actor: Identity, acting_for: Option<ActingForIdentity> });
 contract!(ThreadResolveResult { thread: Thread, activity_sequence: Option<ActivitySequence>, outcome: String });
 contract!(ThreadUnresolveRequest { root_message_id: MessageId, actor: Identity, acting_for: Option<ActingForIdentity> });
@@ -57,6 +68,13 @@ contract!(ThreadUnwatchRequest { root_message_id: MessageId, actor: Identity, ac
 contract!(ThreadUnwatchResult {
     thread: Thread,
     watch_status: WatchStatus,
+    outcome: String
+});
+contract!(TopicWatchRequest { topic_id: TopicId, actor: Identity, acting_for: Option<ActingForIdentity> });
+contract!(TopicWatchResult {
+    topic_id: TopicId,
+    watching: bool,
+    starts_after_activity_sequence: Option<ActivitySequence>,
     outcome: String
 });
 contract!(ThreadListRequest {
@@ -93,6 +111,7 @@ contract!(ThreadCreateResult {
     message: Message,
     creator_participation: ThreadCreatorParticipation,
     orchestrator: Option<OrchestratorHolder>,
+    implementer: Option<ImplementerHolder>,
     watch_status: WatchStatus,
     outcome: String
 });
@@ -107,6 +126,7 @@ contract!(ThreadJoinRequest {
 contract!(ThreadJoinResult {
     participant: Participant,
     orchestrator: Option<OrchestratorHolder>,
+    implementer: Option<ImplementerHolder>,
     watch_status: WatchStatus,
     outcome: String
 });
@@ -120,6 +140,7 @@ contract!(ThreadLeaveResult {
     participant: Participant,
     thread: Thread,
     orchestrator: Option<OrchestratorHolder>,
+    implementer: Option<ImplementerHolder>,
     watch_status: WatchStatus,
     outcome: String
 });
@@ -129,5 +150,6 @@ contract!(ThreadParticipantListRequest {
 });
 contract!(ThreadParticipantListResult {
     page: Page<Participant>,
-    orchestrator: Option<OrchestratorHolder>
+    orchestrator: Option<OrchestratorHolder>,
+    implementer: Option<ImplementerHolder>
 });

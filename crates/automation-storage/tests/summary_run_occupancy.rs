@@ -31,6 +31,8 @@ async fn fresh_run_keeps_occupancy_while_separate_summary_budget_begins()
                     cwd: "/isolated-fixture".into(),
                 },
                 execution_timeout_seconds: Some(120),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,

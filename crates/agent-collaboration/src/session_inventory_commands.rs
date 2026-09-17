@@ -1,6 +1,9 @@
 //! Descriptive stored/loaded/active inventory through the public Control client.
 use clap::{Parser, Subcommand, ValueEnum};
-use collaboration_client::protocol::{EndpointRef, NativeSessionListParams, NativeSessionView};
+use collaboration_client::protocol::{
+    EndpointRef, NativeSessionListParams, NativeSessionScope, NativeSessionSource,
+    NativeSessionView,
+};
 use collaboration_client::{ClientError, ControlClient};
 use serde_json::json;
 use std::{
@@ -24,6 +27,12 @@ enum InventoryView {
     Loaded,
     Active,
 }
+#[derive(Clone, Copy, ValueEnum)]
+enum InventorySource {
+    Interactive,
+    Subagents,
+    All,
+}
 #[derive(Subcommand)]
 enum InventoryCommand {
     /// Read stored metadata or currently loaded/active native observations; never resumes threads.
@@ -32,6 +41,18 @@ enum InventoryCommand {
         endpoint: String,
         #[arg(long, value_enum)]
         view: InventoryView,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long)]
+        checkout: Option<PathBuf>,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        any: bool,
+        #[arg(long, value_enum)]
+        source: InventorySource,
+        #[arg(long)]
+        query: Option<String>,
         #[arg(long,default_value_t=100,value_parser=clap::value_parser!(u32).range(1..=100))]
         page_size: u32,
         #[arg(long)]
@@ -52,14 +73,32 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
     let InventoryCommand::List {
         endpoint,
         view,
+        cwd,
+        checkout,
+        repo,
+        any,
+        source,
+        query,
         page_size,
         cursor,
         service_directory,
         json: machine,
     } = parsed.command;
+    let scope_count = usize::from(cwd.is_some())
+        + usize::from(checkout.is_some())
+        + usize::from(repo.is_some())
+        + usize::from(any);
+    if scope_count != 1 {
+        return crate::endpoint_commands::report_failure(
+            "invalidUsage",
+            "Choose exactly one of --cwd, --checkout, --repo, or --any",
+            2,
+            machine,
+        );
+    }
     let directory = match crate::endpoint_commands::resolve_directory(service_directory) {
         Ok(v) => v,
-        Err(e) => return crate::endpoint_commands::report_failure("invalidUsage", &e, 2, machine),
+        Err(e) => return crate::endpoint_commands::report_failure("invalidField", &e, 2, machine),
     };
     let endpoint = match endpoint.try_into() {
         Ok(v) => v,
@@ -104,6 +143,32 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
                 InventoryView::Loaded => NativeSessionView::Loaded,
                 InventoryView::Active => NativeSessionView::Active,
             },
+            scope: if let Some(path) = cwd {
+                NativeSessionScope::Cwd {
+                    path: collaboration_client::session_catalog::normalize_path(&path),
+                }
+            } else if let Some(path) = checkout {
+                NativeSessionScope::Checkout {
+                    root: collaboration_client::session_catalog::checkout_root(&path),
+                }
+            } else if let Some(path) = repo {
+                let identity =
+                    collaboration_client::session_catalog::discover_repository_identity(&path);
+                NativeSessionScope::Repo {
+                    live_roots: identity.live_roots,
+                    normalized_origin: identity.normalized_origin,
+                    basename: identity.repository_basename,
+                    fallback_cwd: identity.fallback_cwd,
+                }
+            } else {
+                NativeSessionScope::Any
+            },
+            source: match source {
+                InventorySource::Interactive => NativeSessionSource::Interactive,
+                InventorySource::Subagents => NativeSessionSource::Subagents,
+                InventorySource::All => NativeSessionSource::All,
+            },
+            query,
             page_size,
             cursor,
         };
@@ -113,7 +178,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
     });
     match result {
         Ok(result) => {
-            let record = json!({"kind":"result","result":result});
+            let record = crate::endpoint_commands::result_envelope(json!(result));
             let text = if machine {
                 record.to_string()
             } else {

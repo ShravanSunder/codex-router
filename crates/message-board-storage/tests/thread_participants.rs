@@ -122,6 +122,88 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn implementer_seat_is_unique_replaceable_and_visible_on_thread_reads() {
+    let mut fixture = Fixture::open("implementer-seat").await;
+    let created = fixture
+        .create(
+            session("coordinator"),
+            Some(ParticipantRole::Orchestrator),
+            true,
+        )
+        .await;
+    let root = created.message.message_id;
+    let first = session("implementer-one");
+    let second = session("implementer-two");
+    let joined = fixture
+        .store
+        .join_thread(ThreadJoinRequest {
+            root_message_id: root.clone(),
+            actor: first.clone(),
+            role: ParticipantRole::Implementer,
+            watch: true,
+            replace: None,
+            note: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        joined.implementer.as_ref().map(|holder| &holder.identity),
+        Some(&first)
+    );
+    let refusal = fixture
+        .store
+        .join_thread(ThreadJoinRequest {
+            root_message_id: root.clone(),
+            actor: second.clone(),
+            role: ParticipantRole::Implementer,
+            watch: true,
+            replace: None,
+            note: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.kind, BoardFailureKind::ImplementerAlreadyExists);
+    assert_eq!(refusal.next_action, BoardNextAction::ReplaceImplementer);
+    fixture
+        .store
+        .join_thread(ThreadJoinRequest {
+            root_message_id: root.clone(),
+            actor: second.clone(),
+            role: ParticipantRole::Implementer,
+            watch: true,
+            replace: Some(first),
+            note: None,
+        })
+        .await
+        .unwrap();
+    let shown = fixture
+        .store
+        .show_thread(ThreadShowRequest {
+            root_message_id: root.clone(),
+            reader: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        shown.thread.implementer.map(|holder| holder.identity),
+        Some(second.clone())
+    );
+    let participants = fixture
+        .store
+        .list_thread_participants(ThreadParticipantListRequest {
+            root_message_id: root,
+            page: page(20),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        participants.implementer.map(|holder| holder.identity),
+        Some(second)
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn thread_list_pages_escape_heavy_holders_with_complete_cursor_traversal() {
     let mut fixture = Fixture::open("thread-list-frame-budget").await;
     let mut expected_roots = Vec::new();
@@ -556,6 +638,7 @@ async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
                 max_wait_seconds: 1,
             },
             acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
             from_activity_sequence: None,
         })
         .await
@@ -587,6 +670,7 @@ async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
                 max_wait_seconds: 1,
             },
             acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
             from_activity_sequence: None,
         })
         .await
@@ -620,6 +704,7 @@ async fn listen_refuses_every_missing_session_participant_without_creating_watch
                 max_wait_seconds: 1,
             },
             acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
             from_activity_sequence: None,
         })
         .await
@@ -742,6 +827,7 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
                 max_wait_seconds: 1,
             },
             acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
             from_activity_sequence: Some(join_sequence),
         })
         .await

@@ -1,3 +1,4 @@
+use codex_native_integration::ResumeModelChoice;
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -11,6 +12,10 @@ fn debug_app_server_profile_preserves_provider_overrides_without_remote_control(
     let original = codex_native_integration::AppServerCommandSpec::new(
         &paths,
         &profile,
+        &codex_native_integration::RouterControlSocketPath::in_collaboration_directory(Path::new(
+            "/tmp/debug-owner/agent-communication",
+        ))
+        .unwrap(),
         Path::new("/tmp/debug-owner/backend.sock"),
     );
     let debug_profile = codex_native_integration::DebugCodexProfile::parse(
@@ -66,11 +71,23 @@ fn debug_profile_selection_preserves_every_native_launch_tail() {
     let arguments = vec![OsString::from("--model"), OsString::from("example-model")];
     let launches = [
         SessionLaunch::new(socket, cwd, &arguments),
-        SessionLaunch::resume(socket, cwd, &arguments, "thread-id"),
-        SessionLaunch::fork(socket, cwd, &arguments, "thread-id"),
+        SessionLaunch::resume(
+            socket,
+            cwd,
+            &arguments,
+            "thread-id",
+            &ResumeModelChoice::default(),
+        ),
+        SessionLaunch::fork(
+            socket,
+            cwd,
+            &arguments,
+            "thread-id",
+            &ResumeModelChoice::default(),
+        ),
         SessionLaunch::local(cwd, &arguments),
-        SessionLaunch::resume_local(cwd, &arguments, "thread-id"),
-        SessionLaunch::fork_local(cwd, &arguments, "thread-id"),
+        SessionLaunch::resume_local(cwd, &arguments, "thread-id", &ResumeModelChoice::default()),
+        SessionLaunch::fork_local(cwd, &arguments, "thread-id", &ResumeModelChoice::default()),
     ];
     for launch in launches {
         let original = launch.arguments();

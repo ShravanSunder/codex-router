@@ -1,6 +1,6 @@
 //! Shared input options keep immediate messages and timed wake-ups semantically identical.
 use clap::{Args, ValueEnum};
-use collaboration_client::protocol::{MessageContent, MessageDelivery, SavedMessage, SessionRef};
+use collaboration_client::protocol::{MessageContent, MessageDelivery, SavedMessage, UuidIdentity};
 use serde_json::json;
 use std::{
     io::{self, Read},
@@ -14,9 +14,8 @@ pub(crate) enum DeliveryChoice {
 }
 #[derive(Args)]
 pub(crate) struct SendArguments {
-    /// Exact recipient SessionRef JSON; copy `.target` from `sessions list --json`.
-    #[arg(long)]
-    pub(crate) to: String,
+    #[command(flatten)]
+    pub(crate) target: crate::session_target_arguments::SessionTargetArguments,
     /// Use the supplied self address as SessionRef JSON; this is not authenticated identity.
     #[arg(
         long = "from",
@@ -49,11 +48,9 @@ pub(crate) struct SendArguments {
     pub(crate) json: bool,
 }
 
-pub(crate) fn prepare(
-    args: &SendArguments,
-) -> Result<(PathBuf, SessionRef, MessageContent), String> {
+pub(crate) fn prepare(args: &SendArguments) -> Result<(PathBuf, PreparedMessage), String> {
     let directory = crate::endpoint_commands::resolve_directory(args.service_directory.clone())?;
-    let target = serde_json::from_str(&args.to).map_err(|_| session_ref_guidance("--to"))?;
+    let target = args.target.parse()?;
     if let Some(epoch) = &args.expected_service_epoch {
         let _: collaboration_client::protocol::CodexGeneration = serde_json::from_value(
             json!({"serviceEpoch":epoch,"generation":args.expected_generation}),
@@ -91,17 +88,6 @@ pub(crate) fn prepare(
         .map_err(|_| session_ref_guidance("--from"))?;
         MessageContent::Agent { sender, text }
     };
-    Ok((directory, target, content))
-}
-
-fn session_ref_guidance(field: &str) -> String {
-    format!(
-        "{field} must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId. nativeThreadId is a lifecycle address, not a SessionRef. Copy .target from sessions list --json."
-    )
-}
-
-pub(crate) fn saved_message(args: &SendArguments) -> Result<(PathBuf, SavedMessage), String> {
-    let (directory, target, content) = prepare(args)?;
     let generation_guard = match (&args.expected_service_epoch, args.expected_generation) {
         (Some(epoch), Some(generation)) => Some(
             serde_json::from_value(json!({"serviceEpoch":epoch,"generation":generation}))
@@ -112,7 +98,7 @@ pub(crate) fn saved_message(args: &SendArguments) -> Result<(PathBuf, SavedMessa
     };
     Ok((
         directory,
-        SavedMessage {
+        PreparedMessage {
             target,
             content,
             delivery: match args.delivery {
@@ -123,4 +109,27 @@ pub(crate) fn saved_message(args: &SendArguments) -> Result<(PathBuf, SavedMessa
             generation_guard,
         },
     ))
+}
+
+fn session_ref_guidance(field: &str) -> String {
+    format!(
+        "{field} must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId. nativeThreadId is a lifecycle address, not a SessionRef. Copy .target from sessions list --json."
+    )
+}
+
+pub(crate) struct PreparedMessage {
+    pub(crate) target: crate::session_target_arguments::ParsedSessionTarget,
+    pub(crate) content: MessageContent,
+    pub(crate) delivery: MessageDelivery,
+    pub(crate) generation_guard: Option<collaboration_client::protocol::CodexGeneration>,
+}
+impl PreparedMessage {
+    pub(crate) fn resolve(self, service_id: &UuidIdentity) -> Result<SavedMessage, String> {
+        Ok(SavedMessage {
+            target: self.target.resolve(service_id)?,
+            content: self.content,
+            delivery: self.delivery,
+            generation_guard: self.generation_guard,
+        })
+    }
 }

@@ -47,7 +47,7 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
     }
     let record: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let id = record
-        .pointer("/result/definition/wakeupId")
+        .pointer("/result/record/definition/wakeupId")
         .and_then(serde_json::Value::as_str)
         .ok_or("missing created instruction identity")?;
     let read = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -68,13 +68,13 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
     }
     let record: serde_json::Value = serde_json::from_slice(&read.stdout)?;
     if record
-        .pointer("/result/definition/message/content/text")
+        .pointer("/result/record/definition/message/content/text")
         .and_then(serde_json::Value::as_str)
         != Some("Check repository")
     {
         return Err("CLI wake text was not persisted".into());
     }
-    if record.pointer("/result/firstFire") != Some(&serde_json::Value::Null) {
+    if record.pointer("/result/record/firstFire") != Some(&serde_json::Value::Null) {
         return Err("CLI creation invented a firing".into());
     }
     for (action, state) in [
@@ -103,7 +103,7 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         }
         let response: serde_json::Value = serde_json::from_slice(&output.stdout)?;
         if response
-            .pointer("/result/wakeup/state")
+            .pointer("/result/record/wakeup/state")
             .and_then(serde_json::Value::as_str)
             != Some(state)
         {
@@ -142,7 +142,7 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         .to_owned();
     let fired: serde_json::Value = serde_json::from_str(&last)?;
     if fired
-        .pointer("/result/kind")
+        .pointer("/result/record/kind")
         .and_then(serde_json::Value::as_str)
         != Some("wakeFired")
     {
@@ -169,18 +169,18 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
     }
     let listing: serde_json::Value = serde_json::from_slice(&listing.stdout)?;
     if listing
-        .pointer("/result/records")
+        .pointer("/result/page/records")
         .and_then(serde_json::Value::as_array)
         .map(Vec::len)
         != Some(1)
         || listing
-            .pointer("/result/nextCursor")
+            .pointer("/result/page/nextCursor")
             .is_none_or(serde_json::Value::is_null)
     {
         return Err("CLI bounded listing missing page or cursor".into());
     }
     let fired_id = fired
-        .pointer("/result/wakeupId")
+        .pointer("/result/record/wakeupId")
         .and_then(serde_json::Value::as_str)
         .ok_or("missing fired wake identity")?;
     let deliveries = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -200,7 +200,7 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
     }
     let deliveries: serde_json::Value = serde_json::from_slice(&deliveries.stdout)?;
     let delivery_id = deliveries
-        .pointer("/result/records/0/deliveryId")
+        .pointer("/result/page/records/0/deliveryId")
         .and_then(serde_json::Value::as_str)
         .ok_or("missing fired delivery")?;
     for action in ["show", "attempts", "reconcile"] {
@@ -222,7 +222,7 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         let output: serde_json::Value = serde_json::from_slice(&output.stdout)?;
         if action == "attempts"
             && output
-                .pointer("/result/coverage/earlierAttempts")
+                .pointer("/result/page/coverage/earlierAttempts")
                 .and_then(serde_json::Value::as_str)
                 != Some("mayBeUnavailable")
         {

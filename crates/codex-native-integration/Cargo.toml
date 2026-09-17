@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+message-board = { path = "../message-board", version = "0.1.20" }
 toml = "1.1.2"
 sqlx.workspace = true
 futures-util.workspace = true

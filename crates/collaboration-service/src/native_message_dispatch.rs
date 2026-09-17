@@ -144,13 +144,14 @@ impl MessageSession {
             Ok(value) => Ok(value),
             Err(error) => {
                 let kind = match error {
-                    NativeConnectionError::Rejected { .. } => {
+                    NativeConnectionError::Rejected { code } => {
                         if stage == "resume" {
                             self.effects.resume = "rejected";
                         } else if mutation {
                             self.effects.submission = "rejected";
                         }
-                        "nativeRejected"
+                        let native = self.connection.take_last_rejection();
+                        return Err(self.effects.native_rejection(stage, code, native.as_ref()));
                     }
                     NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable => {
                         if stage == "resume" {

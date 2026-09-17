@@ -4,7 +4,7 @@ use crate::board_topic_records::{require_board, require_topic};
 use crate::message_records::{load_message, load_watch_status, require_thread};
 use crate::participant_records::{advance_participant_last_seen, apply_watch_choice};
 use crate::participant_row_decoding::{
-    load_orchestrator, load_participant, require_open_participant, role_name,
+    load_implementer, load_orchestrator, load_participant, require_open_participant, role_name,
 };
 use crate::storage_support::{
     BoardTransaction, allocate_activity_sequence, archived_board, attribute_invalid_record,
@@ -301,6 +301,7 @@ impl BoardStore {
                 None => ThreadCreatorParticipation::NotJoined,
             };
         let orchestrator = load_orchestrator(&mut transaction, &request.message_id).await?;
+        let implementer = load_implementer(&mut transaction, &request.message_id).await?;
         let watch_status =
             load_watch_status(&mut transaction, &actor_key, &request.message_id).await?;
         transaction.commit().await.map_err(storage_error)?;
@@ -309,6 +310,7 @@ impl BoardStore {
             message,
             creator_participation,
             orchestrator,
+            implementer,
             watch_status,
             outcome: "Thread created with the explicit Participant and Watch choices.".to_owned(),
         })

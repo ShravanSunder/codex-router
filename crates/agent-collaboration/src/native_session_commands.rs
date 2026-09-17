@@ -1,8 +1,6 @@
 //! Human and agent entrypoints for public native inspection and exact interruption.
 use clap::{Args, Parser, Subcommand};
-use collaboration_client::protocol::{
-    ChannelDescription, EndpointAvailability, EndpointId, EndpointRef, SessionId, SessionRef,
-};
+use collaboration_client::protocol::{ChannelDescription, EndpointAvailability};
 use collaboration_client::{ClientError, ControlClient};
 use serde_json::{Value, json};
 use std::{
@@ -32,6 +30,13 @@ enum NativeControlCommand {
 enum SessionOperation {
     /// Read native metadata without loading or resuming the thread.
     Inspect(TargetArguments),
+    /// Set the explicit persisted Codex thread name without resuming it.
+    Rename {
+        #[command(flatten)]
+        target: TargetArguments,
+        #[arg(long)]
+        name: String,
+    },
 }
 #[derive(Subcommand)]
 enum TurnOperation {
@@ -45,10 +50,8 @@ enum TurnOperation {
 }
 #[derive(Args)]
 struct TargetArguments {
-    #[arg(long)]
-    endpoint: String,
-    #[arg(long)]
-    session: String,
+    #[command(flatten)]
+    target: crate::session_target_arguments::SessionTargetArguments,
     #[arg(long)]
     service_directory: Option<PathBuf>,
     #[arg(long)]
@@ -64,33 +67,45 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
-    let (target, turn) = match parsed.command {
+    enum RequestedOperation {
+        Inspect,
+        Rename(String),
+        Interrupt(String),
+    }
+    let (target, operation) = match parsed.command {
         NativeControlCommand::Session {
             command: SessionOperation::Inspect(target),
-        } => (target, None),
+        } => (target, RequestedOperation::Inspect),
+        NativeControlCommand::Session {
+            command: SessionOperation::Rename { target, name },
+        } => (target, RequestedOperation::Rename(name)),
         NativeControlCommand::Turn {
             command: TurnOperation::Interrupt { target, turn },
-        } => (target, Some(turn)),
+        } => (target, RequestedOperation::Interrupt(turn)),
     };
     let machine_output = target.json;
     let resolved = (|| {
         let directory = crate::endpoint_commands::resolve_directory(target.service_directory)?;
-        let endpoint =
-            EndpointId::try_from(target.endpoint).map_err(|_| "Invalid endpoint identifier")?;
-        let session =
-            SessionId::try_from(target.session).map_err(|_| "Invalid session identifier")?;
-        if turn.as_ref().is_some_and(|id| {
-            collaboration_client::protocol::NonEmptyText::try_from(id.clone()).is_err()
-        }) {
+        let target = target.target.parse()?;
+        if let RequestedOperation::Interrupt(id) = &operation
+            && collaboration_client::protocol::NonEmptyText::try_from(id.clone()).is_err()
+        {
             return Err("A nonempty exact turn ID is required".to_owned());
         }
-        Ok::<_, String>((directory, endpoint, session))
+        if let RequestedOperation::Rename(name) = &operation
+            && (name.trim() != name
+                || !(1..=120).contains(&name.chars().count())
+                || name.chars().any(char::is_control))
+        {
+            return Err("--name requires 1 to 120 Unicode scalar values without surrounding whitespace or control characters".to_owned());
+        }
+        Ok::<_, String>((directory, target))
     })();
-    let (directory, endpoint, session_id) = match resolved {
+    let (directory, parsed_target) = match resolved {
         Ok(resolved) => resolved,
         Err(message) => {
             return crate::endpoint_commands::report_failure(
-                "invalidUsage",
+                "invalidField",
                 &message,
                 2,
                 machine_output,
@@ -111,21 +126,34 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
             );
         }
     };
+    // The envelope kind is the command's own, not a guess from the result's fields.
+    let operation_kind = match &operation {
+        RequestedOperation::Inspect => "inspect",
+        RequestedOperation::Rename(_) => "rename",
+        RequestedOperation::Interrupt(_) => "interrupt",
+    };
     let mut mutation_started = false;
     let result = runtime.block_on(async {
         let mut client =
             ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
                 .await?;
-        let target = SessionRef {
-            endpoint: EndpointRef {
-                service_id: client.identity().service_id.clone(),
-                endpoint_id: endpoint,
-            },
-            session_id,
-        };
-        let result = match turn {
-            None => json!(client.inspect_session(&target).await?),
-            Some(turn) => {
+        let target = parsed_target
+            .resolve(&client.identity().service_id)
+            .map_err(|_| ClientError::Protocol("invalid session target"))?;
+        let result = match operation {
+            RequestedOperation::Inspect => json!(client.inspect_session(&target).await?),
+            RequestedOperation::Rename(name) => {
+                mutation_started = true;
+                json!(
+                    client
+                        .rename_session(collaboration_client::protocol::NativeRenameParams {
+                            target,
+                            name
+                        })
+                        .await?
+                )
+            }
+            RequestedOperation::Interrupt(turn) => {
                 let inventory = client.list_endpoints().await?;
                 let generation = inventory
                     .endpoints
@@ -156,7 +184,18 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
     match result {
         Ok(result) => {
             let result = if machine_output {
-                json!({"kind":"result","result":result}).to_string()
+                match operation_kind {
+                    "rename" => crate::endpoint_commands::mutation_envelope(
+                        json!(result),
+                        json!({"previousName": result.get("previousName")}),
+                    ),
+                    "interrupt" => crate::endpoint_commands::mutation_envelope(
+                        json!(result),
+                        json!({"kind": result.get("kind")}),
+                    ),
+                    _ => crate::endpoint_commands::result_envelope(json!(result)),
+                }
+                .to_string()
             } else {
                 serde_json::to_string_pretty(&result)
                     .unwrap_or_else(|_| "Result encoding failed".into())

@@ -16,6 +16,18 @@ pub enum ConversationEvent {
     PermissionRequired(SessionRef),
     PromptResult { target: SessionRef, result: Value },
 }
+pub struct ConversationSessionRequest<'a> {
+    pub session: Option<&'a str>,
+    pub fork: Option<&'a str>,
+    pub model: Option<&'a str>,
+    /// Absent on resume, where the thread keeps the effort it was created with,
+    /// and on fork, where the source thread's effort is inherited.
+    pub effort: Option<&'a str>,
+    pub access: Option<&'a str>,
+    pub created_by: Option<&'a SessionRef>,
+    pub approver: Option<&'a SessionRef>,
+    pub root_message_id: Option<&'a str>,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationEnd {
     Completed,
@@ -27,6 +39,7 @@ pub struct AcpConversation {
     frame: Vec<u8>,
     schemas: AcpSchemaCatalog,
     endpoint: EndpointRef,
+    service_directory: std::path::PathBuf,
     target: Option<SessionRef>,
     session_ready: bool,
     next_id: u64,
@@ -37,6 +50,10 @@ pub struct AcpConversation {
     failed: bool,
 }
 impl AcpConversation {
+    #[must_use]
+    pub fn endpoint(&self) -> &EndpointRef {
+        &self.endpoint
+    }
     pub async fn connect(directory: &Path, endpoint_id: EndpointId) -> Result<Self, ClientError> {
         let transport = AcpTransportConnection::connect(directory, endpoint_id).await?;
         if String::from(transport.schema_digest.clone())
@@ -50,6 +67,7 @@ impl AcpConversation {
             schemas: AcpSchemaCatalog::load()
                 .map_err(|_| ClientError::Protocol("ACP schema unavailable"))?,
             endpoint: transport.endpoint,
+            service_directory: directory.to_owned(),
             target: None,
             session_ready: false,
             next_id: 0,
@@ -71,7 +89,7 @@ impl AcpConversation {
     }
     pub async fn open_session(
         &mut self,
-        session: Option<&str>,
+        request: ConversationSessionRequest<'_>,
         cwd: &Path,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<SessionRef, ClientError> {
@@ -84,7 +102,7 @@ impl AcpConversation {
         if !cwd.is_absolute() {
             return Err(ClientError::Protocol("ACP cwd must be absolute"));
         }
-        let target = if let Some(id) = session {
+        let target = if let Some(id) = request.session {
             if !self.load_supported {
                 return Err(ClientError::UnsupportedCapability("ACP session/load"));
             }
@@ -98,17 +116,50 @@ impl AcpConversation {
             self.target = Some(target.clone());
             self.request(
                 "session/load",
-                json!({"sessionId":id,"cwd":cwd,"mcpServers":[]}),
+                json!({"sessionId":id,"cwd":cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata_effort(request.effort)}}),
                 "LoadSessionRequest",
                 "LoadSessionResponse",
             )
             .await?;
             target
         } else {
+            // An absent model or effort is omitted, not sent as null: on fork the
+            // adapter reads the source thread to fill it.
+            let mut router_metadata = serde_json::Map::new();
+            if let Some(model) = request.model {
+                router_metadata.insert("model".to_owned(), json!(model));
+            }
+            if let Some(effort) = request.effort {
+                router_metadata.insert("effort".to_owned(), json!(effort));
+            }
+            router_metadata.extend([
+                ("access".to_owned(), json!(request.access)),
+                ("createdBy".to_owned(), json!(request.created_by)),
+                ("approver".to_owned(), json!(request.approver)),
+            ]);
+            let scratch_scope = request
+                .root_message_id
+                .map(str::to_owned)
+                .unwrap_or_else(session_scratch_scope);
+            let scratch_path = self
+                .service_directory
+                .parent()
+                .ok_or(ClientError::Protocol("service directory has no owner root"))?
+                .join("scratch")
+                .join(&scratch_scope);
+            prepare_project_write_areas(cwd, request.access)?;
+            create_private_scratch(&scratch_path)?;
+            router_metadata.insert("rootMessageId".into(), json!(request.root_message_id));
+            router_metadata.insert("scratchScope".into(), json!(scratch_scope));
+            router_metadata.insert("scratchPath".into(), json!(scratch_path));
+            if let Some(source_thread_id) = request.fork {
+                router_metadata.insert("forkThreadId".into(), json!(source_thread_id));
+            }
+            let params = json!({"cwd":cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata}});
             let result = self
                 .request(
                     "session/new",
-                    json!({"cwd":cwd,"mcpServers":[]}),
+                    params,
                     "NewSessionRequest",
                     "NewSessionResponse",
                 )
@@ -139,6 +190,7 @@ impl AcpConversation {
     pub async fn prompt(
         &mut self,
         text: &str,
+        effort: Option<&str>,
         timeout: Duration,
         cancel: CancellationToken,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
@@ -157,7 +209,7 @@ impl AcpConversation {
         let id = self
             .submit(
                 "session/prompt",
-                json!({"sessionId":session,"prompt":[{"type":"text","text":text}]}),
+                json!({"sessionId":session,"prompt":[{"type":"text","text":text}],"_meta":{"codexRouter":router_metadata_effort(effort)}}),
                 "PromptRequest",
             )
             .await?;
@@ -370,5 +422,84 @@ impl AcpConversation {
                 return Ok(value);
             }
         }
+    }
+}
+
+fn create_private_scratch(path: &Path) -> Result<(), ClientError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700).create(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(ClientError::Protocol(
+            "scratch directory is not owner-private",
+        ));
+    }
+    Ok(())
+}
+
+/// Creates the project directories write-restricted access declares writable.
+///
+/// Workspace-write already owns the worktree, so Router must not materialize
+/// `tmp/` or `docs/wip/` in it on that path.
+fn prepare_project_write_areas(cwd: &Path, access: Option<&str>) -> std::io::Result<()> {
+    if access != Some("write-restricted") {
+        return Ok(());
+    }
+    std::fs::create_dir_all(cwd.join("tmp"))?;
+    std::fs::create_dir_all(cwd.join("docs/wip"))
+}
+
+/// Omits the effort key entirely when the caller selected none, so the adapter
+/// reads absence rather than a null it would have to interpret.
+fn router_metadata_effort(effort: Option<&str>) -> Value {
+    effort.map_or_else(|| json!({}), |effort| json!({"effort": effort}))
+}
+
+fn session_scratch_scope() -> String {
+    format!("session-{}", uuid::Uuid::now_v7())
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn only_write_restricted_access_creates_project_write_areas() {
+        // Arrange: one empty project directory per access selection.
+        let root =
+            std::env::temp_dir().join(format!("router-client-access-{}", uuid::Uuid::now_v7()));
+        let restricted = root.join("restricted");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&restricted).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // Act.
+        prepare_project_write_areas(&restricted, Some("write-restricted")).unwrap();
+        prepare_project_write_areas(&workspace, Some("workspace-write")).unwrap();
+
+        // Assert: workspace-write leaves the worktree exactly as it found it.
+        assert!(restricted.join("tmp").is_dir());
+        assert!(restricted.join("docs/wip").is_dir());
+        assert!(!workspace.join("tmp").exists());
+        assert!(!workspace.join("docs").exists());
+    }
+
+    #[test]
+    fn session_scratch_scopes_are_unique_and_owner_private() {
+        let first = session_scratch_scope();
+        let second = session_scratch_scope();
+        assert_ne!(first, second);
+        let path = std::env::temp_dir()
+            .join("router-client-scratch")
+            .join(first);
+        assert!(create_private_scratch(&path).is_ok());
+        let metadata = std::fs::metadata(path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o077, 0);
     }
 }

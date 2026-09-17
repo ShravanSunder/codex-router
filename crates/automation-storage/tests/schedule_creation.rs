@@ -32,6 +32,8 @@ async fn schedule_creation_replays_without_resetting_timer_anchor()
                 cwd: "/work".into(),
             },
             execution_timeout_seconds: None,
+            model: Some("gpt-5.6-sol".into()),
+            effort: Some("medium".into()),
         },
         imported_continuity: ContinuityInput::None,
         now_ms: 1000,

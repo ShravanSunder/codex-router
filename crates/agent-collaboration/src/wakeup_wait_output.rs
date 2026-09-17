@@ -24,7 +24,7 @@ pub(crate) async fn wait(directory: &Path, wakeup_id: WakeupId, machine: bool) -
     }
     .await;
     let (record, code) = match result {
-        Ok(fire) => (json!({"kind":"result","result":fire}), 0),
+        Ok(fire) => (crate::endpoint_commands::result_envelope(json!(fire)), 0),
         Err(error) => {
             let (kind, next_action, first_fire) = match &error {
                 WakeWaitError::Paused { .. } => ("wakePaused", "resumeWakeup", "notRecorded"),

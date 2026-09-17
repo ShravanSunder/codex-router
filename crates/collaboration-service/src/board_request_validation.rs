@@ -56,6 +56,8 @@ fn validate_required_identities(
         "board/threadUnresolve",
         "board/threadWatch",
         "board/threadUnwatch",
+        "board/topicWatch",
+        "board/topicUnwatch",
         "board/inboxAcknowledge",
     ];
     const READER_METHODS: &[&str] = &[

@@ -102,7 +102,7 @@ async fn skipped_one_shot_cli_wait_reports_no_firing() -> Result<(), Box<dyn std
     if records.len() != 2
         || records
             .first()
-            .and_then(|value| value.pointer("/result/definition/wakeupId"))
+            .and_then(|value| value.pointer("/result/record/definition/wakeupId"))
             != Some(&json!(wake.definition.wakeup_id))
     {
         return Err("creation replay did not return the original wake before waiting".into());

@@ -6,7 +6,8 @@ use crate::message_records::{
 };
 use crate::participant_records::resolve_in_transaction;
 use crate::participant_row_decoding::{
-    StoredParticipantRow, decode_projected_participant, load_orchestrator, load_participant,
+    StoredParticipantRow, decode_projected_participant, load_implementer, load_orchestrator,
+    load_participant,
 };
 use crate::storage_support::{
     StoredIdentityRow, allocate_activity_sequence, archived_board, current_activity_sequence,
@@ -52,6 +53,66 @@ struct StoredThreadRow {
 }
 
 impl BoardStore {
+    pub async fn watch_topic(
+        &mut self,
+        request: TopicWatchRequest,
+    ) -> Result<TopicWatchResult, BoardError> {
+        let mut transaction = self
+            .connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let topic =
+            crate::board_topic_records::require_topic(&mut transaction, &request.topic_id).await?;
+        let board = require_board(&mut transaction, &topic.board_id).await?;
+        let reader_key = ensure_identity(&mut transaction, &request.actor).await?;
+        let boundary = current_activity_sequence(&mut transaction).await?;
+        sqlx::query!(
+            "INSERT INTO topic_watches(reader_key,topic_id,starts_after_activity,active) VALUES(?,?,?,1) ON CONFLICT(reader_key,topic_id) DO UPDATE SET starts_after_activity=CASE WHEN topic_watches.active=0 THEN excluded.starts_after_activity ELSE topic_watches.starts_after_activity END,active=1",
+            reader_key, request.topic_id.as_str(), boundary,
+        ).execute(&mut *transaction).await.map_err(storage_error)?;
+        recompute_project_unread(&mut transaction, &reader_key, board.project_id.as_str()).await?;
+        let starts_after = sqlx::query_scalar!("SELECT starts_after_activity FROM topic_watches WHERE reader_key=? AND topic_id=? AND active=1", reader_key, request.topic_id.as_str()).fetch_one(&mut *transaction).await.map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(TopicWatchResult {
+            topic_id: request.topic_id,
+            watching: true,
+            starts_after_activity_sequence: Some(activity_sequence(starts_after)?),
+            outcome: "Topic watch is active for current and future Threads.".to_owned(),
+        })
+    }
+
+    pub async fn unwatch_topic(
+        &mut self,
+        request: TopicWatchRequest,
+    ) -> Result<TopicWatchResult, BoardError> {
+        let mut transaction = self
+            .connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let topic =
+            crate::board_topic_records::require_topic(&mut transaction, &request.topic_id).await?;
+        let board = require_board(&mut transaction, &topic.board_id).await?;
+        let reader_key = ensure_identity(&mut transaction, &request.actor).await?;
+        sqlx::query!(
+            "UPDATE topic_watches SET active=0 WHERE reader_key=? AND topic_id=?",
+            reader_key,
+            request.topic_id.as_str()
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        recompute_project_unread(&mut transaction, &reader_key, board.project_id.as_str()).await?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(TopicWatchResult {
+            topic_id: request.topic_id,
+            watching: false,
+            starts_after_activity_sequence: None,
+            outcome: "Topic watch is inactive.".to_owned(),
+        })
+    }
+
     pub async fn show_thread(
         &mut self,
         request: ThreadShowRequest,
@@ -66,12 +127,14 @@ impl BoardStore {
             }
         };
         let orchestrator = load_orchestrator(&mut transaction, &request.root_message_id).await?;
+        let implementer = load_implementer(&mut transaction, &request.root_message_id).await?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(ThreadShowResult {
             thread: Thread {
                 root_message_id: location.root_message_id,
                 state: location.state,
                 orchestrator,
+                implementer,
             },
             watch_status,
         })
@@ -158,12 +221,14 @@ impl BoardStore {
             watch_status.message
         );
         let orchestrator = load_orchestrator(&mut transaction, &request.root_message_id).await?;
+        let implementer = load_implementer(&mut transaction, &request.root_message_id).await?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(ThreadWatchResult {
             thread: Thread {
                 root_message_id: request.root_message_id,
                 state: location.state,
                 orchestrator,
+                implementer,
             },
             watch_status,
             outcome,
@@ -195,12 +260,14 @@ impl BoardStore {
             load_watch_status(&mut transaction, &reader_key, &request.root_message_id).await?;
         let outcome = format!("Thread watch is inactive. {}", watch_status.message);
         let orchestrator = load_orchestrator(&mut transaction, &request.root_message_id).await?;
+        let implementer = load_implementer(&mut transaction, &request.root_message_id).await?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(ThreadUnwatchResult {
             thread: Thread {
                 root_message_id: request.root_message_id,
                 state: location.state,
                 orchestrator,
+                implementer,
             },
             watch_status,
             outcome,
@@ -248,7 +315,7 @@ impl BoardStore {
              JOIN project_boards b ON b.board_id=m.board_id \
              LEFT JOIN thread_watches w ON w.root_id=t.root_id AND w.reader_key=? \
              LEFT JOIN thread_participants p ON p.root_id=t.root_id AND p.closed_at_activity IS NULL \
-                 AND (p.role='orchestrator' OR p.role NOT IN ('advisor','reviewer','participant')) \
+                 AND (p.role='orchestrator' OR p.role NOT IN ('implementer','advisor','reviewer','participant')) \
              LEFT JOIN board_identities i ON i.identity_key=p.reader_key \
              WHERE b.project_id=? AND t.root_id>? AND (?=0 OR w.active=1) \
              ORDER BY t.root_id LIMIT ?",
@@ -269,7 +336,9 @@ impl BoardStore {
                 has_more = true;
                 break;
             }
-            let thread = decode_thread(row)?;
+            let mut thread = decode_thread(row)?;
+            thread.implementer =
+                load_implementer(&mut transaction, &thread.root_message_id).await?;
             let thread_bytes = serde_json::to_vec(&thread)
                 .map_err(|_| invalid_record())?
                 .len();
@@ -366,12 +435,14 @@ async fn set_thread_state(
     }
     if location.state == requested {
         let orchestrator = load_orchestrator(&mut transaction, root).await?;
+        let implementer = load_implementer(&mut transaction, root).await?;
         transaction.commit().await.map_err(storage_error)?;
         return Ok((
             Thread {
                 root_message_id: root.clone(),
                 state: requested,
                 orchestrator,
+                implementer,
             },
             None,
             false,
@@ -424,12 +495,14 @@ async fn set_thread_state(
             .await?;
     }
     let orchestrator = load_orchestrator(&mut transaction, root).await?;
+    let implementer = load_implementer(&mut transaction, root).await?;
     transaction.commit().await.map_err(storage_error)?;
     Ok((
         Thread {
             root_message_id: root.clone(),
             state: requested,
             orchestrator,
+            implementer,
         },
         Some(activity_sequence(sequence)?),
         true,
@@ -448,6 +521,7 @@ fn decode_thread(row: StoredThreadRow) -> Result<Thread, BoardError> {
         root_message_id,
         state,
         orchestrator,
+        implementer: None,
     })
 }
 

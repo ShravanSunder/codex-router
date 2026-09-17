@@ -18,6 +18,7 @@ pub(crate) struct StoredParticipantRow {
 pub(crate) fn role_name(role: ParticipantRole) -> &'static str {
     match role {
         ParticipantRole::Orchestrator => "orchestrator",
+        ParticipantRole::Implementer => "implementer",
         ParticipantRole::Advisor => "advisor",
         ParticipantRole::Reviewer => "reviewer",
         ParticipantRole::Participant => "participant",
@@ -27,6 +28,7 @@ pub(crate) fn role_name(role: ParticipantRole) -> &'static str {
 fn decode_role(role: &str) -> Result<ParticipantRole, BoardError> {
     match role {
         "orchestrator" => Ok(ParticipantRole::Orchestrator),
+        "implementer" => Ok(ParticipantRole::Implementer),
         "advisor" => Ok(ParticipantRole::Advisor),
         "reviewer" => Ok(ParticipantRole::Reviewer),
         "participant" => Ok(ParticipantRole::Participant),
@@ -197,6 +199,31 @@ pub(crate) async fn load_orchestrator(
         Some(row) => {
             let participant = decode_participant(transaction, row).await?;
             Ok(Some(OrchestratorHolder {
+                identity: participant.identity,
+                last_seen_activity: participant.last_seen_activity,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+pub(crate) async fn load_implementer(
+    transaction: &mut BoardTransaction<'_>,
+    root_message_id: &MessageId,
+) -> Result<Option<ImplementerHolder>, BoardError> {
+    let row = sqlx::query_as!(
+        StoredParticipantRow,
+        "SELECT reader_key,root_id,role,note,joined_at_activity,last_seen_activity,closed_at_activity,closed_reason,replaced_by \
+         FROM thread_participants WHERE root_id=? AND role='implementer' AND closed_at_activity IS NULL",
+        root_message_id.as_str(),
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    match row {
+        Some(row) => {
+            let participant = decode_participant(transaction, row).await?;
+            Ok(Some(ImplementerHolder {
                 identity: participant.identity,
                 last_seen_activity: participant.last_seen_activity,
             }))

@@ -39,6 +39,8 @@ fn exercise_round_trip(fresh: bool) -> Result<(), Box<dyn std::error::Error>> {
                 }
             },
             execution_timeout_seconds: Some(120),
+            model: Some("gpt-5.6-sol".into()),
+            effort: Some("medium".into()),
         },
         continuity: None,
     };

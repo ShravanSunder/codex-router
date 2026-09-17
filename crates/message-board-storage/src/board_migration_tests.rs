@@ -14,7 +14,9 @@ const ADDITIVE: &str = "ALTER TABLE board_projects ADD COLUMN migration_note TEX
 const REBUILD: &str = "CREATE TABLE replacement_projects(project_id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL) STRICT; INSERT INTO replacement_projects(project_id,name,description) SELECT project_id,name,description FROM board_projects; DROP TABLE board_projects; ALTER TABLE replacement_projects RENAME TO board_projects; CREATE UNIQUE INDEX board_projects_name_unique ON board_projects(name);";
 
 fn current_schema() -> String {
-    format!("{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS}")
+    format!(
+        "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES}"
+    )
 }
 
 fn migrator(version: i64, description: &'static str, extra: &str) -> Migrator {
@@ -39,6 +41,20 @@ fn migrator(version: i64, description: &'static str, extra: &str) -> Migrator {
                 "thread participants".into(),
                 MigrationType::Simple,
                 THREAD_PARTICIPANTS.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609160001,
+                "thread implementer".into(),
+                MigrationType::Simple,
+                THREAD_IMPLEMENTER.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609160002,
+                "topic watches".into(),
+                MigrationType::Simple,
+                TOPIC_WATCHES.into_sql_str(),
                 false,
             ),
             Migration::new(
@@ -150,7 +166,13 @@ async fn participant_migration_preserves_populated_board_and_enforces_one_open_o
     );
     assert_eq!(
         migration_versions(&mut connection).await,
-        vec![202609120001, 202609140001, 202609150001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002
+        ]
     );
     assert!(index_exists(&mut connection, "thread_single_orchestrator").await);
     sqlx::query("UPDATE activity_checkpoint SET last_sequence=3 WHERE singleton=1")
@@ -298,7 +320,13 @@ async fn delivered_position_migration_preserves_populated_thread_and_watch_state
     assert_eq!(after, before);
     assert_eq!(
         migration_versions(&mut connection).await,
-        vec![202609120001, 202609140001, 202609150001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002
+        ]
     );
     assert!(
         sqlx::query_scalar::<_, bool>(
@@ -326,7 +354,7 @@ async fn additive_migration_preserves_semantic_state_and_history() {
     let expected = format!("{} {ADDITIVE}", current_schema());
     initialize_with(
         &mut connection,
-        &migrator(202609160001, "test-only additive", ADDITIVE),
+        &migrator(202609170001, "test-only additive", ADDITIVE),
         &expected,
     )
     .await
@@ -335,7 +363,14 @@ async fn additive_migration_preserves_semantic_state_and_history() {
     assert_eq!(fixture.snapshot_with(&mut store).await, before);
     assert_eq!(
         migration_versions(&mut store.connection).await,
-        vec![202609120001, 202609140001, 202609150001, 202609160001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002,
+            202609170001
+        ]
     );
     assert!(index_exists(&mut store.connection, "board_projects_migration_note").await);
     assert!(
@@ -355,7 +390,7 @@ async fn populated_parent_rebuild_preserves_exact_rows_domain_reads_and_relation
     let expected = format!("{} {REBUILD}", current_schema());
     initialize_with(
         &mut connection,
-        &migrator(202609160001, "test-only rebuild", REBUILD),
+        &migrator(202609170001, "test-only rebuild", REBUILD),
         &expected,
     )
     .await
@@ -365,7 +400,14 @@ async fn populated_parent_rebuild_preserves_exact_rows_domain_reads_and_relation
     assert_eq!(all_domain_rows(&mut store.connection).await, before_rows);
     assert_eq!(
         migration_versions(&mut store.connection).await,
-        vec![202609120001, 202609140001, 202609150001, 202609160001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002,
+            202609170001
+        ]
     );
     for index in [
         "board_projects_name_unique",
@@ -397,7 +439,7 @@ async fn failed_rebuild_reopens_separately_with_original_exact_state_and_history
     assert!(
         initialize_with(
             &mut connection,
-            &migrator(202609160001, "test-only failing rebuild", &failing),
+            &migrator(202609170001, "test-only failing rebuild", &failing),
             &current_schema()
         )
         .await
@@ -413,7 +455,13 @@ async fn failed_rebuild_reopens_separately_with_original_exact_state_and_history
     );
     assert_eq!(
         migration_versions(&mut reopened.connection).await,
-        vec![202609120001, 202609140001, 202609150001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002
+        ]
     );
     fixture.finish(reopened).await;
 }
@@ -431,7 +479,7 @@ async fn broken_relationship_rejects_migration_and_reopens_unchanged() {
     assert!(
         initialize_with(
             &mut connection,
-            &migrator(202609160001, "test-only invalid relationship", &invalid),
+            &migrator(202609170001, "test-only invalid relationship", &invalid),
             &current_schema()
         )
         .await
@@ -442,7 +490,13 @@ async fn broken_relationship_rejects_migration_and_reopens_unchanged() {
     assert_eq!(all_domain_rows(&mut reopened.connection).await, before_rows);
     assert_eq!(
         migration_versions(&mut reopened.connection).await,
-        vec![202609120001, 202609140001, 202609150001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002
+        ]
     );
     assert!(
         foreign_key_violations(&mut reopened.connection)

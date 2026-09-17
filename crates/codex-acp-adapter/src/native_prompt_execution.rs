@@ -7,7 +7,6 @@ use codex_native_integration::{NativeConnectionError, NativeOperation};
 use serde_json::{Value, json};
 
 pub enum PromptEvent {
-    PermissionRequest(Value),
     Update(Value),
     Terminal(Value),
     /// The connection dispatcher must translate and correlate this callback; never auto-approve.
@@ -23,13 +22,37 @@ pub enum PromptExecutionError {
     Native(#[from] NativeConnectionError),
     #[error("native prompt projection failed")]
     Projection,
+    #[error("native prompt receipt projection failed at {0}")]
+    ReceiptProjection(&'static str),
+    #[error("requested effort {requested} but native runtime reported {effective}")]
+    EffortMismatch {
+        requested: String,
+        effective: String,
+    },
 }
+/// Seconds since the thread's own recency, taken from the read Router already made.
+///
+/// The native Thread schema requires `updatedAt` as unix seconds. A response
+/// without it is only idle-free when the thread was never updated, so zero is a
+/// fact there; anything else must fail rather than invent a recency.
+fn thread_idle_seconds(thread: &Value) -> Result<u64, PromptExecutionError> {
+    match thread.get("updatedAt").and_then(Value::as_i64) {
+        Some(updated_at) => Ok(u64::try_from(
+            chrono::Utc::now().timestamp().saturating_sub(updated_at),
+        )
+        .unwrap_or(0)),
+        None if thread.get("createdAt").and_then(Value::as_i64).is_some() => Ok(0),
+        None => Err(PromptExecutionError::ReceiptProjection("recency")),
+    }
+}
+
 pub struct PendingAcpPrompt {
-    permissions: std::collections::BTreeMap<String, crate::PendingPermission>,
     next_permission: u64,
     detached: bool,
     session: AcpSessionBinding,
     settlement: PromptSettlement,
+    /// Absent on resume, where the thread's persisted effort governs.
+    requested_effort: Option<String>,
 }
 impl PendingAcpPrompt {
     /// Consuming the binding prevents a second concurrent prompt on this mapping.
@@ -44,29 +67,44 @@ impl PendingAcpPrompt {
         }
         let translated = translate_prompt_content(catalog, params)
             .map_err(|_| PromptExecutionError::InvalidPrompt)?;
+        let effort = match params.pointer("/_meta/codexRouter/effort") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .filter(|value| {
+                        !value.trim().is_empty() && !value.chars().any(char::is_whitespace)
+                    })
+                    .ok_or(PromptExecutionError::InvalidPrompt)?
+                    .to_owned(),
+            ),
+        };
         if translated.session_id() != session.session_id {
             return Err(PromptExecutionError::InvalidPrompt);
         }
         let mut pending = Self {
-            permissions: std::collections::BTreeMap::new(),
             next_permission: 0,
             detached: false,
             session,
             settlement: PromptSettlement::new(request_id)
                 .map_err(|_| PromptExecutionError::InvalidPrompt)?,
+            requested_effort: effort,
         };
         pending
             .settlement
             .mark_dispatched()
             .map_err(|_| PromptExecutionError::InvalidPrompt)?;
+        // Without a requested effort the turn inherits the thread's own.
+        let mut turn = json!({"threadId":pending.session.session_id,"input":translated.input()});
+        if let (Some(fields), Some(effort)) =
+            (turn.as_object_mut(), pending.requested_effort.as_ref())
+        {
+            fields.insert("effort".into(), json!(effort));
+        }
         let result = pending
             .session
             .connection
-            .request_validated(
-                &pending.session.schemas,
-                NativeOperation::StartTurn,
-                json!({"threadId":pending.session.session_id,"input":translated.input()}),
-            )
+            .request_validated(&pending.session.schemas, NativeOperation::StartTurn, turn)
             .await?;
         let turn_id = result
             .get("turn")
@@ -95,7 +133,9 @@ impl PendingAcpPrompt {
         };
         if !self.session.schemas.validates_server_message(&message) {
             self.detached = true;
-            return Err(PromptExecutionError::Projection);
+            return Err(PromptExecutionError::ReceiptProjection(
+                "serverMessageSchema",
+            ));
         }
         if message.get("id").is_some() && message.get("method").is_some() {
             if matches!(
@@ -109,9 +149,6 @@ impl PendingAcpPrompt {
                     || params.get("turnId").and_then(Value::as_str) != self.settlement.turn_id()
                 {
                     return Ok(None);
-                }
-                if self.permissions.len() >= 64 {
-                    return Err(PromptExecutionError::Projection);
                 }
                 let id = crate::permission_address::permission_id(
                     &self.session.session_id,
@@ -133,8 +170,43 @@ impl PendingAcpPrompt {
                 )
                 .map_err(|_| PromptExecutionError::Projection)?;
                 let request = permission.request().clone();
-                self.permissions.insert(id, permission);
-                return Ok(Some(PromptEvent::PermissionRequest(request)));
+                let outcome = self
+                    .session
+                    .approval_broker
+                    .request(crate::BrokeredApprovalRequest {
+                        thread_id: self.session.session_id.clone(),
+                        generation: self.session.generation.clone(),
+                        request,
+                    })
+                    .await
+                    .map_err(|_| PromptExecutionError::Projection)?;
+                let outcome = match outcome {
+                    crate::BrokeredApprovalOutcome::Selected { option_id } => {
+                        json!({"outcome":"selected","optionId":option_id})
+                    }
+                    crate::BrokeredApprovalOutcome::Cancelled => json!({"outcome":"cancelled"}),
+                };
+                let response = json!({"jsonrpc":"2.0","id":id,"result":{"outcome":outcome}});
+                let reply = permission
+                    .resolve(catalog, &self.session.generation, &response)
+                    .map_err(|_| PromptExecutionError::Projection)?;
+                let native_id = reply
+                    .native_response
+                    .get("id")
+                    .ok_or(PromptExecutionError::Projection)?
+                    .clone();
+                let result = reply
+                    .native_response
+                    .get("result")
+                    .ok_or(PromptExecutionError::Projection)?
+                    .clone();
+                self.session
+                    .connection
+                    .submit_callback_response(native_id, result)
+                    .await?;
+                return Ok(Some(PromptEvent::NativeNotification(json!({
+                    "kind":"approvalDecisionSubmitted"
+                }))));
             }
             return Ok(Some(PromptEvent::NativeCallback(message)));
         }
@@ -148,7 +220,7 @@ impl PendingAcpPrompt {
                 },
                 &message,
             )
-            .map_err(|_| PromptExecutionError::Projection)?
+            .map_err(|_| PromptExecutionError::ReceiptProjection("assistantText"))?
         {
             return Ok(Some(PromptEvent::Update(update)));
         }
@@ -162,28 +234,96 @@ impl PendingAcpPrompt {
                 },
                 &message,
             )
-            .map_err(|_| PromptExecutionError::Projection)?
+            .map_err(|_| PromptExecutionError::ReceiptProjection("toolProgress"))?
         {
             return Ok(Some(PromptEvent::Update(update)));
         }
         if message.get("method").and_then(Value::as_str) == Some("turn/completed") {
             let params = message
                 .get("params")
-                .ok_or(PromptExecutionError::Projection)?;
+                .ok_or(PromptExecutionError::ReceiptProjection("terminalParams"))?;
             if params.get("threadId").and_then(Value::as_str) != Some(&self.session.session_id) {
                 return Ok(None);
             }
-            let turn = params.get("turn").ok_or(PromptExecutionError::Projection)?;
+            let turn = params
+                .get("turn")
+                .ok_or(PromptExecutionError::ReceiptProjection("terminalTurn"))?;
             let status = match turn.get("status").and_then(Value::as_str) {
                 Some("completed") => NativePromptTerminal::Completed,
                 Some("interrupted") => NativePromptTerminal::Interrupted,
                 Some("failed") => NativePromptTerminal::Failed,
-                _ => return Err(PromptExecutionError::Projection),
+                _ => return Err(PromptExecutionError::ReceiptProjection("terminalStatus")),
             };
-            return Ok(self
+            let mut terminal = self
                 .settlement
-                .observe_terminal(turn.get("id").and_then(Value::as_str), status)
-                .map(PromptEvent::Terminal));
+                .observe_terminal(turn.get("id").and_then(Value::as_str), status);
+            if let Some(response) = terminal.as_mut() {
+                let read = self
+                    .session
+                    .connection
+                    .request_validated(
+                        &self.session.schemas,
+                        NativeOperation::ReadThread,
+                        json!({"threadId":self.session.session_id,"includeTurns":false}),
+                    )
+                    .await?;
+                let thread = read
+                    .get("thread")
+                    .ok_or(PromptExecutionError::ReceiptProjection("thread"))?;
+                let model = thread
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .ok_or(PromptExecutionError::ReceiptProjection("model"))?;
+                let effective_effort = thread
+                    .get("reasoningEffort")
+                    .and_then(Value::as_str)
+                    .ok_or(PromptExecutionError::ReceiptProjection("effort"))?;
+                // A resume without a requested effort reports what the thread kept.
+                // A resume that asks for a different one is allowed, and says so:
+                // the provider's prompt cache for this session will not be reused.
+                let effort_change = match (&self.requested_effort, &self.session.persisted_effort) {
+                    (Some(requested), Some(persisted)) if requested != persisted => {
+                        Some(json!({"previous":persisted,"requested":requested}))
+                    }
+                    _ => None,
+                };
+                if effort_change.is_none()
+                    && let Some(requested) = &self.requested_effort
+                    && effective_effort != requested
+                {
+                    return Err(PromptExecutionError::EffortMismatch {
+                        requested: requested.clone(),
+                        effective: effective_effort.to_owned(),
+                    });
+                }
+                let idle_seconds = thread_idle_seconds(thread)?;
+                let result = response
+                    .get_mut("result")
+                    .and_then(Value::as_object_mut)
+                    .ok_or(PromptExecutionError::ReceiptProjection("result"))?;
+                if result.get("_meta").is_some_and(Value::is_null) {
+                    result.insert("_meta".into(), json!({}));
+                }
+                let metadata = result
+                    .entry("_meta")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .ok_or(PromptExecutionError::ReceiptProjection("metadata"))?;
+                let mut router_metadata = json!({
+                    "effectiveModel": model,
+                    "effectiveEffort": effective_effort,
+                    "effectiveAccess": self.session.requested_access,
+                    "settingsObservation": &self.session.settings_observation,
+                    "idleSeconds": idle_seconds
+                });
+                if let (Some(fields), Some(effort_change)) =
+                    (router_metadata.as_object_mut(), effort_change)
+                {
+                    fields.insert("effortChange".into(), effort_change);
+                }
+                metadata.insert("codexRouter".into(), router_metadata);
+            }
+            return Ok(terminal.map(PromptEvent::Terminal));
         }
         Ok(Some(PromptEvent::NativeNotification(message)))
     }
@@ -196,23 +336,12 @@ impl PendingAcpPrompt {
             Ok(response) => response,
             Err(_) => {
                 self.detached = true;
-                self.permissions.clear();
                 self.settlement
                     .settle_cancel(NativeInterruptionState::Unknown)
             }
         }
     }
     async fn cancel_inner(&mut self) -> Option<Value> {
-        for (_, permission) in std::mem::take(&mut self.permissions) {
-            let response = permission.cancel();
-            if let (Some(id), Some(result)) = (response.get("id"), response.get("result")) {
-                let _submitted = self
-                    .session
-                    .connection
-                    .submit_callback_response(id.clone(), result.clone())
-                    .await;
-            }
-        }
         let target = self.settlement.request_cancel().map(str::to_owned);
         let outcome = if let Some(turn_id) = target {
             match self
@@ -233,50 +362,6 @@ impl PendingAcpPrompt {
             NativeInterruptionState::Unknown
         };
         self.settlement.settle_cancel(outcome)
-    }
-    pub async fn respond_permission(
-        &mut self,
-        catalog: &mut AcpSchemaCatalog,
-        response: &Value,
-    ) -> Result<Option<Value>, PromptExecutionError> {
-        let id = response
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or(PromptExecutionError::Projection)?;
-        let Some(permission) = self.permissions.remove(id) else {
-            return Ok(None);
-        };
-        let reply = permission
-            .resolve(catalog, &self.session.generation, response)
-            .map_err(|_| PromptExecutionError::Projection)?;
-        let native_id = reply
-            .native_response
-            .get("id")
-            .ok_or(PromptExecutionError::Projection)?
-            .clone();
-        let result = reply
-            .native_response
-            .get("result")
-            .ok_or(PromptExecutionError::Projection)?
-            .clone();
-        self.session
-            .connection
-            .submit_callback_response(native_id, result)
-            .await?;
-        if reply.invalid_selection {
-            self.detached = true;
-            let turn = self.settlement.turn_id().map(str::to_owned);
-            let mut terminal = self
-                .settlement
-                .observe_terminal(turn.as_deref(), NativePromptTerminal::Failed);
-            if let Some(response) = &mut terminal
-                && let Some(error) = response.get_mut("error").and_then(Value::as_object_mut)
-            {
-                error.insert("message".into(), json!("Invalid permission option"));
-            }
-            return Ok(terminal);
-        }
-        Ok(None)
     }
     #[must_use]
     pub fn blocks_next_prompt(&self) -> bool {

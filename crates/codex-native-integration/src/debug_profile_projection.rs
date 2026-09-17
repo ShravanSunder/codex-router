@@ -1,5 +1,5 @@
 //! Read-only debug configuration projected through supported native server overrides.
-use std::{io::Read, path::Path};
+use std::{collections::BTreeSet, io::Read, path::Path};
 
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
 
@@ -43,16 +43,19 @@ impl DebugCodexProfile {
                 | "model_reasoning_effort"
                 | "model_reasoning_summary"
                 | "model_verbosity"
-                | "model_provider" => {
+                | "model_provider"
+                | "default_permissions" => {
                     if !bounded_string(value) {
                         return Err(DebugProfileError::UnsupportedSettings);
                     }
                 }
                 "model_providers" => {}
                 "projects" => validate_projects(value)?,
+                "permissions" | "features" => {}
                 _ => return Err(DebugProfileError::UnsupportedSettings),
             }
         }
+        validate_network_experiment_configuration(&table)?;
         if port == 0
             || port == 8787
             || table.get("model_provider").and_then(toml::Value::as_str)
@@ -139,4 +142,156 @@ fn validate_projects(value: &toml::Value) -> Result<(), DebugProfileError> {
         }
     }
     Ok(())
+}
+
+fn validate_network_experiment_configuration(table: &toml::Table) -> Result<(), DebugProfileError> {
+    let requested = table.contains_key("default_permissions")
+        || table.contains_key("permissions")
+        || table.contains_key("features");
+    if !requested {
+        return Ok(());
+    }
+    if table
+        .get("default_permissions")
+        .and_then(toml::Value::as_str)
+        != Some("router-write-restricted")
+    {
+        return Err(DebugProfileError::UnsupportedSettings);
+    }
+    let permissions = table
+        .get("permissions")
+        .and_then(toml::Value::as_table)
+        .filter(|permissions| {
+            exact_keys(
+                permissions,
+                &["router-workspace-write", "router-write-restricted"],
+            )
+        })
+        .ok_or(DebugProfileError::UnsupportedSettings)?;
+    let restricted_socket =
+        validate_permission_profile(permissions, "router-write-restricted", ":read-only")?;
+    let workspace_socket =
+        validate_permission_profile(permissions, "router-workspace-write", ":workspace")?;
+    if restricted_socket != workspace_socket {
+        return Err(DebugProfileError::UnsupportedSettings);
+    }
+    let features = table
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .filter(|features| exact_keys(features, &["network_proxy"]))
+        .ok_or(DebugProfileError::UnsupportedSettings)?;
+    let proxy = features
+        .get("network_proxy")
+        .and_then(toml::Value::as_table)
+        .filter(|proxy| {
+            exact_keys(
+                proxy,
+                &[
+                    "allow_local_binding",
+                    "allow_upstream_proxy",
+                    "credential_broker",
+                    "dangerously_allow_all_unix_sockets",
+                    "domains",
+                    "enable_socks5",
+                    "enabled",
+                    "mode",
+                    "proxy_url",
+                    "unix_sockets",
+                ],
+            )
+        })
+        .ok_or(DebugProfileError::UnsupportedSettings)?;
+    for setting in [
+        "allow_local_binding",
+        "allow_upstream_proxy",
+        "credential_broker",
+        "dangerously_allow_all_unix_sockets",
+        "enable_socks5",
+    ] {
+        if proxy.get(setting).and_then(toml::Value::as_bool) != Some(false) {
+            return Err(DebugProfileError::UnsupportedSettings);
+        }
+    }
+    if proxy.get("enabled").and_then(toml::Value::as_bool) != Some(true)
+        || proxy.get("mode").and_then(toml::Value::as_str) != Some("full")
+        || !global_domain_allow(proxy.get("domains"))
+        || !loopback_proxy_url(proxy.get("proxy_url"))
+        || validate_socket_map(proxy.get("unix_sockets"))? != restricted_socket
+    {
+        return Err(DebugProfileError::UnsupportedSettings);
+    }
+    Ok(())
+}
+
+fn validate_permission_profile(
+    permissions: &toml::Table,
+    name: &str,
+    parent: &str,
+) -> Result<String, DebugProfileError> {
+    let profile = permissions
+        .get(name)
+        .and_then(toml::Value::as_table)
+        .filter(|profile| exact_keys(profile, &["extends", "network"]))
+        .ok_or(DebugProfileError::UnsupportedSettings)?;
+    if profile.get("extends").and_then(toml::Value::as_str) != Some(parent) {
+        return Err(DebugProfileError::UnsupportedSettings);
+    }
+    let network = profile
+        .get("network")
+        .and_then(toml::Value::as_table)
+        .filter(|network| exact_keys(network, &["domains", "enabled", "mode", "unix_sockets"]))
+        .ok_or(DebugProfileError::UnsupportedSettings)?;
+    if network.get("enabled").and_then(toml::Value::as_bool) != Some(true)
+        || network.get("mode").and_then(toml::Value::as_str) != Some("full")
+        || !global_domain_allow(network.get("domains"))
+    {
+        return Err(DebugProfileError::UnsupportedSettings);
+    }
+    validate_socket_map(network.get("unix_sockets"))
+}
+
+fn global_domain_allow(value: Option<&toml::Value>) -> bool {
+    value
+        .and_then(toml::Value::as_table)
+        .is_some_and(|domains| {
+            domains.len() == 1 && domains.get("*").and_then(toml::Value::as_str) == Some("allow")
+        })
+}
+
+fn validate_socket_map(value: Option<&toml::Value>) -> Result<String, DebugProfileError> {
+    let sockets = value
+        .and_then(toml::Value::as_table)
+        .filter(|sockets| sockets.len() == 1)
+        .ok_or(DebugProfileError::UnsupportedSettings)?;
+    let (path, permission) = sockets
+        .iter()
+        .next()
+        .ok_or(DebugProfileError::UnsupportedSettings)?;
+    let path_value = Path::new(path);
+    if permission.as_str() != Some("allow")
+        || !path_value.is_absolute()
+        || path.contains('\0')
+        || path_value.file_name().and_then(|name| name.to_str()) != Some("control.sock")
+        || path_value
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            != Some("agent-communication")
+    {
+        return Err(DebugProfileError::UnsupportedSettings);
+    }
+    Ok(path.to_owned())
+}
+
+fn loopback_proxy_url(value: Option<&toml::Value>) -> bool {
+    value
+        .and_then(toml::Value::as_str)
+        .and_then(|url| url.strip_prefix("http://127.0.0.1:"))
+        .and_then(|port| port.parse::<u16>().ok())
+        .is_some_and(|port| port != 0)
+}
+
+fn exact_keys(table: &toml::Table, expected: &[&str]) -> bool {
+    table.keys().map(String::as_str).collect::<BTreeSet<_>>()
+        == expected.iter().copied().collect::<BTreeSet<_>>()
 }

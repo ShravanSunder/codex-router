@@ -15,7 +15,7 @@ pub struct TextValidationError {
 }
 
 macro_rules! bounded_text {
-    ($name:ident, $field:literal, $min:expr, $max:expr, $trim:expr) => {
+    ($name:ident, $field:literal, $min:expr, $max:expr, $trim:expr, $reject_c0:expr) => {
         #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
@@ -32,6 +32,9 @@ macro_rules! bounded_text {
                 if !($min..=$max).contains(&canonical.len()) {
                     return Err(TextValidationError { field: $field, requirement: "is outside its UTF-8 byte bound" });
                 }
+                if $reject_c0 && canonical.chars().any(|character| character <= '\u{001f}' && !matches!(character, '\n' | '\t')) {
+                    return Err(TextValidationError { field: $field, requirement: "contains a forbidden control character" });
+                }
                 Ok(Self(canonical))
             }
         }
@@ -40,10 +43,32 @@ macro_rules! bounded_text {
     };
 }
 
-bounded_text!(ResourceName, "name", 1, MAX_NAME_BYTES, true);
-bounded_text!(Description, "description", 0, MAX_DESCRIPTION_BYTES, false);
-bounded_text!(MessageText, "text", 1, MAX_MESSAGE_TEXT_BYTES, false);
-bounded_text!(SearchQuery, "query", 1, MAX_NAME_BYTES, true);
+// name, minimum, maximum, trims surrounding whitespace, rejects C0 controls.
+bounded_text!(ResourceName, "name", 1, MAX_NAME_BYTES, true, false);
+bounded_text!(
+    Description,
+    "description",
+    0,
+    MAX_DESCRIPTION_BYTES,
+    false,
+    false
+);
+bounded_text!(MessageText, "text", 1, MAX_MESSAGE_TEXT_BYTES, false, true);
+bounded_text!(SearchQuery, "query", 1, MAX_NAME_BYTES, true, false);
+
+#[cfg(test)]
+mod tests {
+    use super::MessageText;
+
+    #[test]
+    fn board_message_text_allows_layout_whitespace_and_rejects_other_c0_controls() {
+        assert!(MessageText::try_from("line one\n\tline two".to_owned()).is_ok());
+        for control in ['\0', '\u{0008}', '\u{000b}', '\u{001f}'] {
+            assert!(MessageText::try_from(format!("before{control}after")).is_err());
+        }
+        assert!(MessageText::try_from("before\u{007f}after".to_owned()).is_ok());
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

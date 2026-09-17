@@ -31,6 +31,8 @@ async fn prepared_identity_and_schedule_result_commit_together()
                 enabled: false,
                 destination: ExecutionDestination::Unprepared,
                 execution_timeout_seconds: None,
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,

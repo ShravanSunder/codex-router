@@ -123,9 +123,9 @@ pub(super) enum ThreadCommand {
     /// Mark a thread unresolved so thread messages can be posted again.
     Unresolve(ThreadMutationArguments),
     /// Watch future activity in a thread. Earlier history remains an explicit range.
-    Watch(ThreadMutationArguments),
+    Watch(ThreadWatchArguments),
     /// Stop watching a thread. Existing message history remains readable.
-    Unwatch(ThreadMutationArguments),
+    Unwatch(ThreadWatchArguments),
     /// List project threads and reader watch status.
     List(ThreadListArguments),
     /// Wait for Thread Activity. Delivery marks it seen; acknowledgement remains separate.
@@ -136,9 +136,9 @@ pub(super) enum ThreadCommand {
 
 #[derive(Subcommand)]
 pub(super) enum ThreadListenControlCommand {
-    /// Show an active Repeating Listen.
+    /// Show any active Listen.
     Show(ThreadListenControlArguments),
-    /// Cancel an active Repeating Listen.
+    /// Cancel any active Listen.
     Cancel(ThreadListenControlArguments),
 }
 
@@ -504,6 +504,18 @@ pub(super) struct ThreadMutationArguments {
 }
 
 #[derive(Args)]
+pub(super) struct ThreadWatchArguments {
+    #[arg(long, conflicts_with = "topic_id")]
+    pub root_message_id: Option<String>,
+    #[arg(long, conflicts_with = "root_message_id")]
+    pub topic_id: Option<String>,
+    #[command(flatten)]
+    pub identity: MutationIdentityArguments,
+    #[command(flatten)]
+    pub common: CommonArguments,
+}
+
+#[derive(Args)]
 pub(super) struct ThreadCreateArguments {
     /// Caller-chosen UUIDv7; generated and reported when omitted.
     #[arg(long)]
@@ -553,8 +565,8 @@ pub(super) struct ThreadJoinArguments {
     pub replace: Option<String>,
     #[arg(long)]
     pub note: Option<String>,
-    /// Start an existing process-owned Listen: once, or for a repeating duration.
-    #[arg(long, num_args = 1..=2, value_names = ["MODE", "DURATION"])]
+    /// Start an existing process-owned Listen: once, short, or long.
+    #[arg(long, num_args = 1, value_name = "MODE")]
     pub listen: Option<Vec<String>>,
     #[arg(long)]
     pub max_wait: Option<String>,
@@ -569,6 +581,7 @@ pub(super) struct ThreadJoinArguments {
 #[derive(Clone, Copy, ValueEnum)]
 pub(super) enum ParticipantRoleKind {
     Orchestrator,
+    Implementer,
     Advisor,
     Reviewer,
     Participant,
@@ -602,10 +615,13 @@ pub(super) struct ThreadParticipantListArguments {
 #[derive(Args)]
 pub(super) struct ThreadListArguments {
     #[arg(long)]
-    pub project_id: String,
-    /// Typed reader Identity JSON.
+    pub project_id: Option<String>,
+    /// Explicit repository path; lists matching threads across projects.
     #[arg(long)]
-    pub reader: String,
+    pub repository_path: Option<PathBuf>,
+    /// Optional typed reader Identity JSON or `self`; adds watch status.
+    #[arg(long)]
+    pub reader: Option<String>,
     #[arg(long)]
     pub watched_only: bool,
     #[command(flatten)]
@@ -620,20 +636,29 @@ pub(super) struct ThreadListenArguments {
     #[command(subcommand)]
     pub control: Option<ThreadListenControlCommand>,
     /// Select every Thread with an active Watch for this Reader.
-    #[arg(long, conflicts_with = "root_message_id")]
+    #[arg(long, conflicts_with_all = ["root_message_id", "topic_id"])]
     pub watched: bool,
     /// Select a named Thread. May be repeated.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "topic_id")]
     pub root_message_id: Vec<String>,
+    /// Select every current and future Thread under one Topic.
+    #[arg(long)]
+    pub topic_id: Option<String>,
     /// Wait for the first Batch set and exit.
     #[arg(long, conflicts_with = "lifetime")]
     pub once: bool,
-    /// Repeating Listen lifetime: integer followed by s, m, h, or d.
+    /// Fixed repeating lifetime.
+    #[arg(long, value_enum)]
+    pub lifetime: Option<ThreadListenLifetimeKind>,
+    /// Shorten a stdout repeating listen without extending its fixed lifetime.
     #[arg(long = "for", value_name = "DURATION")]
-    pub lifetime: Option<String>,
+    pub shorten_for: Option<String>,
     /// Once maximum wait: integer followed by s, m, h, or d.
     #[arg(long, requires = "once")]
     pub max_wait: Option<String>,
+    /// Deliver batches to stdout or arm background delivery into the calling Codex session.
+    #[arg(long, value_enum, default_value = "stdout")]
+    pub deliver: ThreadListenDeliveryKind,
     /// Initialize the Delivered position for a first Listen from this Activity sequence.
     #[arg(long = "from")]
     pub from_activity_sequence: Option<u64>,
@@ -648,6 +673,18 @@ pub(super) struct ThreadListenArguments {
     pub actor: Option<String>,
     #[command(flatten)]
     pub common: CommonArguments,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum ThreadListenLifetimeKind {
+    Short,
+    Long,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum ThreadListenDeliveryKind {
+    Stdout,
+    Session,
 }
 
 #[derive(Args)]

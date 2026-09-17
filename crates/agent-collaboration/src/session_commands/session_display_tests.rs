@@ -92,3 +92,51 @@ fn conversation_preview_applies_cli_snippet_truncation() {
     assert!(preview.snippets[0].ends_with('…'));
     fs::remove_dir_all(root).expect("remove fixture");
 }
+
+#[test]
+fn session_model_choice_pairs_model_with_effort_and_marks_unknown_parts() {
+    // Arrange / Act / Assert: the owner resumes from this column, so every case is shown.
+    assert_eq!(
+        session_model_choice(Some("gpt-5.6-sol"), Some("low")),
+        "gpt-5.6-sol/low"
+    );
+    assert_eq!(
+        session_model_choice(Some("gpt-5.6-sol"), None),
+        "gpt-5.6-sol/-"
+    );
+    assert_eq!(session_model_choice(None, Some("high")), "-/high");
+    assert_eq!(session_model_choice(None, None), "-");
+    assert_eq!(session_model_choice(Some("  "), Some("")), "-");
+}
+
+#[test]
+fn session_model_choice_stays_within_the_row_width_budget() {
+    // Arrange
+    let long_model = "m".repeat(80);
+
+    // Act
+    let rendered = session_model_choice(Some(&long_model), Some("medium"));
+
+    // Assert
+    assert_eq!(rendered.chars().count(), SESSION_MODEL_CHOICE_MAX_CHARS);
+    assert!(rendered.ends_with('…'));
+}
+
+#[test]
+fn human_session_row_shows_the_model_choice_between_recency_and_branch() {
+    // Arrange
+    let mut record = search_consistency_record(None, None);
+    record.model = Some("gpt-5.6-sol".to_owned());
+    record.reasoning_effort = Some("low".to_owned());
+    record.git_branch = Some("feat/resume".to_owned());
+
+    // Act
+    let row = human_session_row(&record);
+
+    // Assert
+    let second_line = row.lines().nth(1).expect("row has a metadata line");
+    let model_index = second_line.find("gpt-5.6-sol/low").expect("model column");
+    let branch_index = second_line.find("feat/resume").expect("branch column");
+    assert!(model_index < branch_index);
+    assert!(second_line.contains("  id=thread-"));
+}

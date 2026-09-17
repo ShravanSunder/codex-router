@@ -42,6 +42,8 @@ pub use session_command_failures::SessionsCommandError;
 mod session_display_text;
 #[cfg(test)]
 use session_display_text::format_duration_ms;
+#[cfg(test)]
+use session_display_text::session_model_choice;
 use session_display_text::{
     display_title_from_session_fields, format_recency_at_ms, human_session_row,
     session_context_from_cwd, truncate_end,
@@ -54,6 +56,7 @@ pub(crate) use session_catalog_records::{
 };
 #[path = "session_commands/session_catalog_query.rs"]
 mod session_catalog_query;
+use codex_native_integration::ResumeModelChoice;
 #[cfg(test)]
 use session_catalog_query::codex_home_from_environment;
 use session_catalog_query::{
@@ -66,6 +69,7 @@ mod picker_runtime_inventory;
 
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
+const SESSION_MODEL_CHOICE_MAX_CHARS: usize = 32;
 const SESSION_CONVERSATION_SNIPPET_MAX_CHARS: usize = 180;
 const DEFAULT_SESSION_RECORD_LIMIT: usize = 100;
 
@@ -97,7 +101,14 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     }
     let launch_target = sessions_launch_target(&command, context)?;
     if let Some(session_id) = command.id.as_deref() {
-        return run_id_session(stdout, &command, &launch_target, runner, session_id);
+        return run_id_session(
+            stdout,
+            &command,
+            context,
+            &launch_target,
+            runner,
+            session_id,
+        );
     }
     if command.new {
         return run_new_session(stdout, command, &launch_target, runner);
@@ -122,6 +133,7 @@ fn run_session_listing<W: Write>(
 fn run_id_session<W: Write>(
     stdout: &mut W,
     command: &SessionsCommand,
+    context: &CliContext,
     launch_target: &SessionsLaunchTarget,
     runner: &mut impl SessionsCommandRunner,
     session_id: &str,
@@ -129,11 +141,56 @@ fn run_id_session<W: Write>(
     if validate_exact_uuid_session_id(session_id).is_err() {
         return Err(SessionsCommandError::InvalidResumeSessionId);
     }
+    let model_choice = stored_model_choice_for_session(context, session_id);
     if command.dry_run {
-        write_codex_resume_dry_run(stdout, launch_target, &command.codex_args, session_id)?;
+        write_codex_resume_dry_run(
+            stdout,
+            launch_target,
+            &command.codex_args,
+            session_id,
+            &model_choice,
+        )?;
         return Ok(());
     }
-    runner.run_codex_resume(&command.codex_args, session_id)
+    runner.run_codex_resume(&command.codex_args, session_id, &model_choice)
+}
+
+/// Reads the model and reasoning effort one stored session last ran with.
+///
+/// A session that is no longer in the catalog resumes exactly as it did before.
+fn stored_model_choice_for_session(context: &CliContext, session_id: &str) -> ResumeModelChoice {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return ResumeModelChoice::default();
+    };
+    let records = runtime.block_on(load_session_records_for_query_with_identity(
+        SessionRecordQuery::for_session_id(session_id),
+        context,
+        None,
+    ));
+    let Ok(records) = records else {
+        return ResumeModelChoice::default();
+    };
+    records
+        .iter()
+        .find(|record| record.session_id == session_id)
+        .map_or_else(ResumeModelChoice::default, stored_model_choice_from_record)
+}
+
+/// Projects one catalog record into the launch-time model choice, warning once when a
+/// stored value cannot be quoted as a TOML basic string.
+fn stored_model_choice_from_record(record: &SessionRecord) -> ResumeModelChoice {
+    let model = record.model.as_deref();
+    let reasoning_effort = record.reasoning_effort.as_deref();
+    if ResumeModelChoice::rejects_stored_value(model, reasoning_effort) {
+        eprintln!(
+            "agent-session: stored model or reasoning effort for session {} contains characters that cannot be passed to Codex; resuming without it",
+            record.session_id
+        );
+    }
+    ResumeModelChoice::from_stored_values(model, reasoning_effort)
 }
 
 fn write_sessions_json<W: Write>(
@@ -220,15 +277,35 @@ fn run_interactive_session(
     match outcome {
         SessionsPickerOutcome::ResumeSession(session_id) => {
             validate_resume_session_id(&session_id)?;
-            runner.run_codex_resume(&command.codex_args, &session_id)
+            let model_choice = selected_model_choice(context, &records, &session_id);
+            runner.run_codex_resume(&command.codex_args, &session_id, &model_choice)
         }
         SessionsPickerOutcome::ForkSession(session_id) => {
             validate_resume_session_id(&session_id)?;
-            runner.run_codex_fork(&command.codex_args, &session_id)
+            let model_choice = selected_model_choice(context, &records, &session_id);
+            runner.run_codex_fork(&command.codex_args, &session_id, &model_choice)
         }
         SessionsPickerOutcome::StartNewSession => runner.run_codex_new(&command.codex_args),
         SessionsPickerOutcome::TerminalTooNarrow => Err(SessionsCommandError::TerminalTooNarrow),
     }
+}
+
+/// Reads the selected row's model and effort, preferring the records already offered.
+///
+/// The picker can page in rows beyond the first load, so a selection that is not in the
+/// offered set falls back to a direct catalog read rather than resuming with no choice.
+fn selected_model_choice(
+    context: &CliContext,
+    offered_records: &[SessionRecord],
+    session_id: &str,
+) -> ResumeModelChoice {
+    offered_records
+        .iter()
+        .find(|record| record.session_id == session_id)
+        .map_or_else(
+            || stored_model_choice_for_session(context, session_id),
+            stored_model_choice_from_record,
+        )
 }
 
 fn session_picker_record_loader(
@@ -284,13 +361,20 @@ fn run_last_session<W: Write>(
         return Err(SessionsCommandError::NoSessionsMatch);
     };
     validate_resume_session_id(&record.session_id)?;
+    let model_choice = stored_model_choice_from_record(&record);
 
     if dry_run {
-        write_codex_resume_dry_run(stdout, launch_target, &codex_args, &record.session_id)?;
+        write_codex_resume_dry_run(
+            stdout,
+            launch_target,
+            &codex_args,
+            &record.session_id,
+            &model_choice,
+        )?;
         return Ok(());
     }
 
-    runner.run_codex_resume(&codex_args, &record.session_id)
+    runner.run_codex_resume(&codex_args, &record.session_id, &model_choice)
 }
 
 fn run_new_session<W: Write>(
@@ -322,12 +406,13 @@ fn write_codex_resume_dry_run<W: Write>(
     launch_target: &SessionsLaunchTarget,
     codex_args: &[OsString],
     session_id: &str,
+    model_choice: &ResumeModelChoice,
 ) -> Result<(), SessionsCommandError> {
     write!(stdout, "codex").map_err(SessionsCommandError::Stdout)?;
     write_codex_args(
         stdout,
         &launch_target
-            .resume_launch(codex_args, session_id)
+            .resume_launch(codex_args, session_id, model_choice)
             .arguments(),
     )?;
     writeln!(stdout).map_err(SessionsCommandError::Stdout)
@@ -406,18 +491,22 @@ pub(crate) trait SessionsCommandRunner {
     /// Launches `codex --profile codex-router`.
     fn run_codex_new(&mut self, codex_args: &[OsString]) -> Result<(), SessionsCommandError>;
 
-    /// Launches `codex --profile codex-router resume <session_id>`.
+    /// Launches `codex --profile codex-router resume <session_id>` with the session's
+    /// own stored model and reasoning effort.
     fn run_codex_resume(
         &mut self,
         codex_args: &[OsString],
         session_id: &str,
+        model_choice: &ResumeModelChoice,
     ) -> Result<(), SessionsCommandError>;
 
-    /// Launches `codex --profile codex-router fork <session_id>`.
+    /// Launches `codex --profile codex-router fork <session_id>` with the session's
+    /// own stored model and reasoning effort.
     fn run_codex_fork(
         &mut self,
         codex_args: &[OsString],
         session_id: &str,
+        model_choice: &ResumeModelChoice,
     ) -> Result<(), SessionsCommandError>;
 }
 
@@ -446,9 +535,12 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
         &mut self,
         codex_args: &[OsString],
         session_id: &str,
+        model_choice: &ResumeModelChoice,
     ) -> Result<(), SessionsCommandError> {
         self.launch_target.resolve_for_launch()?;
-        let launch = self.launch_target.resume_launch(codex_args, session_id);
+        let launch = self
+            .launch_target
+            .resume_launch(codex_args, session_id, model_choice);
         let status = Command::new("codex")
             .args(launch.arguments())
             .status()
@@ -466,9 +558,12 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
         &mut self,
         codex_args: &[OsString],
         session_id: &str,
+        model_choice: &ResumeModelChoice,
     ) -> Result<(), SessionsCommandError> {
         self.launch_target.resolve_for_launch()?;
-        let launch = self.launch_target.fork_launch(codex_args, session_id);
+        let launch = self
+            .launch_target
+            .fork_launch(codex_args, session_id, model_choice);
         let status = Command::new("codex")
             .args(launch.arguments())
             .status()

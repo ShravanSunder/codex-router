@@ -21,6 +21,7 @@ pub struct AcpConnectionInputs {
     pub schemas: Arc<NativePayloadSchemas>,
     pub stored_sessions: Arc<dyn AcpStoredSessions>,
     pub retired: CancellationToken,
+    pub approval_broker: Arc<dyn crate::ApprovalBroker>,
 }
 pub async fn serve_acp_connection<TStream: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: TStream,
@@ -84,10 +85,11 @@ async fn route_connection(
                 frame=router.input.recv()=>match frame {Some(frame)=>frame,None=>break Ok(())},
             };
             if frame.get("jsonrpc")!=Some(&json!("2.0")) {router.output.send(error(Value::Null,-32600,"Invalid ACP envelope")).await?;continue;}
-            if frame.get("method").is_none() {
-                if negotiation.is_initialized() {let _routed=sessions.permission_response((*frame).clone());}
-                continue;
-            }
+            // Router sends the client no requests, so a response frame is
+            // unsolicited; JSON-RPC forbids answering it. A client-sent
+            // session/request_permission carries a method and falls through to
+            // the unsupported-method reply below.
+            if frame.get("method").is_none() {continue;}
             let method=frame.get("method").and_then(Value::as_str).unwrap_or("");
             let params=frame.get("params").cloned().unwrap_or_else(||json!({}));
             let Some(id)=frame.get("id").cloned() else {
@@ -119,7 +121,7 @@ async fn route_connection(
                         }
                     } else {None};
                     let cancellation_barrier=requested_session.as_ref().and_then(|session| sessions.cancellation_barrier(session));
-                    let setup=SetupTaskInputs { cancellation_barrier, known_session, backend_path:inputs.backend_path.clone(), schemas:Arc::clone(&inputs.schemas), generation:inputs.generation.clone(), params, create_new };
+                    let setup=SetupTaskInputs { cancellation_barrier, known_session, backend_path:inputs.backend_path.clone(), schemas:Arc::clone(&inputs.schemas), generation:inputs.generation.clone(), params, create_new, approval_broker:Arc::clone(&inputs.approval_broker) };
                     setup_requests.spawn(async move {
                         let outcome=run_session_setup(setup).await;
                         drop(frame);
@@ -164,5 +166,25 @@ fn setup_error(id: Value, failure: &crate::SessionSetupError) -> Value {
     } else {
         -32603
     };
-    error(id, code, "Native session setup rejected")
+    match failure {
+        crate::SessionSetupError::ModelMismatch {
+            requested,
+            effective,
+        } => json!({
+            "jsonrpc":"2.0","id":id,
+            "error":{"code":code,"message":"Native session setup rejected","data":{
+                "kind":"modelMismatch","requested":requested,"effective":effective
+            }}
+        }),
+        crate::SessionSetupError::AccessMismatch {
+            requested,
+            effective,
+        } => json!({
+            "jsonrpc":"2.0","id":id,
+            "error":{"code":code,"message":"Native session setup rejected","data":{
+                "kind":"accessMismatch","requested":requested,"effective":effective
+            }}
+        }),
+        _ => error(id, code, "Native session setup rejected"),
+    }
 }

@@ -29,9 +29,11 @@ pub enum BoardFailureKind {
     ParticipantRequired,
     OrchestratorRequired,
     OrchestratorAlreadyExists,
+    ImplementerAlreadyExists,
     OrchestratorHandoverRequired,
     HandoverTargetNotParticipant,
     StaleOrchestrator,
+    StaleImplementer,
     SelfReplace,
     OrchestratorRoleChange,
     SessionTopicPost,
@@ -58,6 +60,7 @@ pub enum BoardNextAction {
     CreateThread,
     JoinThread,
     ReplaceOrchestrator,
+    ReplaceImplementer,
     LeaveWithHandoverOrResolve,
     JoinHandoverTarget,
     InspectParticipants,
@@ -157,6 +160,7 @@ impl BoardError {
     fn all_roles() -> Vec<ParticipantRole> {
         vec![
             ParticipantRole::Orchestrator,
+            ParticipantRole::Implementer,
             ParticipantRole::Advisor,
             ParticipantRole::Reviewer,
             ParticipantRole::Participant,
@@ -234,6 +238,35 @@ impl BoardError {
                 holder_last_seen_activity: Some(holder_last_seen_activity),
                 target: None,
                 named_holder: None,
+                }),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn implementer_already_exists(
+        root_message_id: MessageId,
+        actor: Identity,
+        holder: Identity,
+        holder_last_seen_activity: ActivitySequence,
+    ) -> Self {
+        Self {
+            kind: BoardFailureKind::ImplementerAlreadyExists,
+            stage: BoardFailureStage::Admission,
+            message:
+                "This Thread already has an Implementer. Name that holder explicitly to Replace it."
+                    .to_owned(),
+            next_action: BoardNextAction::ReplaceImplementer,
+            details: BoardErrorDetails::ParticipantRefusal {
+                refusal: Box::new(ParticipantRefusalDetails {
+                    root_message_id,
+                    missing_root_message_ids: Vec::new(),
+                    actor,
+                    allowed_roles: vec![ParticipantRole::Implementer],
+                    holder: Some(holder),
+                    holder_last_seen_activity: Some(holder_last_seen_activity),
+                    target: None,
+                    named_holder: None,
                 }),
             },
         }

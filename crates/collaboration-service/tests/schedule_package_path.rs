@@ -50,7 +50,7 @@ async fn exercise_package(fresh: bool) -> Result<(), Box<dyn std::error::Error>>
         json!({"kind":"unprepared"})
     };
     let request: ScheduleCreateRequest = serde_json::from_value(
-        json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":600},"enabled":false,"destination":destination,"executionTimeoutSeconds":null}}),
+        json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":600},"enabled":false,"destination":destination,"executionTimeoutSeconds":null,"model":"gpt-5.6-sol","effort":"medium"}}),
     )?;
     let first = client.create_schedule(request).await?;
     let package = client

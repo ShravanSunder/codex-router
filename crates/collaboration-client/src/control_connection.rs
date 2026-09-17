@@ -106,6 +106,7 @@ impl ControlClient {
         if identity.version.major != 1 || identity.version.minor != 0 {
             return Err(ClientError::Protocol("unsupported negotiated version"));
         }
+        crate::record_service_version(&identity.service_version);
         Ok(Self {
             connection,
             notification_state: EndpointNotificationState::new(&identity),
@@ -162,7 +163,7 @@ impl ControlClient {
             ));
         };
         let (kind, representation) = match params.message {
-            MessageContent::Agent { .. } => (
+            MessageContent::Agent { .. } | MessageContent::Router { .. } => (
                 MessageInputKind::Agent,
                 MessageRepresentation::DeclaredAgentText,
             ),
@@ -252,6 +253,23 @@ impl ControlClient {
         }
         Ok(result)
     }
+    pub async fn rename_session(
+        &mut self,
+        params: collaboration_protocol::NativeRenameParams,
+    ) -> Result<collaboration_protocol::NativeRenameResult, ClientError> {
+        let target = params.target.clone();
+        let result = self
+            .connection
+            .call("codex/sessionRename", json!(params))
+            .await?;
+        let result: collaboration_protocol::NativeRenameResult = serde_json::from_value(result)
+            .map_err(|_| ClientError::Protocol("invalid rename result"))?;
+        if result.target != target {
+            self.connection.failed = true;
+            return Err(ClientError::Protocol("inconsistent rename result"));
+        }
+        Ok(result)
+    }
     pub async fn interrupt_turn(
         &mut self,
         target: &collaboration_protocol::SessionRef,
@@ -276,6 +294,43 @@ impl ControlClient {
         {
             self.connection.failed = true;
             return Err(ClientError::Protocol("inconsistent interruption result"));
+        }
+        Ok(result)
+    }
+    pub async fn list_pending_approvals(
+        &mut self,
+        pending_only: bool,
+    ) -> Result<collaboration_protocol::ApprovalListResult, ClientError> {
+        let value = self
+            .connection
+            .call(
+                "approval/list",
+                json!(collaboration_protocol::ApprovalListParams {
+                    pending: pending_only
+                }),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|_| ClientError::Protocol("invalid approval list"))
+    }
+
+    pub async fn decide_approval(
+        &mut self,
+        params: collaboration_protocol::ApprovalDecideParams,
+    ) -> Result<collaboration_protocol::ApprovalDecideResult, ClientError> {
+        let request_id = params.request_id.clone();
+        let value = self
+            .connection
+            .call("approval/decide", json!(params))
+            .await?;
+        let result: collaboration_protocol::ApprovalDecideResult = serde_json::from_value(value)
+            .map_err(|_| ClientError::Protocol("invalid approval decision receipt"))?;
+        if result.request_id != request_id
+            || result.state != collaboration_protocol::ApprovalState::Decided
+        {
+            self.connection.failed = true;
+            return Err(ClientError::Protocol(
+                "inconsistent approval decision receipt",
+            ));
         }
         Ok(result)
     }

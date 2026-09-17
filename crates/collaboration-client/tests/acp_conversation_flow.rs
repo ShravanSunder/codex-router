@@ -1,4 +1,6 @@
-use collaboration_client::{AcpConversation, ConversationEnd, ConversationEvent};
+use collaboration_client::{
+    AcpConversation, ConversationEnd, ConversationEvent, ConversationSessionRequest,
+};
 use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
 use serde_json::{Value, json};
 use std::{os::unix::fs::DirBuilderExt, time::Duration};
@@ -99,13 +101,27 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
         Ok(())
     };
     client
-        .open_session(Some("owned"), &root, &mut emit)
+        .open_session(
+            ConversationSessionRequest {
+                session: Some("owned"),
+                fork: None,
+                model: None,
+                effort: Some("medium"),
+                access: None,
+                created_by: None,
+                approver: None,
+                root_message_id: None,
+            },
+            &root,
+            &mut emit,
+        )
         .await
         .unwrap();
     assert_eq!(
         client
             .prompt(
                 "question",
+                Some("medium"),
                 Duration::from_secs(3),
                 CancellationToken::new(),
                 &mut emit
@@ -122,7 +138,13 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
     });
     assert_eq!(
         client
-            .prompt("cancel this", Duration::from_secs(3), cancel, &mut emit)
+            .prompt(
+                "cancel this",
+                Some("medium"),
+                Duration::from_secs(3),
+                cancel,
+                &mut emit
+            )
             .await
             .unwrap(),
         ConversationEnd::Cancelled
@@ -134,6 +156,7 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
         client
             .prompt(
                 "must not submit",
+                Some("medium"),
                 Duration::from_secs(3),
                 already_cancelled,
                 &mut emit

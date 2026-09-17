@@ -133,6 +133,12 @@ pub(super) fn parse_mutation_identity(
 }
 
 pub(super) fn parse_identity(value: &str, flag: &str) -> Result<Identity, String> {
+    if value == "self" {
+        return serde_json::from_value(
+            serde_json::json!({"kind":"human","humanId":"__agent_collaboration_self__"}),
+        )
+        .map_err(|_| format!("{flag} self could not be represented"));
+    }
     serde_json::from_str(value)
         .map_err(|_| format!("{flag} must be valid typed Identity JSON with kind session or human"))
 }

@@ -49,7 +49,14 @@ pub(super) enum PreparedBoardCommand {
     ThreadUnresolve(ThreadUnresolveRequest),
     ThreadWatch(ThreadWatchRequest),
     ThreadUnwatch(ThreadUnwatchRequest),
+    TopicWatch(TopicWatchRequest),
+    TopicUnwatch(TopicWatchRequest),
     ThreadList(ThreadListRequest),
+    RepositoryThreadList {
+        repository: BoardRepositoryLocation,
+        reader: Option<Identity>,
+        page: PageRequest,
+    },
     ThreadCreate(Box<PendingThreadCreate>),
     ThreadJoin(Box<PendingThreadJoin>),
     ThreadLeave(PendingThreadLeave),
@@ -105,8 +112,9 @@ pub(super) fn finalize_actor(
 }
 
 fn self_identity(client: &ControlClient) -> Result<Identity, String> {
-    let codex = std::env::var_os("CODEX_THREAD_ID");
-    let claude = std::env::var_os("CLAUDE_CODE_SESSION_ID");
+    let nonempty = |name| std::env::var_os(name).filter(|value| !value.is_empty());
+    let codex = nonempty("CODEX_THREAD_ID");
+    let claude = nonempty("CLAUDE_CODE_SESSION_ID");
     let (session_id, endpoint_id) = match (codex, claude) {
         (Some(_), Some(_)) => return Err("--actor self is ambiguous: set exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID".into()),
         (None, None) => return Err("--actor self requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID".into()),
@@ -135,11 +143,83 @@ fn self_identity(client: &ControlClient) -> Result<Identity, String> {
     })
 }
 
+fn finalize_identity(identity: &mut Identity, client: &ControlClient) -> Result<(), String> {
+    if identity
+        .as_human()
+        .is_some_and(|id| id.as_str() == "__agent_collaboration_self__")
+    {
+        *identity = self_identity(client)?;
+    }
+    Ok(())
+}
+
 pub(super) fn finalize_command(
     command: &mut PreparedBoardCommand,
     client: &ControlClient,
 ) -> Result<(), String> {
     match command {
+        PreparedBoardCommand::RepositoryAttach { actor, .. }
+        | PreparedBoardCommand::RepositoryDetach { actor, .. } => finalize_identity(actor, client)?,
+        PreparedBoardCommand::ProjectCreate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ProjectUpdate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::BoardCreate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::BoardUpdate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::BoardArchive(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::TopicCreate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::TopicUpdate(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::MessagePost(pending) => {
+            finalize_identity(&mut pending.request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadShow(request) => {
+            if let Some(reader) = &mut request.reader {
+                finalize_identity(reader, client)?;
+            }
+        }
+        PreparedBoardCommand::ThreadResolve(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadUnresolve(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadWatch(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadUnwatch(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::TopicWatch(request) | PreparedBoardCommand::TopicUnwatch(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::ThreadList(request) => {
+            finalize_identity(&mut request.reader, client)?
+        }
+        PreparedBoardCommand::RepositoryThreadList {
+            reader: Some(reader),
+            ..
+        } => finalize_identity(reader, client)?,
+        PreparedBoardCommand::InboxFetch(request) => {
+            finalize_identity(&mut request.reader, client)?
+        }
+        PreparedBoardCommand::InboxAcknowledge(request) => {
+            finalize_identity(&mut request.actor, client)?
+        }
+        PreparedBoardCommand::InboxProjects(request) => {
+            finalize_identity(&mut request.reader, client)?
+        }
         PreparedBoardCommand::ThreadCreate(pending) => {
             let actor = finalize_actor(&pending.actor, client)?;
             if matches!(actor, Identity::Session { .. }) && pending.request.role.is_none() {
@@ -153,12 +233,31 @@ pub(super) fn finalize_command(
             if let Some(listen) = &mut pending.listen {
                 listen.request.reader = actor;
             }
+            // --replace self names this session, not a human called "self".
+            if let Some(replace) = &mut pending.request.replace {
+                finalize_identity(replace, client)?;
+            }
         }
         PreparedBoardCommand::ThreadLeave(pending) => {
             pending.request.actor = finalize_actor(&pending.actor, client)?;
+            if let Some(handover) = &mut pending.request.to {
+                finalize_identity(handover, client)?;
+            }
         }
         PreparedBoardCommand::ThreadListen(pending) => {
             pending.request.reader = finalize_actor(&pending.actor, client)?;
+            if pending.request.delivery == ThreadListenDelivery::Session {
+                match &pending.request.reader {
+                    Identity::Session { session }
+                        if session.endpoint.endpoint_id.as_str() == "codex-local" => {}
+                    _ => {
+                        return Err(
+                            "--deliver session requires the calling codex-local session identity"
+                                .into(),
+                        );
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -497,36 +596,59 @@ fn prepare_thread(
                 acting_for,
             },
         ),
-        ThreadCommand::Watch(arguments) => thread_mutation(
-            arguments,
-            PreparedBoardCommand::ThreadWatch,
-            |root_message_id, actor, acting_for| ThreadWatchRequest {
-                root_message_id,
-                actor,
-                acting_for,
-            },
-        ),
-        ThreadCommand::Unwatch(arguments) => thread_mutation(
-            arguments,
-            PreparedBoardCommand::ThreadUnwatch,
-            |root_message_id, actor, acting_for| ThreadUnwatchRequest {
-                root_message_id,
-                actor,
-                acting_for,
-            },
-        ),
+        ThreadCommand::Watch(arguments) => prepare_watch(arguments, true),
+        ThreadCommand::Unwatch(arguments) => prepare_watch(arguments, false),
         ThreadCommand::List(arguments) => Ok((
-            PreparedBoardCommand::ThreadList(ThreadListRequest {
-                project_id: parse_uuid_v7(arguments.project_id, "--project-id")?,
-                reader: parse_identity(&arguments.reader, "--reader")?,
-                watched_only: arguments.watched_only,
-                page: prepare_page_request(arguments.page)?,
-            }),
+            match (arguments.project_id, arguments.repository_path) {
+                (Some(project_id), None) => PreparedBoardCommand::ThreadList(ThreadListRequest {
+                    project_id: parse_uuid_v7(project_id, "--project-id")?,
+                    reader: parse_identity(arguments.reader.as_deref().ok_or("--reader is required with --project-id")?, "--reader")?,
+                    watched_only: arguments.watched_only,
+                    page: prepare_page_request(arguments.page)?,
+                }),
+                (None, Some(path)) if !arguments.watched_only => PreparedBoardCommand::RepositoryThreadList {
+                    repository: BoardRepositoryLocation::discover(&path).map_err(|error| error.to_string())?,
+                    reader: arguments.reader.as_deref().map(|value| parse_identity(value, "--reader")).transpose()?,
+                    page: prepare_page_request(arguments.page)?,
+                },
+                _ => return Err("Choose exactly one of --project-id or --repository-path; --watched-only requires --project-id".into()),
+            },
             command_context(arguments.common),
         )),
         ThreadCommand::Listen(arguments) => prepare_thread_listen(arguments),
         ThreadCommand::Wait(arguments) => prepare_thread_wait(arguments),
     }
+}
+
+fn prepare_watch(
+    arguments: ThreadWatchArguments,
+    watch: bool,
+) -> Result<(PreparedBoardCommand, CommandContext), String> {
+    let (actor, acting_for) = parse_mutation_identity(&arguments.identity)?;
+    let command = match (arguments.root_message_id, arguments.topic_id, watch) {
+        (Some(root), None, true) => PreparedBoardCommand::ThreadWatch(ThreadWatchRequest {
+            root_message_id: parse_uuid_v7(root, "--root-message-id")?,
+            actor,
+            acting_for,
+        }),
+        (Some(root), None, false) => PreparedBoardCommand::ThreadUnwatch(ThreadUnwatchRequest {
+            root_message_id: parse_uuid_v7(root, "--root-message-id")?,
+            actor,
+            acting_for,
+        }),
+        (None, Some(topic), true) => PreparedBoardCommand::TopicWatch(TopicWatchRequest {
+            topic_id: parse_uuid_v7(topic, "--topic-id")?,
+            actor,
+            acting_for,
+        }),
+        (None, Some(topic), false) => PreparedBoardCommand::TopicUnwatch(TopicWatchRequest {
+            topic_id: parse_uuid_v7(topic, "--topic-id")?,
+            actor,
+            acting_for,
+        }),
+        _ => return Err("Choose exactly one of --root-message-id or --topic-id".into()),
+    };
+    Ok((command, command_context(arguments.common)))
 }
 
 fn prepare_thread_participant(
@@ -572,6 +694,7 @@ fn watch_choice(watch: bool, no_watch: bool) -> Result<bool, String> {
 fn participant_role(role: ParticipantRoleKind) -> ParticipantRole {
     match role {
         ParticipantRoleKind::Orchestrator => ParticipantRole::Orchestrator,
+        ParticipantRoleKind::Implementer => ParticipantRole::Implementer,
         ParticipantRoleKind::Advisor => ParticipantRole::Advisor,
         ParticipantRoleKind::Reviewer => ParticipantRole::Reviewer,
         ParticipantRoleKind::Participant => ParticipantRole::Participant,
@@ -716,27 +839,30 @@ fn prepare_join_listen(
     };
     let mode = match listen.as_slice() {
         [kind] if kind == "once" => ThreadListenMode::Once {
-            max_wait_seconds: parse_duration_seconds(
-                max_wait
-                    .as_deref()
-                    .ok_or_else(|| "--listen once requires --max-wait <duration>".to_owned())?,
-                "--max-wait",
-            )?,
+            max_wait_seconds: max_wait
+                .as_deref()
+                .map(|value| parse_duration_seconds(value, "--max-wait"))
+                .transpose()?
+                .unwrap_or(ThreadListenLifetime::Short.seconds()),
         },
-        [kind, lifetime] if kind == "for" => {
+        [kind] if matches!(kind.as_str(), "short" | "long") => {
             if max_wait.is_some() {
-                return Err("--listen for <duration> forbids --max-wait".into());
+                return Err("--listen short|long forbids --max-wait".into());
             }
             ThreadListenMode::Repeating {
-                lifetime_seconds: parse_duration_seconds(lifetime, "--listen for")?,
+                lifetime_seconds: if kind == "short" {
+                    ThreadListenLifetime::Short.seconds()
+                } else {
+                    ThreadListenLifetime::Long.seconds()
+                },
             }
         }
-        [kind] if kind == "for" => return Err("--listen for requires <duration>".into()),
-        [kind, ..] if kind == "once" => {
-            return Err("--listen once requires --max-wait <duration>".into());
-        }
-        _ => return Err("--listen must be once or for <duration>".into()),
+        _ => return Err("--listen must be once, short, or long".into()),
     };
+    if matches!(&mode, ThreadListenMode::Once { max_wait_seconds } if *max_wait_seconds > ThreadListenLifetime::Short.seconds())
+    {
+        return Err("--max-wait may shorten but not exceed the 25 minute Once lifetime".into());
+    }
     let acknowledge = match (acknowledge, no_acknowledge) {
         (true, false) => true,
         (false, true) => false,
@@ -759,6 +885,7 @@ fn prepare_join_listen(
             mode,
             from_activity_sequence: None,
             acknowledge,
+            delivery: ThreadListenDelivery::Stdout,
         },
         actor,
     }))
@@ -790,42 +917,91 @@ fn prepare_thread_listen(
         };
     }
     require_thread_listen_json(&arguments.common)?;
-    let selection = match (arguments.watched, arguments.root_message_id.is_empty()) {
-        (true, true) => ThreadListenSelection::Watched,
-        (false, false) => ThreadListenSelection::Roots {
+    let selection_count = usize::from(arguments.watched)
+        + usize::from(!arguments.root_message_id.is_empty())
+        + usize::from(arguments.topic_id.is_some());
+    let selection = match selection_count {
+        1 if arguments.watched => ThreadListenSelection::Watched,
+        1 if !arguments.root_message_id.is_empty() => ThreadListenSelection::Roots {
             root_message_ids: arguments
                 .root_message_id
                 .into_iter()
                 .map(|value| parse_uuid_v7(value, "--root-message-id"))
                 .collect::<Result<Vec<_>, _>>()?,
         },
+        1 => ThreadListenSelection::Topic {
+            topic_id: parse_uuid_v7(
+                arguments.topic_id.ok_or("--topic-id is required")?,
+                "--topic-id",
+            )?,
+        },
         _ => {
             return Err(
-                "Choose exactly one Thread selection: --watched or repeated --root-message-id"
-                    .into(),
+                "Choose exactly one Thread selection: --watched, repeated --root-message-id, or --topic-id".into(),
             );
         }
     };
+    let delivery = match arguments.deliver {
+        ThreadListenDeliveryKind::Stdout => ThreadListenDelivery::Stdout,
+        ThreadListenDeliveryKind::Session => ThreadListenDelivery::Session,
+    };
     let mode = match (arguments.once, arguments.lifetime) {
-        (true, None) => ThreadListenMode::Once {
-            max_wait_seconds: parse_duration_seconds(
-                arguments
-                    .max_wait
-                    .as_deref()
-                    .ok_or_else(|| "Once Listen requires --max-wait <duration>".to_owned())?,
-                "--max-wait",
-            )?,
-        },
-        (false, Some(lifetime)) => ThreadListenMode::Repeating {
-            lifetime_seconds: parse_duration_seconds(&lifetime, "--for")?,
-        },
-        _ => return Err("Choose exactly one Listen mode: --once or --for <duration>".into()),
+        (true, None) => {
+            if arguments.shorten_for.is_some() {
+                return Err("--for applies only with --lifetime short|long".into());
+            }
+            if delivery == ThreadListenDelivery::Session && arguments.max_wait.is_some() {
+                return Err("--deliver session uses the fixed 25 minute Once lifetime and forbids --max-wait".into());
+            }
+            let seconds = arguments
+                .max_wait
+                .as_deref()
+                .map(|value| parse_duration_seconds(value, "--max-wait"))
+                .transpose()?
+                .unwrap_or(ThreadListenLifetime::Short.seconds());
+            if seconds > ThreadListenLifetime::Short.seconds() {
+                return Err(
+                    "--max-wait may shorten but not exceed the 25 minute Once lifetime".into(),
+                );
+            }
+            ThreadListenMode::Once {
+                max_wait_seconds: seconds,
+            }
+        }
+        (false, Some(lifetime)) => {
+            let lifetime = match lifetime {
+                ThreadListenLifetimeKind::Short => ThreadListenLifetime::Short,
+                ThreadListenLifetimeKind::Long => ThreadListenLifetime::Long,
+            };
+            if delivery == ThreadListenDelivery::Session && arguments.shorten_for.is_some() {
+                return Err("--deliver session uses its fixed lifetime and forbids --for".into());
+            }
+            let seconds = arguments
+                .shorten_for
+                .as_deref()
+                .map(|value| parse_duration_seconds(value, "--for"))
+                .transpose()?
+                .unwrap_or(lifetime.seconds());
+            if seconds > lifetime.seconds() {
+                return Err("--for may shorten but not extend the selected lifetime".into());
+            }
+            ThreadListenMode::Repeating {
+                lifetime_seconds: seconds,
+            }
+        }
+        _ => return Err("Choose exactly one Listen mode: --once or --lifetime short|long".into()),
     };
     let actor = arguments
         .actor
         .as_deref()
         .ok_or_else(|| "Thread Listen requires --actor".to_owned())
         .and_then(parse_actor_input)?;
+    if delivery == ThreadListenDelivery::Session
+        && let ActorInput::Explicit(identity) = &actor
+        && !is_codex_session_identity(identity)
+    {
+        return Err("--deliver session requires the calling codex-local session identity".into());
+    }
     let acknowledge = match (arguments.acknowledge, arguments.no_acknowledge) {
         (true, false) => true,
         (false, true) => false,
@@ -848,11 +1024,16 @@ fn prepare_thread_listen(
             .map(|value| activity_sequence(value, "--from"))
             .transpose()?,
         acknowledge,
+        delivery,
     };
     Ok((
         PreparedBoardCommand::ThreadListen(PendingThreadListen { request, actor }),
         command_context(arguments.common),
     ))
+}
+
+pub(super) fn is_codex_session_identity(identity: &Identity) -> bool {
+    matches!(identity, Identity::Session { session } if session.endpoint.endpoint_id.as_str() == "codex-local")
 }
 
 fn prepare_thread_wait(
@@ -910,6 +1091,7 @@ fn prepare_thread_wait(
             .map(|value| activity_sequence(value, "--from"))
             .transpose()?,
         acknowledge,
+        delivery: ThreadListenDelivery::Stdout,
     };
     Ok((
         PreparedBoardCommand::ThreadListen(PendingThreadListen { request, actor }),

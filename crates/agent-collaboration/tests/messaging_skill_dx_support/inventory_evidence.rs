@@ -16,6 +16,9 @@ pub(super) async fn list_all(
             .list_sessions(NativeSessionListParams {
                 endpoint: proof.endpoint.clone(),
                 view,
+                scope: collaboration_client::protocol::NativeSessionScope::Any,
+                source: collaboration_client::protocol::NativeSessionSource::All,
+                query: None,
                 page_size: 100,
                 cursor,
             })

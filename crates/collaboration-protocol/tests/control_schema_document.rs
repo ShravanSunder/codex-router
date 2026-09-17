@@ -7,7 +7,7 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 82);
+    assert_eq!(methods.len(), 87);
     for method in [
         "automation/configure",
         "automation/status",
@@ -57,8 +57,11 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
         "endpoint/list",
         "codex/sessionList",
         "codex/sessionInspect",
+        "codex/sessionRename",
         "codex/messageSend",
         "codex/turnInterrupt",
+        "approval/list",
+        "approval/decide",
         "addressBook/list",
         "lifecycleJournal/read",
         "lifecycleJournal/status",
@@ -163,7 +166,7 @@ fn bound_native_thread_uses_exact_offline_schema_and_closed_control_result() {
     let id = "00000000-0000-4000-8000-000000000001";
     let mut response = json!({"jsonrpc":"2.0","id":"inspect-1","result":{
         "target":{"endpoint":{"serviceId":id,"endpointId":"codex-local"},"sessionId":"thread"},
-        "generation":{"serviceEpoch":id,"generation":1},"thread":{"id":"thread"}
+        "generation":{"serviceEpoch":id,"generation":1},"effectiveAccess":null,"settingsObservation":{"kind":"unavailable","reason":"threadReadOmitsSettings"},"thread":{"id":"thread"}
     }});
     assert!(validator.is_valid(&response));
     response["result"]["thread"]["id"] = json!(42);

@@ -1,5 +1,22 @@
 # Release Notes
 
+## 0.1.28 - 2026-09-17
+
+- Require explicit model, effort, and access choices for new and forked Codex sessions; preserve those choices through resume and report source-labeled native settings evidence.
+- Add `write-restricted` and `workspace-write` access with owner-private shared scratch, explicit project work areas, inherited approval behavior, and supported exact Control-socket configuration without broad Unix-socket grants.
+- Add persisted session rename and explicitly scoped session discovery by cwd, checkout, repository, source, and query, with explicit names separated from derived titles.
+- Standardize finite collaboration CLI JSON results on `result.page.records` for lists, `result.record` for reads, and `result.record` plus `result.effects` for mutations. Remove the former top-level result fields `sessions`, `message`, and `thread`; every result now identifies its CLI and service versions.
+- Accept either `--to <SessionRef JSON>` or `--endpoint` plus `--session` across commands that target a session, resolve `self` consistently on board actor and reader flags, reject forbidden C0 bytes at text write boundaries, and expose reasoned native rejections.
+- Add repository-scoped board thread discovery across every project attached to an explicit repository path.
+- Add the unique `implementer` Thread seat and report both Orchestrator and Implementer holders on Thread and Participant reads.
+- Add Topic Watch and Topic Listen selection, including roots created after arming. Thread Listens now use fixed `short` and `long` lifetimes, a five-minute debounce with a twenty-minute cap, terminal finalization records, and Codex-only `--deliver session` background delivery with silent-mark heartbeats.
+- Supply the Router Control socket's network profile to the managed app-server itself, so Router-launched threads reach the socket with every public host allowed, exactly one Unix socket permitted, and local binding off.
+- Make `--model` and `--effort` optional on `--fork`, defaulting to the source thread's persisted values, and `--effort` optional on `--session`. A resume that asks for a different effort is allowed and reports `effortChange`, because the provider's prompt cache for that session is not reused.
+- Show each session's model and reasoning effort in the `agent-session` picker and restore them when resuming a picked session.
+- Match the stored `--repo` scope to the human catalog: a row that names an origin is decided by that origin alone, so another repository's row can no longer be selected by a matching directory name.
+- Return the entity itself as `result.record` for single reads of a message, thread, or listen. Choosing each command's envelope through explicit constructors is deferred to a follow-up.
+- Add a skill-to-CLI contract test that replays every documented invocation in the canonical collaboration skill against the built CLI.
+
 ## 0.1.27 - 2026-09-15
 
 - Add explicit Thread Participants with closed Roles (`orchestrator`, `advisor`, `reviewer`, `participant`), one open Orchestrator, sequence-based presence, and Participant listing on Thread reads.

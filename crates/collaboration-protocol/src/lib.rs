@@ -1,10 +1,19 @@
 //! Public communication contracts without process, storage or transport ownership.
 mod cli_output_contract;
 pub use cli_output_contract::{
-    ConversationEffect, ConversationRecord, ConversationStage, FiniteCommandRecord,
+    ConversationEffect, ConversationRecord, ConversationStage, EffortChange, FiniteCommandRecord,
     NativeObservationRecord, ObservationCloseReason,
 };
+mod access_contract;
+mod approval_contract;
 mod permission_diagnostic;
+pub use access_contract::{
+    RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,
+};
+pub use approval_contract::{
+    ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListParams,
+    ApprovalListResult, ApprovalRequestRecord, ApprovalState,
+};
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,
     PermissionDiagnosticStage,
@@ -28,8 +37,8 @@ pub use native_control_contract::{
     NativeSendReceipt,
 };
 pub use native_session_catalog::{
-    NativeSessionListParams, NativeSessionListResult, NativeSessionObservation,
-    NativeSessionSummary, NativeSessionView,
+    NativeSessionListParams, NativeSessionListResult, NativeSessionObservation, NativeSessionScope,
+    NativeSessionSource, NativeSessionSummary, NativeSessionView,
 };
 mod control_initialization;
 mod endpoint_inventory;
@@ -43,7 +52,7 @@ pub use protocol_type_schemas::protocol_type_schemas;
 mod native_control_contract;
 pub use native_control_contract::{
     NativeInspectParams, NativeInspectResult, NativeInterruptKind, NativeInterruptParams,
-    NativeInterruptResult,
+    NativeInterruptResult, NativeRenameParams, NativeRenameResult,
 };
 mod endpoint_identity;
 pub use backend_generation::{CodexGeneration, GenerationNumber};

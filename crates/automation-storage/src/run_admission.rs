@@ -18,7 +18,7 @@ pub enum RunAdmission<TTarget, TEndpoint> {
     },
     Admitted {
         run_id: RunId,
-        inputs: CapturedRunInputs<TTarget, TEndpoint>,
+        inputs: Box<CapturedRunInputs<TTarget, TEndpoint>>,
     },
 }
 impl AutomationStore {
@@ -83,6 +83,8 @@ impl AutomationStore {
             execution_configuration: FrozenExecutionConfiguration {
                 destination: definition.destination,
                 execution_timeout_seconds: definition.execution_timeout_seconds,
+                model: definition.model,
+                effort: definition.effort,
             },
         };
         let captured = serde_json::to_string(&inputs).map_err(|_| StorageError::InvalidRecord)?;
@@ -93,7 +95,10 @@ impl AutomationStore {
             .bind(r#"{"kind":"stateChange","before":"waiting","after":"preparing"}"#)
             .bind(now_ms).execute(&mut *transaction).await?;
         transaction.commit().await?;
-        Ok(RunAdmission::Admitted { run_id, inputs })
+        Ok(RunAdmission::Admitted {
+            run_id,
+            inputs: Box::new(inputs),
+        })
     }
 }
 

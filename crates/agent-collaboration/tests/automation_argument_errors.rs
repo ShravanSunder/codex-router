@@ -134,3 +134,306 @@ fn finite_control_groups_keep_json_for_missing_required_arguments() {
         assert_eq!(record["error"]["nextAction"], "correctRequest");
     }
 }
+
+#[test]
+fn resume_and_fork_accept_absent_choices_while_new_still_requires_them() {
+    // Arrange: resume and fork omit the choices; --new omits them too.
+    let resume = [
+        "conversation",
+        "prompt",
+        "--endpoint",
+        "codex-local",
+        "--cwd",
+        "/tmp",
+        "--session",
+        "01a0a9aa-0393-7a30-aeca-c7c77d679774",
+        "--text",
+        "hello",
+        "--json",
+    ];
+    let fresh = [
+        "conversation",
+        "prompt",
+        "--endpoint",
+        "codex-local",
+        "--cwd",
+        "/tmp",
+        "--new",
+        "--model",
+        "gpt-5.6-sol",
+        "--access",
+        "workspace-write",
+        "--text",
+        "hello",
+        "--json",
+    ];
+
+    let forked = [
+        "conversation",
+        "prompt",
+        "--endpoint",
+        "codex-local",
+        "--cwd",
+        "/tmp",
+        "--fork",
+        "01a0a9aa-0393-7a30-aeca-c7c77d679774",
+        "--access",
+        "workspace-write",
+        "--text",
+        "hello",
+        "--json",
+    ];
+
+    // Act.
+    let resumed = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(resume)
+        .output()
+        .expect("CLI executes");
+    let forked_output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(forked)
+        .output()
+        .expect("CLI executes");
+    let created = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(fresh)
+        .output()
+        .expect("CLI executes");
+
+    // Assert: resume passes validation and fails later, on discovery; --new does not.
+    let record: serde_json::Value =
+        serde_json::from_slice(&resumed.stdout).expect("JSON conversation record");
+    assert_ne!(
+        record["error"]["stage"], "validation",
+        "resume must not require --effort: {record}"
+    );
+    let fork_record: serde_json::Value =
+        serde_json::from_slice(&forked_output.stdout).expect("JSON conversation record");
+    assert_ne!(
+        fork_record["error"]["stage"], "validation",
+        "fork inherits the source thread's model and effort: {fork_record}"
+    );
+    assert_eq!(created.status.code(), Some(2));
+    let refusal: serde_json::Value =
+        serde_json::from_slice(&created.stdout).expect("JSON error record");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--effort")),
+        "{refusal}"
+    );
+}
+
+#[test]
+fn conversation_model_choice_is_validated_before_service_discovery() {
+    let cases = [
+        (
+            vec![
+                "conversation",
+                "prompt",
+                "--endpoint",
+                "codex-local",
+                "--cwd",
+                "/tmp",
+                "--new",
+                "--model",
+                "gpt-5.6-sol",
+                "--access",
+                "workspace-write",
+                "--text",
+                "hello",
+                "--json",
+            ],
+            "--effort",
+        ),
+        (
+            vec![
+                "conversation",
+                "prompt",
+                "--endpoint",
+                "codex-local",
+                "--cwd",
+                "/tmp",
+                "--new",
+                "--effort",
+                "medium",
+                "--access",
+                "workspace-write",
+                "--text",
+                "hello",
+                "--json",
+            ],
+            "--model",
+        ),
+        (
+            vec![
+                "conversation",
+                "prompt",
+                "--endpoint",
+                "codex-local",
+                "--cwd",
+                "/tmp",
+                "--session",
+                "01a0a9aa-0393-7a30-aeca-c7c77d679774",
+                "--model",
+                "gpt-5.6-sol",
+                "--effort",
+                "medium",
+                "--text",
+                "hello",
+                "--json",
+            ],
+            "model is fixed for a thread; fork to change it",
+        ),
+        (
+            vec![
+                "conversation",
+                "prompt",
+                "--endpoint",
+                "codex-local",
+                "--cwd",
+                "/tmp",
+                "--new",
+                "--model",
+                "gpt-5.6-sol",
+                "--effort",
+                "medium",
+                "--text",
+                "hello",
+                "--json",
+            ],
+            "--access",
+        ),
+        (
+            vec![
+                "conversation",
+                "prompt",
+                "--endpoint",
+                "codex-local",
+                "--cwd",
+                "/tmp",
+                "--new",
+                "--model",
+                "gpt-5.6-sol",
+                "--effort",
+                "medium",
+                "--access",
+                "full-access",
+                "--text",
+                "hello",
+                "--json",
+            ],
+            "invalid value 'full-access'",
+        ),
+        (
+            vec![
+                "conversation",
+                "prompt",
+                "--endpoint",
+                "codex-local",
+                "--cwd",
+                "/tmp",
+                "--session",
+                "01a0a9aa-0393-7a30-aeca-c7c77d679774",
+                "--effort",
+                "medium",
+                "--access",
+                "write-restricted",
+                "--text",
+                "hello",
+                "--json",
+            ],
+            "access is fixed for a thread",
+        ),
+    ];
+    for (arguments, expected) in cases {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(arguments)
+            .output()
+            .expect("CLI executes");
+        assert_eq!(output.status.code(), Some(2));
+        let record: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON error");
+        assert!(
+            record["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(expected)),
+            "{record}"
+        );
+    }
+}
+
+#[test]
+fn session_discovery_and_rename_validate_required_choices_before_connecting() {
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &[
+                "sessions",
+                "list",
+                "--endpoint",
+                "codex-local",
+                "--view",
+                "stored",
+                "--source",
+                "all",
+                "--json",
+            ],
+            "--cwd",
+        ),
+        (
+            &[
+                "sessions",
+                "list",
+                "--endpoint",
+                "codex-local",
+                "--view",
+                "stored",
+                "--any",
+                "--json",
+            ],
+            "--source",
+        ),
+        (
+            &[
+                "sessions",
+                "list",
+                "--endpoint",
+                "codex-local",
+                "--view",
+                "stored",
+                "--any",
+                "--cwd",
+                "/tmp",
+                "--source",
+                "all",
+                "--json",
+            ],
+            "exactly one",
+        ),
+        (
+            &[
+                "session",
+                "rename",
+                "--endpoint",
+                "codex-local",
+                "--session",
+                "01a0a9aa-0393-7a30-aeca-c7c77d679774",
+                "--name",
+                "",
+                "--json",
+            ],
+            "--name",
+        ),
+    ];
+    for (arguments, expected) in cases {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(*arguments)
+            .output()
+            .expect("CLI executes");
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        let record: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON error");
+        assert!(
+            record["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(expected)),
+            "{record}"
+        );
+    }
+}

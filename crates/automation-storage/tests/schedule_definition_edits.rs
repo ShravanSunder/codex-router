@@ -30,6 +30,8 @@ async fn disable_preserves_waiting_run_and_reenable_keeps_anchor()
                     cwd: "/isolated-test".into(),
                 },
                 execution_timeout_seconds: None,
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,
@@ -126,6 +128,8 @@ async fn execution_mode_cannot_change_even_before_the_first_run()
                         owned.clone()
                     },
                     execution_timeout_seconds: None,
+                    model: Some("gpt-5.6-sol".into()),
+                    effort: Some("medium".into()),
                 },
                 imported_continuity: ContinuityInput::None,
                 now_ms: 0,

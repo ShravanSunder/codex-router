@@ -130,6 +130,7 @@ fn capture_record(
         git_origin_url: Some("https://github.com/shravan-agent/codex-router.git".to_owned()),
         provider: Some(provider.to_owned()),
         model: Some("gpt-5-codex".to_owned()),
+        reasoning_effort: Some("low".to_owned()),
         preview: Some(format!("{title} preview text")),
         first_user_message: format!("{title} recent question"),
         conversation: SessionConversationPreview {

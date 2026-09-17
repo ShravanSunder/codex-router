@@ -10,6 +10,8 @@ pub(crate) struct NativePreparationInput<'a> {
     pub admission: &'a NativeAdmission,
     pub destination: &'a DestinationPreparation,
     pub instruction_text: &'a str,
+    pub model: Option<&'a str>,
+    pub effort: &'a str,
 }
 pub(crate) struct NativePreparationFailure {
     pub explanation: &'static str,
@@ -56,7 +58,7 @@ pub(crate) async fn prepare(
     let (operation, params) = match input.destination {
         DestinationPreparation::Fresh { cwd, .. } => (
             NativeOperation::StartThread,
-            json!({"cwd":cwd,"developerInstructions":input.instruction_text}),
+            json!({"cwd":cwd,"developerInstructions":input.instruction_text,"model":input.model,"config":{"model_reasoning_effort":input.effort},"allowProviderModelFallback":false,"threadSource":"user"}),
         ),
         DestinationPreparation::Fork {
             source,
@@ -64,7 +66,7 @@ pub(crate) async fn prepare(
             cwd,
         } => (
             NativeOperation::ForkThread,
-            json!({"threadId":String::from(source.session_id.clone()),"lastTurnId":String::from(through_turn_id.clone()),"cwd":cwd,"developerInstructions":input.instruction_text}),
+            json!({"threadId":String::from(source.session_id.clone()),"lastTurnId":String::from(through_turn_id.clone()),"cwd":cwd,"developerInstructions":input.instruction_text,"model":input.model,"config":{"model_reasoning_effort":input.effort},"allowProviderModelFallback":false,"threadSource":"user"}),
         ),
         DestinationPreparation::Existing { target, .. } => (
             NativeOperation::ReadThread,
@@ -158,6 +160,13 @@ pub(crate) async fn prepare(
             explanation: "Native response did not establish the requested identity/workspace; inspect retained effects before retrying.",
             effects: Box::new(effects),
             uncertain: allocation,
+        });
+    }
+    if allocation && response.get("model").and_then(Value::as_str) != input.model {
+        return Err(NativePreparationFailure {
+            explanation: "Native response did not confirm the requested model.",
+            effects: Box::new(effects),
+            uncertain: true,
         });
     }
     Ok((

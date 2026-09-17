@@ -96,6 +96,7 @@ pub(super) async fn run_client_proof(
                 .arg(second)
                 .arg("--cwd")
                 .arg(cwd)
+                .args(["--effort", "medium"])
                 .arg("--service-directory")
                 .arg(directory)
                 .args([
@@ -109,6 +110,14 @@ pub(super) async fn run_client_proof(
         )
         .await??;
         if !output.status.success() {
+            eprintln!(
+                "ACP CLI stdout: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "ACP CLI stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             return Err("ACP conversation CLI failed; no replay".into());
         }
         let mut answer = String::new();

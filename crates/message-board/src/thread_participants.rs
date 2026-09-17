@@ -9,6 +9,7 @@ pub const MAX_PARTICIPANT_NOTE_BYTES: usize = 16_384;
 #[serde(rename_all = "camelCase")]
 pub enum ParticipantRole {
     Orchestrator,
+    Implementer,
     Advisor,
     Reviewer,
     Participant,
@@ -136,8 +137,10 @@ impl Participant {
             | (Some(closed), Some(ParticipantClosedReason::Resolved), None)
                 if closed == last_seen_activity => {}
             (Some(closed), Some(ParticipantClosedReason::Replaced), Some(replacement))
-                if role == ParticipantRole::Orchestrator
-                    && closed == last_seen_activity
+                if matches!(
+                    role,
+                    ParticipantRole::Orchestrator | ParticipantRole::Implementer
+                ) && closed == last_seen_activity
                     && *replacement != identity => {}
             _ => return Err(InvalidParticipantState),
         }
@@ -162,6 +165,13 @@ impl Participant {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OrchestratorHolder {
+    pub identity: Identity,
+    pub last_seen_activity: ActivitySequence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImplementerHolder {
     pub identity: Identity,
     pub last_seen_activity: ActivitySequence,
 }

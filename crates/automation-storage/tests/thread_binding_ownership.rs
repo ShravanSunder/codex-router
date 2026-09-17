@@ -24,6 +24,8 @@ async fn exact_thread_address_has_one_schedule_owner_even_when_disabled()
         enabled: false,
         destination: ExecutionDestination::Unprepared,
         execution_timeout_seconds: None,
+        model: Some("gpt-5.6-sol".into()),
+        effort: Some("medium".into()),
     };
     let first = store
         .create_schedule(&ScheduleCreate {

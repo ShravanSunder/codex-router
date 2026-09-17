@@ -213,6 +213,12 @@ impl ScheduledRunWorker {
                     admission: &admission,
                     destination: &destination,
                     instruction_text: &text,
+                    model: inputs.execution_configuration.model.as_deref(),
+                    effort: inputs
+                        .execution_configuration
+                        .effort
+                        .as_deref()
+                        .unwrap_or_default(),
                 },
             )
             .await;
@@ -279,6 +285,11 @@ impl ScheduledRunWorker {
                 text,
                 effects: record.evidence.native,
                 configuration: &self.configuration,
+                effort: inputs
+                    .execution_configuration
+                    .effort
+                    .as_deref()
+                    .unwrap_or_default(),
             },
         )
         .await

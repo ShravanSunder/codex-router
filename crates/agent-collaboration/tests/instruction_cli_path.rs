@@ -40,7 +40,7 @@ async fn cli_creates_and_reads_instruction_through_host() -> Result<(), Box<dyn 
     }
     let record: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let id = record
-        .pointer("/result/instructionId")
+        .pointer("/result/record/instructionId")
         .and_then(serde_json::Value::as_str)
         .ok_or("missing created instruction identity")?;
     let read = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -61,7 +61,7 @@ async fn cli_creates_and_reads_instruction_through_host() -> Result<(), Box<dyn 
     }
     let record: serde_json::Value = serde_json::from_slice(&read.stdout)?;
     if record
-        .pointer("/result/text")
+        .pointer("/result/record/text")
         .and_then(serde_json::Value::as_str)
         != Some("Check repository")
     {

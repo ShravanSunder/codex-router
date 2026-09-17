@@ -46,11 +46,11 @@ async fn cli_configures_and_inspects_future_attempt_budgets()
     let value: Value = serde_json::from_slice(&status.stdout)?;
     if !status.status.success()
         || value
-            .pointer("/result/configuration/executionTimeoutSeconds")
+            .pointer("/result/record/configuration/executionTimeoutSeconds")
             .and_then(Value::as_u64)
             != Some(120)
         || value
-            .pointer("/result/configuration/summaryTimeoutSeconds")
+            .pointer("/result/record/configuration/summaryTimeoutSeconds")
             .and_then(Value::as_u64)
             != Some(30)
     {
@@ -58,7 +58,7 @@ async fn cli_configures_and_inspects_future_attempt_budgets()
     }
     let configured: Value = serde_json::from_slice(&output.stdout)?;
     let operation_id = configured
-        .get("operationId")
+        .pointer("/result/effects/operationId")
         .and_then(Value::as_str)
         .ok_or("configuration operation ID missing")?;
     let receipt = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -78,11 +78,11 @@ async fn cli_configures_and_inspects_future_attempt_budgets()
     }
     let receipt: Value = serde_json::from_slice(&receipt.stdout)?;
     if receipt
-        .pointer("/result/state/kind")
+        .pointer("/result/record/state/kind")
         .and_then(Value::as_str)
         != Some("succeeded")
         || receipt
-            .pointer("/result/state/outcome/result/executionTimeoutSeconds")
+            .pointer("/result/record/state/outcome/result/executionTimeoutSeconds")
             .and_then(Value::as_u64)
             != Some(120)
     {

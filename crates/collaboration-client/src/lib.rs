@@ -7,6 +7,25 @@ mod control_connection;
 mod endpoint_notification_state;
 pub use collaboration_protocol::{ControlInitializationResult, EndpointInventory, ProtocolVersion};
 pub use control_connection::{ClientError, ControlClient};
+static OBSERVED_SERVICE_VERSION: std::sync::OnceLock<std::sync::Mutex<String>> =
+    std::sync::OnceLock::new();
+pub(crate) fn record_service_version(version: &str) {
+    if let Ok(mut stored) = OBSERVED_SERVICE_VERSION
+        .get_or_init(|| std::sync::Mutex::new(String::new()))
+        .lock()
+    {
+        *stored = version.to_owned();
+    }
+}
+/// The service version this process actually observed, or `None` before any
+/// Control handshake. An empty string is not a version.
+#[must_use]
+pub fn observed_service_version() -> Option<String> {
+    OBSERVED_SERVICE_VERSION
+        .get()
+        .and_then(|value| value.lock().ok().map(|version| version.clone()))
+        .filter(|version| !version.is_empty())
+}
 mod service_discovery;
 
 pub use collaboration_protocol::JournalStatus;
@@ -18,7 +37,9 @@ mod observation_session;
 pub use observation_session::NativeObservation;
 
 mod acp_conversation;
-pub use acp_conversation::{AcpConversation, ConversationEnd, ConversationEvent};
+pub use acp_conversation::{
+    AcpConversation, ConversationEnd, ConversationEvent, ConversationSessionRequest,
+};
 mod acp_transport_connection;
 pub use acp_transport_connection::AcpTransportConnection;
 mod instruction_operations;

@@ -27,6 +27,8 @@ async fn export_rejects_package_that_fits_response_but_not_import()
                     enabled: false,
                     destination: agent_automation::ExecutionDestination::Unprepared,
                     execution_timeout_seconds: None,
+                    model: Some("gpt-5.6-sol".into()),
+                    effort: Some("medium".into()),
                 },
                 imported_continuity: agent_automation::ContinuityInput::None,
                 now_ms: 0,

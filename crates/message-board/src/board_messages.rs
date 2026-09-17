@@ -1,6 +1,6 @@
 use crate::{
-    BoardId, HumanId, Identity, MessageId, MessageText, OrchestratorHolder, ProjectId, ThreadState,
-    TopicId,
+    BoardId, HumanId, Identity, ImplementerHolder, MessageId, MessageText, OrchestratorHolder,
+    ProjectId, ThreadState, TopicId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -274,6 +274,7 @@ pub struct Thread {
     pub root_message_id: MessageId,
     pub state: ThreadState,
     pub orchestrator: Option<OrchestratorHolder>,
+    pub implementer: Option<ImplementerHolder>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -33,6 +33,9 @@ pub(super) async fn load_runtime_records(
             .list_sessions(NativeSessionListParams {
                 endpoint: endpoint.clone(),
                 view: NativeSessionView::Loaded,
+                scope: collaboration_client::protocol::NativeSessionScope::Any,
+                source: collaboration_client::protocol::NativeSessionSource::All,
+                query: None,
                 page_size: 100,
                 cursor,
             })
@@ -152,6 +155,7 @@ fn runtime_record(
         cwd: Some(cwd.to_owned()),
         provider: text("modelProvider"),
         model: text("model"),
+        reasoning_effort: text("reasoningEffort"),
         source: thread.get("source").and_then(|source| {
             source
                 .as_str()

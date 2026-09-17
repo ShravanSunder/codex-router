@@ -275,7 +275,7 @@ async fn board_update_preserves_history_watch_bookmark_and_thread_list_filter() 
             })
             .await
             .unwrap()
-            .message
+            .0
             .placement,
         Placement::Thread {
             root_message_id: first_root.message.message_id.clone()

@@ -30,6 +30,9 @@ fn sessions_list_json_reads_codex_state_metadata_without_prompt_leak() {
     assert_eq!(sessions[0]["session_id"], "thread-newer");
     assert_eq!(sessions[0]["provider"], "codex-router");
     assert_eq!(sessions[0]["model"], "gpt-5.4-mini");
+    // The effort a resume restores travels with the row, and is absent when unknown.
+    assert_eq!(sessions[0]["reasoning_effort"], "medium");
+    assert!(sessions[1].get("reasoning_effort").is_none());
     assert_eq!(sessions[0]["source"], "cli");
     assert_eq!(sessions[0]["thread_source"], "cli");
     assert_eq!(sessions[0]["git_branch"], "main");

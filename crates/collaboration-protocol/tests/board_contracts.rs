@@ -1,7 +1,7 @@
 use collaboration_protocol::{control_error_is_valid, control_schema_document};
 use serde_json::{Value, json};
 
-const BOARD_METHODS: [&str; 37] = [
+const BOARD_METHODS: [&str; 39] = [
     "board/discoverySearch",
     "board/messageSearch",
     "board/projectCreate",
@@ -27,6 +27,8 @@ const BOARD_METHODS: [&str; 37] = [
     "board/threadUnresolve",
     "board/threadWatch",
     "board/threadUnwatch",
+    "board/topicWatch",
+    "board/topicUnwatch",
     "board/threadList",
     "board/threadCreate",
     "board/threadJoin",
@@ -204,7 +206,7 @@ fn board_variants_and_nested_records_fail_closed() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn thread_listen_contract_is_closed_and_has_no_delivery_target()
+fn thread_listen_contract_is_closed_with_explicit_delivery_mode()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema = board_schema()?;
     let validator =
@@ -219,7 +221,8 @@ fn thread_listen_contract_is_closed_and_has_no_delivery_target()
             "selection":{"kind":"roots","rootMessageIds":[root_id]},
             "mode":{"kind":"once","maxWaitSeconds":540},
             "fromActivitySequence":null,
-            "acknowledge":false
+            "acknowledge":false,
+            "delivery":"stdout"
         }
     });
     ensure(validator.is_valid(&valid), "valid Thread Listen request")?;

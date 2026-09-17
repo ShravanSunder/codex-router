@@ -207,23 +207,37 @@ async fn exercise_scheduled_run(
                     );
                 }
             }
+            if logical_stage == 0
+                && (request.pointer("/params/model").and_then(Value::as_str) != Some("gpt-5.6-sol")
+                    || request
+                        .pointer("/params/config/model_reasoning_effort")
+                        .and_then(Value::as_str)
+                        != Some("medium"))
+            {
+                return Err("worker allocation omitted the scheduled model choice".into());
+            }
             if logical_stage == 3
                 && (request.pointer("/params/model").and_then(Value::as_str)
                     != Some("gpt-5.6-luna")
+                    || request
+                        .pointer("/params/config/model_reasoning_effort")
+                        .and_then(Value::as_str)
+                        != Some("low")
                     || request.pointer("/params/sandbox").and_then(Value::as_str)
                         != Some("read-only"))
             {
                 return Err("summary did not request read-only Luna".into());
             }
             if logical_stage == 5
-                && request.pointer("/params/threadId").and_then(Value::as_str)
+                && (request.pointer("/params/threadId").and_then(Value::as_str)
                     != Some("summary-new-thread")
+                    || request.pointer("/params/effort").and_then(Value::as_str) != Some("low"))
             {
                 return Err("summary input went to worker thread".into());
             }
             let result = match logical_stage {
                 0 => {
-                    json!({"thread":{"id":"scheduled-new-thread","cwd":"/fresh-fixture"},"cwd":"/fresh-fixture"})
+                    json!({"thread":{"id":"scheduled-new-thread","cwd":"/fresh-fixture"},"cwd":"/fresh-fixture","model":"gpt-5.6-sol"})
                 }
                 1 => json!({"thread":{"id":"scheduled-new-thread","status":{"type":"idle"}}}),
                 3 => {
@@ -231,13 +245,13 @@ async fn exercise_scheduled_run(
                 }
                 5 => json!({"turn":{"id":"summary-turn"}}),
                 6 if skip_failed_summary => {
-                    json!({"thread":{"id":"summary-new-thread","turns":[{"id":"summary-turn","status":"failed","items":[]}]}})
+                    json!({"thread":{"id":"summary-new-thread","model":"gpt-5.6-luna","reasoningEffort":"low","turns":[{"id":"summary-turn","status":"failed","items":[]}]}})
                 }
                 6 => {
-                    json!({"thread":{"id":"summary-new-thread","turns":[{"id":"summary-turn","status":"completed","items":[{"type":"agentMessage","id":"summary-output","text":"Build checks passed. Monitor the next scheduled run."}]}]}})
+                    json!({"thread":{"id":"summary-new-thread","model":"gpt-5.6-luna","reasoningEffort":"low","turns":[{"id":"summary-turn","status":"completed","items":[{"type":"agentMessage","id":"summary-output","text":"Build checks passed. Monitor the next scheduled run."}]}]}})
                 }
                 _ => {
-                    json!({"thread":{"id":"scheduled-new-thread","turns":[{"id":"scheduled-turn","status":"completed","items":[{"type":"agentMessage","id":"worker-output","text":"Build checked successfully."}]}]}})
+                    json!({"thread":{"id":"scheduled-new-thread","model":"gpt-5.6-sol","reasoningEffort":"medium","turns":[{"id":"scheduled-turn","status":"completed","items":[{"type":"agentMessage","id":"worker-output","text":"Build checked successfully."}]}]}})
                 }
             };
             let result = if resume_rejected && stage == 1 {
@@ -310,6 +324,9 @@ async fn exercise_scheduled_run(
                 if start.get("method").and_then(Value::as_str) != Some("turn/start") {
                     return Err("scheduled worker steered instead of starting".into());
                 }
+                if start.pointer("/params/effort").and_then(Value::as_str) != Some("medium") {
+                    return Err("scheduled worker turn omitted the requested effort".into());
+                }
                 socket
                     .send(Message::Text(
                         json!({"id":start.get("id"),"result":{"turn":{"id":"scheduled-turn"}}})
@@ -321,7 +338,7 @@ async fn exercise_scheduled_run(
         }
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     });
-    let schedule=client.create_schedule(serde_json::from_value::<ScheduleCreateRequest>(json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"at","at":"2026-01-01T00:00:00.000Z"},"enabled":true,"destination":{"kind":"freshEachRun","endpoint":target.endpoint,"cwd":"/fresh-fixture"},"executionTimeoutSeconds":120}}))?).await?;
+    let schedule=client.create_schedule(serde_json::from_value::<ScheduleCreateRequest>(json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"at","at":"2026-01-01T00:00:00.000Z"},"enabled":true,"destination":{"kind":"freshEachRun","endpoint":target.endpoint,"cwd":"/fresh-fixture"},"executionTimeoutSeconds":120,"model":"gpt-5.6-sol","effort":"medium"}}))?).await?;
     if frozen_inputs {
         // Admit with the original fresh-thread definition, then edit only future work.
         let now = chrono::Utc::now().timestamp_millis();

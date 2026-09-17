@@ -41,6 +41,8 @@ pub struct ScheduleDefinition<TTarget, TEndpoint> {
     pub enabled: bool,
     pub destination: ExecutionDestination<TTarget, TEndpoint>,
     pub execution_timeout_seconds: Option<u32>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -75,6 +77,8 @@ pub enum ContinuityInput<TTarget> {
 pub struct FrozenExecutionConfiguration<TTarget, TEndpoint> {
     pub destination: ExecutionDestination<TTarget, TEndpoint>,
     pub execution_timeout_seconds: Option<u32>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
