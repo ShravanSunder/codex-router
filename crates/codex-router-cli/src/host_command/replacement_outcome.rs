@@ -10,6 +10,7 @@ use codex_router_host::OperatorRequest;
 use codex_router_host::TerminalClassification;
 use codex_router_host::UpdateResult;
 
+use super::operator_client::replacement_started_without_terminal;
 use super::operator_client::send_replacement_operator_request;
 
 pub(super) const REPLACEMENT_CONVERGENCE_DEADLINE: Duration = Duration::from_secs(40);
@@ -103,12 +104,7 @@ async fn complete_restart_result_with_deadline(
             response: response.clone(),
         };
     }
-    if !matches!(
-        frames.last(),
-        Some(OperatorFrame::Progress(
-            codex_router_host::HostProgress::ReplacementStarting
-        ))
-    ) {
+    if !replacement_started_without_terminal(&frames) {
         return HostRestartResult::ReplacementFailed {
             message: "Host returned no terminal restart result or replacement progress".to_owned(),
         };

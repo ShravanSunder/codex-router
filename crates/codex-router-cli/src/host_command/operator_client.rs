@@ -68,6 +68,18 @@ where
     send_operator_request_with_connect_retry(socket, request, deadline, false, on_frame).await
 }
 
+pub(super) fn replacement_started_without_terminal(frames: &[OperatorFrame]) -> bool {
+    !frames
+        .iter()
+        .any(|frame| matches!(frame, OperatorFrame::Terminal(_)))
+        && frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(HostProgress::ReplacementStarting)
+            )
+        })
+}
+
 /// Runs the post-reexec exchange, retrying only while the replacement publishes its socket.
 pub(super) async fn send_replacement_operator_request(
     socket: &Path,
@@ -150,12 +162,7 @@ async fn send_operator_request_with_connect_retry(
         on_frame(&frame);
         frames.push(frame);
     }
-    if !terminal_seen
-        && matches!(
-            frames.last(),
-            Some(OperatorFrame::Progress(HostProgress::ReplacementStarting))
-        )
-    {
+    if replacement_started_without_terminal(&frames) {
         return Ok(frames);
     }
     if !terminal_seen {
@@ -263,6 +270,47 @@ mod tests {
             frames.first(),
             Some(OperatorFrame::Progress(HostProgress::RouterReady))
         ));
+        server.await??;
+        let _ = std::fs::remove_file(&socket);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_progress_accepts_multiple_frames_before_eof()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let socket = std::env::temp_dir().join(format!(
+            "codex-router-replacement-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).await?;
+            for progress in [
+                HostProgress::ReplacementStarting,
+                HostProgress::StoppingAppServer,
+                HostProgress::StoppingRouter,
+                HostProgress::ReExecuting,
+            ] {
+                let bytes = encode_operator_frame(&OperatorFrame::Progress(progress))
+                    .map_err(std::io::Error::other)?;
+                stream.write_all(&bytes).await?;
+            }
+            Ok::<_, std::io::Error>(())
+        });
+        let frames = send_operator_request_streaming(
+            &socket,
+            OperatorRequest::RestartHost {
+                executable: std::path::PathBuf::from("/tmp/codex-router"),
+            },
+            Duration::from_secs(2),
+            |_| {},
+        )
+        .await?;
+        assert_eq!(frames.len(), 4);
+        assert!(replacement_started_without_terminal(&frames));
         server.await??;
         let _ = std::fs::remove_file(&socket);
         Ok(())
