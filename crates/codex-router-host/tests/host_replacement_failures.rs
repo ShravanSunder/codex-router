@@ -263,7 +263,15 @@ async fn signal_owns_shutdown_while_host_replacement_teardown_is_retained()
         )?;
         let restart_frames = tokio::time::timeout(Duration::from_secs(2), restart_task).await???;
         check(
-            matches!(restart_frames.as_slice(), [OperatorFrame::Progress(_)]),
+            restart_frames
+                .iter()
+                .all(|frame| matches!(frame, OperatorFrame::Progress(_)))
+                && !restart_frames.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        OperatorFrame::Progress(codex_router_host::HostProgress::ReExecuting)
+                    )
+                }),
             "signal-owned shutdown must close the restart exchange without finalizing replacement",
         )?;
         check(
