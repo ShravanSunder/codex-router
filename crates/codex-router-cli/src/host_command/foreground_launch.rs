@@ -77,9 +77,11 @@ pub(super) async fn run_foreground_host(
     // Validate the native destination before touching state or launch policy.
     tokio::fs::create_dir_all(&router_root).await?;
     if !isolated_debug {
+        let started_at = std::time::Instant::now();
         DesktopLaunchPolicyCommand::new(launchctl_executable(context)?)
             .apply()
             .await?;
+        codex_router_host::record_debug_readiness_timing("launchctlPolicy", started_at);
     }
     let inherited_marker = std::env::var_os(codex_router_host::inherited_lock_environment());
     let instance = match inherited_marker.as_deref() {
@@ -87,11 +89,18 @@ pub(super) async fn run_foreground_host(
         None => HostInstance::acquire(coordination_paths.clone()),
     }
     .map_err(codex_router_host::HostError::from)?;
+    let identity_started_at = std::time::Instant::now();
     let running_identity =
         codex_native_integration::executable_identity(&codex_paths.managed_executable()).await?;
+    codex_router_host::record_debug_readiness_timing("executableIdentity", identity_started_at);
+    let version_started_at = std::time::Instant::now();
     let running_version =
         codex_native_integration::managed_executable_version(&codex_paths.managed_executable())
             .await?;
+    codex_router_host::record_debug_readiness_timing(
+        "managedExecutableVersion",
+        version_started_at,
+    );
     let mut app_server_command = ChildCommandSpec::new(app_server_spec.executable())
         .with_arguments(app_server_spec.arguments())
         .with_output(ChildOutput::Telemetry);

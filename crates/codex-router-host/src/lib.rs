@@ -101,3 +101,4 @@ mod native_schema_cache;
 mod automation_settings_file;
 mod debug_readiness_timing;
 pub use automation_settings_file::AutomationSettingsFile;
+pub use debug_readiness_timing::record as record_debug_readiness_timing;

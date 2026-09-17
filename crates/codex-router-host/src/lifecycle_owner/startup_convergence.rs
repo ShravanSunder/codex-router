@@ -6,8 +6,12 @@ pub(super) async fn start_router(
     config: &HostConfig,
     router_command: Option<&ChildCommandSpec>,
 ) -> Result<(RouterCondition, Option<RouterChild>), HostError> {
+    let started_at = std::time::Instant::now();
     match probe_router(config.router_endpoint(), config.deadlines().router_start()).await? {
-        RouterProbeResult::Compatible => Ok((RouterCondition::ExternalReachable, None)),
+        RouterProbeResult::Compatible => {
+            crate::record_debug_readiness_timing("routerReady", started_at);
+            Ok((RouterCondition::ExternalReachable, None))
+        }
         RouterProbeResult::AuthenticationRequired => Err(HostError::RouterAuthenticationRequired),
         RouterProbeResult::Incompatible => Err(HostError::RouterIncompatible),
         RouterProbeResult::Unavailable => {
@@ -27,7 +31,10 @@ pub(super) async fn start_router(
                 }
             };
             match probe_result {
-                RouterProbeResult::Compatible => Ok((RouterCondition::OwnedReachable, Some(child))),
+                RouterProbeResult::Compatible => {
+                    crate::record_debug_readiness_timing("routerReady", started_at);
+                    Ok((RouterCondition::OwnedReachable, Some(child)))
+                }
                 RouterProbeResult::AuthenticationRequired => {
                     let _shutdown_outcome = child.shutdown().await?;
                     Err(HostError::RouterAuthenticationRequired)
@@ -72,7 +79,10 @@ pub(super) async fn start_app_server(
     config: &HostConfig,
     mut launch_plan: AppServerLaunchPlan,
 ) -> Result<(AppServerChild, AppServerReadiness), HostError> {
+    let started_at = std::time::Instant::now();
+    let spawn_started_at = std::time::Instant::now();
     let mut child = launch_plan.spawn()?;
+    crate::record_debug_readiness_timing("appServerSpawn", spawn_started_at);
     let readiness = child
         .await_readiness(
             config.app_server_socket(),
@@ -86,6 +96,7 @@ pub(super) async fn start_app_server(
             // A failed export retains raw-native access without delaying socket startup.
             launch_plan.prepare_schema().await;
             child.set_schema_export(launch_plan.prepared_schema_export());
+            crate::record_debug_readiness_timing("appServerSpawnAndReady", started_at);
             Ok((child, readiness))
         }
         Err(readiness_error) => {
