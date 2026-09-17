@@ -47,7 +47,7 @@ codex-router sessions ── launches interactive Codex with the native remote
 
 The operator socket is not a Codex protocol endpoint and is not in the client
 data path. It exists only so `host restart`, `host update`, `host status`, and
-`host restart-router` are serialized by the runtime that owns the child
+`host router restart` are serialized by the runtime that owns the child
 handles. No host command discovers and signals an arbitrary PID.
 
 The crate dependency direction is deliberately one-way:
@@ -496,7 +496,7 @@ contains no account, quota, credential, or session data. V1 accepts an external
 router only when identity and revision match and model-route authentication is
 disabled, matching the app-server's configured tokenless router projection.
 
-`restart-router` is valid only for a host-owned router child. For an external
+`host router restart` is valid only for a host-owned router child. For an external
 router it returns `not owned` with a recovery instruction. This preserves the
 repository rule against replacing a production router based only on endpoint
 or PID observations.
@@ -927,7 +927,7 @@ compatible external router is never signalled. Each stage is skipped when its
 child is absent, and no later stage can reactivate a child after stop intent is
 latched.
 
-The router child has a smaller repository-owned stop boundary. `restart-router`
+The router child has a smaller repository-owned stop boundary. `host router restart`
 signals only the retained child with `SIGTERM` and waits up to 10 seconds for
 that exact child to exit. A timeout leaves the child classified as owned and
 still running and launches no replacement. A clean exit starts the current
@@ -1061,9 +1061,9 @@ when either identity cannot be resolved. This comparison is derived and
 short-lived: it does not mutate lifecycle state, retain identity history, or
 create background version polling.
 
-`restart-router` changes only router condition. For an external router it
+`host router restart` changes only router condition. For an external router it
 returns `not owned`. For an owned child it serializes through
-`mutating(restart-router, ...)`, stops/replaces that retained child, and ends in
+`mutating(host router restart, ...)`, stops/replaces that retained child, and ends in
 `owned-running` or `owned-unavailable`; the app-server child and its automatic
 recovery budget remain unchanged.
 
@@ -1392,7 +1392,7 @@ The pre-Shared-Host baseline has no router-owned router-restart predecessor for
 this accepted current-HEAD path.
 
 ```text
-codex-router host restart-router
+codex-router host router restart
   → Operator Client sends typed request over operator socket
   → Lifecycle Owner Task serializes mutation
   → Explicit Router Restart asks Owned Router Child for retained ownership
@@ -1468,7 +1468,7 @@ app-server exit event(child identity)
 - **External router:** reuse its endpoint but never restart it; explicit router
   restart returns not-owned.
 - **Router child exits:** mark the host unavailable and require explicit
-  `restart-router`; app-server automatic-recovery budget is unaffected.
+  `host router restart`; app-server automatic-recovery budget is unaffected.
 - **First steady-state unexpected app-server exit:** consume the in-memory
   budget and make one new launch attempt after the socket is no longer owned
   by the exited child.

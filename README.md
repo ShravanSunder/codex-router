@@ -84,7 +84,7 @@ cargo run -p codex-router-cli -- host status
 cargo run -p codex-router-cli -- host restart
 cargo run -p codex-router-cli -- host app-server restart
 cargo run -p codex-router-cli -- host app-server update
-cargo run -p codex-router-cli -- host restart-router
+cargo run -p codex-router-cli -- host router restart
 ```
 
 `host restart` replaces the whole Host with the installed CLI issuing the

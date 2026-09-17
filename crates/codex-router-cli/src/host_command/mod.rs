@@ -34,7 +34,10 @@ pub(crate) enum HostAction {
     /// Replace the whole Host with this installed CLI and wait for readiness.
     Restart,
     /// Restart the router child when owned by this Host.
-    RestartRouter,
+    Router {
+        #[command(subcommand)]
+        action: RouterAction,
+    },
     /// Restart or update the managed Codex app-server.
     AppServer {
         #[command(subcommand)]
@@ -48,6 +51,12 @@ pub(crate) enum AppServerAction {
     Restart,
     /// Update managed Codex and activate it if changed.
     Update,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Subcommand)]
+pub(crate) enum RouterAction {
+    /// Restart the router child when owned by this Host.
+    Restart,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,7 +156,9 @@ pub(crate) async fn run_host_command<W: Write>(
         HostAction::Restart => OperatorRequest::RestartHost {
             executable: std::env::current_exe()?,
         },
-        HostAction::RestartRouter => OperatorRequest::RestartRouter,
+        HostAction::Router {
+            action: RouterAction::Restart,
+        } => OperatorRequest::RestartRouter,
         HostAction::AppServer {
             action: AppServerAction::Restart,
         } => OperatorRequest::RestartAppServer,
@@ -200,7 +211,9 @@ const fn operator_request_deadline(action: HostAction) -> Duration {
         HostAction::AppServer {
             action: AppServerAction::Restart,
         } => APP_SERVER_RESTART_DEADLINE,
-        HostAction::RestartRouter => ROUTER_RESTART_DEADLINE,
+        HostAction::Router {
+            action: RouterAction::Restart,
+        } => ROUTER_RESTART_DEADLINE,
         HostAction::AppServer {
             action: AppServerAction::Update,
         } => UPDATE_REQUEST_DEADLINE,

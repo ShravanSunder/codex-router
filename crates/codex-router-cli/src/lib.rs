@@ -557,7 +557,7 @@ commands:
   host restart                   Replace the whole Host with this installed CLI
   host app-server restart        Restart managed Codex without updating it
   host app-server update         Update managed Codex and activate it if changed
-  host restart-router            Restart the router when host-owned
+  host router restart            Restart the router when host-owned
   doctor                        Diagnose local router setup
   profile print                 Print the Codex profile snippet
 
