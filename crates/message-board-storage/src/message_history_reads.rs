@@ -34,7 +34,7 @@ impl BoardStore {
         let mut transaction = self.connection.begin().await.map_err(storage_error)?;
         let message = load_message(&mut transaction, &request.message_id).await?;
         transaction.commit().await.map_err(storage_error)?;
-        Ok(MessageShowResult { message })
+        Ok(MessageShowResult(message))
     }
 
     pub async fn list_messages(

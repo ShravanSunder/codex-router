@@ -33,7 +33,10 @@ contract!(MessagePostResult {
 contract!(MessageShowRequest {
     message_id: MessageId
 });
-contract!(MessageShowResult { message: Message });
+/// A single read returns the message itself as the record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct MessageShowResult(pub Message);
 contract!(MessageListRequest {
     scope: MessageListScope,
     selection: MessageSelection,
@@ -42,7 +45,15 @@ contract!(MessageListRequest {
 contract!(MessageListResult { page: MessagePage });
 
 contract!(ThreadShowRequest { root_message_id: MessageId, reader: Option<Identity> });
-contract!(ThreadShowResult { thread: Thread, watch_status: Option<WatchStatus> });
+/// A single read returns the thread itself as the record, carrying the reader's
+/// watch status alongside the thread's own fields.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadShowResult {
+    #[serde(flatten)]
+    pub thread: Thread,
+    pub watch_status: Option<WatchStatus>,
+}
 contract!(ThreadResolveRequest { root_message_id: MessageId, actor: Identity, acting_for: Option<ActingForIdentity> });
 contract!(ThreadResolveResult { thread: Thread, activity_sequence: Option<ActivitySequence>, outcome: String });
 contract!(ThreadUnresolveRequest { root_message_id: MessageId, actor: Identity, acting_for: Option<ActingForIdentity> });

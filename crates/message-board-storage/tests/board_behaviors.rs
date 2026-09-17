@@ -641,12 +641,8 @@ async fn a_stored_control_character_reads_back_escaped_instead_of_raw() {
         .unwrap();
 
     // Assert: the reader sees an escape, and the row still parses as JSON text.
-    assert_eq!(read.message.text.as_str(), "before\\u0007after");
-    assert!(
-        serde_json::to_string(&read.message)
-            .unwrap()
-            .contains("before")
-    );
+    assert_eq!(read.0.text.as_str(), "before\\u0007after");
+    assert!(serde_json::to_string(&read.0).unwrap().contains("before"));
     store.close().await.unwrap();
     std::fs::remove_file(path).unwrap();
 }

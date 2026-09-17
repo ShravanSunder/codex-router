@@ -65,7 +65,7 @@ pub(crate) async fn dispatch(
                 .thread_listens
                 .show(&request.listen_id)
                 .await
-                .map(|listen| serde_json::to_value(ThreadListenShowResult { listen }))
+                .map(|listen| serde_json::to_value(ThreadListenShowResult(listen)))
         }
         "board/threadListenCancel" => {
             let request = match serde_json::from_value::<ThreadListenCancelRequest>(params) {

@@ -226,11 +226,10 @@ pub struct ThreadListenShowRequest {
     pub listen_id: ListenId,
 }
 
+/// A single read returns the listen snapshot itself as the record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ThreadListenShowResult {
-    pub listen: ThreadListenSnapshot,
-}
+#[serde(transparent)]
+pub struct ThreadListenShowResult(pub ThreadListenSnapshot);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

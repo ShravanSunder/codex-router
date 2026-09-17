@@ -27,3 +27,72 @@ fn cli_catalog_covers_closed_envelopes_and_pinned_acp_variants() {
     assert!(conversation.is_valid(&serde_json::json!({"kind":"conversationError","target":null,"stage":"connect","effect":"notDispatched","message":"Unavailable"})));
     assert!(!conversation.is_valid(&serde_json::json!({"kind":"conversationError","stage":"connect","effect":"notDispatched","message":"Unavailable"})));
 }
+
+/// One real sample per command kind, and no wrapper key left under `result`.
+#[test]
+fn published_envelopes_carry_pages_records_and_effects_without_wrapper_keys() {
+    // Arrange: the published envelope validator and one sample per kind.
+    let schemas = collaboration_protocol::protocol_type_schemas().unwrap();
+    let envelope = jsonschema::validator_for(schemas.get("FiniteCommandRecord").unwrap()).unwrap();
+    let message = serde_json::json!({
+        "messageId":"01a0a9aa-0393-7a30-aeca-c7c77d679774",
+        "boardId":"01a0a9aa-0393-7a30-aeca-c7c77d679775",
+        "topicId":"01a0a9aa-0393-7a30-aeca-c7c77d679776",
+        "text":"a finding"
+    });
+    let thread = serde_json::json!({
+        "rootMessageId":"01a0a9aa-0393-7a30-aeca-c7c77d679774",
+        "state":"open",
+        "watchStatus":{"watching":true}
+    });
+    let listen = serde_json::json!({"listenId":"01a0a9aa-0393-7a30-aeca-c7c77d679777"});
+    let samples = [
+        (
+            "list",
+            serde_json::json!({"page":{"records":[&message],"nextCursor":null}}),
+        ),
+        ("messageShow", serde_json::json!({"record":message})),
+        ("threadShow", serde_json::json!({"record":thread})),
+        ("listenShow", serde_json::json!({"record":listen})),
+        (
+            "mutation",
+            serde_json::json!({"record":{"rootMessageId":"01a0a9aa-0393-7a30-aeca-c7c77d679774"},
+                "effects":{"outcome":"joined"}}),
+        ),
+    ];
+
+    for (kind, result) in samples {
+        // Act.
+        let published = serde_json::json!({"kind":"result","cliVersion":"0.1.28","serviceVersion":"0.1.28","result":result});
+
+        // Assert: the envelope validates and names no entity wrapper.
+        assert!(envelope.is_valid(&published), "{kind} envelope");
+        for wrapper in ["message", "thread", "listen", "sessions"] {
+            assert!(
+                published.pointer(&format!("/result/{wrapper}")).is_none(),
+                "{kind}: result must not wrap its entity in {wrapper}"
+            );
+            assert!(
+                published
+                    .pointer(&format!("/result/record/{wrapper}"))
+                    .is_none(),
+                "{kind}: the record must be the entity, not a {wrapper} wrapper"
+            );
+        }
+    }
+
+    // Assert: a single read's result schema is the entity's own, with no
+    // wrapper property standing between the record and its fields.
+    let document = collaboration_protocol::control_schema_document(None).unwrap();
+    let definitions = serde_json::to_string(&document).unwrap();
+    for wrapper in [
+        r#""MessageShowResult":{"properties":{"message""#,
+        r#""ThreadShowResult":{"properties":{"thread""#,
+        r#""ThreadListenShowResult":{"properties":{"listen""#,
+    ] {
+        assert!(
+            !definitions.contains(wrapper),
+            "a single read must publish the entity, not {wrapper}"
+        );
+    }
+}

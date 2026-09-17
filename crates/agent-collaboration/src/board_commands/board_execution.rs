@@ -333,7 +333,7 @@ async fn repository_threads(
                     message_id: thread.root_message_id.clone(),
                 })
                 .await?
-                .message;
+                .0;
             let board = client
                 .board_show(BoardShowRequest {
                     board_id: root.board_id.clone(),
