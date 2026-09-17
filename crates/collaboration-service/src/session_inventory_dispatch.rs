@@ -101,6 +101,42 @@ fn runtime_scope_matches(scope: &NativeSessionScope, thread: &Value) -> bool {
         }
     }
 }
+/// Seconds between a last-updated instant and the service clock, for every row.
+fn idle_seconds_since_ms(updated_at_ms: i64) -> u64 {
+    u64::try_from(
+        chrono::Utc::now()
+            .timestamp_millis()
+            .saturating_sub(updated_at_ms)
+            / 1000,
+    )
+    .unwrap_or(0)
+}
+
+/// The native `Thread.updatedAt` is a Unix timestamp in seconds.
+fn idle_seconds_from_thread(thread: &Value) -> u64 {
+    thread
+        .get("updatedAt")
+        .and_then(Value::as_i64)
+        .map_or(0, |seconds| {
+            idle_seconds_since_ms(seconds.saturating_mul(1000))
+        })
+}
+
+/// The identifier of the turn a busy session is running, when the runtime names one.
+///
+/// `ActiveThreadStatus` in `codex_app_server_protocol.v2.schemas.json` carries only
+/// `type` and `activeFlags`, so an active thread reports no turn id today; a turn id
+/// would require loading turns, which this read-only listing must not do.
+fn active_turn_id(status: &Value) -> Option<&str> {
+    if status.get("type").and_then(Value::as_str) != Some("active") {
+        return None;
+    }
+    status
+        .get("turnId")
+        .or_else(|| status.pointer("/turn/id"))
+        .and_then(Value::as_str)
+}
+
 pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Value {
     let Ok(params) = serde_json::from_value::<NativeSessionListParams>(request.params) else {
         return invalid(request.id);
@@ -276,13 +312,7 @@ async fn stored_page(
             .and_then(chrono::DateTime::from_timestamp_millis)
             .ok_or(())?
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let idle_seconds = u64::try_from(
-            chrono::Utc::now()
-                .timestamp_millis()
-                .saturating_sub(time.ok_or(())?)
-                / 1000,
-        )
-        .unwrap_or(0);
+        let idle_seconds = idle_seconds_since_ms(time.ok_or(())?);
         let session = json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title.unwrap_or_default(),"source":source,"gitBranch":git_branch,"workingDirectory":cwd,"observation":{"kind":"stored","updatedAt":updated},"model":model,"reasoningEffort":reasoning_effort,"idleSeconds":idle_seconds});
         let row_bytes = serde_json::to_vec(&session)
             .map_err(|_| ())?
@@ -383,7 +413,7 @@ async fn runtime_page(
         {
             continue;
         }
-        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title,"source":source,"gitBranch":thread.pointer("/gitInfo/branch").and_then(Value::as_str),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":null},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":0}));
+        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title,"source":source,"gitBranch":thread.pointer("/gitInfo/branch").and_then(Value::as_str),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":active_turn_id(status)},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":idle_seconds_from_thread(thread)}));
     }
     let next = result
         .get("nextCursor")
