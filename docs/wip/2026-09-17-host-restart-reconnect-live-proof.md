@@ -28,6 +28,41 @@ hit the local-network policy; the approved isolated launch then reached:
 listening: 127.0.0.1:18787
 ```
 
+Three-restart timing run (2026-09-17, isolated debug Host, port 18787):
+
+- Restart 1 CLI wall time: 6.710 s; `re-executing Host`: 4.60 s.
+- Restart 2 CLI wall time: 6.599 s; `re-executing Host`: 4.55 s.
+- Restart 3 CLI wall time: 6.675 s; `re-executing Host`: 4.57 s.
+
+Representative restart 1 Host timeline, with new-image process start at
+`22:22:40.324331Z` as offset zero:
+
+```text
+00.000  profile/spec projection complete
+00.000  router-root preparation complete
+00.001  singleton acquired
+00.415  executable identity complete
+00.424  managed executable version complete
+00.424  app-server launch plan built
+00.425  app-server spawn issued
+00.921  router ready
+01.612  app-server socket/native readiness complete
+01.737  public readiness observation began
+02.135  public schema verified
+03.818  public validators resolved
+03.818  public generation published; AwaitHostStart can converge
+```
+
+The old CLI began restart 1 at `22:22:37.300Z` and completed at
+`22:22:44.300Z`. Approximately 3.0 s therefore elapsed between the old
+Host's `ReExecuting` phase and the new image's first timing record. The
+app-server socket was ready about 1.2 s after new-image start, well before the
+CLI completed the re-exec observation. The unexplained time is in the old
+Host's pre-exec handoff (telemetry flush plus socket/lock transition), not
+router readiness, app-server spawn, CLI retry cadence, or presenter phase
+closure. Telemetry initialization is not separately timestamped, so no finer
+sub-attribution is claimed.
+
 No production process, port `8787`, or `~/.codex-router` state was modified.
 These are verbatim non-TTY captures from the isolated debug Host. The
 installed/production launchctl policy path was not exercised.
