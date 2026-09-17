@@ -155,6 +155,7 @@ fn runtime_record(
         cwd: Some(cwd.to_owned()),
         provider: text("modelProvider"),
         model: text("model"),
+        reasoning_effort: text("reasoningEffort"),
         source: thread.get("source").and_then(|source| {
             source
                 .as_str()

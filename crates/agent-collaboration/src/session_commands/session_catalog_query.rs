@@ -11,6 +11,9 @@ use collaboration_client::session_catalog::{
 };
 use std::path::PathBuf;
 
+/// A session-id search is a substring match, so read a few rows and keep the exact one.
+const SESSION_ID_LOOKUP_LIMIT: usize = 8;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SessionRecordQuery {
     root: SessionCatalogRoot,
@@ -32,6 +35,19 @@ impl SessionRecordQuery {
             last: command.last,
             limit: command.limit,
             search: String::new(),
+        }
+    }
+
+    /// Query that isolates one stored record by its session id.
+    pub(super) fn for_session_id(session_id: &str) -> Self {
+        Self {
+            root: SessionCatalogRoot::Any,
+            provider: SessionCatalogProvider::Any,
+            source: SessionCatalogSource::All,
+            sort: SessionCatalogSort::Updated,
+            last: false,
+            limit: SESSION_ID_LOOKUP_LIMIT,
+            search: format!("id:{session_id}"),
         }
     }
 

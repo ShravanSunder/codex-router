@@ -94,7 +94,8 @@ pub(super) struct CodexStateThreadFixture {
     pub(super) id: String,
     pub(super) cwd: PathBuf,
     pub(super) provider: String,
-    pub(super) model: String,
+    pub(super) model: Option<String>,
+    pub(super) reasoning_effort: Option<String>,
     pub(super) source: String,
     pub(super) thread_source: Option<String>,
     pub(super) git_branch: String,
@@ -120,7 +121,8 @@ impl CodexStateThreadFixture {
             id: id.to_owned(),
             cwd: cwd.to_path_buf(),
             provider: provider.to_owned(),
-            model: "gpt-5.4-mini".to_owned(),
+            model: Some("gpt-5.4-mini".to_owned()),
+            reasoning_effort: None,
             source: source.to_owned(),
             thread_source: Some(thread_source.to_owned()),
             git_branch: git_branch.to_owned(),
@@ -135,6 +137,16 @@ impl CodexStateThreadFixture {
 
     pub(super) fn with_thread_source(mut self, thread_source: Option<&str>) -> Self {
         self.thread_source = thread_source.map(str::to_owned);
+        self
+    }
+
+    pub(super) fn with_reasoning_effort(mut self, reasoning_effort: &str) -> Self {
+        self.reasoning_effort = Some(reasoning_effort.to_owned());
+        self
+    }
+
+    pub(super) fn with_model(mut self, model: Option<&str>) -> Self {
+        self.model = model.map(str::to_owned);
         self
     }
 
@@ -166,8 +178,10 @@ pub(super) struct FakeSessionsCommandRunner {
     pub(super) new_codex_args: Vec<Vec<OsString>>,
     pub(super) resumed_session_ids: Vec<String>,
     pub(super) resume_codex_args: Vec<Vec<OsString>>,
+    pub(super) resume_model_choices: Vec<codex_native_integration::ResumeModelChoice>,
     pub(super) forked_session_ids: Vec<String>,
     pub(super) fork_codex_args: Vec<Vec<OsString>>,
+    pub(super) fork_model_choices: Vec<codex_native_integration::ResumeModelChoice>,
 }
 
 impl crate::sessions::SessionsCommandRunner for FakeSessionsCommandRunner {
@@ -183,9 +197,11 @@ impl crate::sessions::SessionsCommandRunner for FakeSessionsCommandRunner {
         &mut self,
         codex_args: &[OsString],
         session_id: &str,
+        model_choice: &codex_native_integration::ResumeModelChoice,
     ) -> Result<(), crate::sessions::SessionsCommandError> {
         self.resume_codex_args.push(codex_args.to_vec());
         self.resumed_session_ids.push(session_id.to_owned());
+        self.resume_model_choices.push(model_choice.clone());
         Ok(())
     }
 
@@ -193,9 +209,11 @@ impl crate::sessions::SessionsCommandRunner for FakeSessionsCommandRunner {
         &mut self,
         codex_args: &[OsString],
         session_id: &str,
+        model_choice: &codex_native_integration::ResumeModelChoice,
     ) -> Result<(), crate::sessions::SessionsCommandError> {
         self.fork_codex_args.push(codex_args.to_vec());
         self.forked_session_ids.push(session_id.to_owned());
+        self.fork_model_choices.push(model_choice.clone());
         Ok(())
     }
 }
@@ -424,7 +442,7 @@ pub(super) fn create_codex_state_db_with_thread_rows(
                 ) VALUES (
                     ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL, 0, 1,
                     0, NULL, NULL, ?, ?, NULL,
-                    ?, NULL, NULL, NULL, ?, NULL, NULL,
+                    ?, NULL, NULL, NULL, ?, ?, NULL,
                     ?, ?, ?, ?, NULL, ?
                 )
                 "#,
@@ -439,6 +457,7 @@ pub(super) fn create_codex_state_db_with_thread_rows(
                 .bind(&row.git_origin_url)
                 .bind(row.first_user_message.as_deref().unwrap_or(prompt_canary))
                 .bind(&row.model)
+                .bind(&row.reasoning_effort)
                 .bind(row.recency_at_ms - 100)
                 .bind(row.recency_at_ms)
                 .bind(&row.thread_source)

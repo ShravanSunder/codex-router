@@ -125,6 +125,7 @@ pub async fn load_stored_sessions(
                 cwd: row.get("cwd"),
                 provider: row.get("model_provider"),
                 model: row.get("model"),
+                reasoning_effort: row.get("reasoning_effort"),
                 source: row.get("source"),
                 thread_source: row.get("thread_source"),
                 git_branch: row.get("git_branch"),

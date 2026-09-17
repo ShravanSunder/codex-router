@@ -67,6 +67,7 @@ impl SessionsLaunchTarget {
         &self,
         codex_args: &[OsString],
         session_id: &str,
+        model_choice: &codex_native_integration::ResumeModelChoice,
     ) -> codex_native_integration::SessionLaunch {
         match self {
             Self::Hosted {
@@ -78,12 +79,14 @@ impl SessionsLaunchTarget {
                 invoking_cwd,
                 codex_args,
                 session_id,
+                model_choice,
             ),
             Self::Local { invoking_cwd, .. } => {
                 codex_native_integration::SessionLaunch::resume_local(
                     invoking_cwd,
                     codex_args,
                     session_id,
+                    model_choice,
                 )
             }
         }
@@ -94,6 +97,7 @@ impl SessionsLaunchTarget {
         &self,
         codex_args: &[OsString],
         session_id: &str,
+        model_choice: &codex_native_integration::ResumeModelChoice,
     ) -> codex_native_integration::SessionLaunch {
         match self {
             Self::Hosted {
@@ -105,12 +109,14 @@ impl SessionsLaunchTarget {
                 invoking_cwd,
                 codex_args,
                 session_id,
+                model_choice,
             ),
             Self::Local { invoking_cwd, .. } => {
                 codex_native_integration::SessionLaunch::fork_local(
                     invoking_cwd,
                     codex_args,
                     session_id,
+                    model_choice,
                 )
             }
         }
