@@ -192,11 +192,24 @@ pub(crate) async fn run_host_command<W: Write + Send>(
             action: AppServerAction::Update
         }
     ) {
-        let result = replacement_outcome::complete_update_result(&coordination_paths, frames).await;
+        let result = replacement_outcome::complete_update_result_with_progress(
+            &coordination_paths,
+            frames,
+            |frame| {
+                let _ = progress_presenter.accept(stdout, frame);
+            },
+        )
+        .await;
         crate::presentation::host::render_update_result(stdout, &result)?;
     } else if command.action() == HostAction::Restart {
-        let result =
-            replacement_outcome::complete_restart_result(&coordination_paths, frames).await;
+        let result = replacement_outcome::complete_restart_result_with_progress(
+            &coordination_paths,
+            frames,
+            |frame| {
+                let _ = progress_presenter.accept(stdout, frame);
+            },
+        )
+        .await;
         crate::presentation::host::render_restart_result(stdout, &result)?;
         if let Some(message) = result.failure_message() {
             return Err(HostCommandError::RestartFailed(message.to_owned()));

@@ -89,6 +89,18 @@ pub(super) async fn send_replacement_operator_request(
     send_operator_request_with_connect_retry(socket, request, deadline, true, |_| {}).await
 }
 
+pub(super) async fn send_replacement_operator_request_streaming<F>(
+    socket: &Path,
+    request: OperatorRequest,
+    deadline: Duration,
+    on_frame: F,
+) -> Result<Vec<OperatorFrame>, OperatorClientError>
+where
+    F: FnMut(&OperatorFrame),
+{
+    send_operator_request_with_connect_retry(socket, request, deadline, true, on_frame).await
+}
+
 async fn send_operator_request_with_connect_retry(
     socket: &Path,
     request: OperatorRequest,
