@@ -145,12 +145,21 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     .env("CODEX_ROUTER_COMPILED_CLI_APP_CHILD", "1")
     .env("CODEX_ROUTER_COMPILED_CLI_PROCESS_LOG", &process_log)
     .env("CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES", "1")
+    .env("CODEX_ROUTER_DEBUG_READINESS_TIMING", "1")
     .stdout(Stdio::null())
     .stderr(Stdio::from(std::fs::File::create(&host_stderr)?));
     let mut host = host.spawn()?;
     // Always release owned children, including when an assertion below fails.
     let proof = async {
         wait_for_operator_socket(&mut host, &router_root.join("host.sock"), &host_stderr).await?;
+        let timing_output = std::fs::read_to_string(&host_stderr)?;
+        for stage in ["launchctlPolicy", "executableIdentity"] {
+            check(
+                timing_output.contains(stage),
+                &format!("missing debug readiness timing stage {stage}: {timing_output}"),
+            )?;
+        }
+        eprintln!("compiled_acceptance_readiness_timing={timing_output}");
         check(
             std::fs::read_to_string(&launchctl_log)?.trim()
                 == "setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1",
@@ -164,9 +173,9 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             &format!("status: {}", String::from_utf8_lossy(&status.stderr)),
         )?;
         let status_stdout = String::from_utf8(status.stdout)?;
-        check(status_stdout.contains("readiness: Ready"), &status_stdout)?;
+        check(status_stdout.contains("readiness: ready"), &status_stdout)?;
         check(
-            status_stdout.contains("remote_control: Connected"),
+            status_stdout.contains("remote_control: connected"),
             &status_stdout,
         )?;
         check(
@@ -178,11 +187,11 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             &status_stdout,
         )?;
         check(
-            status_stdout.contains("desktop_attachment: Configured"),
+            status_stdout.contains("desktop attachment: configured"),
             &status_stdout,
         )?;
         check(
-            status_stdout.contains("desktop_relaunch: required_if_running"),
+            status_stdout.contains("desktop relaunch: restart required if already running"),
             &status_stdout,
         )?;
 
@@ -197,7 +206,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             &format!("restart: {}", String::from_utf8_lossy(&restart.stderr)),
         )?;
         check(
-            String::from_utf8(restart.stdout)?.contains("result: Succeeded"),
+            String::from_utf8(restart.stdout)?.contains("result: succeeded"),
             "app-server restart did not report success",
         )?;
 
@@ -240,7 +249,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         check(restarted.status.success(), &format!("whole Host restart: {}", String::from_utf8_lossy(&restarted.stderr)))?;
         let restarted_stdout = String::from_utf8(restarted.stdout)?;
         check(restarted_stdout.contains("restart_result: host restarted using installed executable"), &restarted_stdout)?;
-        check(restarted_stdout.contains("readiness: Ready"), &restarted_stdout)?;
+        check(restarted_stdout.contains("readiness: ready"), &restarted_stdout)?;
         check(host.try_wait()?.is_none(), "original Host PID exited instead of replacing its image")?;
         verify_host_image(host_process_id, &replacement_binary)?;
         check(std::fs::metadata(&lock_path)?.ino() == lock_inode, "Host replaced its stable lock artifact")?;
