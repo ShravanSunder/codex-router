@@ -1,7 +1,10 @@
 # Release Notes
 
-## Unreleased - 2026-09-16
+## 0.1.28 - 2026-09-16
 
+- Require explicit model, effort, and access choices for new and forked Codex sessions; preserve those choices through resume and report source-labeled native settings evidence.
+- Add `write-restricted` and `workspace-write` access with owner-private shared scratch, explicit project work areas, inherited approval behavior, and supported exact Control-socket configuration without broad Unix-socket grants.
+- Add persisted session rename and explicitly scoped session discovery by cwd, checkout, repository, source, and query, with explicit names separated from derived titles.
 - Standardize finite collaboration CLI JSON results on `result.page.records` for lists, `result.record` for reads, and `result.record` plus `result.effects` for mutations. Remove the former top-level result fields `sessions`, `message`, and `thread`; every result now identifies its CLI and service versions.
 - Accept either `--to <SessionRef JSON>` or `--endpoint` plus `--session` across commands that target a session, resolve `self` consistently on board actor and reader flags, reject forbidden C0 bytes at text write boundaries, and expose reasoned native rejections.
 - Add repository-scoped board thread discovery across every project attached to an explicit repository path.
