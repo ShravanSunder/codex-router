@@ -138,14 +138,14 @@ jobs:
             exit 1
           fi
 
-          session_binary="target/release/agent-session"
+          session_binary="target/release/agent-sessions"
           if [[ "$(file "${session_binary}")" != *"Mach-O 64-bit executable arm64"* ]]; then
-            echo "agent-session binary is not Mach-O arm64" >&2
+            echo "agent-sessions binary is not Mach-O arm64" >&2
             exit 1
           fi
           codesign --verify --verbose=2 "${session_binary}"
-          if [[ "$("${session_binary}" --version)" != "agent-session ${RELEASE_VERSION}" ]]; then
-            echo "agent-session version does not match release tag" >&2
+          if [[ "$("${session_binary}" --version)" != "agent-sessions ${RELEASE_VERSION}" ]]; then
+            echo "agent-sessions version does not match release tag" >&2
             exit 1
           fi
 
@@ -155,13 +155,13 @@ jobs:
           mkdir -p "${payload_directory}"
           install -m 0755 "${release_binary}" "${payload_directory}/codex-router"
           install -m 0755 "${collaboration_binary}" "${payload_directory}/agent-collaboration"
-          install -m 0755 "${session_binary}" "${payload_directory}/agent-session"
+          install -m 0755 "${session_binary}" "${payload_directory}/agent-sessions"
           cp -R target/protocol-schemas "${payload_directory}/protocol-schemas"
           install -m 0644 docs/agent-guidance/agent-collaboration.md "${payload_directory}/agent-collaboration-guide.md"
           COPYFILE_DISABLE=1 tar \
             -C "${payload_directory}" \
             -czf "${release_directory}/${asset_name}" \
-            codex-router agent-collaboration agent-session protocol-schemas agent-collaboration-guide.md
+            codex-router agent-collaboration agent-sessions protocol-schemas agent-collaboration-guide.md
           asset_sha256="$(shasum -a 256 "${release_directory}/${asset_name}" | cut -d ' ' -f 1)"
 
           {
@@ -323,7 +323,7 @@ jobs:
             exit 1
           fi
 
-          for executable in agent-collaboration agent-session; do
+          for executable in agent-collaboration agent-sessions; do
             installed_executable="$(brew --prefix codex-router)/bin/${executable}"
             if [[ ! -x "${installed_executable}" ]]; then
               echo "Homebrew did not install ${executable}" >&2

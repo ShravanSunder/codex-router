@@ -1,5 +1,9 @@
 # Release Notes
 
+## 0.1.29 - 2026-09-17
+
+- Rename the human session picker binary from `agent-session` to `agent-sessions`; it replaces the retired standalone `agent-sessions` install and keeps every flag, including model and effort restoration on resume and fork.
+
 ## 0.1.28 - 2026-09-17
 
 - Require explicit model, effort, and access choices for new and forked Codex sessions; preserve those choices through resume and report source-labeled native settings evidence.
@@ -12,7 +16,7 @@
 - Add Topic Watch and Topic Listen selection, including roots created after arming. Thread Listens now use fixed `short` and `long` lifetimes, a five-minute debounce with a twenty-minute cap, terminal finalization records, and Codex-only `--deliver session` background delivery with silent-mark heartbeats.
 - Supply the Router Control socket's network profile to the managed app-server itself, so Router-launched threads reach the socket with every public host allowed, exactly one Unix socket permitted, and local binding off.
 - Make `--model` and `--effort` optional on `--fork`, defaulting to the source thread's persisted values, and `--effort` optional on `--session`. A resume that asks for a different effort is allowed and reports `effortChange`, because the provider's prompt cache for that session is not reused.
-- Show each session's model and reasoning effort in the `agent-session` picker and restore them when resuming a picked session.
+- Show each session's model and reasoning effort in the `agent-sessions` picker and restore them when resuming a picked session.
 - Match the stored `--repo` scope to the human catalog: a row that names an origin is decided by that origin alone, so another repository's row can no longer be selected by a matching directory name.
 - Return the entity itself as `result.record` for single reads of a message, thread, or listen. Choosing each command's envelope through explicit constructors is deferred to a follow-up.
 - Add a skill-to-CLI contract test that replays every documented invocation in the canonical collaboration skill against the built CLI.
@@ -29,7 +33,7 @@
 - Add process-owned `board thread listen` for watched or named Threads, with Once and Repeating modes, durable Delivered positions, explicit `--acknowledge` or `--no-acknowledge`, and JSON Batch sets on stdout. Once Listens require `--max-wait <duration>`.
 - Use the Control protocol's long-poll `ThreadWait` fallback because Control 1.0 has one response per request; the CLI loops that request for Repeating Listens.
 - Coalesce Activity with the fixed `THREAD_LISTEN_DEBOUNCE = 30s` window and `THREAD_LISTEN_DEBOUNCE_CAP = 120s` cap.
-- Restore `agent-session` as the singular standalone executable name for the session picker while `agent-collaboration` remains the collaboration and board CLI.
+- Restore `agent-sessions` as the singular standalone executable name for the session picker while `agent-collaboration` remains the collaboration and board CLI.
 
 ## 0.1.2
 
