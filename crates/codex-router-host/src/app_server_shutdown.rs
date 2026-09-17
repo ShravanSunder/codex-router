@@ -56,6 +56,8 @@ pub enum ShutdownOutcome {
 pub enum ShutdownAction {
     /// Send the first and only SIGTERM.
     SendTerminate,
+    /// Send the immediate second SIGTERM, requesting upstream forced cleanup.
+    SendForceTerminate,
     /// Await child exit or the next force boundary.
     Wait,
     /// Send the one SIGKILL escalation.
@@ -71,6 +73,7 @@ pub enum ShutdownAction {
 pub struct ExpectedExit {
     child_id: u32,
     term_sent: bool,
+    force_term_sent: bool,
     kill_sent: bool,
 }
 
@@ -81,6 +84,7 @@ impl ExpectedExit {
         Self {
             child_id,
             term_sent: false,
+            force_term_sent: false,
             kill_sent: false,
         }
     }
@@ -114,6 +118,10 @@ impl ExpectedExit {
             self.term_sent = true;
             return ShutdownAction::SendTerminate;
         }
+        if !self.force_term_sent {
+            self.force_term_sent = true;
+            return ShutdownAction::SendForceTerminate;
+        }
         if elapsed >= deadlines.force_after && !self.kill_sent {
             self.kill_sent = true;
             return ShutdownAction::SendKill;
@@ -137,6 +145,11 @@ impl ExpectedExit {
     #[must_use]
     pub const fn kill_sent(&self) -> bool {
         self.kill_sent
+    }
+
+    #[must_use]
+    pub const fn force_term_sent(&self) -> bool {
+        self.force_term_sent
     }
 }
 
@@ -175,6 +188,22 @@ impl AppServerChild {
         self.expected_exit = Some(expected_exit);
         if first_action != ShutdownAction::SendTerminate {
             return Err(AppServerShutdownError::InvalidInitialAction);
+        }
+        self.process.send_terminate()?;
+        // Yield once so the upstream signal handler can observe the first TERM
+        // before the force TERM is delivered; no wall-clock delay is added.
+        tokio::task::yield_now().await;
+        if self.process.try_wait()?.is_some() {
+            return Ok(ShutdownOutcome::Graceful);
+        }
+        let expected_exit = self
+            .expected_exit
+            .as_mut()
+            .ok_or(AppServerShutdownError::MissingProgress)?;
+        if expected_exit.next_action_with_deadlines(Duration::ZERO, true, deadlines)
+            != ShutdownAction::SendForceTerminate
+        {
+            return Err(AppServerShutdownError::InvalidForceTerminateAction);
         }
         self.process.send_terminate()?;
 
@@ -227,4 +256,7 @@ pub enum AppServerShutdownError {
     /// Grace expiry did not produce the SIGKILL action.
     #[error("app-server shutdown did not reach its force action")]
     InvalidForceAction,
+    /// The immediate second SIGTERM was not recorded before waiting.
+    #[error("app-server shutdown did not send its force SIGTERM")]
+    InvalidForceTerminateAction,
 }
