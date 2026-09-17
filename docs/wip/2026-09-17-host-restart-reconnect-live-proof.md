@@ -75,6 +75,25 @@ socket/public generation, not by app-server socket acceptance. The pre-exec
 telemetry flush is now outside the child-teardown-to-exec window; no additional
 safe change was made at this boundary.
 
+Final teardown-to-exec instrumentation (2026-09-17 22:33Z) recorded:
+
+```text
+preExecTelemetryDone  +5 ms from activation start
+appServerStopped      +9 ms
+reExecutingQueued     +9 ms
+reExecutingAcked      +0 ms (100 ms bound)
+operatorSocketRemoved +0 ms
+lockPrepared          +0 ms
+new-image first record 22:33:03.035058Z
+```
+
+The old app-server exit to lock preparation was approximately 0 ms after the
+9 ms teardown point; the replacement image's first instrumented record arrived
+about 371 ms later. This isolates the remaining interval to process image
+startup before `foreground_launch` timing begins (debug-build cold start and
+telemetry initialization). The app-server socket then reached native readiness
+at `+1.16 s` from the new-image timing start.
+
 No production process, port `8787`, or `~/.codex-router` state was modified.
 These are verbatim non-TTY captures from the isolated debug Host. The
 installed/production launchctl policy path was not exercised.
