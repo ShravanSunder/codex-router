@@ -165,13 +165,13 @@ pub(crate) async fn run_host_command<W: Write>(
             action: AppServerAction::Update,
         } => OperatorRequest::UpdateCodex,
     };
+    let mut progress_presenter =
+        crate::presentation::host::HostProgressPresenter::new(context.stdout_is_terminal());
     let frames = operator_client::send_operator_request_streaming(
         coordination_paths.operator_socket(),
         request,
         operator_request_deadline(command.action()),
-        |frame| {
-            let _ = crate::presentation::host::render_progress_frame(stdout, frame);
-        },
+        |frame| { let _ = progress_presenter.accept(stdout, frame); },
     )
     .await
     .map_err(|error| {

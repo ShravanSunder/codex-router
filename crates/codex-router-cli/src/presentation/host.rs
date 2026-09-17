@@ -4,9 +4,72 @@ use std::io::Write;
 use std::time::Instant;
 
 use crate::host_command::replacement_outcome::HostRestartResult;
+use codex_router_host::HostProgress;
 use codex_router_host::HostSnapshot;
 use codex_router_host::OperatorFrame;
 use codex_router_host::UpdateResult;
+
+pub(crate) struct HostProgressPresenter {
+    active: Option<(HostProgress, Instant, indicatif::ProgressBar)>,
+    tty: bool,
+}
+
+impl HostProgressPresenter {
+    pub(crate) fn new(tty: bool) -> Self {
+        Self { active: None, tty }
+    }
+
+    pub(crate) fn accept<W: Write>(
+        &mut self,
+        stdout: &mut W,
+        frame: &OperatorFrame,
+    ) -> std::io::Result<()> {
+        match frame {
+            OperatorFrame::Progress(progress) => {
+                self.finish(stdout, None)?;
+                let spinner = indicatif::ProgressBar::new_spinner();
+                spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+                spinner.set_message(progress_label(*progress).to_owned());
+                self.active = Some((*progress, Instant::now(), spinner));
+            }
+            OperatorFrame::Terminal(response) => {
+                self.finish(stdout, Some(response.classification()))?
+            }
+        }
+        Ok(())
+    }
+
+    fn finish<W: Write>(
+        &mut self,
+        stdout: &mut W,
+        terminal: Option<codex_router_host::TerminalClassification>,
+    ) -> std::io::Result<()> {
+        let Some((progress, started, spinner)) = self.active.take() else {
+            return Ok(());
+        };
+        let glyph = if progress == HostProgress::AppServerKilled {
+            "⚠"
+        } else if matches!(
+            terminal,
+            Some(
+                codex_router_host::TerminalClassification::Failed
+                    | codex_router_host::TerminalClassification::Busy
+            )
+        ) {
+            "✗"
+        } else {
+            "✓"
+        };
+        spinner.finish_and_clear();
+        let _ = self.tty;
+        writeln!(
+            stdout,
+            "{glyph} {} ({:.2?})",
+            progress_label(progress),
+            started.elapsed()
+        )
+    }
+}
 
 pub(crate) fn render_restart_result<W: Write>(
     stdout: &mut W,
@@ -22,7 +85,11 @@ pub(crate) fn render_restart_result<W: Write>(
         }
         HostRestartResult::NotRestarted { response } => {
             writeln!(stdout, "restart_result: host not restarted")?;
-            writeln!(stdout, "result: {:?}", response.classification())?;
+            writeln!(
+                stdout,
+                "result: {}",
+                classification_label(response.classification())
+            )?;
             writeln!(stdout, "message: {}", response.message())?;
             render_snapshot(stdout, response.snapshot())
         }
@@ -45,21 +112,15 @@ pub(crate) fn render_frames<W: Write>(
         match frame {
             OperatorFrame::Progress(progress) => render_progress(stdout, *progress),
             OperatorFrame::Terminal(response) => {
-                writeln!(stdout, "result: {:?}", response.classification())?;
+                writeln!(
+                    stdout,
+                    "result: {}",
+                    classification_label(response.classification())
+                )?;
                 writeln!(stdout, "message: {}", response.message())?;
                 render_snapshot(stdout, response.snapshot())
             }
         }?;
-    }
-    Ok(())
-}
-
-pub(crate) fn render_progress_frame<W: Write>(
-    stdout: &mut W,
-    frame: &OperatorFrame,
-) -> std::io::Result<()> {
-    if let OperatorFrame::Progress(progress) = frame {
-        render_progress(stdout, *progress)?;
     }
     Ok(())
 }
@@ -75,8 +136,14 @@ fn render_progress<W: Write>(
     stdout: &mut W,
     progress: codex_router_host::HostProgress,
 ) -> std::io::Result<()> {
-    let started = Instant::now();
-    let label = match progress {
+    let label = progress_label(progress);
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.finish_and_clear();
+    writeln!(stdout, "✓ {label}")
+}
+
+fn progress_label(progress: HostProgress) -> &'static str {
+    match progress {
         codex_router_host::HostProgress::ReplacementStarting => "starting Host replacement",
         codex_router_host::HostProgress::StoppingAppServer => "stopping app-server",
         codex_router_host::HostProgress::AppServerKilled => "forced app-server shutdown",
@@ -86,12 +153,7 @@ fn render_progress<W: Write>(
         codex_router_host::HostProgress::AppServerReady => "app-server ready",
         codex_router_host::HostProgress::RemoteControlReady => "Remote Control ready",
         codex_router_host::HostProgress::UpdatingAppServer => "updating app-server",
-    };
-    let spinner = indicatif::ProgressBar::new_spinner();
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-    spinner.set_message(label.to_owned());
-    spinner.finish_and_clear();
-    writeln!(stdout, "✓ {label} ({:.2?})", started.elapsed())
+    }
 }
 
 pub(crate) fn render_update_result<W: Write>(
@@ -148,8 +210,11 @@ fn render_snapshot<W: Write>(stdout: &mut W, snapshot: &HostSnapshot) -> std::io
         writeln!(stdout, "remote_server_name: unavailable")?;
         writeln!(stdout, "remote_environment_id: unavailable")?;
     }
-    writeln!(stdout, "desktop_attachment: Configured")?;
-    writeln!(stdout, "desktop_relaunch: required_if_running")?;
+    writeln!(stdout, "desktop attachment: configured")?;
+    writeln!(
+        stdout,
+        "desktop relaunch: restart required if already running"
+    )?;
     writeln!(
         stdout,
         "executable_relation: {}",
@@ -165,6 +230,19 @@ fn render_snapshot<W: Write>(stdout: &mut W, snapshot: &HostSnapshot) -> std::io
         "last_lifecycle_outcome: {}",
         outcome_label(snapshot.last_lifecycle_outcome())
     )
+}
+
+fn classification_label(classification: codex_router_host::TerminalClassification) -> &'static str {
+    match classification {
+        codex_router_host::TerminalClassification::Ready => "ready",
+        codex_router_host::TerminalClassification::LocalReadyRemoteDegraded => {
+            "local ready (Remote Control degraded)"
+        }
+        codex_router_host::TerminalClassification::Unavailable => "unavailable",
+        codex_router_host::TerminalClassification::Succeeded => "succeeded",
+        codex_router_host::TerminalClassification::Failed => "failed",
+        codex_router_host::TerminalClassification::Busy => "busy",
+    }
 }
 
 fn readiness_label(readiness: codex_router_host::HostedReadiness) -> &'static str {
