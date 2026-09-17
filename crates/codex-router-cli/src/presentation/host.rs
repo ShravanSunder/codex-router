@@ -424,6 +424,29 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn presenter_completes_delayed_phases_in_tty_and_plain_modes() -> std::io::Result<()> {
+        for tty in [false, true] {
+            let mut presenter = HostProgressPresenter::new(tty);
+            let mut output = Vec::new();
+            presenter.accept(
+                &mut output,
+                &OperatorFrame::Progress(HostProgress::RouterReady),
+            )?;
+            for _ in 0..20_000 {
+                std::hint::spin_loop();
+            }
+            presenter.accept(
+                &mut output,
+                &OperatorFrame::Progress(HostProgress::AppServerReady),
+            )?;
+            let rendered = String::from_utf8(output).map_err(std::io::Error::other)?;
+            assert!(rendered.contains("✓ router ready ("));
+            assert!(rendered.contains("router ready ("));
+        }
+        Ok(())
+    }
+
     fn ready_snapshot() -> HostSnapshot {
         HostSnapshot::new(HostSnapshotDimensions {
             phase: HostPhase::Steady,
