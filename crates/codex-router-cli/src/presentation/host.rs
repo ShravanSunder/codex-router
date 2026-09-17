@@ -401,4 +401,39 @@ mod tests {
         assert!(rendered.contains("recovery_action: codex-router host"));
         Ok(())
     }
+
+    #[test]
+    fn presenter_renders_forced_shutdown_as_warning_and_failure_as_error() -> std::io::Result<()> {
+        let mut presenter = HostProgressPresenter::new(false);
+        let mut output = Vec::new();
+        presenter.accept(
+            &mut output,
+            &OperatorFrame::Progress(HostProgress::AppServerKilled),
+        )?;
+        presenter.accept(
+            &mut output,
+            &OperatorFrame::Terminal(HostTerminalResponse::new(
+                OperatorRequest::Status,
+                TerminalClassification::Failed,
+                ready_snapshot(),
+                "failed".to_owned(),
+            )),
+        )?;
+        let rendered = String::from_utf8(output).map_err(std::io::Error::other)?;
+        assert!(rendered.contains("⚠ forced app-server shutdown"));
+        Ok(())
+    }
+
+    fn ready_snapshot() -> HostSnapshot {
+        HostSnapshot::new(HostSnapshotDimensions {
+            phase: HostPhase::Steady,
+            router: RouterCondition::ExternalReachable,
+            app_server: AppServerCondition::Absent,
+            remote_control: RemoteControlCondition::Unavailable,
+            remote_control_identity: None,
+            executable_relation: ExecutableRelation::Unknown,
+            recovery_budget: RecoveryBudget::Available,
+            last_lifecycle_outcome: None,
+        })
+    }
 }
