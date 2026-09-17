@@ -25,24 +25,7 @@ impl MessageEffects {
         json!({"jsonrpc":"2.0","id":self.id,"error":{"code":-32050,"message":"Message operation failed","data":data}})
     }
     pub fn native_rejection(&self, stage: &str, code: i64, native: Option<&Value>) -> Value {
-        let description = native
-            .map(Value::to_string)
-            .unwrap_or_default()
-            .to_lowercase();
-        let (reason, next_action) =
-            if description.contains("subagent") || description.contains("child") {
-                ("childThread", "inspectTarget")
-            } else if description.contains("busy") || description.contains("active turn") {
-                ("busy", "useDeliverySteer")
-            } else if description.contains("resume") {
-                ("notResumable", "inspectTarget")
-            } else if description.contains("permission") || code == -32001 {
-                ("permissionDenied", "requestApproval")
-            } else if code == -32601 || description.contains("unsupported") {
-                ("unsupportedCapability", "correctRequest")
-            } else {
-                ("unknown", "retryLater")
-            };
+        let (reason, next_action) = classify_native_rejection(code, native);
         let mut data = json!({"kind":"nativeRejected","stage":stage,"message":"Message operation failed",
             "reason":reason,"nextAction":next_action,"effects":{"resume":self.resume,"submission":self.submission}});
         if reason == "unknown"
@@ -54,6 +37,31 @@ impl MessageEffects {
             fields.insert("clientUserMessageId".to_owned(), json!(id));
         }
         json!({"jsonrpc":"2.0","id":self.id,"error":{"code":-32050,"message":"Message operation failed","data":data}})
+    }
+}
+
+/// The closed rejection reason set and its corrective action, shared by every
+/// native path so one refusal reads the same whichever call produced it.
+pub(crate) fn classify_native_rejection(
+    code: i64,
+    native: Option<&Value>,
+) -> (&'static str, &'static str) {
+    let description = native
+        .map(Value::to_string)
+        .unwrap_or_default()
+        .to_lowercase();
+    if description.contains("subagent") || description.contains("child") {
+        ("childThread", "inspectTarget")
+    } else if description.contains("busy") || description.contains("active turn") {
+        ("busy", "useDeliverySteer")
+    } else if description.contains("resume") {
+        ("notResumable", "inspectTarget")
+    } else if description.contains("permission") || code == -32001 {
+        ("permissionDenied", "requestApproval")
+    } else if code == -32601 || description.contains("unsupported") {
+        ("unsupportedCapability", "correctRequest")
+    } else {
+        ("unknown", "retryLater")
     }
 }
 

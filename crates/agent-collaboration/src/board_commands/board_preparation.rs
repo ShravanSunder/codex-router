@@ -233,9 +233,16 @@ pub(super) fn finalize_command(
             if let Some(listen) = &mut pending.listen {
                 listen.request.reader = actor;
             }
+            // --replace self names this session, not a human called "self".
+            if let Some(replace) = &mut pending.request.replace {
+                finalize_identity(replace, client)?;
+            }
         }
         PreparedBoardCommand::ThreadLeave(pending) => {
             pending.request.actor = finalize_actor(&pending.actor, client)?;
+            if let Some(handover) = &mut pending.request.to {
+                finalize_identity(handover, client)?;
+            }
         }
         PreparedBoardCommand::ThreadListen(pending) => {
             pending.request.reader = finalize_actor(&pending.actor, client)?;

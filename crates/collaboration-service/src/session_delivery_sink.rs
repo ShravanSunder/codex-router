@@ -34,6 +34,8 @@ impl SessionDeliverySink {
             .map(|admission| admission.generation().clone())
             .ok_or(BatchSinkFailure::Unavailable)?;
         let text = render_record(&record).map_err(|_| BatchSinkFailure::Unavailable)?;
+        // A native RPC correlation id, not a Listen identity.
+        let request_id = crate::new_service_uuid().map_err(|_| BatchSinkFailure::Unavailable)?;
         // A delivery is Router's own record; the target session did not send it.
         let message = MessageContent::Router {
             text: text.try_into().map_err(|_| BatchSinkFailure::Unavailable)?,
@@ -55,7 +57,7 @@ impl SessionDeliverySink {
             crate::native_control_dispatch::NativeControlRequest {
                 method: "codex/messageSend",
                 params: serde_json::to_value(params).map_err(|_| BatchSinkFailure::Unavailable)?,
-                id: json!(message_board::ListenId::generate().as_str()),
+                id: json!(String::from(request_id)),
                 service_id: &self.service_id,
                 backend: self.backend.as_ref(),
                 endpoints: &endpoints,

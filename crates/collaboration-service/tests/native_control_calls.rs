@@ -120,12 +120,15 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     let (client, server) =
         tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("pair: {error}"));
     let service = tokio::spawn(serve_control_connection(server, identity.clone()));
+    // The native Thread schema requires both timestamps as unix seconds.
+    let thread_updated_at = chrono::Utc::now().timestamp() - 45;
+    let thread_created_at = thread_updated_at - 600;
     let backend = tokio::spawn(async move {
         for (method, expected, result) in [
             (
                 "thread/read",
                 json!({"threadId":"proof-thread","includeTurns":false}),
-                json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}),
+                json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"},"createdAt":thread_created_at,"updatedAt":thread_updated_at,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}),
             ),
             (
                 "turn/start",
@@ -209,7 +212,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                         result.clone()
                     } else if expected_method == "thread/read" {
                         rename_read_count = rename_read_count.saturating_add(1);
-                        json!({"thread":{"id":"proof-thread","name":if method == "thread/name/set" && rename_read_count == 2 {"🔎 Review"} else {"Old name"},"cwd":"/tmp","status":{"type":"idle"},"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
+                        json!({"thread":{"id":"proof-thread","name":if method == "thread/name/set" && rename_read_count == 2 {"🔎 Review"} else {"Old name"},"cwd":"/tmp","status":{"type":"idle"},"createdAt":thread_created_at,"updatedAt":thread_updated_at,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
                     } else {
                         json!({})
                     };
@@ -300,6 +303,10 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .unwrap();
     assert_eq!(inventory.sessions.len(), 1);
     assert_eq!(inventory.sessions[0].target, target);
+    assert!(
+        (45..105).contains(&inventory.sessions[0].idle_seconds),
+        "a runtime row reports the thread's own idle time"
+    );
     assert_eq!(inventory.generation.as_ref(), Some(&generation));
     let renamed = client
         .rename_session(collaboration_protocol::NativeRenameParams {

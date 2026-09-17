@@ -11,7 +11,18 @@ use std::{
 };
 pub(crate) fn result_envelope(result: serde_json::Value) -> serde_json::Value {
     let result = normalize_result(result);
-    serde_json::json!({"kind":"result","cliVersion":env!("CARGO_PKG_VERSION"),"serviceVersion":collaboration_client::observed_service_version(),"result":result})
+    let mut envelope =
+        serde_json::json!({"kind":"result","cliVersion":env!("CARGO_PKG_VERSION"),"result":result});
+    if let (Some(fields), Some(service_version)) = (
+        envelope.as_object_mut(),
+        collaboration_client::observed_service_version(),
+    ) {
+        fields.insert(
+            "serviceVersion".to_owned(),
+            serde_json::json!(service_version),
+        );
+    }
+    envelope
 }
 fn normalize_result(result: serde_json::Value) -> serde_json::Value {
     let Some(fields) = result.as_object() else {
@@ -209,7 +220,12 @@ mod tests {
                     .as_str()
                     .is_some_and(|value| !value.is_empty())
             );
-            assert!(envelope.get("serviceVersion").is_some());
+            // Unobserved before any handshake: omitted rather than empty.
+            assert!(
+                envelope
+                    .get("serviceVersion")
+                    .is_none_or(|version| version.as_str().is_some_and(|value| !value.is_empty()))
+            );
         }
         assert_eq!(list.pointer("/result/page/records/0/id"), Some(&json!(1)));
         assert_eq!(

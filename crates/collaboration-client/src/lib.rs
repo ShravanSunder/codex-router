@@ -17,12 +17,14 @@ pub(crate) fn record_service_version(version: &str) {
         *stored = version.to_owned();
     }
 }
+/// The service version this process actually observed, or `None` before any
+/// Control handshake. An empty string is not a version.
 #[must_use]
-pub fn observed_service_version() -> String {
+pub fn observed_service_version() -> Option<String> {
     OBSERVED_SERVICE_VERSION
         .get()
         .and_then(|value| value.lock().ok().map(|version| version.clone()))
-        .unwrap_or_default()
+        .filter(|version| !version.is_empty())
 }
 mod service_discovery;
 

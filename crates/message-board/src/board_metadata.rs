@@ -15,7 +15,7 @@ pub struct TextValidationError {
 }
 
 macro_rules! bounded_text {
-    ($name:ident, $field:literal, $min:expr, $max:expr, $trim:expr) => {
+    ($name:ident, $field:literal, $min:expr, $max:expr, $trim:expr, $reject_c0:expr) => {
         #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
@@ -32,7 +32,7 @@ macro_rules! bounded_text {
                 if !($min..=$max).contains(&canonical.len()) {
                     return Err(TextValidationError { field: $field, requirement: "is outside its UTF-8 byte bound" });
                 }
-                if $field == "text" && canonical.chars().any(|character| character <= '\u{001f}' && !matches!(character, '\n' | '\t')) {
+                if $reject_c0 && canonical.chars().any(|character| character <= '\u{001f}' && !matches!(character, '\n' | '\t')) {
                     return Err(TextValidationError { field: $field, requirement: "contains a forbidden control character" });
                 }
                 Ok(Self(canonical))
@@ -43,10 +43,18 @@ macro_rules! bounded_text {
     };
 }
 
-bounded_text!(ResourceName, "name", 1, MAX_NAME_BYTES, true);
-bounded_text!(Description, "description", 0, MAX_DESCRIPTION_BYTES, false);
-bounded_text!(MessageText, "text", 1, MAX_MESSAGE_TEXT_BYTES, false);
-bounded_text!(SearchQuery, "query", 1, MAX_NAME_BYTES, true);
+// name, minimum, maximum, trims surrounding whitespace, rejects C0 controls.
+bounded_text!(ResourceName, "name", 1, MAX_NAME_BYTES, true, false);
+bounded_text!(
+    Description,
+    "description",
+    0,
+    MAX_DESCRIPTION_BYTES,
+    false,
+    false
+);
+bounded_text!(MessageText, "text", 1, MAX_MESSAGE_TEXT_BYTES, false, true);
+bounded_text!(SearchQuery, "query", 1, MAX_NAME_BYTES, true, false);
 
 #[cfg(test)]
 mod tests {
