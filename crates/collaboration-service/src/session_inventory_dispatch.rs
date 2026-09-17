@@ -50,7 +50,7 @@ fn classify_source(source: Option<&str>, thread_source: Option<&str>) -> NativeS
 /// takes. Every surface that resolves `--repo` goes through the one predicate.
 fn repository_identity_for_scope(
     scope: &NativeSessionScope,
-) -> Option<collaboration_client::session_catalog::RepositoryIdentity> {
+) -> Option<codex_native_integration::RepositoryIdentity> {
     let NativeSessionScope::Repo {
         live_roots,
         normalized_origin,
@@ -60,7 +60,7 @@ fn repository_identity_for_scope(
     else {
         return None;
     };
-    Some(collaboration_client::session_catalog::RepositoryIdentity {
+    Some(codex_native_integration::RepositoryIdentity {
         normalized_origin: normalized_origin.clone(),
         live_roots: live_roots.clone(),
         repository_basename: basename.clone(),
@@ -100,7 +100,7 @@ fn runtime_scope_matches(scope: &NativeSessionScope, thread: &Value) -> bool {
         // the catalog's canonical predicate rather than a second reading of it.
         NativeSessionScope::Repo { .. } => {
             repository_identity_for_scope(scope).is_some_and(|identity| {
-                collaboration_client::session_catalog::repository_contains_session(
+                codex_native_integration::repository_contains_session(
                     &identity,
                     thread.pointer("/gitInfo/originUrl").and_then(Value::as_str),
                     candidate,
@@ -335,10 +335,10 @@ async fn stored_page(
             query: params.query.clone(),
         };
         if let Some(identity) = &repository_identity
-            && !collaboration_client::session_catalog::repository_contains_session(
+            && !codex_native_integration::repository_contains_session(
                 identity,
                 git_origin_url.as_deref(),
-                &collaboration_client::session_catalog::normalize_path(std::path::Path::new(&cwd)),
+                &codex_native_integration::normalize_path(std::path::Path::new(&cwd)),
             )
         {
             last = Some(scope_cursor);

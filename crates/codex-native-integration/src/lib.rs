@@ -16,6 +16,7 @@ mod native_session_launch;
 mod native_state_paths;
 mod remote_control_observation;
 mod router_profile_projection;
+mod stored_repository_identity;
 
 pub use app_server_launch::AppServerCommandSpec;
 pub use desktop_launch_policy::DesktopLaunchPolicyCommand;
@@ -40,6 +41,11 @@ pub use remote_control_observation::RemoteControlObservation;
 pub use router_profile_projection::CodexRouterProfile;
 pub use router_profile_projection::RouterControlSocketError;
 pub use router_profile_projection::RouterControlSocketPath;
+pub use stored_repository_identity::{
+    RepositoryIdentity, non_empty_trimmed, normalize_git_origin_url, normalize_path,
+    normalized_paths_resolve_to_same_location, path_identity_candidates,
+    paths_resolve_to_same_location, repository_contains_session,
+};
 
 mod session_search_expression;
 pub use session_search_expression::SessionSearchDocument;
