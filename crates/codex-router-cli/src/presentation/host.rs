@@ -141,23 +141,18 @@ pub(crate) fn render_restart_result<W: Write>(
     }
 }
 
-pub(crate) fn render_frames<W: Write>(
+pub(crate) fn render_terminal_frame<W: Write>(
     stdout: &mut W,
     frames: &[OperatorFrame],
 ) -> std::io::Result<()> {
-    for frame in frames {
-        match frame {
-            OperatorFrame::Progress(progress) => render_progress(stdout, *progress),
-            OperatorFrame::Terminal(response) => {
-                writeln!(
-                    stdout,
-                    "result: {}",
-                    classification_label(response.classification())
-                )?;
-                writeln!(stdout, "message: {}", response.message())?;
-                render_snapshot(stdout, response.snapshot())
-            }
-        }?;
+    if let Some(OperatorFrame::Terminal(response)) = frames.last() {
+        writeln!(
+            stdout,
+            "result: {}",
+            classification_label(response.classification())
+        )?;
+        writeln!(stdout, "message: {}", response.message())?;
+        render_snapshot(stdout, response.snapshot())?;
     }
     Ok(())
 }
@@ -166,17 +161,9 @@ pub(crate) fn render_progress_event<W: Write>(
     stdout: &mut W,
     progress: codex_router_host::HostProgress,
 ) -> std::io::Result<()> {
-    render_progress(stdout, progress)
-}
-
-fn render_progress<W: Write>(
-    stdout: &mut W,
-    progress: codex_router_host::HostProgress,
-) -> std::io::Result<()> {
-    let label = progress_label(progress);
-    let spinner = indicatif::ProgressBar::new_spinner();
-    spinner.finish_and_clear();
-    writeln!(stdout, "✓ {label}")
+    let mut presenter = HostProgressPresenter::new(false);
+    presenter.accept(stdout, &OperatorFrame::Progress(progress))?;
+    presenter.finish_success(stdout)
 }
 
 fn progress_label(progress: HostProgress) -> &'static str {
@@ -420,7 +407,7 @@ mod tests {
         ))];
         let mut output = Vec::new();
 
-        render_frames(&mut output, &frames)?;
+        render_terminal_frame(&mut output, &frames)?;
 
         let rendered = String::from_utf8(output).map_err(std::io::Error::other)?;
         for field in [

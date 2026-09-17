@@ -215,7 +215,7 @@ pub(crate) async fn run_host_command<W: Write + Send>(
             return Err(HostCommandError::RestartFailed(message.to_owned()));
         }
     } else {
-        crate::presentation::host::render_frames(stdout, &frames)?;
+        crate::presentation::host::render_terminal_frame(stdout, &frames)?;
     }
     Ok(())
 }
