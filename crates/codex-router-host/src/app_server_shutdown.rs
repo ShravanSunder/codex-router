@@ -185,12 +185,16 @@ impl AppServerChild {
         deadlines: AppServerShutdownDeadlines,
     ) -> Result<ShutdownOutcome, AppServerShutdownError> {
         if let Some(expected_exit) = self.expected_exit.as_ref() {
+            let kill_sent = expected_exit.kill_sent();
+            let force_term_sent = expected_exit.force_term_sent();
             return match self.process.try_wait()? {
-                Some(_status) if expected_exit.kill_sent() => Ok(ShutdownOutcome::Killed),
-                Some(_status) if expected_exit.force_term_sent() => {
-                    Ok(ShutdownOutcome::ForcedDrain)
-                }
+                Some(_status) if kill_sent => Ok(ShutdownOutcome::Killed),
+                Some(_status) if force_term_sent => Ok(ShutdownOutcome::ForcedDrain),
                 Some(_status) => Ok(ShutdownOutcome::Graceful),
+                None if kill_sent => {
+                    self.process.send_group_kill()?;
+                    Ok(ShutdownOutcome::TimedOutStillRunning)
+                }
                 None => Ok(ShutdownOutcome::TimedOutStillRunning),
             };
         }
