@@ -85,7 +85,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 .unwrap_or_else(|error| panic!("JSON: {error}"));
                 assert_eq!(request["method"], method);
                 let result = if method == "thread/start" {
-                    json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work"]},"thread":{"id":"thread-a","cwd":"/work"}})
+                    json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work"}})
                 } else {
                     assert_eq!(request["params"]["input"][0]["text"], "hello");
                     assert_eq!(request["params"]["effort"], "medium");

@@ -170,7 +170,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             let result = if method == "initialize" {
                 json!({})
             } else {
-                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work"]},"thread":{"id":"created-thread","cwd":"/work","turns":[]}})
+                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"created-thread","cwd":"/work","turns":[]}})
             };
             if method != "initialize" {
                 setup_entered.send(method).await.unwrap();

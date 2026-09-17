@@ -53,7 +53,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
                     "initialize" => json!({}),
                     "turn/start" => json!({"turn":{"id":"target","status":"inProgress"}}),
                     _ => {
-                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work"]},"thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
                     }
                 };
                 let reply = if *method == "turn/interrupt" {
