@@ -221,10 +221,18 @@ impl AcpSessionBinding {
                 json!("write"),
             );
         }
-        config.insert(format!("permissions.{profile}"), json!({
-            "extends": if choice.access == RouterAccess::WriteRestricted { ":read-only" } else { ":workspace" },
-            "filesystem": filesystem
-        }));
+        config.insert(
+            format!("permissions.{profile}.extends"),
+            json!(if choice.access == RouterAccess::WriteRestricted {
+                ":read-only"
+            } else {
+                ":workspace"
+            }),
+        );
+        config.insert(
+            format!("permissions.{profile}.filesystem"),
+            Value::Object(filesystem),
+        );
         if !directories.is_empty() {
             fields.insert("runtimeWorkspaceRoots".into(), json!(directories));
         }
@@ -521,10 +529,8 @@ fn resume_parameters(session_id: &str, cwd: &Path, route: Option<&crate::Approva
         "permissions":profile,
         "config":{
             "default_permissions":profile,
-            format!("permissions.{profile}"):{
-                "extends":if route.access == RouterAccess::WriteRestricted { ":read-only" } else { ":workspace" },
-                "filesystem":filesystem
-            }
+            format!("permissions.{profile}.extends"):if route.access == RouterAccess::WriteRestricted { ":read-only" } else { ":workspace" },
+            format!("permissions.{profile}.filesystem"):filesystem
         }
     })
 }

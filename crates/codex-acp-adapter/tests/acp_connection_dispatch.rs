@@ -152,6 +152,20 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                     request["params"]["config"]["default_permissions"],
                     "router-workspace-write"
                 );
+                assert_eq!(
+                    request["params"]["config"]["permissions.router-workspace-write.extends"],
+                    ":workspace"
+                );
+                assert_eq!(
+                    request["params"]["config"]["permissions.router-workspace-write.filesystem"]
+                        [TEST_SCRATCH],
+                    "write"
+                );
+                assert!(
+                    request["params"]["config"]
+                        .get("permissions.router-workspace-write")
+                        .is_none()
+                );
             }
             let result = if method == "initialize" {
                 json!({})

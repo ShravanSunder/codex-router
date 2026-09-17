@@ -93,6 +93,20 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                 assert_eq!(request["params"]["allowProviderModelFallback"], false);
                 assert_eq!(request["params"]["threadSource"], "user");
                 assert_eq!(request["params"]["permissions"], "router-write-restricted");
+                assert_eq!(
+                    request["params"]["config"]["permissions.router-write-restricted.extends"],
+                    ":read-only"
+                );
+                assert_eq!(
+                    request["params"]["config"]["permissions.router-write-restricted.filesystem"]
+                        [TEST_SCRATCH],
+                    "write"
+                );
+                assert!(
+                    request["params"]["config"]
+                        .get("permissions.router-write-restricted")
+                        .is_none()
+                );
                 assert!(request["params"].get("sandbox").is_none());
                 assert!(request["params"].get("approvalPolicy").is_none());
                 assert!(request["params"].get("approvalsReviewer").is_none());
