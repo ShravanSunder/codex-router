@@ -34,7 +34,9 @@ pub(crate) fn activate_host_replacement(
     pre_exec_telemetry: Option<Arc<dyn crate::PreExecTelemetry>>,
 ) -> HostReplacementFuture {
     Box::pin(async move {
+        let activation_started_at = std::time::Instant::now();
         crate::lifecycle_owner::flush_pre_exec_telemetry(pre_exec_telemetry).await;
+        crate::record_debug_readiness_timing("preExecTelemetryDone", activation_started_at);
         let mut app_server_shutdown = None;
         if let Some(child) = app_server.as_mut() {
             let _ = progress
@@ -48,6 +50,7 @@ pub(crate) fn activate_host_replacement(
                 ) => {
                     app_server_shutdown = Some(outcome);
                     app_server = None;
+                    crate::record_debug_readiness_timing("appServerStopped", activation_started_at);
                 }
                 Ok(ShutdownOutcome::TimedOutStillRunning) => {
                     return HostReplacementCompletion {
@@ -74,6 +77,7 @@ pub(crate) fn activate_host_replacement(
             match child.shutdown().await {
                 Ok(RouterShutdownOutcome::Graceful) => {
                     router = None;
+                    crate::record_debug_readiness_timing("routerStopped", activation_started_at);
                 }
                 Ok(RouterShutdownOutcome::TimedOutStillRunning) | Err(_) => {
                     return HostReplacementCompletion {
@@ -88,6 +92,7 @@ pub(crate) fn activate_host_replacement(
         let _ = progress
             .send(OperatorFrame::Progress(HostProgress::ReExecuting))
             .await;
+        crate::record_debug_readiness_timing("reExecutingQueued", activation_started_at);
         HostReplacementCompletion {
             app_server,
             router,

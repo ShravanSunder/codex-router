@@ -169,13 +169,17 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
     // Do not remove the operator socket until the writer has flushed the
     // ReExecuting frame. Queue admission alone is insufficient because exec
     // tears down the writer task with any queued bytes.
+    let pre_exec_started_at = std::time::Instant::now();
     let _ = tokio::time::timeout(
         std::time::Duration::from_millis(100),
         context.active.reexecuting_ack,
     )
     .await;
+    crate::record_debug_readiness_timing("reExecutingAcked", pre_exec_started_at);
     context.instance.remove_operator_socket_for_exec()?;
+    crate::record_debug_readiness_timing("operatorSocketRemoved", pre_exec_started_at);
     context.instance.prepare_lock_for_exec()?;
+    crate::record_debug_readiness_timing("lockPrepared", pre_exec_started_at);
     let replacement_command = context.active.replacement_command.with_environment(
         crate::inherited_lock_environment(),
         crate::inherited_lock_marker(),
