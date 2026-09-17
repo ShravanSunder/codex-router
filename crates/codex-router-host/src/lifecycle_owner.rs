@@ -246,25 +246,28 @@ impl HostRuntime {
                 .map_err(HostError::Signal)?;
         let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
             .map_err(HostError::Signal)?;
-        let (router_condition, mut router_child) =
-            startup_convergence::start_router(&config, child_launch_plans.router_command.as_ref())
-                .await?;
         if let Err(endpoint_error) = require_unowned_app_server_endpoint(
             config.app_server_socket(),
             config.deadlines().endpoint_inspection(),
         )
         .await
         {
-            startup_convergence::shutdown_owned_router_after_startup_failure(&mut router_child)
-                .await?;
             return Err(HostError::AppServerEndpoint(endpoint_error));
         }
-        let (mut app_server, readiness) = match startup_convergence::start_app_server(
-            &config,
-            child_launch_plans.app_server.clone(),
-        )
-        .await
-        {
+        let (router_result, app_server_result) = tokio::join!(
+            startup_convergence::start_router(&config, child_launch_plans.router_command.as_ref()),
+            startup_convergence::start_app_server(&config, child_launch_plans.app_server.clone()),
+        );
+        let (router_condition, mut router_child) = match router_result {
+            Ok(started) => started,
+            Err(error) => {
+                if let Ok((mut app_server, _readiness)) = app_server_result {
+                    app_server.shutdown().await?;
+                }
+                return Err(error);
+            }
+        };
+        let (mut app_server, readiness) = match app_server_result {
             Ok(started) => started,
             Err(error) => {
                 startup_convergence::shutdown_owned_router_after_startup_failure(&mut router_child)

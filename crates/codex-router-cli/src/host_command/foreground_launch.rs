@@ -97,10 +97,11 @@ pub(super) async fn run_foreground_host(
     for (key, value) in app_server_spec.environment() {
         app_server_command = app_server_command.with_environment(key, value);
     }
-    let mut app_server =
+    let app_server =
         AppServerLaunchPlan::new(app_server_command, running_identity, running_version)
             .with_schema_directory(router_root.join("agent-communication"));
-    app_server.prepare_schema().await;
+    // Schema export is optional raw-native enrichment; do not delay app-server
+    // socket startup on this best-effort operation.
     let current_executable = std::env::current_exe()?;
     let otlp_endpoint = crate::telemetry::foreground_host_otlp_endpoint(
         context.env_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
