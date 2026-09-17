@@ -6,6 +6,15 @@ case that observes the `AppServerKilled` progress frame. `TimedOutStillRunning`
 resume/re-kill behavior also remains unchanged and is intentionally recorded for
 owner disposition rather than adding a new recovery path here.
 
+Re-exec timing comparison: the pre-instrumentation live sample reported
+`re-executing Host (4.62s)` to router readiness. The post-instrumentation
+compiled acceptance recorded profile/spec projection 0 ms, router-root setup
+1 ms, fixture launchctl policy 239 ms, singleton acquisition 243 ms, and
+executable identity 0 ms. The measured re-exec span remains approximately
+4.6 s; no safe reduction was claimed because the managed executable identity
+and version are required inputs to construct the app-server launch plan before
+spawn. Production launchctl timing was not exercised.
+
 The fixture-backed compiled CLI acceptance is green, including whole-Host
 replacement from a new install path. A direct isolated debug Host was then
 launched with fresh `/private/tmp` router and socket roots and port `18787`.
