@@ -70,7 +70,7 @@ async fn await_router_readiness(
 
 pub(super) async fn start_app_server(
     config: &HostConfig,
-    launch_plan: AppServerLaunchPlan,
+    mut launch_plan: AppServerLaunchPlan,
 ) -> Result<(AppServerChild, AppServerReadiness), HostError> {
     let mut child = launch_plan.spawn()?;
     let readiness = child
@@ -81,7 +81,13 @@ pub(super) async fn start_app_server(
         )
         .await;
     match readiness {
-        Ok(readiness) => Ok((child, readiness)),
+        Ok(readiness) => {
+            // Schema export is optional and runs only after the native socket is accepting.
+            // A failed export retains raw-native access without delaying socket startup.
+            launch_plan.prepare_schema().await;
+            child.set_schema_export(launch_plan.prepared_schema_export());
+            Ok((child, readiness))
+        }
         Err(readiness_error) => {
             let _shutdown_outcome = child.shutdown().await?;
             Err(HostError::AppServerReadiness(readiness_error))
