@@ -65,6 +65,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
                 request: OperatorRequest::UpdateCodex,
                 operation: HostOperation::UpdateCodex,
                 started_at: context.active.started_at,
+                reexecuting_ack: context.active.reexecuting_ack,
             });
             return;
         }
@@ -165,9 +166,14 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
             crate::HostProgress::AppServerKilled,
         );
     }
-    for _ in 0..4 {
-        tokio::task::yield_now().await;
-    }
+    // Do not remove the operator socket until the writer has flushed the
+    // ReExecuting frame. Queue admission alone is insufficient because exec
+    // tears down the writer task with any queued bytes.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        context.active.reexecuting_ack,
+    )
+    .await;
     lifecycle_convergence::flush_pre_exec_telemetry(
         context.update_inputs.pre_exec_telemetry.clone(),
     )

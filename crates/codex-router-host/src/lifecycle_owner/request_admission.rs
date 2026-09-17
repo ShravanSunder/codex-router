@@ -57,6 +57,7 @@ const fn drain_operation(
 pub(super) struct OperatorWork {
     pub(super) request: OperatorRequest,
     pub(super) response: mpsc::Sender<OperatorFrame>,
+    pub(super) reexecuting_ack: tokio::sync::oneshot::Receiver<()>,
 }
 
 pub(super) struct ActiveAppServerRestart {
@@ -77,6 +78,7 @@ pub(super) struct ActiveUpdate {
     pub(super) future: crate::codex_update_preparation::UpdateFuture,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) started_at: tokio::time::Instant,
+    pub(super) reexecuting_ack: tokio::sync::oneshot::Receiver<()>,
 }
 
 pub(super) struct ActiveHostReplacement {
@@ -86,6 +88,7 @@ pub(super) struct ActiveHostReplacement {
     pub(super) request: OperatorRequest,
     pub(super) operation: HostOperation,
     pub(super) started_at: tokio::time::Instant,
+    pub(super) reexecuting_ack: tokio::sync::oneshot::Receiver<()>,
 }
 
 pub(super) struct ActiveStatusObservation {
@@ -124,16 +127,19 @@ pub(super) fn spawn_operator_connection(
             return;
         };
         let (response_sender, mut response_receiver) = mpsc::channel(16);
+        let (reexecuting_ack_sender, reexecuting_ack_receiver) = tokio::sync::oneshot::channel();
         if operator_sender
             .send(OperatorWork {
                 request,
                 response: response_sender,
+                reexecuting_ack: reexecuting_ack_receiver,
             })
             .await
             .is_err()
         {
             return;
         }
+        let mut reexecuting_ack_sender = Some(reexecuting_ack_sender);
         while let Some(frame) = response_receiver.recv().await {
             let terminal = matches!(frame, OperatorFrame::Terminal(_));
             let write_deadline_at = tokio::time::Instant::now() + request_deadline;
@@ -146,6 +152,13 @@ pub(super) fn spawn_operator_connection(
             .is_err()
             {
                 return;
+            }
+            if matches!(
+                frame,
+                OperatorFrame::Progress(crate::HostProgress::ReExecuting)
+            ) && let Some(sender) = reexecuting_ack_sender.take()
+            {
+                let _ = sender.send(());
             }
             if terminal {
                 let _shutdown_result = crate::operator_connection::shutdown_operator_stream(
@@ -247,6 +260,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 request,
                 operation: HostOperation::RestartHost,
                 started_at: tokio::time::Instant::now(),
+                reexecuting_ack: work.reexecuting_ack,
             });
         }
         OperatorRequest::Status | OperatorRequest::AwaitHostStart => {
@@ -363,6 +377,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 ),
                 response: work.response,
                 started_at: tokio::time::Instant::now(),
+                reexecuting_ack: work.reexecuting_ack,
             });
         }
     }

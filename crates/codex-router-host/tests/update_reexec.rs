@@ -433,7 +433,15 @@ async fn host_restart_exec_failure_releases_singleton_after_settling_children()
         )
         .await?;
         check(
-            matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
+            frames
+                .iter()
+                .all(|frame| matches!(frame, OperatorFrame::Progress(_)))
+                && frames.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        OperatorFrame::Progress(codex_router_host::HostProgress::ReExecuting)
+                    )
+                }),
             "failed exec must close the old connection after replacement progress",
         )?;
         let runtime_wait = tokio::time::timeout(Duration::from_secs(20), &mut runtime).await;
