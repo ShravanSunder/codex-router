@@ -113,7 +113,7 @@ struct ClapHostCommand {
     require_debug_isolation: bool,
 }
 
-pub(crate) async fn run_host_command<W: Write>(
+pub(crate) async fn run_host_command<W: Write + Send>(
     stdout: &mut W,
     command: HostCommand,
     context: &CliContext,
@@ -146,6 +146,7 @@ pub(crate) async fn run_host_command<W: Write>(
             coordination_paths,
             context,
             telemetry,
+            stdout,
         )
         .await;
     }

@@ -42,6 +42,7 @@ pub(super) async fn run_foreground_host(
     coordination_paths: HostCoordinationPaths,
     context: &CliContext,
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
+    stdout: &mut (impl std::io::Write + Send),
 ) -> Result<(), HostCommandError> {
     let isolated_debug = cfg!(all(debug_assertions, not(test)))
         && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none();
@@ -140,7 +141,22 @@ pub(super) async fn run_foreground_host(
         update_inputs =
             update_inputs.with_pre_exec_telemetry(Arc::new(HostPreExecTelemetry(telemetry)));
     }
-    HostRuntime::run_acquired(config, child_launch_plans, update_inputs, instance).await?;
+    let mut presenter =
+        crate::presentation::host::HostProgressPresenter::new(context.stdout_is_terminal());
+    let mut emit = |progress| {
+        let _ = presenter.accept(
+            stdout,
+            &codex_router_host::OperatorFrame::Progress(progress),
+        );
+    };
+    HostRuntime::run_acquired_with_progress(
+        config,
+        child_launch_plans,
+        update_inputs,
+        instance,
+        Some(&mut emit),
+    )
+    .await?;
     Ok(())
 }
 

@@ -179,7 +179,7 @@ pub async fn run_with_io_async<W, E>(
     stderr: &mut E,
 ) -> Result<(), CliError>
 where
-    W: std::io::Write,
+    W: std::io::Write + Send,
     E: std::io::Write,
 {
     run_with_io_async_with_telemetry(args, context, stdout, stderr, None).await
@@ -193,7 +193,7 @@ async fn run_with_io_async_with_telemetry<W, E>(
     telemetry_shutdown: Option<telemetry::TelemetryShutdownHandle>,
 ) -> Result<(), CliError>
 where
-    W: std::io::Write,
+    W: std::io::Write + Send,
     E: std::io::Write,
 {
     match CliCommand::parse(args.clone())? {

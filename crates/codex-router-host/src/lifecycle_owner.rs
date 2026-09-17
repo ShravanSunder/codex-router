@@ -175,6 +175,8 @@ pub enum HostError {
 /// Foreground host composition and its single lifecycle owner task.
 pub struct HostRuntime;
 
+pub type HostProgressCallback<'a> = &'a mut (dyn FnMut(crate::HostProgress) + Send);
+
 impl HostRuntime {
     /// Acquires authority, converges startup, then owns all retained handles.
     pub async fn run(
@@ -190,6 +192,7 @@ impl HostRuntime {
             update_inputs,
             instance,
             startup_started_at,
+            None,
         )
         .await
     }
@@ -210,6 +213,7 @@ impl HostRuntime {
             update_inputs,
             instance,
             startup_started_at,
+            None,
         )
         .await
     }
@@ -221,12 +225,24 @@ impl HostRuntime {
         update_inputs: ManagedUpdateInputs,
         instance: HostInstance,
     ) -> Result<HostExit, HostError> {
+        Self::run_acquired_with_progress(config, child_launch_plans, update_inputs, instance, None)
+            .await
+    }
+
+    pub async fn run_acquired_with_progress(
+        config: HostConfig,
+        child_launch_plans: ManagedChildLaunchPlans,
+        update_inputs: ManagedUpdateInputs,
+        instance: HostInstance,
+        progress: Option<HostProgressCallback<'_>>,
+    ) -> Result<HostExit, HostError> {
         Self::run_owned(
             config,
             child_launch_plans,
             update_inputs,
             instance,
             tokio::time::Instant::now(),
+            progress,
         )
         .await
     }
@@ -237,6 +253,7 @@ impl HostRuntime {
         update_inputs: ManagedUpdateInputs,
         instance: HostInstance,
         startup_started_at: tokio::time::Instant,
+        progress: Option<HostProgressCallback<'_>>,
     ) -> Result<HostExit, HostError> {
         let mut interrupt =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -275,6 +292,13 @@ impl HostRuntime {
                 return Err(error);
             }
         };
+        if let Some(emit) = progress {
+            emit(crate::HostProgress::RouterReady);
+            emit(crate::HostProgress::AppServerReady);
+            if matches!(readiness, crate::AppServerReadiness::Ready { .. }) {
+                emit(crate::HostProgress::RemoteControlReady);
+            }
+        }
         let mut collaboration = match collaboration_lifecycle::CollaborationLifecycle::start(
             &config,
             &app_server,
