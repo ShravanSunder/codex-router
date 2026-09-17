@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::CodexPaths;
 use crate::CodexRouterProfile;
+use crate::RouterControlSocketPath;
 
 /// Exact executable and arguments for one managed app-server child.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,10 +20,15 @@ pub struct AppServerCommandSpec {
 impl AppServerCommandSpec {
     /// Builds the native app-server command from the shared router projection.
     #[must_use]
-    pub fn new(paths: &CodexPaths, profile: &CodexRouterProfile, app_server_socket: &Path) -> Self {
+    pub fn new(
+        paths: &CodexPaths,
+        profile: &CodexRouterProfile,
+        control_socket: &RouterControlSocketPath,
+        app_server_socket: &Path,
+    ) -> Self {
         Self {
             executable: paths.managed_executable(),
-            root_overrides: profile.root_overrides(),
+            root_overrides: profile.root_overrides(control_socket),
             app_server_socket: app_server_socket.to_owned(),
             remote_control: true,
         }

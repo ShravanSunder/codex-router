@@ -35,6 +35,8 @@ pub use native_session_launch::SessionProfile;
 pub use native_state_paths::CodexPaths;
 pub use remote_control_observation::RemoteControlObservation;
 pub use router_profile_projection::CodexRouterProfile;
+pub use router_profile_projection::RouterControlSocketError;
+pub use router_profile_projection::RouterControlSocketPath;
 
 mod session_search_expression;
 pub use session_search_expression::SessionSearchDocument;

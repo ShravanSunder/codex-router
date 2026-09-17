@@ -11,6 +11,7 @@ use codex_native_integration::AppServerCommandSpec;
 use codex_native_integration::CodexPaths;
 use codex_native_integration::CodexRouterProfile;
 use codex_native_integration::DesktopLaunchPolicyCommand;
+use codex_native_integration::RouterControlSocketPath;
 use codex_router_host::AppServerLaunchPlan;
 use codex_router_host::ChildCommandSpec;
 use codex_router_host::ChildOutput;
@@ -58,8 +59,12 @@ pub(super) async fn run_foreground_host(
     let codex_paths = CodexPaths::from_codex_home(codex_home.clone());
     let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
         .map_err(|message| HostCommandError::AppServerSocket(message.to_owned()))?;
+    let collaboration_directory = router_root.join("agent-communication");
+    let control_socket =
+        RouterControlSocketPath::in_collaboration_directory(&collaboration_directory)?;
     let profile = CodexRouterProfile::new(port);
-    let app_server_spec = AppServerCommandSpec::new(&codex_paths, &profile, &app_server_socket);
+    let app_server_spec =
+        AppServerCommandSpec::new(&codex_paths, &profile, &control_socket, &app_server_socket);
     let app_server_spec = if isolated_debug {
         app_server_spec.with_debug_profile(&codex_native_integration::DebugCodexProfile::read(
             &codex_home,
@@ -97,7 +102,6 @@ pub(super) async fn run_foreground_host(
             .with_schema_directory(router_root.join("agent-communication"));
     app_server.prepare_schema().await;
     let current_executable = std::env::current_exe()?;
-    let collaboration_directory = router_root.join("agent-communication");
     let otlp_endpoint = crate::telemetry::foreground_host_otlp_endpoint(
         context.env_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
     );

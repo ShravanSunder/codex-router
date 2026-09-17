@@ -1,5 +1,6 @@
 use codex_native_integration::{
     AppServerCommandSpec, CodexPaths, CodexRouterProfile, DebugCodexProfile,
+    RouterControlSocketPath,
 };
 use std::path::Path;
 
@@ -65,6 +66,10 @@ fn backend_overrides_preserve_supported_debug_profile_values() {
     let command = AppServerCommandSpec::new(
         &paths,
         &CodexRouterProfile::new(8787),
+        &RouterControlSocketPath::in_collaboration_directory(Path::new(
+            "/tmp/debug-proof/agent-communication",
+        ))
+        .unwrap(),
         Path::new("/tmp/debug-proof/backend.sock"),
     )
     .with_debug_profile(&profile);

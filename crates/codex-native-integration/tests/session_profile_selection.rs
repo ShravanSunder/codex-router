@@ -11,6 +11,10 @@ fn debug_app_server_profile_preserves_provider_overrides_without_remote_control(
     let original = codex_native_integration::AppServerCommandSpec::new(
         &paths,
         &profile,
+        &codex_native_integration::RouterControlSocketPath::in_collaboration_directory(Path::new(
+            "/tmp/debug-owner/agent-communication",
+        ))
+        .unwrap(),
         Path::new("/tmp/debug-owner/backend.sock"),
     );
     let debug_profile = codex_native_integration::DebugCodexProfile::parse(

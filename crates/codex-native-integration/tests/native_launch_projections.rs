@@ -1,9 +1,11 @@
 use std::ffi::OsString;
+use std::path::Path;
 use std::path::PathBuf;
 
 use codex_native_integration::AppServerCommandSpec;
 use codex_native_integration::CodexPaths;
 use codex_native_integration::CodexRouterProfile;
+use codex_native_integration::RouterControlSocketPath;
 use codex_native_integration::SessionLaunch;
 
 #[test]
@@ -20,10 +22,53 @@ fn codex_paths_keep_native_state_under_normal_codex_home() {
     );
 }
 
+const CONTROL_SOCKET: &str = "/Users/owner/.codex-router/agent-communication/control.sock";
+
+const COLLABORATION_DIRECTORY: &str = "/Users/owner/.codex-router/agent-communication";
+
+fn expected_router_root_overrides() -> Vec<String> {
+    vec![
+        "model_provider=\"codex-router\"".to_owned(),
+        "model_providers.codex-router.name=\"codex-router\"".to_owned(),
+        "model_providers.codex-router.base_url=\"http://127.0.0.1:8787/v1\"".to_owned(),
+        "model_providers.codex-router.wire_api=\"responses\"".to_owned(),
+        "model_providers.codex-router.requires_openai_auth=false".to_owned(),
+        "model_providers.codex-router.supports_websockets=true".to_owned(),
+        "features.network_proxy.enabled=true".to_owned(),
+        "features.network_proxy.mode=\"full\"".to_owned(),
+        "features.network_proxy.domains={\"*\"=\"allow\"}".to_owned(),
+        format!("features.network_proxy.unix_sockets={{\"{CONTROL_SOCKET}\"=\"allow\"}}"),
+        "features.network_proxy.allow_local_binding=false".to_owned(),
+        "features.network_proxy.dangerously_allow_all_unix_sockets=false".to_owned(),
+        "features.network_proxy.enable_socks5=false".to_owned(),
+        "features.network_proxy.allow_upstream_proxy=false".to_owned(),
+        "features.network_proxy.credential_broker=false".to_owned(),
+        "permissions.router-write-restricted.extends=\":read-only\"".to_owned(),
+        "permissions.router-write-restricted.network.enabled=true".to_owned(),
+        "permissions.router-write-restricted.network.mode=\"full\"".to_owned(),
+        "permissions.router-write-restricted.network.domains={\"*\"=\"allow\"}".to_owned(),
+        format!(
+            "permissions.router-write-restricted.network.unix_sockets={{\"{CONTROL_SOCKET}\"=\"allow\"}}"
+        ),
+        "permissions.router-workspace-write.extends=\":workspace\"".to_owned(),
+        "permissions.router-workspace-write.network.enabled=true".to_owned(),
+        "permissions.router-workspace-write.network.mode=\"full\"".to_owned(),
+        "permissions.router-workspace-write.network.domains={\"*\"=\"allow\"}".to_owned(),
+        format!(
+            "permissions.router-workspace-write.network.unix_sockets={{\"{CONTROL_SOCKET}\"=\"allow\"}}"
+        ),
+    ]
+}
+
 #[test]
 fn router_profile_has_one_rendering_and_root_override_projection() {
+    // Arrange: the production loopback port and the production collaboration directory.
     let profile = CodexRouterProfile::new(8787);
+    let owner_control_socket =
+        RouterControlSocketPath::in_collaboration_directory(Path::new(COLLABORATION_DIRECTORY))
+            .unwrap();
 
+    // Act & assert: the profile file stays model routing only.
     assert_eq!(
         profile.render(),
         concat!(
@@ -36,47 +81,120 @@ fn router_profile_has_one_rendering_and_root_override_projection() {
             "supports_websockets = true\n",
         )
     );
+    // Assert: the managed child also carries the Router socket network profile.
     assert_eq!(
-        profile.root_overrides(),
-        vec![
-            "model_provider=\"codex-router\"".to_owned(),
-            "model_providers.codex-router.name=\"codex-router\"".to_owned(),
-            "model_providers.codex-router.base_url=\"http://127.0.0.1:8787/v1\"".to_owned(),
-            "model_providers.codex-router.wire_api=\"responses\"".to_owned(),
-            "model_providers.codex-router.requires_openai_auth=false".to_owned(),
-            "model_providers.codex-router.supports_websockets=true".to_owned(),
-        ]
+        profile.root_overrides(&owner_control_socket),
+        expected_router_root_overrides()
+    );
+}
+
+#[test]
+fn router_root_overrides_allow_every_host_and_only_the_control_socket() {
+    // Arrange: overrides are separate -c values; native merges them into one table.
+    let owner_control_socket =
+        RouterControlSocketPath::in_collaboration_directory(Path::new(COLLABORATION_DIRECTORY))
+            .unwrap();
+    let overrides = CodexRouterProfile::new(8787).root_overrides(&owner_control_socket);
+
+    // Act: parse them exactly as TOML, proving the inline tables and dotted keys are valid.
+    let document = toml::Value::Table(overrides.join("\n").parse::<toml::Table>().unwrap());
+
+    // Assert: one allowed socket, no socket-wide escape hatch, no local binding.
+    let networks = [
+        &document["features"]["network_proxy"],
+        &document["permissions"]["router-write-restricted"]["network"],
+        &document["permissions"]["router-workspace-write"]["network"],
+    ];
+    for network in networks {
+        assert_eq!(
+            network.get("enabled").and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            network.get("mode").and_then(toml::Value::as_str),
+            Some("full")
+        );
+        let domains = network
+            .get("domains")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert_eq!(domains.len(), 1);
+        assert_eq!(
+            domains.get("*").and_then(toml::Value::as_str),
+            Some("allow")
+        );
+        let sockets = network
+            .get("unix_sockets")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert_eq!(sockets.len(), 1);
+        assert_eq!(
+            sockets.get(CONTROL_SOCKET).and_then(toml::Value::as_str),
+            Some("allow")
+        );
+    }
+    let proxy = &document["features"]["network_proxy"];
+    for denied in [
+        "allow_local_binding",
+        "dangerously_allow_all_unix_sockets",
+        "enable_socks5",
+        "allow_upstream_proxy",
+        "credential_broker",
+    ] {
+        assert_eq!(
+            proxy.get(denied).and_then(toml::Value::as_bool),
+            Some(false),
+            "{denied} must stay off"
+        );
+    }
+}
+
+#[test]
+fn router_control_socket_requires_an_absolute_collaboration_directory() {
+    // Arrange & act: a relative directory cannot name a canonical socket.
+    let socket =
+        RouterControlSocketPath::in_collaboration_directory(Path::new("agent-communication"));
+
+    // Assert.
+    assert!(socket.is_err());
+    assert_eq!(
+        RouterControlSocketPath::in_collaboration_directory(Path::new(COLLABORATION_DIRECTORY))
+            .unwrap()
+            .as_path(),
+        Path::new(CONTROL_SOCKET)
     );
 }
 
 #[test]
 fn app_server_command_uses_managed_executable_profile_and_native_contract() {
+    // Arrange.
     let paths = CodexPaths::from_codex_home(PathBuf::from("/Users/owner/.codex"));
     let socket = paths.app_server_socket();
-    let command = AppServerCommandSpec::new(&paths, &CodexRouterProfile::new(8787), &socket);
+    let owner_control_socket =
+        RouterControlSocketPath::in_collaboration_directory(Path::new(COLLABORATION_DIRECTORY))
+            .unwrap();
 
-    assert_eq!(command.executable(), paths.managed_executable());
-    assert_eq!(
-        command.arguments(),
-        vec![
-            OsString::from("-c"),
-            OsString::from("model_provider=\"codex-router\""),
-            OsString::from("-c"),
-            OsString::from("model_providers.codex-router.name=\"codex-router\""),
-            OsString::from("-c"),
-            OsString::from("model_providers.codex-router.base_url=\"http://127.0.0.1:8787/v1\"",),
-            OsString::from("-c"),
-            OsString::from("model_providers.codex-router.wire_api=\"responses\""),
-            OsString::from("-c"),
-            OsString::from("model_providers.codex-router.requires_openai_auth=false"),
-            OsString::from("-c"),
-            OsString::from("model_providers.codex-router.supports_websockets=true"),
-            OsString::from("app-server"),
-            OsString::from("--remote-control"),
-            OsString::from("--listen"),
-            OsString::from("unix:///Users/owner/.codex/app-server-control/app-server-control.sock",),
-        ]
+    // Act.
+    let command = AppServerCommandSpec::new(
+        &paths,
+        &CodexRouterProfile::new(8787),
+        &owner_control_socket,
+        &socket,
     );
+
+    // Assert: every root override reaches the child as its own -c argument.
+    assert_eq!(command.executable(), paths.managed_executable());
+    let mut expected: Vec<OsString> = expected_router_root_overrides()
+        .into_iter()
+        .flat_map(|root_override| [OsString::from("-c"), OsString::from(root_override)])
+        .collect();
+    expected.extend([
+        OsString::from("app-server"),
+        OsString::from("--remote-control"),
+        OsString::from("--listen"),
+        OsString::from("unix:///Users/owner/.codex/app-server-control/app-server-control.sock"),
+    ]);
+    assert_eq!(command.arguments(), expected);
 }
 
 #[test]
