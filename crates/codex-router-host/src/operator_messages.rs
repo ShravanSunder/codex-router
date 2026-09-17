@@ -52,14 +52,24 @@ impl OperatorRequest {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostProgress {
+    /// Preparation work for an app-server operation is beginning.
+    PreparingAppServer,
     /// Whole-Host replacement is beginning ordered child teardown before re-exec.
     ReplacementStarting,
     /// The managed app-server is stopping.
     StoppingAppServer,
+    /// A replacement app-server has been spawned and is starting.
+    StartingAppServer,
+    /// Native app-server readiness converged; waiting for Remote Control.
+    WaitingForRemoteControl,
     /// The app-server required forced process-group termination.
     AppServerKilled,
     /// The owned router is stopping.
     StoppingRouter,
+    /// A replacement router is being prepared.
+    PreparingRouter,
+    /// A replacement router has been spawned and is starting.
+    StartingRouter,
     /// The Host is re-executing its replacement command.
     ReExecuting,
     /// The router readiness probe converged.
@@ -68,6 +78,8 @@ pub enum HostProgress {
     AppServerReady,
     /// Remote Control readiness converged.
     RemoteControlReady,
+    /// Native readiness converged but Remote Control is degraded.
+    RemoteControlDegraded,
     /// A managed Codex update is starting.
     UpdatingAppServer,
 }

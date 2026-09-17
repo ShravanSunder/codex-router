@@ -293,10 +293,15 @@ impl HostRuntime {
             }
         };
         if let Some(emit) = progress {
+            emit(Some(crate::HostProgress::StartingRouter));
+            emit(Some(crate::HostProgress::StartingAppServer));
             emit(Some(crate::HostProgress::RouterReady));
             emit(Some(crate::HostProgress::AppServerReady));
+            emit(Some(crate::HostProgress::WaitingForRemoteControl));
             if matches!(readiness, crate::AppServerReadiness::Ready { .. }) {
                 emit(Some(crate::HostProgress::RemoteControlReady));
+            } else {
+                emit(Some(crate::HostProgress::RemoteControlDegraded));
             }
             emit(None);
         }

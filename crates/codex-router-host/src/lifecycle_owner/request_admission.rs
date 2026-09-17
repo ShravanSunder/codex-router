@@ -273,7 +273,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
         OperatorRequest::RestartAppServer => {
             send_progress(
                 &work.response,
-                crate::operator_messages::HostProgress::StoppingAppServer,
+                crate::operator_messages::HostProgress::PreparingAppServer,
             );
             let current_child = context.app_server.take();
             context.state.phase = HostPhase::Mutating {
@@ -293,6 +293,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                     context.child_launch_plans.app_server.clone(),
                     current_child,
                     stop_intent.clone(),
+                    work.response.clone(),
                 ),
                 stop_intent,
                 response: work.response,
@@ -313,7 +314,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
         OperatorRequest::RestartRouter => {
             send_progress(
                 &work.response,
-                crate::operator_messages::HostProgress::StoppingRouter,
+                crate::operator_messages::HostProgress::PreparingRouter,
             );
             let current_child = context.router_child.take();
             let Some(router_command) = context.child_launch_plans.router_command.clone() else {
@@ -339,6 +340,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                     router_command,
                     current_child,
                     stop_intent.clone(),
+                    work.response.clone(),
                 ),
                 stop_intent,
                 response: work.response,

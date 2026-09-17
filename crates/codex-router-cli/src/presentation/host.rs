@@ -26,6 +26,32 @@ impl HostProgressPresenter {
     ) -> std::io::Result<()> {
         match frame {
             OperatorFrame::Progress(progress) => {
+                if is_phase_completion(*progress) {
+                    self.finish(
+                        stdout,
+                        if *progress == HostProgress::RemoteControlDegraded {
+                            Some(
+                                codex_router_host::TerminalClassification::LocalReadyRemoteDegraded,
+                            )
+                        } else {
+                            None
+                        },
+                    )?;
+                    if self.active.is_none() && !self.tty {
+                        writeln!(stdout, "✓ {}", progress_label(*progress))?;
+                    }
+                    return Ok(());
+                }
+                if *progress == HostProgress::AppServerKilled {
+                    self.finish(
+                        stdout,
+                        Some(codex_router_host::TerminalClassification::Failed),
+                    )?;
+                    if !self.tty {
+                        writeln!(stdout, "⚠ {}", progress_label(*progress))?;
+                    }
+                    return Ok(());
+                }
                 self.finish(stdout, None)?;
                 let spinner = indicatif::ProgressBar::new_spinner();
                 spinner.enable_steady_tick(std::time::Duration::from_millis(80));
@@ -65,7 +91,14 @@ impl HostProgressPresenter {
             "✓"
         };
         spinner.finish_and_clear();
-        let _ = self.tty;
+        if !self.tty {
+            return writeln!(
+                stdout,
+                "{glyph} {} ({:.2?})",
+                progress_label(progress),
+                started.elapsed()
+            );
+        }
         writeln!(
             stdout,
             "{glyph} {} ({:.2?})",
@@ -148,16 +181,32 @@ fn render_progress<W: Write>(
 
 fn progress_label(progress: HostProgress) -> &'static str {
     match progress {
+        codex_router_host::HostProgress::PreparingAppServer => "preparing app-server",
         codex_router_host::HostProgress::ReplacementStarting => "starting Host replacement",
         codex_router_host::HostProgress::StoppingAppServer => "stopping app-server",
+        codex_router_host::HostProgress::StartingAppServer => "starting app-server",
+        codex_router_host::HostProgress::WaitingForRemoteControl => "waiting for Remote Control",
         codex_router_host::HostProgress::AppServerKilled => "forced app-server shutdown",
         codex_router_host::HostProgress::StoppingRouter => "stopping router",
+        codex_router_host::HostProgress::PreparingRouter => "preparing router",
+        codex_router_host::HostProgress::StartingRouter => "starting router",
         codex_router_host::HostProgress::ReExecuting => "re-executing Host",
         codex_router_host::HostProgress::RouterReady => "router ready",
         codex_router_host::HostProgress::AppServerReady => "app-server ready",
         codex_router_host::HostProgress::RemoteControlReady => "Remote Control ready",
+        codex_router_host::HostProgress::RemoteControlDegraded => "Remote Control degraded",
         codex_router_host::HostProgress::UpdatingAppServer => "updating app-server",
     }
+}
+
+fn is_phase_completion(progress: HostProgress) -> bool {
+    matches!(
+        progress,
+        HostProgress::RouterReady
+            | HostProgress::AppServerReady
+            | HostProgress::RemoteControlReady
+            | HostProgress::RemoteControlDegraded
+    )
 }
 
 pub(crate) fn render_update_result<W: Write>(
@@ -435,7 +484,7 @@ mod tests {
             let mut output = Vec::new();
             presenter.accept(
                 &mut output,
-                &OperatorFrame::Progress(HostProgress::RouterReady),
+                &OperatorFrame::Progress(HostProgress::StartingRouter),
             )?;
             for _ in 0..20_000 {
                 std::hint::spin_loop();
@@ -445,8 +494,8 @@ mod tests {
                 &OperatorFrame::Progress(HostProgress::AppServerReady),
             )?;
             let rendered = String::from_utf8(output).map_err(std::io::Error::other)?;
-            assert!(rendered.contains("✓ router ready ("));
-            assert!(rendered.contains("router ready ("));
+            assert!(rendered.contains("✓ starting router ("));
+            assert!(rendered.contains("starting router ("));
         }
         Ok(())
     }
