@@ -585,9 +585,12 @@ impl BatchSink for RecordingSink {
         Box<dyn std::future::Future<Output = Result<(), BatchSinkFailure>> + Send + 'a>,
     > {
         Box::pin(async move {
+            // A finalization is always recorded: refusing it would hide the very
+            // outcome these proofs read.
             let remaining = self.rejections_remaining.load(Ordering::Relaxed);
-            if (self.reject_batches && matches!(record, ListenDeliveryRecord::Batch(_)))
-                || remaining > 0
+            if !matches!(record, ListenDeliveryRecord::Finalization(_))
+                && ((self.reject_batches && matches!(record, ListenDeliveryRecord::Batch(_)))
+                    || remaining > 0)
             {
                 self.rejections_remaining
                     .store(remaining.saturating_sub(1), Ordering::Relaxed);
@@ -658,8 +661,31 @@ fn three_consecutive_session_rejections_end_with_error_evidence() {
     assert_eq!(evidence["reason"], "childThread");
 }
 
-/// Long enough for every mark of a long listen to pass under paused time.
-const LISTEN_OBSERVATION_WINDOW: std::time::Duration = std::time::Duration::from_secs(90 * 60);
+fn describe_record(record: &ListenDeliveryRecord) -> String {
+    match record {
+        ListenDeliveryRecord::Batch(value) => format!("batch(catch_up={})", value.catch_up),
+        ListenDeliveryRecord::Heartbeat(value) => format!("heartbeat({})", value.mark),
+        ListenDeliveryRecord::Finalization(value) => format!("final({:?})", value.reason),
+    }
+}
+
+/// Drives a spawned session delivery under paused time.
+///
+/// Auto-advance races task startup: a single long sleep can jump the clock past
+/// the delivery task's first poll, so its debounce window would open after the
+/// observation window closed. Yield until the task has registered its timers,
+/// then step the clock by less than one debounce at a time.
+async fn drive_session_delivery(minutes: u64) {
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..minutes {
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
 
 #[tokio::test(start_paused = true)]
 async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() {
@@ -687,7 +713,7 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
             rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(2)),
         }),
     );
-    tokio::time::sleep(LISTEN_OBSERVATION_WINDOW).await;
+    drive_session_delivery(90).await;
 
     // Assert: the listen reached its lifetime instead of failing, and the
     // rejection it survived is still reported.
@@ -698,6 +724,91 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
             if value.reason == ThreadListenEndReason::Lifetime
                 && value.last_rejection.is_some()
     ));
+    drop(seen);
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
+    // Arrange: a long session listen with activity waiting in its first mark window.
+    let fixture = ListenFixture::create("mark-suppression").await;
+    let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
+    let listen = fixture
+        .register(
+            &registry,
+            ThreadListenMode::Repeating {
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
+            },
+        )
+        .await;
+    fixture.reply("Inside the first mark").await;
+    let records = Arc::new(TokioMutex::new(Vec::new()));
+
+    // Act: run past the first mark, which the delivery has already covered.
+    registry.spawn_session_delivery(
+        listen.listen_id.clone(),
+        Arc::clone(&fixture.store),
+        RecordingSink::accepting(&records),
+    );
+    drive_session_delivery(90).await;
+
+    // Assert: the Batch set stood in for that mark's heartbeat.
+    let seen = records.lock().await;
+    let kinds: Vec<String> = seen.iter().map(describe_record).collect();
+    assert!(
+        matches!(seen.first(), Some(ListenDeliveryRecord::Batch(_))),
+        "records: {kinds:?}"
+    );
+    assert!(
+        !seen.iter().any(|record| {
+            matches!(record, ListenDeliveryRecord::Heartbeat(value) if value.mark == 1)
+        }),
+        "a mark with a delivery must not also emit a heartbeat"
+    );
+    drop(seen);
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_third_consecutive_rejection_ends_the_listen_with_its_evidence() {
+    // Arrange: a sink that refuses every record it is offered.
+    let fixture = ListenFixture::create("rejection-terminal").await;
+    let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
+    let listen = fixture
+        .register(
+            &registry,
+            ThreadListenMode::Repeating {
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
+            },
+        )
+        .await;
+    fixture.reply("Refused activity").await;
+    let records = Arc::new(TokioMutex::new(Vec::new()));
+
+    // Act: a refused Batch set, then two refused heartbeats.
+    registry.spawn_session_delivery(
+        listen.listen_id.clone(),
+        Arc::clone(&fixture.store),
+        Arc::new(RecordingSink {
+            records: Arc::clone(&records),
+            reject_batches: false,
+            rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(u8::MAX)),
+        }),
+    );
+    drive_session_delivery(90).await;
+
+    // Assert: the listen ended on the third refusal, carrying the last evidence.
+    let seen = records.lock().await;
+    assert!(
+        matches!(
+            seen.last(),
+            Some(ListenDeliveryRecord::Finalization(value))
+                if value.reason == ThreadListenEndReason::Error
+                    && value.last_rejection.is_some()
+        ),
+        "three refusals in a row must end the listen with its reason, saw {:?}",
+        seen.iter().map(describe_record).collect::<Vec<_>>()
+    );
     drop(seen);
     fixture.finish().await;
 }
