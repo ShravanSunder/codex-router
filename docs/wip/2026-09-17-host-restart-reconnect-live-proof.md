@@ -63,6 +63,18 @@ router readiness, app-server spawn, CLI retry cadence, or presenter phase
 closure. Telemetry initialization is not separately timestamped, so no finer
 sub-attribution is claimed.
 
+Post-fix timing run after moving telemetry flush ahead of child teardown
+(2026-09-17 22:30Z) produced three wall-clock CLI gaps of approximately
+`6.667 s`, `6.724 s`, and `6.903 s`; presenter `re-executing Host` spans were
+`4.45 s`, `4.58 s`, and `4.63 s`. The new-image records show router readiness
+at roughly `11 ms` and app-server socket/native readiness at `1.12–1.26 s`
+after process start. Public generation publication completed at about
+`2.06–2.14 s`. The remaining multi-second client gap is therefore dominated by
+the CLI's bounded AwaitHostStart reconnect cadence waiting for the operator
+socket/public generation, not by app-server socket acceptance. The pre-exec
+telemetry flush is now outside the child-teardown-to-exec window; no additional
+safe change was made at this boundary.
+
 No production process, port `8787`, or `~/.codex-router` state was modified.
 These are verbatim non-TTY captures from the isolated debug Host. The
 installed/production launchctl policy path was not exercised.
