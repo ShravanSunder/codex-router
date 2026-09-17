@@ -59,7 +59,6 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
                     context.app_server.take(),
                     context.router.take(),
                     context.active.response.clone(),
-                    context.update_inputs.pre_exec_telemetry.clone(),
                 ),
                 response: context.active.response,
                 replacement_command,
@@ -110,6 +109,7 @@ pub(super) struct ActivationContext<'a> {
     pub(super) state: &'a mut RuntimeState,
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
+    pub(super) update_inputs: &'a ManagedUpdateInputs,
     pub(super) instance: &'a HostInstance,
 }
 
@@ -176,6 +176,10 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
     )
     .await;
     crate::record_debug_readiness_timing("reExecutingAcked", pre_exec_started_at);
+    lifecycle_convergence::flush_pre_exec_telemetry(
+        context.update_inputs.pre_exec_telemetry.clone(),
+    )
+    .await;
     context.instance.remove_operator_socket_for_exec()?;
     crate::record_debug_readiness_timing("operatorSocketRemoved", pre_exec_started_at);
     context.instance.prepare_lock_for_exec()?;

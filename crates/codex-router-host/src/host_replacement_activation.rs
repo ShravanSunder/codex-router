@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use crate::AppServerChild;
 use crate::RouterChild;
@@ -31,12 +30,9 @@ pub(crate) fn activate_host_replacement(
     mut app_server: Option<AppServerChild>,
     mut router: Option<RouterChild>,
     progress: mpsc::Sender<OperatorFrame>,
-    pre_exec_telemetry: Option<Arc<dyn crate::PreExecTelemetry>>,
 ) -> HostReplacementFuture {
     Box::pin(async move {
         let activation_started_at = std::time::Instant::now();
-        crate::lifecycle_owner::flush_pre_exec_telemetry(pre_exec_telemetry).await;
-        crate::record_debug_readiness_timing("preExecTelemetryDone", activation_started_at);
         let mut app_server_shutdown = None;
         if let Some(child) = app_server.as_mut() {
             let _ = progress

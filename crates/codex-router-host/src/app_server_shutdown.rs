@@ -38,6 +38,9 @@ impl AppServerShutdownDeadlines {
     pub fn new(force_after: Duration, total: Duration) -> Option<Self> {
         if force_after < total {
             let kill_after = force_after.saturating_mul(2);
+            if kill_after >= total {
+                return None;
+            }
             Some(Self {
                 force_after,
                 kill_after,

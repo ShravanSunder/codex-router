@@ -71,6 +71,14 @@ fn app_server_shutdown_policy_uses_fast_grace_and_reap_boundaries() {
     assert!(expected_exit.kill_sent());
 }
 
+#[test]
+fn shutdown_deadlines_reject_kill_boundary_at_or_after_total() {
+    assert!(
+        AppServerShutdownDeadlines::new(Duration::from_millis(400), Duration::from_millis(800),)
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn owned_app_server_is_isolated_and_receives_one_exact_pid_sigterm()
 -> Result<(), Box<dyn std::error::Error>> {
