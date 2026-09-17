@@ -84,8 +84,17 @@ No public process-control surface, binary download service, or dashboard is adde
   from replacement failure and provide the foreground-start recovery action on
   failure. Connection EOF alone MUST NOT be reported as success.
 - **Interruption:** intentional Host or app-server replacement may disconnect
-  clients. Clients reconnect through their established behavior; no live-
-  connection continuity guarantee is made.
+  clients. The app-server socket must accept and initialize again within the
+  upstream Codex reconnect window (approximately 15 seconds), allowing the
+  client to resume the same thread. Live connection continuity is not required.
+
+### Shutdown and command shape
+
+Managed app-server shutdown sends SIGTERM, immediately sends a second SIGTERM
+to invoke upstream force/cleanup handling, waits one second, then uses
+process-group SIGKILL as a backstop before bounded reap. The supported command
+shape is `host`, `host status`, `host restart`, `host router restart`,
+`host app-server restart`, and `host app-server update`.
 
 ### R5 / C5 — One-time legacy bootstrap
 
