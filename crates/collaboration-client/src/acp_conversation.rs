@@ -20,7 +20,8 @@ pub struct ConversationSessionRequest<'a> {
     pub session: Option<&'a str>,
     pub fork: Option<&'a str>,
     pub model: Option<&'a str>,
-    pub effort: &'a str,
+    /// Absent on resume: the thread keeps the effort it was created with.
+    pub effort: Option<&'a str>,
     pub access: Option<&'a str>,
     pub created_by: Option<&'a SessionRef>,
     pub approver: Option<&'a SessionRef>,
@@ -114,7 +115,7 @@ impl AcpConversation {
             self.target = Some(target.clone());
             self.request(
                 "session/load",
-                json!({"sessionId":id,"cwd":cwd,"mcpServers":[],"_meta":{"codexRouter":{"effort":request.effort}}}),
+                json!({"sessionId":id,"cwd":cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata_effort(request.effort)}}),
                 "LoadSessionRequest",
                 "LoadSessionResponse",
             )
@@ -181,7 +182,7 @@ impl AcpConversation {
     pub async fn prompt(
         &mut self,
         text: &str,
-        effort: &str,
+        effort: Option<&str>,
         timeout: Duration,
         cancel: CancellationToken,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
@@ -200,7 +201,7 @@ impl AcpConversation {
         let id = self
             .submit(
                 "session/prompt",
-                json!({"sessionId":session,"prompt":[{"type":"text","text":text}],"_meta":{"codexRouter":{"effort":effort}}}),
+                json!({"sessionId":session,"prompt":[{"type":"text","text":text}],"_meta":{"codexRouter":router_metadata_effort(effort)}}),
                 "PromptRequest",
             )
             .await?;
@@ -443,6 +444,12 @@ fn prepare_project_write_areas(cwd: &Path, access: Option<&str>) -> std::io::Res
     }
     std::fs::create_dir_all(cwd.join("tmp"))?;
     std::fs::create_dir_all(cwd.join("docs/wip"))
+}
+
+/// Omits the effort key entirely when the caller selected none, so the adapter
+/// reads absence rather than a null it would have to interpret.
+fn router_metadata_effort(effort: Option<&str>) -> Value {
+    effort.map_or_else(|| json!({}), |effort| json!({"effort": effort}))
 }
 
 fn session_scratch_scope() -> String {

@@ -136,6 +136,67 @@ fn finite_control_groups_keep_json_for_missing_required_arguments() {
 }
 
 #[test]
+fn resume_accepts_an_absent_effort_while_new_still_requires_one() {
+    // Arrange: the same command with and without --effort on a resume.
+    let resume = [
+        "conversation",
+        "prompt",
+        "--endpoint",
+        "codex-local",
+        "--cwd",
+        "/tmp",
+        "--session",
+        "01a0a9aa-0393-7a30-aeca-c7c77d679774",
+        "--text",
+        "hello",
+        "--json",
+    ];
+    let fresh = [
+        "conversation",
+        "prompt",
+        "--endpoint",
+        "codex-local",
+        "--cwd",
+        "/tmp",
+        "--new",
+        "--model",
+        "gpt-5.6-sol",
+        "--access",
+        "workspace-write",
+        "--text",
+        "hello",
+        "--json",
+    ];
+
+    // Act.
+    let resumed = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(resume)
+        .output()
+        .expect("CLI executes");
+    let created = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(fresh)
+        .output()
+        .expect("CLI executes");
+
+    // Assert: resume passes validation and fails later, on discovery; --new does not.
+    let record: serde_json::Value =
+        serde_json::from_slice(&resumed.stdout).expect("JSON conversation record");
+    assert_ne!(
+        record["error"]["stage"], "validation",
+        "resume must not require --effort: {record}"
+    );
+    assert_eq!(created.status.code(), Some(2));
+    let refusal: serde_json::Value =
+        serde_json::from_slice(&created.stdout).expect("JSON error record");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--effort")),
+        "{refusal}"
+    );
+}
+
+#[test]
 fn conversation_model_choice_is_validated_before_service_discovery() {
     let cases = [
         (

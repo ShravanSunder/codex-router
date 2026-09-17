@@ -128,7 +128,7 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
                     session: selected_id.as_deref().filter(|_| args.fork.is_none()),
                     fork: selected_id.as_deref().filter(|_| args.fork.is_some()),
                     model: args.model.as_deref(),
-                    effort: args.effort.as_deref().ok_or(ClientError::Protocol("--effort is required"))?,
+                    effort: args.effort.as_deref(),
                     access: args.access.map(ConversationAccess::as_str),
                     created_by: creator.as_ref(),
                     approver: approver.as_ref(),
@@ -138,7 +138,7 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
                 &mut emit,
             ).await?);
             stage="prompt";
-            client.prompt(&text,args.effort.as_deref().ok_or(ClientError::Protocol("--effort is required"))?,Duration::from_secs(args.timeout_seconds),cancel,&mut emit).await
+            client.prompt(&text,args.effort.as_deref(),Duration::from_secs(args.timeout_seconds),cancel,&mut emit).await
         }.await;
         signal_task.abort();let _joined=signal_task.await;
         match result{
@@ -177,8 +177,13 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
     if dispatch_count != 1 {
         return Err("Choose exactly one of --new, --session, or --fork".into());
     }
-    let effort = args.effort.as_deref().ok_or("--effort is required")?;
-    validate_choice_value(effort, "--effort")?;
+    // Resume keeps the thread's persisted effort; a new thread must state one.
+    let resuming = !args.new_session && args.fork.is_none();
+    match args.effort.as_deref() {
+        Some(effort) => validate_choice_value(effort, "--effort")?,
+        None if resuming => {}
+        None => return Err("--effort is required with --new and --fork".into()),
+    }
     if args.fork.is_none() && !args.new_session && args.model.is_some() {
         return Err(
             "--model is invalid with --session: model is fixed for a thread; fork to change it"

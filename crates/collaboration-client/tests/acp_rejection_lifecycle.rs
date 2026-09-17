@@ -156,7 +156,7 @@ mod tests {
                     session: Some("rejected-thread"),
                     fork: None,
                     model: None,
-                    effort: "medium",
+                    effort: Some("medium"),
                     access: None,
                     created_by: None,
                     approver: None,
@@ -175,7 +175,7 @@ mod tests {
                         session: Some("another-thread"),
                         fork: None,
                         model: None,
-                        effort: "medium",
+                        effort: Some("medium"),
                         access: None,
                         created_by: None,
                         approver: None,
@@ -190,7 +190,7 @@ mod tests {
             client
                 .prompt(
                     "must not reach the peer",
-                    "medium",
+                    Some("medium"),
                     Duration::from_secs(2),
                     CancellationToken::new(),
                     &mut emit,

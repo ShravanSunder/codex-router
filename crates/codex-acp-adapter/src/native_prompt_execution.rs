@@ -51,7 +51,8 @@ pub struct PendingAcpPrompt {
     detached: bool,
     session: AcpSessionBinding,
     settlement: PromptSettlement,
-    requested_effort: String,
+    /// Absent on resume, where the thread's persisted effort governs.
+    requested_effort: Option<String>,
 }
 impl PendingAcpPrompt {
     /// Consuming the binding prevents a second concurrent prompt on this mapping.
@@ -66,11 +67,18 @@ impl PendingAcpPrompt {
         }
         let translated = translate_prompt_content(catalog, params)
             .map_err(|_| PromptExecutionError::InvalidPrompt)?;
-        let effort = params
-            .pointer("/_meta/codexRouter/effort")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_whitespace))
-            .ok_or(PromptExecutionError::InvalidPrompt)?;
+        let effort = match params.pointer("/_meta/codexRouter/effort") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .filter(|value| {
+                        !value.trim().is_empty() && !value.chars().any(char::is_whitespace)
+                    })
+                    .ok_or(PromptExecutionError::InvalidPrompt)?
+                    .to_owned(),
+            ),
+        };
         if translated.session_id() != session.session_id {
             return Err(PromptExecutionError::InvalidPrompt);
         }
@@ -80,20 +88,23 @@ impl PendingAcpPrompt {
             session,
             settlement: PromptSettlement::new(request_id)
                 .map_err(|_| PromptExecutionError::InvalidPrompt)?,
-            requested_effort: effort.to_owned(),
+            requested_effort: effort,
         };
         pending
             .settlement
             .mark_dispatched()
             .map_err(|_| PromptExecutionError::InvalidPrompt)?;
+        // Without a requested effort the turn inherits the thread's own.
+        let mut turn = json!({"threadId":pending.session.session_id,"input":translated.input()});
+        if let (Some(fields), Some(effort)) =
+            (turn.as_object_mut(), pending.requested_effort.as_ref())
+        {
+            fields.insert("effort".into(), json!(effort));
+        }
         let result = pending
             .session
             .connection
-            .request_validated(
-                &pending.session.schemas,
-                NativeOperation::StartTurn,
-                json!({"threadId":pending.session.session_id,"input":translated.input(),"effort":effort}),
-            )
+            .request_validated(&pending.session.schemas, NativeOperation::StartTurn, turn)
             .await?;
         let turn_id = result
             .get("turn")
@@ -267,9 +278,12 @@ impl PendingAcpPrompt {
                     .get("reasoningEffort")
                     .and_then(Value::as_str)
                     .ok_or(PromptExecutionError::ReceiptProjection("effort"))?;
-                if effective_effort != self.requested_effort {
+                // A resume without a requested effort reports what the thread kept.
+                if let Some(requested) = &self.requested_effort
+                    && effective_effort != requested
+                {
                     return Err(PromptExecutionError::EffortMismatch {
-                        requested: self.requested_effort.clone(),
+                        requested: requested.clone(),
                         effective: effective_effort.to_owned(),
                     });
                 }

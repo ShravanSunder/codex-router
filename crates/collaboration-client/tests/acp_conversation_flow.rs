@@ -106,7 +106,7 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
                 session: Some("owned"),
                 fork: None,
                 model: None,
-                effort: "medium",
+                effort: Some("medium"),
                 access: None,
                 created_by: None,
                 approver: None,
@@ -121,7 +121,7 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
         client
             .prompt(
                 "question",
-                "medium",
+                Some("medium"),
                 Duration::from_secs(3),
                 CancellationToken::new(),
                 &mut emit
@@ -140,7 +140,7 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
         client
             .prompt(
                 "cancel this",
-                "medium",
+                Some("medium"),
                 Duration::from_secs(3),
                 cancel,
                 &mut emit
@@ -156,7 +156,7 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
         client
             .prompt(
                 "must not submit",
-                "medium",
+                Some("medium"),
                 Duration::from_secs(3),
                 already_cancelled,
                 &mut emit
