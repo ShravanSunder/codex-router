@@ -12,8 +12,8 @@ workspace = true
 quota-reset-test-harness = []
 
 [[bin]]
-name = "agent-session"
-path = "src/bin/agent-session.rs"
+name = "agent-sessions"
+path = "src/bin/agent-sessions.rs"
 
 [dependencies]
 tokio-util.workspace = true

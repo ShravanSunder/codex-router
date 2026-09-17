@@ -186,7 +186,7 @@ fn stored_model_choice_from_record(record: &SessionRecord) -> ResumeModelChoice 
     let reasoning_effort = record.reasoning_effort.as_deref();
     if ResumeModelChoice::rejects_stored_value(model, reasoning_effort) {
         eprintln!(
-            "agent-session: stored model or reasoning effort for session {} contains characters that cannot be passed to Codex; resuming without it",
+            "agent-sessions: stored model or reasoning effort for session {} contains characters that cannot be passed to Codex; resuming without it",
             record.session_id
         );
     }

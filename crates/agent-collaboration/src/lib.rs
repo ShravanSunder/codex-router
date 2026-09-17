@@ -29,7 +29,7 @@ pub fn command_help() -> String {
 /// Usage for the standalone session picker executable.
 #[must_use]
 pub fn session_command_help() -> String {
-    sessions::command_help("agent-session")
+    sessions::command_help("agent-sessions")
 }
 
 mod endpoint_commands;

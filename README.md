@@ -74,12 +74,12 @@ cargo run -p codex-router-cli -- host
 
 The host starts `codex-router serve` when a compatible router is absent, starts
 the managed Codex app-server, and keeps lifecycle
-control on an owner-only Unix socket. Hosted `agent-session` new/resume launches
+control on an owner-only Unix socket. Hosted `agent-sessions` new/resume launches
 resolve the advertised public native selector. Backend replacement closes native
 connections; the native TUI owns bounded reconnection without a Sessions supervisor.
 
 ```shell
-cargo run -p agent-collaboration --bin agent-session -- --id 019fe7c6-f493-7f02-be72-2feac69d6e6d
+cargo run -p agent-collaboration --bin agent-sessions -- --id 019fe7c6-f493-7f02-be72-2feac69d6e6d
 cargo run -p codex-router-cli -- host status
 cargo run -p codex-router-cli -- host restart
 cargo run -p codex-router-cli -- host app-server restart

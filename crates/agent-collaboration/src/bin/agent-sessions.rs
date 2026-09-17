@@ -7,7 +7,7 @@ fn main() {
             .first()
             .is_some_and(|argument| argument == "--version" || argument == "-V")
     {
-        println!("agent-session {}", env!("CARGO_PKG_VERSION"));
+        println!("agent-sessions {}", env!("CARGO_PKG_VERSION"));
         return;
     }
     if arguments.len() == 1
