@@ -202,68 +202,96 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
 #[tokio::test]
 async fn fork_session_sends_exact_model_choice_to_native_runtime() {
     ensure_test_scratch();
-    let mut catalog = AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
-    let mut definitions = serde_json::Map::new();
-    for name in [
-        "ThreadFork",
-        "ThreadLoadedList",
-        "ThreadRead",
-        "ThreadResume",
-        "ThreadStart",
-        "TurnInterrupt",
-        "TurnStart",
-        "TurnSteer",
-    ] {
-        definitions.insert(format!("{name}Params"), json!({"type":"object"}));
-        definitions.insert(format!("{name}Response"), json!({"type":"object"}));
-    }
-    let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
-        "codex_app_server_protocol.schemas.json".to_owned(),
-        serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))
-            .unwrap_or_else(|error| panic!("JSON: {error}")),
-    )]))
-    .unwrap_or_else(|error| panic!("bundle: {error}"));
-    let schemas = Arc::new(
-        NativePayloadSchemas::from_bundle(&bundle)
-            .unwrap_or_else(|error| panic!("schemas: {error}")),
-    );
-    let generation: collaboration_protocol::CodexGeneration = serde_json::from_value(
-        json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
-    )
-    .unwrap_or_else(|error| panic!("generation: {error}"));
-    let (client, server) =
-        tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("pair: {error}"));
-    let connection = NativeProtocolConnection::from_websocket(
-        WebSocketStream::from_raw_socket(client, Role::Client, None).await,
-    );
-    let fixture = tokio::spawn(async move {
-        let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-        let frame = server
-            .next()
-            .await
-            .unwrap_or_else(|| panic!("request"))
-            .unwrap_or_else(|error| panic!("frame: {error}"));
-        let request: Value = serde_json::from_str(
-            frame
-                .to_text()
-                .unwrap_or_else(|error| panic!("text: {error}")),
-        )
-        .unwrap_or_else(|error| panic!("request JSON: {error}"));
-        assert_eq!(request["method"], "thread/fork");
-        assert_eq!(request["params"]["threadId"], "source-thread");
-        assert_eq!(request["params"]["cwd"], "/work/project");
-        assert_eq!(request["params"]["model"], "gpt-6-astra");
-        assert_eq!(
-            request["params"]["config"]["model_reasoning_effort"],
-            "high"
+    // The second case omits both choices: the source thread's own values govern.
+    for explicit_choice in [true, false] {
+        let mut catalog =
+            AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
+        let mut definitions = serde_json::Map::new();
+        for name in [
+            "ThreadFork",
+            "ThreadLoadedList",
+            "ThreadRead",
+            "ThreadResume",
+            "ThreadStart",
+            "TurnInterrupt",
+            "TurnStart",
+            "TurnSteer",
+        ] {
+            definitions.insert(format!("{name}Params"), json!({"type":"object"}));
+            definitions.insert(format!("{name}Response"), json!({"type":"object"}));
+        }
+        let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
+            "codex_app_server_protocol.schemas.json".to_owned(),
+            serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))
+                .unwrap_or_else(|error| panic!("JSON: {error}")),
+        )]))
+        .unwrap_or_else(|error| panic!("bundle: {error}"));
+        let schemas = Arc::new(
+            NativePayloadSchemas::from_bundle(&bundle)
+                .unwrap_or_else(|error| panic!("schemas: {error}")),
         );
-        assert_eq!(request["params"]["allowProviderModelFallback"], false);
-        assert_eq!(request["params"]["threadSource"], "user");
-        assert_eq!(request["params"]["permissions"], "router-workspace-write");
-        assert!(request["params"].get("sandbox").is_none());
-        assert!(request["params"].get("approvalPolicy").is_none());
-        assert!(request["params"].get("approvalsReviewer").is_none());
-        server
+        let generation: collaboration_protocol::CodexGeneration = serde_json::from_value(
+            json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
+        )
+        .unwrap_or_else(|error| panic!("generation: {error}"));
+        let (client, server) =
+            tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("pair: {error}"));
+        let connection = NativeProtocolConnection::from_websocket(
+            WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+        );
+        let fixture = tokio::spawn(async move {
+            let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+            let frame = server
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("request"))
+                .unwrap_or_else(|error| panic!("frame: {error}"));
+            let mut request: Value = serde_json::from_str(
+                frame
+                    .to_text()
+                    .unwrap_or_else(|error| panic!("text: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("request JSON: {error}"));
+            if !explicit_choice {
+                // The source thread is read once, before the fork is dispatched.
+                assert_eq!(request["method"], "thread/read");
+                assert_eq!(request["params"]["threadId"], "source-thread");
+                assert_eq!(request["params"]["includeTurns"], false);
+                server
+                .send(Message::Text(
+                    json!({"id":request["id"],"result":{"thread":{"id":"source-thread","model":"gpt-6-astra","reasoningEffort":"high"}}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap_or_else(|error| panic!("source read: {error}"));
+                let frame = server
+                    .next()
+                    .await
+                    .unwrap_or_else(|| panic!("fork request"))
+                    .unwrap_or_else(|error| panic!("fork frame: {error}"));
+                request = serde_json::from_str(
+                    frame
+                        .to_text()
+                        .unwrap_or_else(|error| panic!("fork text: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("fork JSON: {error}"));
+            }
+            assert_eq!(request["method"], "thread/fork");
+            assert_eq!(request["params"]["threadId"], "source-thread");
+            assert_eq!(request["params"]["cwd"], "/work/project");
+            assert_eq!(request["params"]["model"], "gpt-6-astra");
+            assert_eq!(
+                request["params"]["config"]["model_reasoning_effort"],
+                "high"
+            );
+            assert_eq!(request["params"]["allowProviderModelFallback"], false);
+            assert_eq!(request["params"]["threadSource"], "user");
+            assert_eq!(request["params"]["permissions"], "router-workspace-write");
+            assert!(request["params"].get("sandbox").is_none());
+            assert!(request["params"].get("approvalPolicy").is_none());
+            assert!(request["params"].get("approvalsReviewer").is_none());
+            server
             .send(Message::Text(
                 json!({
                     "id": request["id"],
@@ -286,9 +314,9 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
             ))
             .await
             .unwrap_or_else(|error| panic!("send: {error}"));
-    });
+        });
 
-    let session = AcpSessionBinding::create(
+        let session = AcpSessionBinding::create(
         &mut catalog,
         SessionSetupInputs {
             connection,
@@ -298,7 +326,7 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
                 "cwd": "/work/project",
                 "mcpServers": [],
                 "_meta": {
-                    "codexRouter": {
+                    "codexRouter": if explicit_choice { json!({
                         "model": "gpt-6-astra",
                         "effort": "high",
                         "access": "workspace-write",
@@ -307,7 +335,14 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
                         "createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
                         "approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
                         "forkThreadId": "source-thread"
-                    }
+                    }) } else { json!({
+                        "access": "workspace-write",
+                        "scratchScope":"session-00000000-0000-4000-8000-000000000099",
+                        "scratchPath":TEST_SCRATCH,
+                        "createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
+                        "approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
+                        "forkThreadId": "source-thread"
+                    }) }
                 }
             }),
             approval_broker: std::sync::Arc::new(
@@ -317,8 +352,9 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
     )
     .await
     .unwrap_or_else(|error| panic!("fork: {error}"));
-    fixture
-        .await
-        .unwrap_or_else(|error| panic!("fixture: {error}"));
-    assert_eq!(session.session_id(), "forked-thread");
+        fixture
+            .await
+            .unwrap_or_else(|error| panic!("fixture: {error}"));
+        assert_eq!(session.session_id(), "forked-thread");
+    }
 }

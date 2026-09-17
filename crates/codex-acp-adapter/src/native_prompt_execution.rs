@@ -279,7 +279,16 @@ impl PendingAcpPrompt {
                     .and_then(Value::as_str)
                     .ok_or(PromptExecutionError::ReceiptProjection("effort"))?;
                 // A resume without a requested effort reports what the thread kept.
-                if let Some(requested) = &self.requested_effort
+                // A resume that asks for a different one is allowed, and says so:
+                // the provider's prompt cache for this session will not be reused.
+                let effort_change = match (&self.requested_effort, &self.session.persisted_effort) {
+                    (Some(requested), Some(persisted)) if requested != persisted => {
+                        Some(json!({"previous":persisted,"requested":requested}))
+                    }
+                    _ => None,
+                };
+                if effort_change.is_none()
+                    && let Some(requested) = &self.requested_effort
                     && effective_effort != requested
                 {
                     return Err(PromptExecutionError::EffortMismatch {
@@ -300,16 +309,19 @@ impl PendingAcpPrompt {
                     .or_insert_with(|| json!({}))
                     .as_object_mut()
                     .ok_or(PromptExecutionError::ReceiptProjection("metadata"))?;
-                metadata.insert(
-                    "codexRouter".into(),
-                    json!({
-                        "effectiveModel": model,
-                        "effectiveEffort": effective_effort,
-                        "effectiveAccess": self.session.requested_access,
-                        "settingsObservation": &self.session.settings_observation,
-                        "idleSeconds": idle_seconds
-                    }),
-                );
+                let mut router_metadata = json!({
+                    "effectiveModel": model,
+                    "effectiveEffort": effective_effort,
+                    "effectiveAccess": self.session.requested_access,
+                    "settingsObservation": &self.session.settings_observation,
+                    "idleSeconds": idle_seconds
+                });
+                if let (Some(fields), Some(effort_change)) =
+                    (router_metadata.as_object_mut(), effort_change)
+                {
+                    fields.insert("effortChange".into(), effort_change);
+                }
+                metadata.insert("codexRouter".into(), router_metadata);
             }
             return Ok(terminal.map(PromptEvent::Terminal));
         }

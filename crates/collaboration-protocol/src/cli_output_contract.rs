@@ -72,6 +72,11 @@ pub enum ConversationRecord {
         effective_effort: String,
         effective_access: Option<RouterAccess>,
         settings_observation: Box<SettingsObservation>,
+        /// Present only when a resume asked for an effort the thread did not
+        /// already carry. The turn still runs; the change is reported because
+        /// it invalidates the provider's prompt cache for this session.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        effort_change: Option<EffortChange>,
         idle_seconds: u64,
         #[schemars(schema_with = "acp_result_schema")]
         result: Value,
@@ -83,6 +88,14 @@ pub enum ConversationRecord {
         message: NonEmptyText,
     },
 }
+/// One resume's reasoning-effort change, as the caller asked and the thread held.
+#[derive(JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EffortChange {
+    pub previous: String,
+    pub requested: String,
+}
+
 #[derive(JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConversationStage {

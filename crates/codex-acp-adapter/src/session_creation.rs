@@ -52,11 +52,15 @@ pub struct AcpSessionBinding {
     pub(crate) settings_observation: SettingsObservation,
     pub(crate) access_route: Option<crate::ApprovalRoute>,
     pub(crate) approval_broker: std::sync::Arc<dyn crate::ApprovalBroker>,
+    /// The reasoning effort the resumed thread already carried, when the native
+    /// resume reported one. Absent for a thread this connection created.
+    pub(crate) persisted_effort: Option<String>,
 }
 
 struct RouterModelChoice<'a> {
-    model: &'a str,
-    effort: &'a str,
+    /// Absent only on fork, where the source thread's value is inherited.
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
     fork_thread_id: Option<&'a str>,
     access: RouterAccess,
     created_by: collaboration_protocol::SessionRef,
@@ -65,21 +69,62 @@ struct RouterModelChoice<'a> {
     root_message_id: Option<&'a str>,
 }
 
+/// The source thread's own model and reasoning effort, for a fork that named none.
+#[derive(Default)]
+struct InheritedChoice {
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+/// Reads the source thread once, before the fork is dispatched.
+async fn read_thread_choice(
+    connection: &mut NativeProtocolConnection,
+    schemas: &NativePayloadSchemas,
+    thread_id: &str,
+) -> Result<InheritedChoice, SessionSetupError> {
+    let read = connection
+        .request_validated(
+            schemas,
+            NativeOperation::ReadThread,
+            json!({"threadId":thread_id,"includeTurns":false}),
+        )
+        .await
+        .map_err(map_native_failure)?;
+    let thread = read
+        .get("thread")
+        .ok_or(SessionSetupError::OutcomeUnknown)?;
+    Ok(InheritedChoice {
+        model: thread
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        effort: thread
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
 fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionSetupError> {
     let router = params
         .pointer("/_meta/codexRouter")
         .and_then(Value::as_object)
         .ok_or(SessionSetupError::InvalidParameters)?;
-    let model = router
-        .get("model")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_whitespace))
-        .ok_or(SessionSetupError::InvalidParameters)?;
-    let effort = router
-        .get("effort")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_whitespace))
-        .ok_or(SessionSetupError::InvalidParameters)?;
+    let choice_value = |key: &str| -> Result<Option<&str>, SessionSetupError> {
+        match router.get(key) {
+            None => Ok(None),
+            Some(value) => Ok(Some(
+                value
+                    .as_str()
+                    .filter(|value| {
+                        !value.trim().is_empty() && !value.chars().any(char::is_whitespace)
+                    })
+                    .ok_or(SessionSetupError::InvalidParameters)?,
+            )),
+        }
+    };
+    let model = choice_value("model")?;
+    let effort = choice_value("effort")?;
     let fork_thread_id = router
         .get("forkThreadId")
         .map(|value| {
@@ -121,6 +166,10 @@ fn router_model_choice(params: &Value) -> Result<RouterModelChoice<'_>, SessionS
         .and_then(Value::as_str)
         .ok_or(SessionSetupError::InvalidParameters)?;
     let root_message_id = router.get("rootMessageId").and_then(Value::as_str);
+    // A fresh thread must state both choices; only a fork may inherit them.
+    if fork_thread_id.is_none() && (model.is_none() || effort.is_none()) {
+        return Err(SessionSetupError::InvalidParameters);
+    }
     validate_scratch(scratch_path, scratch_scope, root_message_id)?;
     Ok(RouterModelChoice {
         model,
@@ -143,7 +192,7 @@ pub struct SessionSetupInputs {
 impl AcpSessionBinding {
     pub async fn create(
         catalog: &mut AcpSchemaCatalog,
-        inputs: SessionSetupInputs,
+        mut inputs: SessionSetupInputs,
     ) -> Result<Self, SessionSetupError> {
         if !catalog
             .validate("NewSessionRequest", &inputs.params)
@@ -178,14 +227,39 @@ impl AcpSessionBinding {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         };
+        // A fork without an explicit choice inherits the source thread's own
+        // model and reasoning effort, read once before the fork is dispatched.
+        let inherited = match choice.fork_thread_id {
+            Some(fork_thread_id) if choice.model.is_none() || choice.effort.is_none() => {
+                read_thread_choice(&mut inputs.connection, &inputs.schemas, fork_thread_id).await?
+            }
+            _ => InheritedChoice::default(),
+        };
+        let model = match choice.model {
+            Some(model) => model.to_owned(),
+            None => inherited
+                .model
+                .clone()
+                .ok_or(SessionSetupError::InvalidParameters)?,
+        };
+        let effort = match choice.effort {
+            Some(effort) => Some(effort.to_owned()),
+            None => inherited.effort.clone(),
+        };
         let mut native = json!({
             "cwd":cwd,
             "experimentalRawEvents":false,
-            "model":choice.model,
+            "model":model,
             "allowProviderModelFallback":false,
             "threadSource":"user",
-            "config":{"model_reasoning_effort":choice.effort}
+            "config":{}
         });
+        if let (Some(config), Some(effort)) = (
+            native.get_mut("config").and_then(Value::as_object_mut),
+            effort.as_ref(),
+        ) {
+            config.insert("model_reasoning_effort".into(), json!(effort));
+        }
         let fields = native
             .as_object_mut()
             .ok_or(SessionSetupError::InvalidParameters)?;
@@ -249,9 +323,9 @@ impl AcpSessionBinding {
             .request_validated(&inputs.schemas, operation, native)
             .await
             .map_err(map_native_failure)?;
-        if result.get("model").and_then(Value::as_str) != Some(choice.model) {
+        if result.get("model").and_then(Value::as_str) != Some(model.as_str()) {
             return Err(SessionSetupError::ModelMismatch {
-                requested: choice.model.to_owned(),
+                requested: model.clone(),
                 effective: result
                     .get("model")
                     .and_then(Value::as_str)
@@ -341,6 +415,7 @@ impl AcpSessionBinding {
             settings_observation,
             access_route: Some(access_route),
             approval_broker: inputs.approval_broker,
+            persisted_effort: None,
         })
     }
     #[must_use]
@@ -408,10 +483,16 @@ impl AcpSessionBinding {
             }),
             access_route: route,
             approval_broker: inputs.approval_broker,
+            persisted_effort: None,
         };
         let response = session
             .resume_with_receipt(catalog, &inputs.generation, &inputs.params)
             .await?;
+        session.persisted_effort = response
+            .pointer("/thread/reasoningEffort")
+            .or_else(|| response.get("reasoningEffort"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         session.settings_observation = observe_settings(
             &response,
             SettingsObservationSource::ThreadResume,

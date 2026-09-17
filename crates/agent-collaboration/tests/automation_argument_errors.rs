@@ -136,8 +136,8 @@ fn finite_control_groups_keep_json_for_missing_required_arguments() {
 }
 
 #[test]
-fn resume_accepts_an_absent_effort_while_new_still_requires_one() {
-    // Arrange: the same command with and without --effort on a resume.
+fn resume_and_fork_accept_absent_choices_while_new_still_requires_them() {
+    // Arrange: resume and fork omit the choices; --new omits them too.
     let resume = [
         "conversation",
         "prompt",
@@ -168,9 +168,29 @@ fn resume_accepts_an_absent_effort_while_new_still_requires_one() {
         "--json",
     ];
 
+    let forked = [
+        "conversation",
+        "prompt",
+        "--endpoint",
+        "codex-local",
+        "--cwd",
+        "/tmp",
+        "--fork",
+        "01a0a9aa-0393-7a30-aeca-c7c77d679774",
+        "--access",
+        "workspace-write",
+        "--text",
+        "hello",
+        "--json",
+    ];
+
     // Act.
     let resumed = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(resume)
+        .output()
+        .expect("CLI executes");
+    let forked_output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(forked)
         .output()
         .expect("CLI executes");
     let created = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -184,6 +204,12 @@ fn resume_accepts_an_absent_effort_while_new_still_requires_one() {
     assert_ne!(
         record["error"]["stage"], "validation",
         "resume must not require --effort: {record}"
+    );
+    let fork_record: serde_json::Value =
+        serde_json::from_slice(&forked_output.stdout).expect("JSON conversation record");
+    assert_ne!(
+        fork_record["error"]["stage"], "validation",
+        "fork inherits the source thread's model and effort: {fork_record}"
     );
     assert_eq!(created.status.code(), Some(2));
     let refusal: serde_json::Value =

@@ -20,7 +20,8 @@ pub struct ConversationSessionRequest<'a> {
     pub session: Option<&'a str>,
     pub fork: Option<&'a str>,
     pub model: Option<&'a str>,
-    /// Absent on resume: the thread keeps the effort it was created with.
+    /// Absent on resume, where the thread keeps the effort it was created with,
+    /// and on fork, where the source thread's effort is inherited.
     pub effort: Option<&'a str>,
     pub access: Option<&'a str>,
     pub created_by: Option<&'a SessionRef>,
@@ -122,9 +123,16 @@ impl AcpConversation {
             .await?;
             target
         } else {
-            let mut router_metadata = serde_json::Map::from_iter([
-                ("model".to_owned(), json!(request.model)),
-                ("effort".to_owned(), json!(request.effort)),
+            // An absent model or effort is omitted, not sent as null: on fork the
+            // adapter reads the source thread to fill it.
+            let mut router_metadata = serde_json::Map::new();
+            if let Some(model) = request.model {
+                router_metadata.insert("model".to_owned(), json!(model));
+            }
+            if let Some(effort) = request.effort {
+                router_metadata.insert("effort".to_owned(), json!(effort));
+            }
+            router_metadata.extend([
                 ("access".to_owned(), json!(request.access)),
                 ("createdBy".to_owned(), json!(request.created_by)),
                 ("approver".to_owned(), json!(request.approver)),

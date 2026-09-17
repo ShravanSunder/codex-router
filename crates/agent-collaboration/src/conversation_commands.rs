@@ -177,12 +177,12 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
     if dispatch_count != 1 {
         return Err("Choose exactly one of --new, --session, or --fork".into());
     }
-    // Resume keeps the thread's persisted effort; a new thread must state one.
-    let resuming = !args.new_session && args.fork.is_none();
+    // Only a new thread must state its reasoning effort: resume keeps the
+    // thread's persisted effort and fork inherits the source thread's.
     match args.effort.as_deref() {
         Some(effort) => validate_choice_value(effort, "--effort")?,
-        None if resuming => {}
-        None => return Err("--effort is required with --new and --fork".into()),
+        None if args.new_session => return Err("--effort is required".into()),
+        None => {}
     }
     if args.fork.is_none() && !args.new_session && args.model.is_some() {
         return Err(
@@ -203,10 +203,12 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
         );
     }
     if args.new_session || args.fork.is_some() {
-        validate_choice_value(
-            args.model.as_deref().ok_or("--model is required")?,
-            "--model",
-        )?;
+        // Fork inherits the source thread's model when the caller names none.
+        match args.model.as_deref() {
+            Some(model) => validate_choice_value(model, "--model")?,
+            None if args.fork.is_some() => {}
+            None => return Err("--model is required".into()),
+        }
         args.access.as_ref().ok_or("--access is required")?;
         if let Some(root_message_id) = &args.root_message_id {
             let _: collaboration_client::protocol::UuidIdentity = root_message_id
@@ -347,12 +349,29 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
                     ))?,
             )
             .map_err(|_| ClientError::Protocol("invalid settings observation in prompt receipt"))?;
+            let effort_change: Option<collaboration_client::protocol::EffortChange> = result
+                .pointer("/_meta/codexRouter/effortChange")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| ClientError::Protocol("invalid effort change in prompt receipt"))?;
+            // A changed effort is allowed, and visible: the provider's prompt
+            // cache for this session cannot be reused after it.
+            if let (false, Some(change)) = (machine, effort_change.as_ref()) {
+                let _noted = writeln!(
+                    io::stderr(),
+                    "note: effort changed from {} to {}; the provider prompt cache for this session will not be reused",
+                    change.previous,
+                    change.requested
+                );
+            }
             ConversationRecord::PromptResult {
                 target,
                 effective_model,
                 effective_effort,
                 effective_access,
                 settings_observation: Box::new(settings_observation),
+                effort_change,
                 idle_seconds,
                 result,
             }
