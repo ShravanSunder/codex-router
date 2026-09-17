@@ -120,6 +120,38 @@ fn unsafe_or_unrepresentable_profiles_fail_without_exposing_contents() {
 }
 
 #[test]
+fn local_only_profile_settings_are_accepted_but_not_projected() {
+    let profile = format!(
+        "approval_policy = \"never\"\napprovals_reviewer = \"local\"\nauto_review = \"enabled\"\napps = []\n{PROFILE}"
+    );
+    let parsed = DebugCodexProfile::parse(&profile, 18787).unwrap();
+    let paths = CodexPaths::from_codex_home("/unused-native-home".into());
+    let command = AppServerCommandSpec::new(
+        &paths,
+        &CodexRouterProfile::new(8787),
+        &RouterControlSocketPath::in_collaboration_directory(Path::new(
+            "/tmp/debug-proof/agent-communication",
+        ))
+        .unwrap(),
+        Path::new("/tmp/debug-proof/backend.sock"),
+    )
+    .with_debug_profile(&parsed);
+    let args = command.arguments();
+    for key in [
+        "approval_policy",
+        "approvals_reviewer",
+        "auto_review",
+        "apps",
+    ] {
+        assert!(
+            !args
+                .iter()
+                .any(|argument| argument.to_string_lossy().starts_with(key))
+        );
+    }
+}
+
+#[test]
 fn network_experiment_configuration_is_typed_and_closed() {
     assert!(DebugCodexProfile::parse(NETWORK_PROFILE, 18787).is_ok());
     for rejected in [
