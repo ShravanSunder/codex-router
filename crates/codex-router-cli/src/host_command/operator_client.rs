@@ -53,6 +53,23 @@ pub(crate) async fn send_operator_request(
     send_operator_request_with_connect_retry(socket, request, deadline, false).await
 }
 
+/// Runs one operator exchange while delivering each decoded frame immediately.
+pub(crate) async fn send_operator_request_streaming<F>(
+    socket: &Path,
+    request: OperatorRequest,
+    deadline: Duration,
+    mut on_frame: F,
+) -> Result<Vec<OperatorFrame>, OperatorClientError>
+where
+    F: FnMut(&OperatorFrame),
+{
+    let frames = send_operator_request(socket, request, deadline).await?;
+    for frame in &frames {
+        on_frame(frame);
+    }
+    Ok(frames)
+}
+
 /// Runs the post-reexec exchange, retrying only while the replacement publishes its socket.
 pub(super) async fn send_replacement_operator_request(
     socket: &Path,

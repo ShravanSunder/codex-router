@@ -15,7 +15,6 @@ use thiserror::Error;
 
 use crate::CliContext;
 use operator_client::OperatorClientError;
-use operator_client::send_operator_request;
 
 mod foreground_launch;
 pub(crate) mod operator_client;
@@ -166,10 +165,13 @@ pub(crate) async fn run_host_command<W: Write>(
             action: AppServerAction::Update,
         } => OperatorRequest::UpdateCodex,
     };
-    let frames = send_operator_request(
+    let frames = operator_client::send_operator_request_streaming(
         coordination_paths.operator_socket(),
         request,
         operator_request_deadline(command.action()),
+        |frame| {
+            let _ = crate::presentation::host::render_progress_frame(stdout, frame);
+        },
     )
     .await
     .map_err(|error| {

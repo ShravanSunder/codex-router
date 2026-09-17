@@ -1,6 +1,7 @@
 //! Deterministic CLI presentation for shared-host operator responses.
 
 use std::io::Write;
+use std::time::Instant;
 
 use crate::host_command::replacement_outcome::HostRestartResult;
 use codex_router_host::HostSnapshot;
@@ -42,7 +43,7 @@ pub(crate) fn render_frames<W: Write>(
 ) -> std::io::Result<()> {
     for frame in frames {
         match frame {
-            OperatorFrame::Progress(progress) => writeln!(stdout, "progress: {progress:?}"),
+            OperatorFrame::Progress(progress) => render_progress(stdout, *progress),
             OperatorFrame::Terminal(response) => {
                 writeln!(stdout, "result: {:?}", response.classification())?;
                 writeln!(stdout, "message: {}", response.message())?;
@@ -51,6 +52,39 @@ pub(crate) fn render_frames<W: Write>(
         }?;
     }
     Ok(())
+}
+
+pub(crate) fn render_progress_frame<W: Write>(
+    stdout: &mut W,
+    frame: &OperatorFrame,
+) -> std::io::Result<()> {
+    if let OperatorFrame::Progress(progress) = frame {
+        render_progress(stdout, *progress)?;
+    }
+    Ok(())
+}
+
+fn render_progress<W: Write>(
+    stdout: &mut W,
+    progress: codex_router_host::HostProgress,
+) -> std::io::Result<()> {
+    let started = Instant::now();
+    let label = match progress {
+        codex_router_host::HostProgress::ReplacementStarting => "starting Host replacement",
+        codex_router_host::HostProgress::StoppingAppServer => "stopping app-server",
+        codex_router_host::HostProgress::AppServerKilled => "forced app-server shutdown",
+        codex_router_host::HostProgress::StoppingRouter => "stopping router",
+        codex_router_host::HostProgress::ReExecuting => "re-executing Host",
+        codex_router_host::HostProgress::RouterReady => "router ready",
+        codex_router_host::HostProgress::AppServerReady => "app-server ready",
+        codex_router_host::HostProgress::RemoteControlReady => "Remote Control ready",
+        codex_router_host::HostProgress::UpdatingAppServer => "updating app-server",
+    };
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    spinner.set_message(label.to_owned());
+    spinner.finish_and_clear();
+    writeln!(stdout, "✓ {label} ({:.2?})", started.elapsed())
 }
 
 pub(crate) fn render_update_result<W: Write>(

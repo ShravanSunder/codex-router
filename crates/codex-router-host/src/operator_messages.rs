@@ -54,6 +54,22 @@ impl OperatorRequest {
 pub enum HostProgress {
     /// Whole-Host replacement is beginning ordered child teardown before re-exec.
     ReplacementStarting,
+    /// The managed app-server is stopping.
+    StoppingAppServer,
+    /// The app-server required forced process-group termination.
+    AppServerKilled,
+    /// The owned router is stopping.
+    StoppingRouter,
+    /// The Host is re-executing its replacement command.
+    ReExecuting,
+    /// The router readiness probe converged.
+    RouterReady,
+    /// The app-server native endpoint converged.
+    AppServerReady,
+    /// Remote Control readiness converged.
+    RemoteControlReady,
+    /// A managed Codex update is starting.
+    UpdatingAppServer,
 }
 
 /// Terminal classification independent of presentation text.
