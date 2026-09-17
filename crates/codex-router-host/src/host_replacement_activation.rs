@@ -38,7 +38,11 @@ pub(crate) fn activate_host_replacement(
                 .send(OperatorFrame::Progress(HostProgress::StoppingAppServer))
                 .await;
             match child.shutdown().await {
-                Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Forced)) => {
+                Ok(
+                    outcome @ (ShutdownOutcome::Graceful
+                    | ShutdownOutcome::ForcedDrain
+                    | ShutdownOutcome::Killed),
+                ) => {
                     app_server_shutdown = Some(outcome);
                     app_server = None;
                 }

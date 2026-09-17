@@ -100,12 +100,14 @@ pub(super) fn recovery_future(
             Err(readiness_error) => {
                 let _readiness_error = readiness_error;
                 match child.shutdown().await {
-                    Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Forced)) => {
-                        RecoveryCompletion::Failed {
-                            retained_child: None,
-                            shutdown_outcome: Some(outcome),
-                        }
-                    }
+                    Ok(
+                        outcome @ (ShutdownOutcome::Graceful
+                        | ShutdownOutcome::ForcedDrain
+                        | ShutdownOutcome::Killed),
+                    ) => RecoveryCompletion::Failed {
+                        retained_child: None,
+                        shutdown_outcome: Some(outcome),
+                    },
                     Ok(ShutdownOutcome::TimedOutStillRunning) => RecoveryCompletion::Failed {
                         retained_child: Some(child),
                         shutdown_outcome: Some(ShutdownOutcome::TimedOutStillRunning),

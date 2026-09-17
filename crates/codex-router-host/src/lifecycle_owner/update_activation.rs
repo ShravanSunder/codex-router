@@ -149,7 +149,7 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         context.active.operation,
         if matches!(
             context.completion.app_server_shutdown,
-            Some(crate::ShutdownOutcome::Forced)
+            Some(crate::ShutdownOutcome::ForcedDrain)
         ) {
             "forced-replacement-starting"
         } else {
@@ -159,7 +159,7 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
     );
     if matches!(
         context.completion.app_server_shutdown,
-        Some(crate::ShutdownOutcome::Forced)
+        Some(crate::ShutdownOutcome::ForcedDrain)
     ) {
         request_admission::send_progress(
             &context.active.response,

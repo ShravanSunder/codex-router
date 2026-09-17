@@ -83,7 +83,11 @@ pub(crate) fn restart_app_server(
                 .send(OperatorFrame::Progress(HostProgress::StoppingAppServer))
                 .await;
             match child.shutdown().await {
-                Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Forced)) => {
+                Ok(
+                    outcome @ (ShutdownOutcome::Graceful
+                    | ShutdownOutcome::ForcedDrain
+                    | ShutdownOutcome::Killed),
+                ) => {
                     shutdown_outcome = Some(outcome);
                 }
                 Ok(ShutdownOutcome::TimedOutStillRunning) => {
@@ -182,7 +186,11 @@ pub(crate) fn restart_app_server(
                 let replacement_shutdown = replacement.shutdown().await;
                 let child = match replacement_shutdown {
                     Ok(ShutdownOutcome::TimedOutStillRunning) | Err(_) => Some(replacement),
-                    Ok(ShutdownOutcome::Graceful | ShutdownOutcome::Forced) => None,
+                    Ok(
+                        ShutdownOutcome::Graceful
+                        | ShutdownOutcome::ForcedDrain
+                        | ShutdownOutcome::Killed,
+                    ) => None,
                 };
                 AppServerRestartCompletion {
                     child,

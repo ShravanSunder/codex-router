@@ -9,6 +9,8 @@ use crate::managed_app_server::AppServerChild;
 
 /// Grace period before SIGKILL escalation.
 pub const APP_SERVER_GRACE_PERIOD: Duration = Duration::from_secs(1);
+/// Delay before forcing a still-running app-server with a second SIGTERM.
+pub const APP_SERVER_FORCE_AFTER: Duration = Duration::from_millis(500);
 /// Total app-server shutdown observation bound, including forced reap.
 pub const APP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -16,6 +18,7 @@ pub const APP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AppServerShutdownDeadlines {
     force_after: Duration,
+    kill_after: Duration,
     total: Duration,
 }
 
@@ -24,7 +27,8 @@ impl AppServerShutdownDeadlines {
     #[must_use]
     pub const fn production() -> Self {
         Self {
-            force_after: APP_SERVER_GRACE_PERIOD,
+            force_after: APP_SERVER_FORCE_AFTER,
+            kill_after: APP_SERVER_GRACE_PERIOD,
             total: APP_SERVER_SHUTDOWN_TIMEOUT,
         }
     }
@@ -33,7 +37,12 @@ impl AppServerShutdownDeadlines {
     #[must_use]
     pub fn new(force_after: Duration, total: Duration) -> Option<Self> {
         if force_after < total {
-            Some(Self { force_after, total })
+            let kill_after = force_after.saturating_mul(2);
+            Some(Self {
+                force_after,
+                kill_after,
+                total,
+            })
         } else {
             None
         }
@@ -45,8 +54,10 @@ impl AppServerShutdownDeadlines {
 pub enum ShutdownOutcome {
     /// Child exited after SIGTERM without force escalation.
     Graceful,
-    /// Child exited after SIGKILL escalation.
-    Forced,
+    /// Child exited after the second SIGTERM forced-drain path.
+    ForcedDrain,
+    /// Child exited after the SIGKILL backstop fired.
+    Killed,
     /// Total bound expired while the exact child remained retained.
     TimedOutStillRunning,
 }
@@ -106,7 +117,9 @@ impl ExpectedExit {
     ) -> ShutdownAction {
         if !child_running {
             return ShutdownAction::Complete(if self.kill_sent {
-                ShutdownOutcome::Forced
+                ShutdownOutcome::Killed
+            } else if self.force_term_sent {
+                ShutdownOutcome::ForcedDrain
             } else {
                 ShutdownOutcome::Graceful
             });
@@ -122,7 +135,7 @@ impl ExpectedExit {
             self.force_term_sent = true;
             return ShutdownAction::SendForceTerminate;
         }
-        if elapsed >= deadlines.force_after && !self.kill_sent {
+        if elapsed >= deadlines.kill_after && !self.kill_sent {
             self.kill_sent = true;
             return ShutdownAction::SendKill;
         }
@@ -173,7 +186,10 @@ impl AppServerChild {
     ) -> Result<ShutdownOutcome, AppServerShutdownError> {
         if let Some(expected_exit) = self.expected_exit.as_ref() {
             return match self.process.try_wait()? {
-                Some(_status) if expected_exit.kill_sent() => Ok(ShutdownOutcome::Forced),
+                Some(_status) if expected_exit.kill_sent() => Ok(ShutdownOutcome::Killed),
+                Some(_status) if expected_exit.force_term_sent() => {
+                    Ok(ShutdownOutcome::ForcedDrain)
+                }
                 Some(_status) => Ok(ShutdownOutcome::Graceful),
                 None => Ok(ShutdownOutcome::TimedOutStillRunning),
             };
@@ -190,10 +206,9 @@ impl AppServerChild {
             return Err(AppServerShutdownError::InvalidInitialAction);
         }
         self.process.send_terminate()?;
-        // Yield once so the upstream signal handler can observe the first TERM
-        // before the force TERM is delivered; no wall-clock delay is added.
-        tokio::task::yield_now().await;
-        if self.process.try_wait()?.is_some() {
+        let first_wait = deadlines.force_after;
+        if let Ok(result) = tokio::time::timeout(first_wait, self.process.wait()).await {
+            let _status = result?;
             return Ok(ShutdownOutcome::Graceful);
         }
         let expected_exit = self
@@ -207,10 +222,11 @@ impl AppServerChild {
         }
         self.process.send_terminate()?;
 
-        match tokio::time::timeout(deadlines.force_after, self.process.wait()).await {
+        let second_wait = deadlines.kill_after.saturating_sub(deadlines.force_after);
+        match tokio::time::timeout(second_wait, self.process.wait()).await {
             Ok(result) => {
                 let _status = result?;
-                return Ok(ShutdownOutcome::Graceful);
+                return Ok(ShutdownOutcome::ForcedDrain);
             }
             Err(_elapsed) => {}
         }
@@ -219,17 +235,17 @@ impl AppServerChild {
             .as_mut()
             .ok_or(AppServerShutdownError::MissingProgress)?;
         let force_action =
-            expected_exit.next_action_with_deadlines(deadlines.force_after, true, deadlines);
+            expected_exit.next_action_with_deadlines(deadlines.kill_after, true, deadlines);
         if force_action != ShutdownAction::SendKill {
             return Err(AppServerShutdownError::InvalidForceAction);
         }
         self.process.send_group_kill()?;
 
-        let forced_wait = deadlines.total.saturating_sub(deadlines.force_after);
+        let forced_wait = deadlines.total.saturating_sub(deadlines.kill_after);
         match tokio::time::timeout(forced_wait, self.process.wait()).await {
             Ok(result) => {
                 let _status = result?;
-                Ok(ShutdownOutcome::Forced)
+                Ok(ShutdownOutcome::Killed)
             }
             Err(_elapsed) => Ok(ShutdownOutcome::TimedOutStillRunning),
         }

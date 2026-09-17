@@ -7,7 +7,9 @@ pub(super) const fn restart_lifecycle_classification(
     shutdown_outcome: Option<crate::ShutdownOutcome>,
 ) -> LifecycleOutcomeClassification {
     match shutdown_outcome {
-        Some(crate::ShutdownOutcome::Forced) => LifecycleOutcomeClassification::Forced,
+        Some(crate::ShutdownOutcome::ForcedDrain | crate::ShutdownOutcome::Killed) => {
+            LifecycleOutcomeClassification::Forced
+        }
         Some(crate::ShutdownOutcome::TimedOutStillRunning) => {
             LifecycleOutcomeClassification::TimedOut
         }
@@ -103,7 +105,7 @@ mod tests {
     #[test]
     fn restart_classification_preserves_forced_and_timed_out_shutdowns() {
         assert_eq!(
-            restart_lifecycle_classification(true, Some(crate::ShutdownOutcome::Forced)),
+            restart_lifecycle_classification(true, Some(crate::ShutdownOutcome::ForcedDrain)),
             LifecycleOutcomeClassification::Forced
         );
         assert_eq!(

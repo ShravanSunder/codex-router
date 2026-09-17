@@ -44,7 +44,7 @@ fn app_server_shutdown_policy_uses_fast_grace_and_reap_boundaries() {
         ShutdownAction::SendTerminate
     );
     assert_eq!(
-        expected_exit.next_action(Duration::ZERO, true),
+        expected_exit.next_action(Duration::from_millis(500), true),
         ShutdownAction::SendForceTerminate
     );
     assert_eq!(
@@ -65,7 +65,7 @@ fn app_server_shutdown_policy_uses_fast_grace_and_reap_boundaries() {
     );
     assert_eq!(
         expected_exit.next_action(Duration::from_millis(5_001), false),
-        ShutdownAction::Complete(ShutdownOutcome::Forced)
+        ShutdownAction::Complete(ShutdownOutcome::Killed)
     );
     assert!(expected_exit.term_sent());
     assert!(expected_exit.kill_sent());
@@ -140,8 +140,8 @@ async fn app_server_force_escalation_signals_and_reaps_once()
         app_server
             .shutdown_with_deadlines(fixture_deadlines)
             .await?,
-        ShutdownOutcome::Forced,
-        "SIGTERM-ignoring app-server must use the force escalation",
+        ShutdownOutcome::Killed,
+        "SIGTERM-ignoring app-server must use the kill backstop",
     )?;
     check_equal(
         app_server.expected_exit().map(ExpectedExit::term_sent),
@@ -175,7 +175,7 @@ async fn app_server_second_sigterm_exits_gracefully_before_backstop()
     let outcome = app_server.shutdown().await?;
     let events = std::fs::read_to_string(&event_file)?;
     check(
-        outcome == ShutdownOutcome::Graceful,
+        outcome == ShutdownOutcome::ForcedDrain,
         &format!("second SIGTERM should preserve graceful cleanup: {outcome:?}, events={events:?}"),
     )?;
     check(
@@ -217,7 +217,7 @@ async fn app_server_force_escalation_kills_the_complete_process_group()
         app_server
             .shutdown_with_deadlines(fixture_deadlines)
             .await?,
-        ShutdownOutcome::Forced,
+        ShutdownOutcome::Killed,
         "SIGTERM-ignoring app-server must be force-killed",
     )?;
     wait_for_process_exit(process_ids[1]).await?;
