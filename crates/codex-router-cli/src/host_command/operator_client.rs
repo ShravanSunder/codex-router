@@ -11,8 +11,9 @@ use codex_router_host::OperatorRequest;
 use codex_router_host::decode_operator_frame;
 use codex_router_host::encode_operator_request;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
 use tokio::net::UnixStream;
 
 /// Bounded operator-client transport or protocol failure.
@@ -45,12 +46,13 @@ pub enum OperatorClientError {
 }
 
 /// Runs one bounded operator request/response exchange over the private socket.
+#[allow(dead_code)]
 pub(crate) async fn send_operator_request(
     socket: &Path,
     request: OperatorRequest,
     deadline: Duration,
 ) -> Result<Vec<OperatorFrame>, OperatorClientError> {
-    send_operator_request_with_connect_retry(socket, request, deadline, false).await
+    send_operator_request_with_connect_retry(socket, request, deadline, false, |_| {}).await
 }
 
 /// Runs one operator exchange while delivering each decoded frame immediately.
@@ -58,16 +60,12 @@ pub(crate) async fn send_operator_request_streaming<F>(
     socket: &Path,
     request: OperatorRequest,
     deadline: Duration,
-    mut on_frame: F,
+    on_frame: F,
 ) -> Result<Vec<OperatorFrame>, OperatorClientError>
 where
     F: FnMut(&OperatorFrame),
 {
-    let frames = send_operator_request(socket, request, deadline).await?;
-    for frame in &frames {
-        on_frame(frame);
-    }
-    Ok(frames)
+    send_operator_request_with_connect_retry(socket, request, deadline, false, on_frame).await
 }
 
 /// Runs the post-reexec exchange, retrying only while the replacement publishes its socket.
@@ -76,7 +74,7 @@ pub(super) async fn send_replacement_operator_request(
     request: OperatorRequest,
     deadline: Duration,
 ) -> Result<Vec<OperatorFrame>, OperatorClientError> {
-    send_operator_request_with_connect_retry(socket, request, deadline, true).await
+    send_operator_request_with_connect_retry(socket, request, deadline, true, |_| {}).await
 }
 
 async fn send_operator_request_with_connect_retry(
@@ -84,6 +82,7 @@ async fn send_operator_request_with_connect_retry(
     request: OperatorRequest,
     deadline: Duration,
     retry_unpublished_socket: bool,
+    mut on_frame: impl FnMut(&OperatorFrame),
 ) -> Result<Vec<OperatorFrame>, OperatorClientError> {
     let deadline_at = tokio::time::Instant::now() + deadline;
     let mut stream = loop {
@@ -120,26 +119,35 @@ async fn send_operator_request_with_connect_retry(
         .map_err(|_elapsed| OperatorClientError::Timeout)?
         .map_err(OperatorClientError::Write)?;
 
-    let response_bytes = read_bounded_to_end(&mut stream, deadline_at)
-        .await
-        .map_err(|error| match error {
-            BoundedReadError::Io(error) => OperatorClientError::Read(error),
-            BoundedReadError::Timeout => OperatorClientError::Timeout,
-            BoundedReadError::TooLarge => {
-                OperatorClientError::Protocol(OperatorProtocolError::FrameTooLarge)
-            }
-        })?;
     let mut frames = Vec::new();
     let mut terminal_seen = false;
-    for response_line in response_bytes.split_inclusive(|byte| *byte == b'\n') {
-        if response_line.is_empty() {
+    let mut response_bytes = 0usize;
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut response_line = Vec::new();
+        let read =
+            tokio::time::timeout_at(deadline_at, reader.read_until(b'\n', &mut response_line))
+                .await
+                .map_err(|_elapsed| OperatorClientError::Timeout)?
+                .map_err(OperatorClientError::Read)?;
+        if read == 0 {
+            break;
+        }
+        response_bytes = response_bytes.saturating_add(response_line.len());
+        if response_bytes > MAX_OPERATOR_FRAME_BYTES {
+            return Err(OperatorClientError::Protocol(
+                OperatorProtocolError::FrameTooLarge,
+            ));
+        }
+        if response_line == b"\n" {
             continue;
         }
         if terminal_seen {
             return Err(OperatorClientError::FramesAfterTerminal);
         }
-        let frame = decode_operator_frame(response_line)?;
+        let frame = decode_operator_frame(&response_line)?;
         terminal_seen = matches!(frame, OperatorFrame::Terminal(_));
+        on_frame(&frame);
         frames.push(frame);
     }
     if !terminal_seen
@@ -156,31 +164,18 @@ async fn send_operator_request_with_connect_retry(
     Ok(frames)
 }
 
-enum BoundedReadError {
-    Timeout,
-    TooLarge,
-    Io(std::io::Error),
-}
-
-async fn read_bounded_to_end(
-    stream: &mut UnixStream,
-    deadline_at: tokio::time::Instant,
-) -> Result<Vec<u8>, BoundedReadError> {
-    let mut payload = Vec::new();
-    let mut limited = stream.take(u64::try_from(MAX_OPERATOR_FRAME_BYTES).unwrap_or(u64::MAX) + 1);
-    tokio::time::timeout_at(deadline_at, limited.read_to_end(&mut payload))
-        .await
-        .map_err(|_elapsed| BoundedReadError::Timeout)?
-        .map_err(BoundedReadError::Io)?;
-    if payload.len() > MAX_OPERATOR_FRAME_BYTES {
-        return Err(BoundedReadError::TooLarge);
-    }
-    Ok(payload)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_router_host::{
+        AppServerCondition, ExecutableRelation, HostOperation, HostPhase, HostSnapshot,
+        HostSnapshotDimensions, HostTerminalResponse, LifecycleOutcome,
+        LifecycleOutcomeClassification, RecoveryBudget, RemoteControlCondition, RouterCondition,
+        TerminalClassification, encode_operator_frame,
+    };
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn first_connect_reports_missing_host_without_waiting_for_lifecycle_deadline() {
@@ -196,5 +191,80 @@ mod tests {
 
         assert!(matches!(result, Err(OperatorClientError::HostNotRunning)));
         assert!(started_at.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn streaming_client_delivers_progress_before_terminal_frame()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let socket = std::env::temp_dir().join(format!(
+            "codex-router-streaming-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let (progress_seen_tx, progress_seen_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let request = {
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).await?;
+                bytes
+            };
+            assert!(!request.is_empty());
+            stream
+                .write_all(
+                    &encode_operator_frame(&OperatorFrame::Progress(HostProgress::RouterReady))
+                        .map_err(std::io::Error::other)?,
+                )
+                .await?;
+            progress_seen_rx.await.map_err(std::io::Error::other)?;
+            let snapshot = HostSnapshot::new(HostSnapshotDimensions {
+                phase: HostPhase::Steady,
+                router: RouterCondition::ExternalReachable,
+                app_server: AppServerCondition::Absent,
+                remote_control: RemoteControlCondition::Unavailable,
+                remote_control_identity: None,
+                executable_relation: ExecutableRelation::Unknown,
+                recovery_budget: RecoveryBudget::Available,
+                last_lifecycle_outcome: Some(LifecycleOutcome {
+                    operation: HostOperation::Status,
+                    classification: LifecycleOutcomeClassification::Succeeded,
+                }),
+            });
+            stream
+                .write_all(
+                    &encode_operator_frame(&OperatorFrame::terminal(HostTerminalResponse::new(
+                        OperatorRequest::Status,
+                        TerminalClassification::Succeeded,
+                        snapshot,
+                        "ok".to_owned(),
+                    )))
+                    .map_err(std::io::Error::other)?,
+                )
+                .await?;
+            Ok::<_, std::io::Error>(())
+        });
+        let mut progress_seen_tx = Some(progress_seen_tx);
+        let frames = send_operator_request_streaming(
+            &socket,
+            OperatorRequest::Status,
+            Duration::from_secs(2),
+            |frame| {
+                if matches!(frame, OperatorFrame::Progress(HostProgress::RouterReady)) {
+                    let _ = progress_seen_tx
+                        .take()
+                        .expect("progress callback once")
+                        .send(());
+                }
+            },
+        )
+        .await?;
+        assert!(matches!(
+            frames.first(),
+            Some(OperatorFrame::Progress(HostProgress::RouterReady))
+        ));
+        server.await??;
+        let _ = std::fs::remove_file(&socket);
+        Ok(())
     }
 }

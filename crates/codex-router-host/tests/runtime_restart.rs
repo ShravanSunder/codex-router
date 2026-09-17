@@ -44,6 +44,19 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
 
     let current_executable = std::env::current_exe()?;
     let app_server_socket = directory.path().join("app.sock");
+    let app_server_socket_for_gap = app_server_socket.clone();
+    let managed_executable = directory.path().join("managed-codex");
+    std::fs::write(
+        &managed_executable,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 1.2.3'; else exec '{}' \"$@\"; fi\n",
+            current_executable.display()
+        ),
+    )?;
+    std::fs::set_permissions(
+        &managed_executable,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
     let identity = codex_native_integration::executable_identity(&current_executable).await?;
     let app_server = AppServerLaunchPlan::new(
         ChildCommandSpec::new(current_executable.clone())
@@ -78,7 +91,7 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
         coordination_paths: coordination_paths.clone(),
         router_endpoint: router_address,
         app_server_socket,
-        managed_executable: directory.path().join("unused-codex"),
+        managed_executable,
         deadlines: HostDeadlines::new(HostDeadlineInputs {
             router_start: Duration::from_millis(500),
             app_server_start: Duration::from_secs(2),
@@ -140,12 +153,16 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
         RouterCondition::Unavailable,
     )
     .await?;
-    check_equal(
-        terminal_snapshot(&unavailable)?.app_server().clone(),
-        codex_router_host::AppServerCondition::NativeReady {
-            running_version: "1.2.3".to_owned(),
-        },
-        "owned-router exit must preserve the healthy app-server",
+    let unavailable_snapshot = terminal_snapshot(&unavailable)?;
+    check(
+        unavailable_snapshot.app_server()
+            == &codex_router_host::AppServerCondition::NativeReady {
+                running_version: "1.2.3".to_owned(),
+            },
+        &format!(
+            "owned-router exit must preserve the healthy app-server: {:?}",
+            unavailable_snapshot.app_server()
+        ),
     )?;
     let recovery_restart = send_operator_request(
         coordination_paths.operator_socket(),
@@ -160,10 +177,46 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
     )?;
     let recovered_router_pids = wait_for_process_ids(&router_process_log, 3).await?;
 
+    let restart_started_at = tokio::time::Instant::now();
+    let operator_socket_for_restart = coordination_paths.operator_socket().to_owned();
+    let restart_future = send_operator_request(
+        &operator_socket_for_restart,
+        OperatorRequest::RestartAppServer,
+        Duration::from_secs(4),
+    );
+    let (restart_result, restarted_app_server_pids) = tokio::join!(
+        restart_future,
+        wait_for_process_ids(&app_server_process_log, 2)
+    );
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if tokio::net::UnixStream::connect(&app_server_socket_for_gap)
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let restart_gap = restart_started_at.elapsed();
+    eprintln!("app_server_restart_gap_ms={}", restart_gap.as_millis());
+    check(
+        restart_gap < Duration::from_secs(5),
+        &format!("app-server restart socket gap exceeded target: {restart_gap:?}"),
+    )?;
+    let restart_result = restart_result?;
+    check(
+        terminal_classification(&restart_result)? == TerminalClassification::Succeeded,
+        &format!("app-server restart must succeed: {restart_result:?}"),
+    )?;
+    let restarted_app_server_pid = restarted_app_server_pids?[1];
+
     runtime.abort();
     let _runtime_result = runtime.await;
     terminate_process(recovered_router_pids[2])?;
-    terminate_process(initial_app_server_pid)?;
+    terminate_process(restarted_app_server_pid)?;
     Ok(())
 }
 
