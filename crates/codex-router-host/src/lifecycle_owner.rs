@@ -42,6 +42,7 @@ use crate::require_unowned_app_server_endpoint;
 
 mod collaboration_lifecycle;
 mod lifecycle_convergence;
+pub(crate) use lifecycle_convergence::flush_pre_exec_telemetry;
 mod request_admission;
 mod retained_lifecycle;
 mod startup_convergence;
@@ -523,7 +524,6 @@ impl HostRuntime {
                         state: &mut state,
                         app_server: &mut app_server,
                         router: &mut router_child,
-                        update_inputs: &update_inputs,
                         instance: &instance,
                     }).await?;
                 }

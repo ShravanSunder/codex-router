@@ -59,6 +59,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
                     context.app_server.take(),
                     context.router.take(),
                     context.active.response.clone(),
+                    context.update_inputs.pre_exec_telemetry.clone(),
                 ),
                 response: context.active.response,
                 replacement_command,
@@ -109,7 +110,6 @@ pub(super) struct ActivationContext<'a> {
     pub(super) state: &'a mut RuntimeState,
     pub(super) app_server: &'a mut Option<AppServerChild>,
     pub(super) router: &'a mut Option<RouterChild>,
-    pub(super) update_inputs: &'a ManagedUpdateInputs,
     pub(super) instance: &'a HostInstance,
 }
 
@@ -170,12 +170,8 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
     // ReExecuting frame. Queue admission alone is insufficient because exec
     // tears down the writer task with any queued bytes.
     let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(100),
         context.active.reexecuting_ack,
-    )
-    .await;
-    lifecycle_convergence::flush_pre_exec_telemetry(
-        context.update_inputs.pre_exec_telemetry.clone(),
     )
     .await;
     context.instance.remove_operator_socket_for_exec()?;

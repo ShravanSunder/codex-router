@@ -307,7 +307,7 @@ pub(super) async fn settle_host_replacement_for_shutdown(
     *router = completion.router;
 }
 
-pub(super) async fn flush_pre_exec_telemetry(telemetry: Option<Arc<dyn PreExecTelemetry>>) {
+pub(crate) async fn flush_pre_exec_telemetry(telemetry: Option<Arc<dyn PreExecTelemetry>>) {
     let Some(telemetry) = telemetry else {
         return;
     };

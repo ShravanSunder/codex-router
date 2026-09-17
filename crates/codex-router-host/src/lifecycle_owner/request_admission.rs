@@ -254,6 +254,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                     context.app_server.take(),
                     context.router_child.take(),
                     work.response.clone(),
+                    context.update_inputs.pre_exec_telemetry.clone(),
                 ),
                 response: work.response,
                 replacement_command: replacement_command.with_executable(executable),
