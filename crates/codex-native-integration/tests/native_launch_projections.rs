@@ -1,3 +1,5 @@
+use codex_native_integration::ResumeModelChoice;
+use codex_native_integration::caller_overrides;
 use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
@@ -217,7 +219,14 @@ fn session_launch_keeps_remote_at_root_for_new_and_resume() {
         ]
     );
     assert_eq!(
-        SessionLaunch::resume(&socket, &invoking_cwd, &user_arguments, "thread_123").arguments(),
+        SessionLaunch::resume(
+            &socket,
+            &invoking_cwd,
+            &user_arguments,
+            "thread_123",
+            &ResumeModelChoice::default()
+        )
+        .arguments(),
         vec![
             OsString::from("--profile"),
             OsString::from("codex-router"),
@@ -233,7 +242,14 @@ fn session_launch_keeps_remote_at_root_for_new_and_resume() {
         ]
     );
     assert_eq!(
-        SessionLaunch::fork(&socket, &invoking_cwd, &user_arguments, "thread_123").arguments(),
+        SessionLaunch::fork(
+            &socket,
+            &invoking_cwd,
+            &user_arguments,
+            "thread_123",
+            &ResumeModelChoice::default()
+        )
+        .arguments(),
         vec![
             OsString::from("--profile"),
             OsString::from("codex-router"),
@@ -272,7 +288,13 @@ fn local_session_launch_keeps_router_profile_without_remote_attachment() {
         ]
     );
     assert_eq!(
-        SessionLaunch::resume_local(&invoking_cwd, &user_arguments, "thread_123").arguments(),
+        SessionLaunch::resume_local(
+            &invoking_cwd,
+            &user_arguments,
+            "thread_123",
+            &ResumeModelChoice::default()
+        )
+        .arguments(),
         vec![
             OsString::from("--profile"),
             OsString::from("codex-router"),
@@ -287,7 +309,13 @@ fn local_session_launch_keeps_router_profile_without_remote_attachment() {
         ]
     );
     assert_eq!(
-        SessionLaunch::fork_local(&invoking_cwd, &user_arguments, "thread_123").arguments(),
+        SessionLaunch::fork_local(
+            &invoking_cwd,
+            &user_arguments,
+            "thread_123",
+            &ResumeModelChoice::default()
+        )
+        .arguments(),
         vec![
             OsString::from("--profile"),
             OsString::from("codex-router"),
@@ -333,9 +361,181 @@ fn session_launch_preserves_every_explicit_cwd_spelling_without_injecting_a_dupl
         ]);
 
         assert_eq!(
-            SessionLaunch::resume(&socket, &invoking_cwd, &user_arguments, "thread_123")
-                .arguments(),
+            SessionLaunch::resume(
+                &socket,
+                &invoking_cwd,
+                &user_arguments,
+                "thread_123",
+                &ResumeModelChoice::default()
+            )
+            .arguments(),
             expected_arguments,
         );
     }
+}
+
+fn text_arguments(arguments: &[OsString]) -> Vec<String> {
+    arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn caller_overrides_detect_every_model_and_effort_argument_form() {
+    // Arrange / Act / Assert: each row is one argument vector and the keys it claims.
+    let cases: Vec<(Vec<&str>, bool, bool)> = vec![
+        (vec![], false, false),
+        (vec!["--search"], false, false),
+        (vec!["-m", "gpt-6"], true, false),
+        (vec!["--model", "gpt-6"], true, false),
+        (vec!["-m=gpt-6"], true, false),
+        (vec!["-mgpt-6"], true, false),
+        (vec!["--model=gpt-6"], true, false),
+        (vec!["-c", "model=\"gpt-6\""], true, false),
+        (vec!["-cmodel=\"gpt-6\""], true, false),
+        (vec!["--config", "model=\"gpt-6\""], true, false),
+        (vec!["--config=model=\"gpt-6\""], true, false),
+        (vec!["-c", "model_reasoning_effort=\"high\""], false, true),
+        (
+            vec!["--config", "model_reasoning_effort=\"high\""],
+            false,
+            true,
+        ),
+        (
+            vec!["--config=model_reasoning_effort=\"high\""],
+            false,
+            true,
+        ),
+        (vec!["-c", "model_verbosity=\"high\""], false, false),
+        (
+            vec!["-m", "gpt-6", "-c", "model_reasoning_effort=\"high\""],
+            true,
+            true,
+        ),
+    ];
+
+    for (arguments, expects_model, expects_effort) in cases {
+        let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+        let overrides = caller_overrides(&arguments);
+        assert_eq!(
+            (overrides.model, overrides.reasoning_effort),
+            (expects_model, expects_effort),
+            "unexpected overrides for {arguments:?}"
+        );
+    }
+}
+
+#[test]
+fn resume_injects_stored_model_and_effort_immediately_before_the_subcommand() {
+    // Arrange
+    let invoking_cwd = PathBuf::from("/Users/owner/project");
+    let user_arguments = vec![OsString::from("--search")];
+    let choice = ResumeModelChoice::from_stored_values(Some("gpt-6-astra"), Some("high"));
+
+    // Act
+    let resume = SessionLaunch::resume_local(&invoking_cwd, &user_arguments, "thread_123", &choice);
+    let fork = SessionLaunch::fork_local(&invoking_cwd, &user_arguments, "thread_123", &choice);
+
+    // Assert
+    assert_eq!(
+        text_arguments(&resume.arguments()),
+        vec![
+            "--profile",
+            "codex-router",
+            "--cd",
+            "/Users/owner/project",
+            "--search",
+            "-c",
+            "model=\"gpt-6-astra\"",
+            "-c",
+            "model_reasoning_effort=\"high\"",
+            "resume",
+            "--",
+            "thread_123",
+        ]
+    );
+    assert_eq!(
+        text_arguments(&fork.arguments())[4..9],
+        [
+            "--search",
+            "-c",
+            "model=\"gpt-6-astra\"",
+            "-c",
+            "model_reasoning_effort=\"high\"",
+        ]
+    );
+}
+
+#[test]
+fn resume_leaves_arguments_unchanged_without_stored_model_or_effort() {
+    // Arrange
+    let invoking_cwd = PathBuf::from("/Users/owner/project");
+    let user_arguments = vec![OsString::from("--search")];
+    let empty = ResumeModelChoice::from_stored_values(None, None);
+
+    // Act
+    let launch = SessionLaunch::resume_local(&invoking_cwd, &user_arguments, "thread_123", &empty);
+
+    // Assert
+    assert_eq!(
+        text_arguments(&launch.arguments()),
+        vec![
+            "--profile",
+            "codex-router",
+            "--cd",
+            "/Users/owner/project",
+            "--search",
+            "resume",
+            "--",
+            "thread_123",
+        ]
+    );
+}
+
+#[test]
+fn caller_model_argument_wins_over_the_stored_model() {
+    // Arrange
+    let invoking_cwd = PathBuf::from("/Users/owner/project");
+    let user_arguments = vec![OsString::from("-m"), OsString::from("gpt-6-mini")];
+    let choice = ResumeModelChoice::from_stored_values(Some("gpt-6-astra"), Some("high"));
+
+    // Act
+    let launch = SessionLaunch::resume_local(&invoking_cwd, &user_arguments, "thread_123", &choice);
+
+    // Assert
+    let arguments = text_arguments(&launch.arguments());
+    assert!(
+        !arguments
+            .iter()
+            .any(|argument| argument.starts_with("model="))
+    );
+    assert_eq!(
+        arguments[4..8],
+        ["-m", "gpt-6-mini", "-c", "model_reasoning_effort=\"high\""]
+    );
+}
+
+#[test]
+fn stored_values_that_cannot_be_quoted_are_dropped_from_the_launch() {
+    // Arrange
+    let invoking_cwd = PathBuf::from("/Users/owner/project");
+    let unsafe_model = Some("gpt-6\"injected");
+
+    // Act
+    let choice = ResumeModelChoice::from_stored_values(unsafe_model, Some("high"));
+    let launch = SessionLaunch::resume_local(&invoking_cwd, &[], "thread_123", &choice);
+
+    // Assert
+    assert!(ResumeModelChoice::rejects_stored_value(
+        unsafe_model,
+        Some("high")
+    ));
+    let arguments = text_arguments(&launch.arguments());
+    assert!(
+        !arguments
+            .iter()
+            .any(|argument| argument.starts_with("model="))
+    );
+    assert!(arguments.contains(&"model_reasoning_effort=\"high\"".to_owned()));
 }

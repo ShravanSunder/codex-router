@@ -13,6 +13,7 @@ fn search_consistency_record(
         cwd: Some("/history/app.impl-search".to_owned()),
         provider: Some("codex-router".to_owned()),
         model: None,
+        reasoning_effort: None,
         source: Some("cli".to_owned()),
         thread_source: None,
         git_branch: Some("main".to_owned()),

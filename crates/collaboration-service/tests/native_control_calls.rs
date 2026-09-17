@@ -8,6 +8,9 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc};
 use tokio_tungstenite::tungstenite::Message;
 
+/// A fixed instant well in the past, so a computed idle time can only be positive.
+const BUSY_THREAD_UPDATED_AT_SECONDS: i64 = 1_700_000_000;
+
 #[tokio::test]
 async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_guards() {
     // Arrange: isolated Control and backend sockets plus explicitly fixture-only schemas.
@@ -212,7 +215,14 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                         result.clone()
                     } else if expected_method == "thread/read" {
                         rename_read_count = rename_read_count.saturating_add(1);
-                        json!({"thread":{"id":"proof-thread","name":if method == "thread/name/set" && rename_read_count == 2 {"🔎 Review"} else {"Old name"},"cwd":"/tmp","status":{"type":"idle"},"createdAt":thread_created_at,"updatedAt":thread_updated_at,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
+                        // Only the inventory read models a busy thread; the message paths
+                        // branch on status and must keep their idle fixture.
+                        let status = if method == "thread/loaded/list" {
+                            json!({"type":"active","activeFlags":[]})
+                        } else {
+                            json!({"type":"idle"})
+                        };
+                        json!({"thread":{"id":"proof-thread","name":if method == "thread/name/set" && rename_read_count == 2 {"🔎 Review"} else {"Old name"},"cwd":"/tmp","status":status,"updatedAt":BUSY_THREAD_UPDATED_AT_SECONDS,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
                     } else {
                         json!({})
                     };
@@ -304,6 +314,22 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     assert_eq!(inventory.sessions.len(), 1);
     assert_eq!(inventory.sessions[0].target, target);
     assert_eq!(inventory.generation.as_ref(), Some(&generation));
+    // A busy row reports the running status and a real idle time, never a hardcoded zero.
+    let collaboration_protocol::NativeSessionObservation::Runtime { status, turn_id } =
+        &inventory.sessions[0].observation
+    else {
+        panic!("a loaded row must carry a runtime observation");
+    };
+    assert_eq!(
+        serde_json::to_value(status).unwrap_or_else(|error| panic!("status: {error}"))["type"],
+        "active"
+    );
+    // ActiveThreadStatus in codex_app_server_protocol.v2.schemas.json names no turn id.
+    assert_eq!(turn_id.as_deref(), None);
+    assert!(
+        inventory.sessions[0].idle_seconds > 0,
+        "idle seconds must be computed from updatedAt, not hardcoded"
+    );
     let renamed = client
         .rename_session(collaboration_protocol::NativeRenameParams {
             target: target.clone(),

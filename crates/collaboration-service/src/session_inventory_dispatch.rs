@@ -46,6 +46,28 @@ fn classify_source(source: Option<&str>, thread_source: Option<&str>) -> NativeS
         NativeSessionSource::Interactive
     }
 }
+/// The repository identity a `Repo` scope carries, in the shape the canonical predicate
+/// takes. Every surface that resolves `--repo` goes through the one predicate.
+fn repository_identity_for_scope(
+    scope: &NativeSessionScope,
+) -> Option<codex_native_integration::RepositoryIdentity> {
+    let NativeSessionScope::Repo {
+        live_roots,
+        normalized_origin,
+        basename,
+        fallback_cwd,
+    } = scope
+    else {
+        return None;
+    };
+    Some(codex_native_integration::RepositoryIdentity {
+        normalized_origin: normalized_origin.clone(),
+        live_roots: live_roots.clone(),
+        repository_basename: basename.clone(),
+        fallback_cwd: fallback_cwd.clone(),
+    })
+}
+
 fn runtime_scope_matches(scope: &NativeSessionScope, thread: &Value) -> bool {
     let Some(cwd) = thread.get("cwd").and_then(Value::as_str) else {
         return false;
@@ -74,33 +96,56 @@ fn runtime_scope_matches(scope: &NativeSessionScope, thread: &Value) -> bool {
         NativeSessionScope::Any => true,
         NativeSessionScope::Cwd { path } => exact(path),
         NativeSessionScope::Checkout { root } => child(root),
-        NativeSessionScope::Repo {
-            live_roots,
-            normalized_origin,
-            basename,
-            fallback_cwd,
-        } => {
-            if let Some(fallback) = fallback_cwd {
-                return exact(fallback);
-            }
-            let origin = thread.pointer("/gitInfo/originUrl").and_then(Value::as_str);
-            if let (Some(expected), Some(actual)) = (normalized_origin, origin) {
-                return message_board::normalize_git_origin_url(actual).as_ref() == Some(expected);
-            }
-            live_roots.iter().any(|root| child(root))
-                || (!basename.is_empty()
-                    && candidate
-                        .file_name()
-                        .and_then(std::ffi::OsStr::to_str)
-                        .is_some_and(|leaf| {
-                            leaf == basename
-                                || leaf.strip_prefix(basename).is_some_and(|suffix| {
-                                    suffix.starts_with('.') || suffix.starts_with('-')
-                                })
-                        }))
+        // The loaded and stored views must answer `--repo` the same way, so both call
+        // the catalog's canonical predicate rather than a second reading of it.
+        NativeSessionScope::Repo { .. } => {
+            repository_identity_for_scope(scope).is_some_and(|identity| {
+                codex_native_integration::repository_contains_session(
+                    &identity,
+                    thread.pointer("/gitInfo/originUrl").and_then(Value::as_str),
+                    candidate,
+                )
+            })
         }
     }
 }
+
+/// Seconds between a last-updated instant and the service clock, for every row.
+fn idle_seconds_since_ms(updated_at_ms: i64) -> u64 {
+    u64::try_from(
+        chrono::Utc::now()
+            .timestamp_millis()
+            .saturating_sub(updated_at_ms)
+            / 1000,
+    )
+    .unwrap_or(0)
+}
+
+/// The native `Thread.updatedAt` is a Unix timestamp in seconds.
+fn idle_seconds_from_thread(thread: &Value) -> u64 {
+    thread
+        .get("updatedAt")
+        .and_then(Value::as_i64)
+        .map_or(0, |seconds| {
+            idle_seconds_since_ms(seconds.saturating_mul(1000))
+        })
+}
+
+/// The identifier of the turn a busy session is running, when the runtime names one.
+///
+/// `ActiveThreadStatus` in `codex_app_server_protocol.v2.schemas.json` carries only
+/// `type` and `activeFlags`, so an active thread reports no turn id today; a turn id
+/// would require loading turns, which this read-only listing must not do.
+fn active_turn_id(status: &Value) -> Option<&str> {
+    if status.get("type").and_then(Value::as_str) != Some("active") {
+        return None;
+    }
+    status
+        .get("turnId")
+        .or_else(|| status.pointer("/turn/id"))
+        .and_then(Value::as_str)
+}
+
 pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Value {
     let Ok(params) = serde_json::from_value::<NativeSessionListParams>(request.params) else {
         return invalid(request.id);
@@ -253,6 +298,10 @@ async fn stored_page(
         query: params.query.clone(),
     };
     let rows = catalog.read_page(&query).await.map_err(|_| ())?;
+    // The SQL repository clause bounds the scan; the canonical predicate decides. A page
+    // may therefore return fewer rows than the page size. It never returns a gap: the
+    // cursor advances over every row read, including the ones the predicate rejects.
+    let repository_identity = repository_identity_for_scope(&params.scope);
     let mut has_more = rows.len() == params.page_size as usize;
     let mut sessions = Vec::new();
     let mut last = None;
@@ -272,17 +321,34 @@ async fn stored_page(
         let source_value: Option<String> = row.try_get("source").map_err(|_| ())?;
         let thread_source: Option<String> = row.try_get("thread_source").map_err(|_| ())?;
         let source = classify_source(source_value.as_deref(), thread_source.as_deref());
+        let git_origin_url: Option<String> = row.try_get("git_origin_url").map_err(|_| ())?;
+        let scope_cursor = InventoryCursor {
+            endpoint: params.endpoint.clone(),
+            view: "stored".into(),
+            generation: None,
+            expires_at: None,
+            native_cursor: None,
+            stored_time: time,
+            stored_id: Some(id.clone()),
+            scope: params.scope.clone(),
+            source: params.source,
+            query: params.query.clone(),
+        };
+        if let Some(identity) = &repository_identity
+            && !codex_native_integration::repository_contains_session(
+                identity,
+                git_origin_url.as_deref(),
+                &codex_native_integration::normalize_path(std::path::Path::new(&cwd)),
+            )
+        {
+            last = Some(scope_cursor);
+            continue;
+        }
         let updated = time
             .and_then(chrono::DateTime::from_timestamp_millis)
             .ok_or(())?
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let idle_seconds = u64::try_from(
-            chrono::Utc::now()
-                .timestamp_millis()
-                .saturating_sub(time.ok_or(())?)
-                / 1000,
-        )
-        .unwrap_or(0);
+        let idle_seconds = idle_seconds_since_ms(time.ok_or(())?);
         let session = json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title.unwrap_or_default(),"source":source,"gitBranch":git_branch,"workingDirectory":cwd,"observation":{"kind":"stored","updatedAt":updated},"model":model,"reasoningEffort":reasoning_effort,"idleSeconds":idle_seconds});
         let row_bytes = serde_json::to_vec(&session)
             .map_err(|_| ())?
@@ -296,18 +362,7 @@ async fn stored_page(
         // The outer envelope guard reports overload if that row cannot fit alone.
         page_bytes = page_bytes.saturating_add(row_bytes);
         sessions.push(session);
-        last = Some(InventoryCursor {
-            endpoint: params.endpoint.clone(),
-            view: "stored".into(),
-            generation: None,
-            expires_at: None,
-            native_cursor: None,
-            stored_time: time,
-            stored_id: Some(id),
-            scope: params.scope.clone(),
-            source: params.source,
-            query: params.query.clone(),
-        });
+        last = Some(scope_cursor);
     }
     catalog.close().await;
     let next = if has_more {
@@ -383,7 +438,7 @@ async fn runtime_page(
         {
             continue;
         }
-        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title,"source":source,"gitBranch":thread.pointer("/gitInfo/branch").and_then(Value::as_str),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":null},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":0}));
+        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title,"source":source,"gitBranch":thread.pointer("/gitInfo/branch").and_then(Value::as_str),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":active_turn_id(status)},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":idle_seconds_from_thread(thread)}));
     }
     let next = result
         .get("nextCursor")

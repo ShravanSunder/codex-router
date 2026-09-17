@@ -412,6 +412,7 @@ version = "0.1.28"
 dependencies = [
  "futures-util",
  "jsonschema",
+ "message-board",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",

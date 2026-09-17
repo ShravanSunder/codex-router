@@ -80,6 +80,7 @@ fn cwd_scope_defers_all_symlink_spellings_to_the_final_matcher() {
         cwd: Some(persisted_cwd.display().to_string()),
         provider: None,
         model: None,
+        reasoning_effort: None,
         source: None,
         thread_source: None,
         git_branch: None,
