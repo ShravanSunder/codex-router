@@ -175,7 +175,7 @@ pub enum HostError {
 /// Foreground host composition and its single lifecycle owner task.
 pub struct HostRuntime;
 
-pub type HostProgressCallback<'a> = &'a mut (dyn FnMut(crate::HostProgress) + Send);
+pub type HostProgressCallback<'a> = &'a mut (dyn FnMut(Option<crate::HostProgress>) + Send);
 
 impl HostRuntime {
     /// Acquires authority, converges startup, then owns all retained handles.
@@ -293,11 +293,12 @@ impl HostRuntime {
             }
         };
         if let Some(emit) = progress {
-            emit(crate::HostProgress::RouterReady);
-            emit(crate::HostProgress::AppServerReady);
+            emit(Some(crate::HostProgress::RouterReady));
+            emit(Some(crate::HostProgress::AppServerReady));
             if matches!(readiness, crate::AppServerReadiness::Ready { .. }) {
-                emit(crate::HostProgress::RemoteControlReady);
+                emit(Some(crate::HostProgress::RemoteControlReady));
             }
+            emit(None);
         }
         let mut collaboration = match collaboration_lifecycle::CollaborationLifecycle::start(
             &config,

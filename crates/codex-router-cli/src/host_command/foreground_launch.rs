@@ -153,10 +153,13 @@ pub(super) async fn run_foreground_host(
     let mut presenter =
         crate::presentation::host::HostProgressPresenter::new(context.stdout_is_terminal());
     let mut emit = |progress| {
-        let _ = presenter.accept(
-            stdout,
-            &codex_router_host::OperatorFrame::Progress(progress),
-        );
+        let _ = match progress {
+            Some(progress) => presenter.accept(
+                stdout,
+                &codex_router_host::OperatorFrame::Progress(progress),
+            ),
+            None => presenter.finish_success(stdout),
+        };
     };
     HostRuntime::run_acquired_with_progress(
         config,

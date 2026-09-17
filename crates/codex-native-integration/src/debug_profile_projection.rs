@@ -49,6 +49,9 @@ impl DebugCodexProfile {
                         return Err(DebugProfileError::UnsupportedSettings);
                     }
                 }
+                // These settings belong to the local CLI/reviewer and must not be
+                // projected into the app-server's `-c` overrides.
+                "approval_policy" | "approvals_reviewer" | "auto_review" | "apps" => {}
                 "model_providers" => {}
                 "projects" => validate_projects(value)?,
                 "permissions" | "features" => {}
@@ -106,6 +109,12 @@ impl DebugCodexProfile {
         Ok(Self {
             overrides: table
                 .into_iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "approval_policy" | "approvals_reviewer" | "auto_review" | "apps"
+                    )
+                })
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect(),
         })

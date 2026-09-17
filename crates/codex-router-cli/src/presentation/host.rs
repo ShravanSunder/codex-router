@@ -39,6 +39,10 @@ impl HostProgressPresenter {
         Ok(())
     }
 
+    pub(crate) fn finish_success<W: Write>(&mut self, stdout: &mut W) -> std::io::Result<()> {
+        self.finish(stdout, None)
+    }
+
     fn finish<W: Write>(
         &mut self,
         stdout: &mut W,
