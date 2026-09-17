@@ -30,10 +30,6 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
             let _progress_result = context.active.response.try_send(OperatorFrame::Progress(
                 crate::operator_messages::HostProgress::ReplacementStarting,
             ));
-            request_admission::send_progress(
-                &context.active.response,
-                crate::HostProgress::ReExecuting,
-            );
             let Some(replacement_command) = context.update_inputs.replacement_command.clone()
             else {
                 context.state.phase = HostPhase::Steady;
@@ -62,6 +58,7 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
                 future: crate::host_replacement_activation::activate_host_replacement(
                     context.app_server.take(),
                     context.router.take(),
+                    context.active.response.clone(),
                 ),
                 response: context.active.response,
                 replacement_command,
@@ -168,7 +165,9 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
             crate::HostProgress::AppServerKilled,
         );
     }
-    request_admission::send_progress(&context.active.response, crate::HostProgress::ReExecuting);
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
     lifecycle_convergence::flush_pre_exec_telemetry(
         context.update_inputs.pre_exec_telemetry.clone(),
     )

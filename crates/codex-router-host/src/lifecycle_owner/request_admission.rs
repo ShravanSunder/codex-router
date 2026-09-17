@@ -224,20 +224,6 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             let _progress_result = work.response.try_send(OperatorFrame::Progress(
                 crate::operator_messages::HostProgress::ReplacementStarting,
             ));
-            send_progress(
-                &work.response,
-                crate::operator_messages::HostProgress::StoppingAppServer,
-            );
-            if context.router_child.is_some() {
-                send_progress(
-                    &work.response,
-                    crate::operator_messages::HostProgress::StoppingRouter,
-                );
-            }
-            send_progress(
-                &work.response,
-                crate::operator_messages::HostProgress::ReExecuting,
-            );
             context.state.phase = HostPhase::Mutating {
                 operation: HostOperation::RestartHost,
                 phase: "host-restart-teardown".to_owned(),
@@ -254,6 +240,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 future: crate::host_replacement_activation::activate_host_replacement(
                     context.app_server.take(),
                     context.router_child.take(),
+                    work.response.clone(),
                 ),
                 response: work.response,
                 replacement_command: replacement_command.with_executable(executable),
