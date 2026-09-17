@@ -30,6 +30,10 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
             let _progress_result = context.active.response.try_send(OperatorFrame::Progress(
                 crate::operator_messages::HostProgress::ReplacementStarting,
             ));
+            request_admission::send_progress(
+                &context.active.response,
+                crate::HostProgress::ReExecuting,
+            );
             let Some(replacement_command) = context.update_inputs.replacement_command.clone()
             else {
                 context.state.phase = HostPhase::Steady;
@@ -155,6 +159,16 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         },
         context.active.started_at.elapsed(),
     );
+    if matches!(
+        context.completion.app_server_shutdown,
+        Some(crate::ShutdownOutcome::Forced)
+    ) {
+        request_admission::send_progress(
+            &context.active.response,
+            crate::HostProgress::AppServerKilled,
+        );
+    }
+    request_admission::send_progress(&context.active.response, crate::HostProgress::ReExecuting);
     lifecycle_convergence::flush_pre_exec_telemetry(
         context.update_inputs.pre_exec_telemetry.clone(),
     )

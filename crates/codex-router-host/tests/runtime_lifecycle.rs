@@ -122,6 +122,25 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         codex_router_host::HostedReadiness::Ready,
         "host startup must reach full readiness",
     )?;
+    check(
+        initial_frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::RouterReady)
+            )
+        }) && initial_frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::AppServerReady)
+            )
+        }) && initial_frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::RemoteControlReady)
+            )
+        }),
+        "host startup must stream router, app-server, and Remote Control readiness phases",
+    )?;
     let mut collaboration = collaboration_client::ControlClient::connect(
         &collaboration_directory,
         "host-loop-proof",

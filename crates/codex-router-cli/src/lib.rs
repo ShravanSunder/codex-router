@@ -273,6 +273,11 @@ where
                     )
                 });
 
+            crate::presentation::host::render_progress_event(
+                stdout,
+                codex_router_host::HostProgress::RouterReady,
+            )
+            .map_err(CliError::Stdout)?;
             writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
             let _quota_refresh_worker = if command.background_quota_refresh_enabled {
                 Some(quota::start_background_quota_refresh_worker(

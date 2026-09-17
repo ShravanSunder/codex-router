@@ -123,7 +123,7 @@ pub(super) fn spawn_operator_connection(
         else {
             return;
         };
-        let (response_sender, mut response_receiver) = mpsc::channel(2);
+        let (response_sender, mut response_receiver) = mpsc::channel(16);
         if operator_sender
             .send(OperatorWork {
                 request,
@@ -224,6 +224,20 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             let _progress_result = work.response.try_send(OperatorFrame::Progress(
                 crate::operator_messages::HostProgress::ReplacementStarting,
             ));
+            send_progress(
+                &work.response,
+                crate::operator_messages::HostProgress::StoppingAppServer,
+            );
+            if context.router_child.is_some() {
+                send_progress(
+                    &work.response,
+                    crate::operator_messages::HostProgress::StoppingRouter,
+                );
+            }
+            send_progress(
+                &work.response,
+                crate::operator_messages::HostProgress::ReExecuting,
+            );
             context.state.phase = HostPhase::Mutating {
                 operation: HostOperation::RestartHost,
                 phase: "host-restart-teardown".to_owned(),
@@ -270,6 +284,10 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             });
         }
         OperatorRequest::RestartAppServer => {
+            send_progress(
+                &work.response,
+                crate::operator_messages::HostProgress::StoppingAppServer,
+            );
             let current_child = context.app_server.take();
             context.state.phase = HostPhase::Mutating {
                 operation: HostOperation::RestartAppServer,
@@ -306,6 +324,10 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             );
         }
         OperatorRequest::RestartRouter => {
+            send_progress(
+                &work.response,
+                crate::operator_messages::HostProgress::StoppingRouter,
+            );
             let current_child = context.router_child.take();
             let Some(router_command) = context.child_launch_plans.router_command.clone() else {
                 *context.router_child = current_child;
@@ -337,6 +359,10 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             });
         }
         OperatorRequest::UpdateCodex => {
+            send_progress(
+                &work.response,
+                crate::operator_messages::HostProgress::UpdatingAppServer,
+            );
             context.state.phase = HostPhase::Mutating {
                 operation: HostOperation::UpdateCodex,
                 phase: "running-official-updater".to_owned(),
@@ -377,6 +403,13 @@ pub(super) fn send_terminal_response(
 ) {
     let response = HostTerminalResponse::new(request, classification, snapshot, message.to_owned());
     let _send_result = response_sender.try_send(OperatorFrame::terminal(response));
+}
+
+pub(super) fn send_progress(
+    response_sender: &mpsc::Sender<OperatorFrame>,
+    progress: crate::operator_messages::HostProgress,
+) {
+    let _send_result = response_sender.try_send(OperatorFrame::Progress(progress));
 }
 
 #[cfg(test)]

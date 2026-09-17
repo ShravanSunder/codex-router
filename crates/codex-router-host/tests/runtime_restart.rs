@@ -131,6 +131,20 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
         TerminalClassification::Succeeded,
         "owned router restart must succeed",
     )?;
+    check(
+        restart.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::StoppingRouter)
+            )
+        }) && restart.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::RouterReady)
+            )
+        }),
+        "router restart must stream stopping and ready phases",
+    )?;
     let restarted_router_pids = wait_for_process_ids(&router_process_log, 2).await?;
     check(
         restarted_router_pids[1] != initial_router_pid,
@@ -210,6 +224,20 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
     check(
         terminal_classification(&restart_result)? == TerminalClassification::Succeeded,
         &format!("app-server restart must succeed: {restart_result:?}"),
+    )?;
+    check(
+        restart_result.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::StoppingAppServer)
+            )
+        }) && restart_result.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::AppServerReady)
+            )
+        }),
+        "app-server restart must stream stopping and ready phases",
     )?;
     let restarted_app_server_pid = restarted_app_server_pids?[1];
 

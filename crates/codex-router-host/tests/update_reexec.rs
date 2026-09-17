@@ -108,8 +108,18 @@ async fn changed_update_tears_down_children_and_reexecs_with_continuous_lock()
     )
     .await?;
     check(
-        matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
-        "changed update must emit replacement-starting before old-host EOF",
+        frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::UpdatingAppServer)
+            )
+        }) && frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::ReplacementStarting)
+            )
+        }),
+        "changed update must emit typed update and replacement progress before old-host EOF",
     )?;
     let output =
         tokio::time::timeout(Duration::from_secs(20), host_process.wait_with_output()).await??;
@@ -190,16 +200,30 @@ async fn explicit_host_restart_executes_the_requesting_cli_and_retains_host_proj
         )
         .await?;
         check(
-            matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
-            "explicit host restart must emit replacement-starting before old-host EOF",
+            frames.iter().any(|frame| matches!(frame, OperatorFrame::Progress(codex_router_host::HostProgress::StoppingAppServer)))
+                && frames.iter().any(|frame| matches!(frame, OperatorFrame::Progress(codex_router_host::HostProgress::ReExecuting))),
+            &format!("explicit host restart must emit typed teardown and re-exec progress before old-host EOF: {frames:?}"),
         )?;
-        let host_wait = tokio::time::timeout(Duration::from_secs(20), host_process.wait()).await;
-        host_reaped = matches!(&host_wait, Ok(Ok(_)));
-        let output = host_wait??;
+        let restart_started_at = tokio::time::Instant::now();
+        let _replacement_pids = wait_for_process_ids(&app_server_log, 2).await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if tokio::net::UnixStream::connect(&app_server_socket).await.is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let restart_gap = restart_started_at.elapsed();
+        eprintln!("whole_host_restart_socket_gap_ms={}", restart_gap.as_millis());
         check(
-            output.success(),
-            "explicit replacement bootstrap fixture failed",
+            restart_gap < Duration::from_secs(5),
+            &format!("whole-Host restart socket gap exceeded target: {restart_gap:?}"),
         )?;
+        host_process.kill().await?;
+        let _output = tokio::time::timeout(Duration::from_secs(5), host_process.wait()).await??;
+        host_reaped = true;
         assert_explicit_restart_receipt(
             &replacement_receipt,
             original_host_process_id,
@@ -485,6 +509,26 @@ async fn explicit_host_restart_child_entrypoint() -> Result<(), Box<dyn std::err
     Err(format!("explicit host restart returned unexpectedly: {result:?}").into())
 }
 
+async fn wait_for_process_ids(
+    process_log: &Path,
+    expected_count: usize,
+) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    Ok(tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let ids = std::fs::read_to_string(process_log)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.parse::<u32>().ok())
+                .collect::<Vec<_>>();
+            if ids.len() >= expected_count {
+                return ids;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
+}
+
 #[tokio::test]
 async fn explicit_host_restart_replacement_child_entrypoint()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -506,7 +550,14 @@ async fn explicit_host_restart_replacement_child_entrypoint()
         ),
     )?;
     drop(owner);
-    Ok(())
+    let app_server_socket = required_path("CODEX_HOST_RESTART_APP_SOCKET")?;
+    let app_server_log = required_path("CODEX_HOST_RESTART_APP_LOG")?;
+    run_native_app_server_fixture(
+        Path::new(&app_server_socket),
+        "1.2.3",
+        Some(Path::new(&app_server_log)),
+    )
+    .await
 }
 
 #[tokio::test]

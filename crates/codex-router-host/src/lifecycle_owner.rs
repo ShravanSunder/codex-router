@@ -379,7 +379,14 @@ impl HostRuntime {
                     };
                     app_server = restart_completion.child;
                     let classification = if restart_completion.succeeded {
+                        if matches!(restart_completion.shutdown_outcome, Some(crate::ShutdownOutcome::Forced)) {
+                            request_admission::send_progress(&active.response, crate::HostProgress::AppServerKilled);
+                        }
                         if let Some(readiness) = restart_completion.readiness {
+                            request_admission::send_progress(&active.response, crate::HostProgress::AppServerReady);
+                            if matches!(readiness, crate::AppServerReadiness::Ready { .. }) {
+                                request_admission::send_progress(&active.response, crate::HostProgress::RemoteControlReady);
+                            }
                             state.apply_readiness(readiness);
                         }
                         state.recovery_budget = RecoveryBudget::Available;
@@ -427,6 +434,7 @@ impl HostRuntime {
                     };
                     router_child = router_restart_completion.child;
                     let classification = if router_restart_completion.succeeded {
+                        request_admission::send_progress(&active.response, crate::HostProgress::RouterReady);
                         state.router = RouterCondition::OwnedReachable;
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
                             operation: HostOperation::RestartRouter,
@@ -514,6 +522,15 @@ impl HostRuntime {
                         crate::HostedReadiness::Unavailable => TerminalClassification::Unavailable,
                     };
                     for (request, response) in active.responses {
+                        if matches!(snapshot.router(), RouterCondition::ExternalReachable | RouterCondition::OwnedReachable) {
+                            request_admission::send_progress(&response, crate::HostProgress::RouterReady);
+                        }
+                        if matches!(snapshot.app_server(), AppServerCondition::NativeReady { .. }) {
+                            request_admission::send_progress(&response, crate::HostProgress::AppServerReady);
+                        }
+                        if matches!(snapshot.remote_control(), crate::RemoteControlCondition::Connected) {
+                            request_admission::send_progress(&response, crate::HostProgress::RemoteControlReady);
+                        }
                         request_admission::send_terminal_response(
                             response,
                             request,

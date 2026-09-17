@@ -64,6 +64,13 @@ pub(crate) fn render_progress_frame<W: Write>(
     Ok(())
 }
 
+pub(crate) fn render_progress_event<W: Write>(
+    stdout: &mut W,
+    progress: codex_router_host::HostProgress,
+) -> std::io::Result<()> {
+    render_progress(stdout, progress)
+}
+
 fn render_progress<W: Write>(
     stdout: &mut W,
     progress: codex_router_host::HostProgress,
@@ -113,11 +120,23 @@ pub(crate) fn render_update_result<W: Write>(
 }
 
 fn render_snapshot<W: Write>(stdout: &mut W, snapshot: &HostSnapshot) -> std::io::Result<()> {
-    writeln!(stdout, "readiness: {:?}", snapshot.hosted_readiness())?;
-    writeln!(stdout, "phase: {:?}", snapshot.phase())?;
-    writeln!(stdout, "router: {:?}", snapshot.router())?;
-    writeln!(stdout, "app_server: {:?}", snapshot.app_server())?;
-    writeln!(stdout, "remote_control: {:?}", snapshot.remote_control())?;
+    writeln!(
+        stdout,
+        "readiness: {}",
+        readiness_label(snapshot.hosted_readiness())
+    )?;
+    writeln!(stdout, "phase: {}", phase_label(snapshot.phase()))?;
+    writeln!(stdout, "router: {}", router_label(snapshot.router()))?;
+    writeln!(
+        stdout,
+        "app_server: {}",
+        app_server_label(snapshot.app_server())
+    )?;
+    writeln!(
+        stdout,
+        "remote_control: {}",
+        remote_control_label(snapshot.remote_control())
+    )?;
     if let Some(identity) = snapshot.remote_control_identity() {
         writeln!(stdout, "remote_server_name: {}", identity.server_name())?;
         writeln!(
@@ -133,15 +152,98 @@ fn render_snapshot<W: Write>(stdout: &mut W, snapshot: &HostSnapshot) -> std::io
     writeln!(stdout, "desktop_relaunch: required_if_running")?;
     writeln!(
         stdout,
-        "executable_relation: {:?}",
-        snapshot.executable_relation()
+        "executable_relation: {}",
+        executable_relation_label(snapshot.executable_relation())
     )?;
-    writeln!(stdout, "recovery_budget: {:?}", snapshot.recovery_budget())?;
     writeln!(
         stdout,
-        "last_lifecycle_outcome: {:?}",
-        snapshot.last_lifecycle_outcome()
+        "recovery_budget: {}",
+        recovery_budget_label(snapshot.recovery_budget())
+    )?;
+    writeln!(
+        stdout,
+        "last_lifecycle_outcome: {}",
+        outcome_label(snapshot.last_lifecycle_outcome())
     )
+}
+
+fn readiness_label(readiness: codex_router_host::HostedReadiness) -> &'static str {
+    match readiness {
+        codex_router_host::HostedReadiness::Ready => "ready",
+        codex_router_host::HostedReadiness::LocalReadyRemoteDegraded => {
+            "local ready (Remote Control degraded)"
+        }
+        codex_router_host::HostedReadiness::Unavailable => "unavailable",
+    }
+}
+
+fn phase_label(phase: &codex_router_host::HostPhase) -> &'static str {
+    match phase {
+        codex_router_host::HostPhase::Starting => "starting",
+        codex_router_host::HostPhase::Steady => "steady",
+        codex_router_host::HostPhase::Mutating { .. } => "mutating",
+        codex_router_host::HostPhase::Stopping => "stopping",
+    }
+}
+
+fn router_label(router: codex_router_host::RouterCondition) -> &'static str {
+    match router {
+        codex_router_host::RouterCondition::ExternalReachable => "external router ready",
+        codex_router_host::RouterCondition::OwnedReachable => "host-owned router ready",
+        codex_router_host::RouterCondition::OwnedTransitioning => "host-owned router starting",
+        codex_router_host::RouterCondition::Unavailable => "unavailable",
+    }
+}
+
+fn app_server_label(app_server: &codex_router_host::AppServerCondition) -> String {
+    match app_server {
+        codex_router_host::AppServerCondition::NativeReady { running_version } => {
+            format!("ready ({running_version})")
+        }
+        codex_router_host::AppServerCondition::Starting => "starting".to_owned(),
+        codex_router_host::AppServerCondition::Stopping => "stopping".to_owned(),
+        codex_router_host::AppServerCondition::ShutdownTimedOut => "shutdown timed out".to_owned(),
+        codex_router_host::AppServerCondition::Absent => "absent".to_owned(),
+        codex_router_host::AppServerCondition::Failed => "failed".to_owned(),
+    }
+}
+
+fn remote_control_label(condition: codex_router_host::RemoteControlCondition) -> &'static str {
+    match condition {
+        codex_router_host::RemoteControlCondition::Connected => "connected",
+        codex_router_host::RemoteControlCondition::Connecting => "connecting",
+        codex_router_host::RemoteControlCondition::Errored => "error",
+        codex_router_host::RemoteControlCondition::Disabled => "disabled",
+        codex_router_host::RemoteControlCondition::Unavailable => "unavailable",
+    }
+}
+
+fn executable_relation_label(relation: codex_router_host::ExecutableRelation) -> &'static str {
+    match relation {
+        codex_router_host::ExecutableRelation::Match => "matches installed executable",
+        codex_router_host::ExecutableRelation::Drift => "differs from installed executable",
+        codex_router_host::ExecutableRelation::Unknown => "unknown",
+    }
+}
+
+fn recovery_budget_label(budget: codex_router_host::RecoveryBudget) -> &'static str {
+    match budget {
+        codex_router_host::RecoveryBudget::Available => "available",
+        codex_router_host::RecoveryBudget::Consumed => "consumed",
+    }
+}
+
+fn outcome_label(outcome: Option<&codex_router_host::LifecycleOutcome>) -> &'static str {
+    let Some(outcome) = outcome else {
+        return "none";
+    };
+    match outcome.classification {
+        codex_router_host::LifecycleOutcomeClassification::Succeeded => "succeeded",
+        codex_router_host::LifecycleOutcomeClassification::Failed => "failed",
+        codex_router_host::LifecycleOutcomeClassification::Forced => "forced",
+        codex_router_host::LifecycleOutcomeClassification::TimedOut => "timed out",
+        codex_router_host::LifecycleOutcomeClassification::Busy => "busy",
+    }
 }
 
 #[cfg(test)]
