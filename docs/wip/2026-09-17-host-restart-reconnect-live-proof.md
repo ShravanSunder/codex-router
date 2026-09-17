@@ -15,30 +15,68 @@ listening: 127.0.0.1:18787
 ```
 
 No production process, port `8787`, or `~/.codex-router` state was modified.
-The three live commands produced these non-TTY transcripts:
+These are verbatim non-TTY captures from the isolated debug Host. The
+installed/production launchctl policy path was not exercised.
 
 ```text
-codex-router host app-server restart --port 18787 --router-root <debug-router-root>
-# ✓ preparing app-server (1.57s)
-# ✓ stopping app-server (3.71ms)
-# ✓ starting app-server (68.56ms)
-# ✓ app-server ready
-# result: succeeded; readiness: local ready (Remote Control degraded)
+$ codex-router host app-server restart --port 18787 --router-root /private/tmp/host-reconnect-live.E9yJd1/router
+✓ preparing app-server (1.57s)
+✓ stopping app-server (3.71ms)
+✓ starting app-server (68.56ms)
+✓ app-server ready
+result: succeeded
+message: app-server restarted
+readiness: local ready (Remote Control degraded)
+phase: steady
+router: host-owned router ready
+app_server: ready (0.154.0)
+remote_control: disabled
+remote_server_name: unavailable
+remote_environment_id: unavailable
+desktop attachment: configured
+desktop relaunch: restart required if already running
+executable_relation: matches installed executable
+recovery_budget: available
+last_lifecycle_outcome: succeeded
 
-codex-router host router restart --port 18787 --router-root <debug-router-root>
-# ✓ preparing router (4.62µs)
-# ✓ stopping router (707.54µs)
-# ✓ starting router (480.50ms)
-# ✓ router ready
-# result: succeeded; readiness: local ready (Remote Control degraded)
+$ codex-router host router restart --port 18787 --router-root /private/tmp/host-reconnect-live.E9yJd1/router
+✓ preparing router (4.62µs)
+✓ stopping router (707.54µs)
+✓ starting router (480.50ms)
+✓ router ready
+result: succeeded
+message: owned router restarted
+readiness: local ready (Remote Control degraded)
+phase: steady
+router: host-owned router ready
+app_server: ready (0.154.0)
+remote_control: disabled
+remote_server_name: unavailable
+remote_environment_id: unavailable
+desktop attachment: configured
+desktop relaunch: restart required if already running
+executable_relation: matches installed executable
+recovery_budget: available
+last_lifecycle_outcome: succeeded
 
-codex-router host restart --port 18787 --router-root <debug-router-root>
-# ✓ starting Host replacement (46.41ms)
-# ✓ stopping app-server (3.11ms)
-# ✓ stopping router (4.13ms)
-# ✓ re-executing Host (4.62s)
-# ✓ router ready
-# ✓ app-server ready
-# restart_result: host restarted using installed executable
-# readiness: local ready (Remote Control degraded)
+$ codex-router host restart --port 18787 --router-root /private/tmp/host-reconnect-live.E9yJd1/router
+✓ starting Host replacement (46.41ms)
+✓ stopping app-server (3.11ms)
+✓ stopping router (4.13ms)
+✓ re-executing Host (4.62s)
+✓ router ready
+✓ app-server ready
+restart_result: host restarted using installed executable
+readiness: local ready (Remote Control degraded)
+phase: steady
+router: host-owned router ready
+app_server: ready (0.154.0)
+remote_control: disabled
+remote_server_name: Sunbook-Pro-M4.local
+remote_environment_id: unassigned
+desktop attachment: configured
+desktop relaunch: restart required if already running
+executable_relation: matches installed executable
+recovery_budget: available
+last_lifecycle_outcome: none
 ```
