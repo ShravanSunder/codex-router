@@ -487,6 +487,39 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn streamed_progress_and_terminal_render_each_phase_once() -> std::io::Result<()> {
+        let mut presenter = HostProgressPresenter::new(false);
+        let mut output = Vec::new();
+        presenter.accept(
+            &mut output,
+            &OperatorFrame::Progress(HostProgress::StartingAppServer),
+        )?;
+        presenter.accept(
+            &mut output,
+            &OperatorFrame::Progress(HostProgress::AppServerReady),
+        )?;
+        presenter.finish_success(&mut output)?;
+        let response = HostTerminalResponse::new(
+            OperatorRequest::RestartAppServer,
+            TerminalClassification::Succeeded,
+            ready_snapshot(),
+            "app-server restarted".to_owned(),
+        );
+        render_terminal_frame(
+            &mut output,
+            &[
+                OperatorFrame::Progress(HostProgress::StartingAppServer),
+                OperatorFrame::Terminal(response),
+            ],
+        )?;
+        let rendered = String::from_utf8(output).map_err(std::io::Error::other)?;
+        assert_eq!(rendered.matches("starting app-server").count(), 1);
+        assert_eq!(rendered.matches("app-server ready").count(), 1);
+        assert_eq!(rendered.matches("result: succeeded").count(), 1);
+        Ok(())
+    }
+
     fn ready_snapshot() -> HostSnapshot {
         HostSnapshot::new(HostSnapshotDimensions {
             phase: HostPhase::Steady,

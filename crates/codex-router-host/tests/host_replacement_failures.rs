@@ -266,6 +266,14 @@ async fn signal_owns_shutdown_while_host_replacement_teardown_is_retained()
             restart_frames
                 .iter()
                 .all(|frame| matches!(frame, OperatorFrame::Progress(_)))
+                && restart_frames.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        OperatorFrame::Progress(
+                            codex_router_host::HostProgress::ReplacementStarting
+                        )
+                    )
+                })
                 && !restart_frames.iter().any(|frame| {
                     matches!(
                         frame,
