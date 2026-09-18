@@ -278,10 +278,10 @@ attach, launch fails visibly rather than silently claiming shared operation.
   but the replacement host or its app-server is unavailable; provide an
   explicit manual recovery action rather than silently reverting or repeatedly
   restarting.
-- **F5 — Graceful shutdown timeout:** upstream Codex's version-bounded graceful
-  shutdown contract owns any later force escalation. The host reports whether
-  graceful or forced termination occurred and does not invent a second timeout
-  or force policy.
+- **F5 — Graceful shutdown timeout:** the Host gives upstream Codex one second
+  to drain after SIGTERM, then sends SIGKILL to the complete app-server process
+  group and stops observing at a five-second total bound. The host reports
+  whether graceful or forced termination occurred.
 - **F6 — Recovery exhausted:** stop automatic attempts after the one allowed
   restart and require an explicit operator action.
 - **F7 — Host process death:** no V1 continuity guarantee; surviving upstream

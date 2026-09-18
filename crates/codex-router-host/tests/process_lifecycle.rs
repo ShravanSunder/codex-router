@@ -6,8 +6,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_native_integration::executable_identity;
-use codex_router_host::APP_SERVER_FORCE_AFTER;
-use codex_router_host::APP_SERVER_SHUTDOWN_TOTAL;
+use codex_router_host::APP_SERVER_GRACE_PERIOD;
+use codex_router_host::APP_SERVER_SHUTDOWN_TIMEOUT;
 use codex_router_host::AppServerChild;
 use codex_router_host::AppServerEndpointError;
 use codex_router_host::AppServerReadiness;
@@ -34,9 +34,9 @@ use tokio::process::Command;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn app_server_shutdown_policy_uses_the_pinned_60_and_70_second_boundaries() {
-    assert_eq!(APP_SERVER_FORCE_AFTER, Duration::from_secs(60));
-    assert_eq!(APP_SERVER_SHUTDOWN_TOTAL, Duration::from_secs(70));
+fn app_server_shutdown_policy_uses_fast_grace_and_reap_boundaries() {
+    assert_eq!(APP_SERVER_GRACE_PERIOD, Duration::from_secs(1));
+    assert_eq!(APP_SERVER_SHUTDOWN_TIMEOUT, Duration::from_secs(5));
 
     let mut expected_exit = ExpectedExit::new(4100);
     assert_eq!(
@@ -44,27 +44,35 @@ fn app_server_shutdown_policy_uses_the_pinned_60_and_70_second_boundaries() {
         ShutdownAction::SendTerminate
     );
     assert_eq!(
-        expected_exit.next_action(Duration::from_secs(59), true),
+        expected_exit.next_action(Duration::from_millis(999), true),
         ShutdownAction::Wait
     );
     assert_eq!(
-        expected_exit.next_action(Duration::from_secs(60), true),
+        expected_exit.next_action(Duration::from_secs(1), true),
         ShutdownAction::SendKill
     );
     assert_eq!(
-        expected_exit.next_action(Duration::from_secs(69), true),
+        expected_exit.next_action(Duration::from_millis(4_999), true),
         ShutdownAction::Wait
     );
     assert_eq!(
-        expected_exit.next_action(Duration::from_secs(70), true),
+        expected_exit.next_action(Duration::from_secs(5), true),
         ShutdownAction::TimedOutStillRunning
     );
     assert_eq!(
-        expected_exit.next_action(Duration::from_secs(71), false),
-        ShutdownAction::Complete(ShutdownOutcome::Forced)
+        expected_exit.next_action(Duration::from_millis(5_001), false),
+        ShutdownAction::Complete(ShutdownOutcome::Killed)
     );
     assert!(expected_exit.term_sent());
     assert!(expected_exit.kill_sent());
+}
+
+#[test]
+fn shutdown_deadlines_reject_kill_boundary_at_or_after_total() {
+    assert!(
+        AppServerShutdownDeadlines::new(Duration::from_millis(800), Duration::from_millis(800),)
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -136,8 +144,8 @@ async fn app_server_force_escalation_signals_and_reaps_once()
         app_server
             .shutdown_with_deadlines(fixture_deadlines)
             .await?,
-        ShutdownOutcome::Forced,
-        "SIGTERM-ignoring app-server must use the pinned force escalation",
+        ShutdownOutcome::Killed,
+        "SIGTERM-ignoring app-server must use the kill backstop",
     )?;
     check_equal(
         app_server.expected_exit().map(ExpectedExit::term_sent),
@@ -149,11 +157,44 @@ async fn app_server_force_escalation_signals_and_reaps_once()
         Some(true),
         "force path must retain the one SIGKILL escalation",
     )?;
-    check_equal(
-        std::fs::read_to_string(&event_file)?,
-        "ready\nsigterm\n".to_owned(),
-        "fixture must observe exactly one catchable signal before SIGKILL",
+    check(
+        std::fs::read_to_string(&event_file)?.starts_with("ready\nsigterm\n"),
+        "fixture must observe the initial TERM before SIGKILL",
     )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn app_server_force_escalation_kills_the_complete_process_group()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new("app-server-process-group")?;
+    let process_log = directory.path().join("processes.log");
+    std::fs::write(&process_log, b"")?;
+    let identity = executable_identity(&std::env::current_exe()?).await?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("--exact")
+        .arg("app_server_group_parent_child_entrypoint")
+        .arg("--nocapture")
+        .env("CODEX_ROUTER_HOST_APP_SERVER_GROUP_PARENT", "1")
+        .env("CODEX_ROUTER_HOST_APP_SERVER_GROUP_LOG", &process_log)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let process = ProcessGroupChild::spawn(&mut command)?;
+    let mut app_server = AppServerChild::new(process, identity);
+    let process_ids = wait_for_process_ids(&process_log, 2).await?;
+
+    let fixture_deadlines =
+        AppServerShutdownDeadlines::new(Duration::from_millis(50), Duration::from_secs(2))
+            .ok_or("fixture shutdown deadlines must be ordered")?;
+    check_equal(
+        app_server
+            .shutdown_with_deadlines(fixture_deadlines)
+            .await?,
+        ShutdownOutcome::Killed,
+        "SIGTERM-ignoring app-server must be force-killed",
+    )?;
+    wait_for_process_exit(process_ids[1]).await?;
     Ok(())
 }
 
@@ -220,6 +261,15 @@ async fn app_server_owner_rejects_foreign_endpoint_and_observes_native_readiness
         "reachable foreign app-server endpoint must fail before spawn",
     )?;
     drop(squatter);
+
+    let stale_socket = directory.path().join("stale.sock");
+    let stale_listener = std::os::unix::net::UnixListener::bind(&stale_socket)?;
+    drop(stale_listener);
+    wait_for_unowned_app_server_endpoint(&stale_socket).await?;
+    check(
+        stale_socket.exists(),
+        "ownership inspection must accept but not unlink a stale socket",
+    )?;
 
     let socket_path = directory.path().join("app-server.sock");
     require_unowned_app_server_endpoint(&socket_path, Duration::from_millis(200)).await?;
@@ -383,6 +433,41 @@ async fn updater_group_descendant_child_entrypoint() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+#[tokio::test]
+async fn app_server_group_parent_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("CODEX_ROUTER_HOST_APP_SERVER_GROUP_PARENT").is_none() {
+        return Ok(());
+    }
+    let process_log = std::env::var_os("CODEX_ROUTER_HOST_APP_SERVER_GROUP_LOG")
+        .ok_or("app-server group process log is missing")?;
+    append_process_id(Path::new(&process_log))?;
+    let mut descendant = Command::new(std::env::current_exe()?);
+    descendant
+        .arg("--exact")
+        .arg("app_server_group_descendant_child_entrypoint")
+        .arg("--nocapture")
+        .env("CODEX_ROUTER_HOST_APP_SERVER_GROUP_DESCENDANT", "1")
+        .env("CODEX_ROUTER_HOST_APP_SERVER_GROUP_LOG", &process_log)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _descendant = descendant.spawn()?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    while terminate.recv().await.is_some() {}
+    Ok(())
+}
+
+#[tokio::test]
+async fn app_server_group_descendant_child_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("CODEX_ROUTER_HOST_APP_SERVER_GROUP_DESCENDANT").is_none() {
+        return Ok(());
+    }
+    let process_log = std::env::var_os("CODEX_ROUTER_HOST_APP_SERVER_GROUP_LOG")
+        .ok_or("app-server group process log is missing")?;
+    append_process_id(Path::new(&process_log))?;
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
 fn append_process_id(process_log: &Path) -> std::io::Result<()> {
     use std::io::Write;
 
@@ -435,6 +520,7 @@ async fn signal_recording_child_entrypoint() -> Result<(), Box<dyn std::error::E
     let mode = match mode.to_str() {
         Some("exit-on-terminate") => SignalFixtureMode::ExitOnTerminate,
         Some("ignore-terminate") => SignalFixtureMode::IgnoreTerminate,
+        Some("exit-on-second-terminate") => SignalFixtureMode::ExitOnSecondTerminate,
         _ => return Err("unknown signal fixture mode".into()),
     };
     run_signal_fixture(mode, Path::new(&event_file)).await?;
@@ -457,6 +543,7 @@ fn signal_fixture_command(
     let mode = match mode {
         SignalFixtureMode::ExitOnTerminate => "exit-on-terminate",
         SignalFixtureMode::IgnoreTerminate => "ignore-terminate",
+        SignalFixtureMode::ExitOnSecondTerminate => "exit-on-second-terminate",
     };
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -500,6 +587,23 @@ async fn wait_for_fixture_ready(event_file: &Path) -> Result<(), Box<dyn std::er
     })
     .await?;
     Ok(())
+}
+
+async fn wait_for_unowned_app_server_endpoint(
+    socket_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match require_unowned_app_server_endpoint(socket_path, Duration::from_millis(200)).await
+            {
+                Ok(()) => return Ok(()),
+                Err(AppServerEndpointError::OwnershipConflict) => tokio::task::yield_now().await,
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await?
+    .map_err(Into::into)
 }
 
 fn check_equal<TValue>(

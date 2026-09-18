@@ -52,7 +52,13 @@ First upgrade from an older protocol (U5)
 ## Limits and non-goals
 
 - `host restart` does not download or install `codex-router`.
-- No zero-downtime or client-connection continuity promise is introduced.
+- Clients must reconnect and initialize the resumed thread within the upstream
+  Codex reconnect window (approximately 15 seconds) after an intentional
+  replacement; uninterrupted TCP continuity is not promised.
+- Host shutdown sends one SIGTERM, waits up to one second for exit, then uses
+  process-group SIGKILL as a backstop before bounded reap. The one-second
+  boundary is shared by Host-owned app-server replacement paths so clients can
+  reconnect within the upstream window.
 - No automatic rollback, PID discovery/signalling, legacy request shim, status
   dashboard, Host binary-drift status, or production process replacement is in
   scope.
@@ -61,4 +67,3 @@ First upgrade from an older protocol (U5)
   not change.
 - Validation uses an isolated debug runtime. It must not stop, restart, or
   replace the production Codex router or production Host.
-

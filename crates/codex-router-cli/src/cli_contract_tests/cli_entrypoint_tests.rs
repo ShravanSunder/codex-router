@@ -6,7 +6,7 @@ fn host_lifecycle_commands_have_separate_names() {
         vec!["host", "restart"],
         vec!["host", "app-server", "restart"],
         vec!["host", "app-server", "update"],
-        vec!["host", "restart-router"],
+        vec!["host", "router", "restart"],
     ] {
         let arguments = std::iter::once(OsString::from("codex-router"))
             .chain(words.iter().map(|word| OsString::from(*word)));

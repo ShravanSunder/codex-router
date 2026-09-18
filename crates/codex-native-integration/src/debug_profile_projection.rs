@@ -2,6 +2,12 @@
 use std::{collections::BTreeSet, io::Read, path::Path};
 
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
+const LOCAL_ONLY_KEYS: [&str; 4] = [
+    "approval_policy",
+    "approvals_reviewer",
+    "auto_review",
+    "apps",
+];
 
 pub struct DebugCodexProfile {
     overrides: Vec<String>,
@@ -38,6 +44,10 @@ impl DebugCodexProfile {
         }
         let table: toml::Table = toml::from_str(text).map_err(|_| DebugProfileError::Malformed)?;
         for (key, value) in &table {
+            if LOCAL_ONLY_KEYS.contains(&key.as_str()) {
+                tracing::warn!(setting = key, "dropping local-only debug profile setting");
+                continue;
+            }
             match key.as_str() {
                 "model"
                 | "model_reasoning_effort"
@@ -106,6 +116,7 @@ impl DebugCodexProfile {
         Ok(Self {
             overrides: table
                 .into_iter()
+                .filter(|(key, _)| !LOCAL_ONLY_KEYS.contains(&key.as_str()))
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect(),
         })

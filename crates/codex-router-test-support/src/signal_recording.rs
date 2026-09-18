@@ -9,6 +9,8 @@ pub enum SignalFixtureMode {
     ExitOnTerminate,
     /// Record SIGTERM and remain alive until externally killed.
     IgnoreTerminate,
+    /// Record the first SIGTERM and exit on the second.
+    ExitOnSecondTerminate,
 }
 
 /// Runs a child fixture until its selected signal outcome.
@@ -19,7 +21,15 @@ pub async fn run_signal_fixture(mode: SignalFixtureMode, event_file: &Path) -> s
     append_event(event_file, "sigterm\n")?;
     match mode {
         SignalFixtureMode::ExitOnTerminate => Ok(()),
-        SignalFixtureMode::IgnoreTerminate => std::future::pending::<std::io::Result<()>>().await,
+        SignalFixtureMode::IgnoreTerminate => {
+            tokio::task::yield_now().await;
+            std::future::pending::<std::io::Result<()>>().await
+        }
+        SignalFixtureMode::ExitOnSecondTerminate => {
+            let _signal = terminate.recv().await;
+            append_event(event_file, "sigterm\n")?;
+            Ok(())
+        }
     }
 }
 

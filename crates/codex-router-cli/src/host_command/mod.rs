@@ -15,7 +15,6 @@ use thiserror::Error;
 
 use crate::CliContext;
 use operator_client::OperatorClientError;
-use operator_client::send_operator_request;
 
 mod foreground_launch;
 pub(crate) mod operator_client;
@@ -23,7 +22,7 @@ pub(crate) mod replacement_outcome;
 
 const DEFAULT_HOST_PORT: u16 = 8787;
 const STATUS_REQUEST_DEADLINE: Duration = Duration::from_secs(40);
-const APP_SERVER_RESTART_DEADLINE: Duration = Duration::from_secs(120);
+const APP_SERVER_RESTART_DEADLINE: Duration = Duration::from_secs(40);
 const ROUTER_RESTART_DEADLINE: Duration = Duration::from_secs(30);
 const UPDATE_REQUEST_DEADLINE: Duration = Duration::from_secs(17 * 60);
 
@@ -34,7 +33,10 @@ pub(crate) enum HostAction {
     /// Replace the whole Host with this installed CLI and wait for readiness.
     Restart,
     /// Restart the router child when owned by this Host.
-    RestartRouter,
+    Router {
+        #[command(subcommand)]
+        action: RouterAction,
+    },
     /// Restart or update the managed Codex app-server.
     AppServer {
         #[command(subcommand)]
@@ -48,6 +50,12 @@ pub(crate) enum AppServerAction {
     Restart,
     /// Update managed Codex and activate it if changed.
     Update,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Subcommand)]
+pub(crate) enum RouterAction {
+    /// Restart the router child when owned by this Host.
+    Restart,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -105,7 +113,7 @@ struct ClapHostCommand {
     require_debug_isolation: bool,
 }
 
-pub(crate) async fn run_host_command<W: Write>(
+pub(crate) async fn run_host_command<W: Write + Send>(
     stdout: &mut W,
     command: HostCommand,
     context: &CliContext,
@@ -138,6 +146,7 @@ pub(crate) async fn run_host_command<W: Write>(
             coordination_paths,
             context,
             telemetry,
+            stdout,
         )
         .await;
     }
@@ -147,7 +156,9 @@ pub(crate) async fn run_host_command<W: Write>(
         HostAction::Restart => OperatorRequest::RestartHost {
             executable: std::env::current_exe()?,
         },
-        HostAction::RestartRouter => OperatorRequest::RestartRouter,
+        HostAction::Router {
+            action: RouterAction::Restart,
+        } => OperatorRequest::RestartRouter,
         HostAction::AppServer {
             action: AppServerAction::Restart,
         } => OperatorRequest::RestartAppServer,
@@ -155,10 +166,13 @@ pub(crate) async fn run_host_command<W: Write>(
             action: AppServerAction::Update,
         } => OperatorRequest::UpdateCodex,
     };
-    let frames = send_operator_request(
+    let mut progress_presenter =
+        crate::presentation::host::HostProgressPresenter::new(context.stdout_is_terminal());
+    let frames = operator_client::send_operator_request_streaming(
         coordination_paths.operator_socket(),
         request,
         operator_request_deadline(command.action()),
+        |frame| { let _ = progress_presenter.accept(stdout, frame); },
     )
     .await
     .map_err(|error| {
@@ -178,17 +192,30 @@ pub(crate) async fn run_host_command<W: Write>(
             action: AppServerAction::Update
         }
     ) {
-        let result = replacement_outcome::complete_update_result(&coordination_paths, frames).await;
+        let result = replacement_outcome::complete_update_result_with_progress(
+            &coordination_paths,
+            frames,
+            |frame| {
+                let _ = progress_presenter.accept(stdout, frame);
+            },
+        )
+        .await;
         crate::presentation::host::render_update_result(stdout, &result)?;
     } else if command.action() == HostAction::Restart {
-        let result =
-            replacement_outcome::complete_restart_result(&coordination_paths, frames).await;
+        let result = replacement_outcome::complete_restart_result_with_progress(
+            &coordination_paths,
+            frames,
+            |frame| {
+                let _ = progress_presenter.accept(stdout, frame);
+            },
+        )
+        .await;
         crate::presentation::host::render_restart_result(stdout, &result)?;
         if let Some(message) = result.failure_message() {
             return Err(HostCommandError::RestartFailed(message.to_owned()));
         }
     } else {
-        crate::presentation::host::render_frames(stdout, &frames)?;
+        crate::presentation::host::render_terminal_frame(stdout, &frames)?;
     }
     Ok(())
 }
@@ -200,7 +227,9 @@ const fn operator_request_deadline(action: HostAction) -> Duration {
         HostAction::AppServer {
             action: AppServerAction::Restart,
         } => APP_SERVER_RESTART_DEADLINE,
-        HostAction::RestartRouter => ROUTER_RESTART_DEADLINE,
+        HostAction::Router {
+            action: RouterAction::Restart,
+        } => ROUTER_RESTART_DEADLINE,
         HostAction::AppServer {
             action: AppServerAction::Update,
         } => UPDATE_REQUEST_DEADLINE,
@@ -242,8 +271,15 @@ mod tests {
     #[test]
     fn operator_deadlines_cover_their_owned_lifecycle_bounds() {
         assert!(
-            operator_request_deadline(HostAction::Restart) > Duration::from_secs(70),
-            "app-server restart must outlive upstream's complete shutdown bound"
+            operator_request_deadline(HostAction::Restart)
+                > codex_router_host::APP_SERVER_SHUTDOWN_TIMEOUT,
+            "whole-Host restart must outlive the app-server shutdown bound"
+        );
+        assert!(
+            operator_request_deadline(HostAction::AppServer {
+                action: AppServerAction::Restart
+            }) > codex_router_host::APP_SERVER_SHUTDOWN_TIMEOUT,
+            "app-server restart must outlive its complete shutdown bound"
         );
         assert!(
             operator_request_deadline(HostAction::AppServer {

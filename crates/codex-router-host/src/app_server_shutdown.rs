@@ -1,4 +1,4 @@
-//! Expected-exit identity and pinned app-server shutdown progression.
+//! Expected-exit identity and bounded app-server shutdown progression.
 
 use std::time::Duration;
 
@@ -7,33 +7,33 @@ use thiserror::Error;
 use crate::ProcessGroupError;
 use crate::managed_app_server::AppServerChild;
 
-/// Pinned upstream grace period before SIGKILL escalation.
-pub const APP_SERVER_FORCE_AFTER: Duration = Duration::from_secs(60);
-/// Pinned upstream total app-server shutdown observation bound.
-pub const APP_SERVER_SHUTDOWN_TOTAL: Duration = Duration::from_secs(70);
+/// Grace period before SIGKILL escalation.
+pub const APP_SERVER_GRACE_PERIOD: Duration = Duration::from_secs(1);
+/// Total app-server shutdown observation bound, including forced reap.
+pub const APP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Injected shutdown boundaries with the production path fixed to upstream values.
+/// Injected shutdown boundaries for deterministic process lifecycle tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AppServerShutdownDeadlines {
-    force_after: Duration,
+    kill_after: Duration,
     total: Duration,
 }
 
 impl AppServerShutdownDeadlines {
-    /// Returns the exact accepted upstream 60/70-second contract.
+    /// Returns the production one-second grace and bounded reap contract.
     #[must_use]
-    pub const fn upstream() -> Self {
+    pub const fn production() -> Self {
         Self {
-            force_after: APP_SERVER_FORCE_AFTER,
-            total: APP_SERVER_SHUTDOWN_TOTAL,
+            kill_after: APP_SERVER_GRACE_PERIOD,
+            total: APP_SERVER_SHUTDOWN_TIMEOUT,
         }
     }
 
     /// Creates valid shorter boundaries for deterministic process fixtures.
     #[must_use]
-    pub fn new(force_after: Duration, total: Duration) -> Option<Self> {
-        if force_after < total {
-            Some(Self { force_after, total })
+    pub fn new(kill_after: Duration, total: Duration) -> Option<Self> {
+        if kill_after < total {
+            Some(Self { kill_after, total })
         } else {
             None
         }
@@ -45,8 +45,8 @@ impl AppServerShutdownDeadlines {
 pub enum ShutdownOutcome {
     /// Child exited after SIGTERM without force escalation.
     Graceful,
-    /// Child exited after the pinned SIGKILL escalation.
-    Forced,
+    /// Child exited after the SIGKILL backstop fired.
+    Killed,
     /// Total bound expired while the exact child remained retained.
     TimedOutStillRunning,
 }
@@ -56,9 +56,9 @@ pub enum ShutdownOutcome {
 pub enum ShutdownAction {
     /// Send the first and only SIGTERM.
     SendTerminate,
-    /// Await child exit or the next pinned boundary.
+    /// Await child exit or the next force boundary.
     Wait,
-    /// Send the one pinned SIGKILL escalation.
+    /// Send the one SIGKILL escalation.
     SendKill,
     /// Return a terminal result for a reaped child.
     Complete(ShutdownOutcome),
@@ -90,7 +90,7 @@ impl ExpectedExit {
         self.next_action_with_deadlines(
             elapsed,
             child_running,
-            AppServerShutdownDeadlines::upstream(),
+            AppServerShutdownDeadlines::production(),
         )
     }
 
@@ -102,7 +102,7 @@ impl ExpectedExit {
     ) -> ShutdownAction {
         if !child_running {
             return ShutdownAction::Complete(if self.kill_sent {
-                ShutdownOutcome::Forced
+                ShutdownOutcome::Killed
             } else {
                 ShutdownOutcome::Graceful
             });
@@ -114,7 +114,7 @@ impl ExpectedExit {
             self.term_sent = true;
             return ShutdownAction::SendTerminate;
         }
-        if elapsed >= deadlines.force_after && !self.kill_sent {
+        if elapsed >= deadlines.kill_after && !self.kill_sent {
             self.kill_sent = true;
             return ShutdownAction::SendKill;
         }
@@ -133,7 +133,7 @@ impl ExpectedExit {
         self.term_sent
     }
 
-    /// Returns whether the pinned SIGKILL escalation was recorded and sent.
+    /// Returns whether the SIGKILL escalation was recorded and sent.
     #[must_use]
     pub const fn kill_sent(&self) -> bool {
         self.kill_sent
@@ -147,9 +147,9 @@ impl AppServerChild {
         self.expected_exit.as_ref()
     }
 
-    /// Runs or resumes the one pinned upstream app-server shutdown routine.
+    /// Runs or resumes the bounded app-server shutdown routine.
     pub async fn shutdown(&mut self) -> Result<ShutdownOutcome, AppServerShutdownError> {
-        self.shutdown_with_deadlines(AppServerShutdownDeadlines::upstream())
+        self.shutdown_with_deadlines(AppServerShutdownDeadlines::production())
             .await
     }
 
@@ -159,9 +159,14 @@ impl AppServerChild {
         deadlines: AppServerShutdownDeadlines,
     ) -> Result<ShutdownOutcome, AppServerShutdownError> {
         if let Some(expected_exit) = self.expected_exit.as_ref() {
+            let kill_sent = expected_exit.kill_sent();
             return match self.process.try_wait()? {
-                Some(_status) if expected_exit.kill_sent() => Ok(ShutdownOutcome::Forced),
+                Some(_status) if kill_sent => Ok(ShutdownOutcome::Killed),
                 Some(_status) => Ok(ShutdownOutcome::Graceful),
+                None if kill_sent => {
+                    self.process.send_group_kill()?;
+                    Ok(ShutdownOutcome::TimedOutStillRunning)
+                }
                 None => Ok(ShutdownOutcome::TimedOutStillRunning),
             };
         }
@@ -177,30 +182,26 @@ impl AppServerChild {
             return Err(AppServerShutdownError::InvalidInitialAction);
         }
         self.process.send_terminate()?;
-
-        match tokio::time::timeout(deadlines.force_after, self.process.wait()).await {
-            Ok(result) => {
-                let _status = result?;
-                return Ok(ShutdownOutcome::Graceful);
-            }
-            Err(_elapsed) => {}
+        if let Ok(result) = tokio::time::timeout(deadlines.kill_after, self.process.wait()).await {
+            let _status = result?;
+            return Ok(ShutdownOutcome::Graceful);
         }
         let expected_exit = self
             .expected_exit
             .as_mut()
             .ok_or(AppServerShutdownError::MissingProgress)?;
         let force_action =
-            expected_exit.next_action_with_deadlines(deadlines.force_after, true, deadlines);
+            expected_exit.next_action_with_deadlines(deadlines.kill_after, true, deadlines);
         if force_action != ShutdownAction::SendKill {
             return Err(AppServerShutdownError::InvalidForceAction);
         }
-        self.process.send_kill()?;
+        self.process.send_group_kill()?;
 
-        let forced_wait = deadlines.total.saturating_sub(deadlines.force_after);
+        let forced_wait = deadlines.total.saturating_sub(deadlines.kill_after);
         match tokio::time::timeout(forced_wait, self.process.wait()).await {
             Ok(result) => {
                 let _status = result?;
-                Ok(ShutdownOutcome::Forced)
+                Ok(ShutdownOutcome::Killed)
             }
             Err(_elapsed) => Ok(ShutdownOutcome::TimedOutStillRunning),
         }
@@ -224,7 +225,7 @@ pub enum AppServerShutdownError {
     /// New shutdown progress did not request SIGTERM first.
     #[error("app-server shutdown did not begin with SIGTERM")]
     InvalidInitialAction,
-    /// Grace expiry did not produce the pinned SIGKILL action.
+    /// Grace expiry did not produce the SIGKILL action.
     #[error("app-server shutdown did not reach its force action")]
     InvalidForceAction,
 }

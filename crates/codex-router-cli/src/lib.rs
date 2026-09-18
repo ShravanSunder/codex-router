@@ -179,7 +179,7 @@ pub async fn run_with_io_async<W, E>(
     stderr: &mut E,
 ) -> Result<(), CliError>
 where
-    W: std::io::Write,
+    W: std::io::Write + Send,
     E: std::io::Write,
 {
     run_with_io_async_with_telemetry(args, context, stdout, stderr, None).await
@@ -193,7 +193,7 @@ async fn run_with_io_async_with_telemetry<W, E>(
     telemetry_shutdown: Option<telemetry::TelemetryShutdownHandle>,
 ) -> Result<(), CliError>
 where
-    W: std::io::Write,
+    W: std::io::Write + Send,
     E: std::io::Write,
 {
     match CliCommand::parse(args.clone())? {
@@ -273,6 +273,11 @@ where
                     )
                 });
 
+            crate::presentation::host::render_progress_event(
+                stdout,
+                codex_router_host::HostProgress::RouterReady,
+            )
+            .map_err(CliError::Stdout)?;
             writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
             let _quota_refresh_worker = if command.background_quota_refresh_enabled {
                 Some(quota::start_background_quota_refresh_worker(
@@ -557,7 +562,7 @@ commands:
   host restart                   Replace the whole Host with this installed CLI
   host app-server restart        Restart managed Codex without updating it
   host app-server update         Update managed Codex and activate it if changed
-  host restart-router            Restart the router when host-owned
+  host router restart            Restart the router when host-owned
   doctor                        Diagnose local router setup
   profile print                 Print the Codex profile snippet
 

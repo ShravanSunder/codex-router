@@ -1,16 +1,15 @@
 //! Managed-update preparation and shared Host replacement finalization.
 
 use super::*;
-use crate::OperatorFrame;
 
 pub(super) struct PreparationContext<'a> {
     pub(super) preparation: crate::codex_update_preparation::UpdatePreparation,
     pub(super) active: request_admission::ActiveUpdate,
     pub(super) state: &'a mut RuntimeState,
-    pub(super) update_inputs: &'a ManagedUpdateInputs,
+    pub(super) config: &'a HostConfig,
+    pub(super) child_launch_plans: &'a ManagedChildLaunchPlans,
+    pub(super) active_app_server_restart: &'a mut Option<request_admission::ActiveAppServerRestart>,
     pub(super) app_server: &'a mut Option<AppServerChild>,
-    pub(super) router: &'a mut Option<RouterChild>,
-    pub(super) activation: &'a mut Option<request_admission::ActiveHostReplacement>,
     pub(super) pending_identity: &'a mut Option<codex_native_integration::ExecutableIdentityTask>,
     pub(super) retained_updater: &'a mut Option<ProcessGroupChild>,
 }
@@ -27,43 +26,26 @@ pub(super) fn apply_preparation(context: PreparationContext<'_>) {
         }
         crate::codex_update_preparation::UpdatePreparation::Changed => {
             context.state.executable_relation = ExecutableRelation::Drift;
-            let _progress_result = context.active.response.try_send(OperatorFrame::Progress(
-                crate::operator_messages::HostProgress::ReplacementStarting,
-            ));
-            let Some(replacement_command) = context.update_inputs.replacement_command.clone()
-            else {
-                context.state.phase = HostPhase::Steady;
-                context.state.last_lifecycle_outcome = Some(LifecycleOutcome {
-                    operation: HostOperation::UpdateCodex,
-                    classification: LifecycleOutcomeClassification::Failed,
-                });
-                request_admission::send_terminal_response(
-                    context.active.response,
-                    OperatorRequest::UpdateCodex,
-                    TerminalClassification::Failed,
-                    context.state.snapshot(),
-                    "managed Codex changed but replacement command is unavailable",
-                );
-                return;
-            };
             context.state.phase = HostPhase::Mutating {
                 operation: HostOperation::UpdateCodex,
-                phase: "changed-update-teardown".to_owned(),
+                phase: "restarting-updated-app-server".to_owned(),
             };
             context.state.app_server = AppServerCondition::Stopping;
-            if context.router.is_some() {
-                context.state.router = RouterCondition::OwnedTransitioning;
-            }
-            *context.activation = Some(request_admission::ActiveHostReplacement {
-                future: crate::host_replacement_activation::activate_host_replacement(
-                    context.app_server.take(),
-                    context.router.take(),
+            let current_child = context.app_server.take();
+            let stop_intent = crate::explicit_app_server_restart::StopIntent::default();
+            *context.active_app_server_restart = Some(request_admission::ActiveAppServerRestart {
+                future: crate::explicit_app_server_restart::restart_app_server(
+                    context.config.clone(),
+                    context.child_launch_plans.app_server.clone(),
+                    current_child,
+                    stop_intent.clone(),
+                    context.active.response.clone(),
                 ),
+                stop_intent,
                 response: context.active.response,
-                replacement_command,
-                request: OperatorRequest::UpdateCodex,
                 operation: HostOperation::UpdateCodex,
                 started_at: context.active.started_at,
+                request: OperatorRequest::UpdateCodex,
             });
             return;
         }
@@ -147,7 +129,7 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         context.active.operation,
         if matches!(
             context.completion.app_server_shutdown,
-            Some(crate::ShutdownOutcome::Forced)
+            Some(crate::ShutdownOutcome::Killed)
         ) {
             "forced-replacement-starting"
         } else {
@@ -155,12 +137,33 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         },
         context.active.started_at.elapsed(),
     );
+    if matches!(
+        context.completion.app_server_shutdown,
+        Some(crate::ShutdownOutcome::Killed)
+    ) {
+        request_admission::send_progress(
+            &context.active.response,
+            crate::HostProgress::AppServerKilled,
+        );
+    }
+    // Do not remove the operator socket until the writer has flushed the
+    // ReExecuting frame. Queue admission alone is insufficient because exec
+    // tears down the writer task with any queued bytes.
+    let pre_exec_started_at = std::time::Instant::now();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        context.active.reexecuting_ack,
+    )
+    .await;
+    crate::record_debug_readiness_timing("reExecutingAcked", pre_exec_started_at);
     lifecycle_convergence::flush_pre_exec_telemetry(
         context.update_inputs.pre_exec_telemetry.clone(),
     )
     .await;
     context.instance.remove_operator_socket_for_exec()?;
+    crate::record_debug_readiness_timing("operatorSocketRemoved", pre_exec_started_at);
     context.instance.prepare_lock_for_exec()?;
+    crate::record_debug_readiness_timing("lockPrepared", pre_exec_started_at);
     let replacement_command = context.active.replacement_command.with_environment(
         crate::inherited_lock_environment(),
         crate::inherited_lock_marker(),

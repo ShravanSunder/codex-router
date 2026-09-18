@@ -10,8 +10,11 @@ use crate::AppServerChild;
 use crate::AppServerLaunchPlan;
 use crate::AppServerReadiness;
 use crate::HostConfig;
+use crate::HostProgress;
+use crate::OperatorFrame;
 use crate::ShutdownOutcome;
 use crate::require_unowned_app_server_endpoint;
+use tokio::sync::mpsc;
 
 pub(crate) type AppServerRestartFuture =
     Pin<Box<dyn Future<Output = AppServerRestartCompletion> + Send + 'static>>;
@@ -42,6 +45,7 @@ pub(crate) fn restart_app_server(
     launch_plan: AppServerLaunchPlan,
     current_child: Option<AppServerChild>,
     stop_intent: StopIntent,
+    progress: mpsc::Sender<OperatorFrame>,
 ) -> AppServerRestartFuture {
     Box::pin(async move {
         let timing = std::time::Instant::now();
@@ -75,8 +79,11 @@ pub(crate) fn restart_app_server(
         crate::debug_readiness_timing::record("restartPrepared", timing);
         let mut shutdown_outcome = None;
         if let Some(mut child) = current_child {
+            let _ = progress
+                .send(OperatorFrame::Progress(HostProgress::StoppingAppServer))
+                .await;
             match child.shutdown().await {
-                Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Forced)) => {
+                Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Killed)) => {
                     shutdown_outcome = Some(outcome);
                 }
                 Ok(ShutdownOutcome::TimedOutStillRunning) => {
@@ -138,6 +145,9 @@ pub(crate) fn restart_app_server(
         }
 
         crate::debug_readiness_timing::record("endpointUnowned", timing);
+        let _ = progress
+            .send(OperatorFrame::Progress(HostProgress::StartingAppServer))
+            .await;
         let mut replacement = match launch_plan.spawn() {
             Ok(child) => child,
             Err(_error) => {
@@ -172,7 +182,7 @@ pub(crate) fn restart_app_server(
                 let replacement_shutdown = replacement.shutdown().await;
                 let child = match replacement_shutdown {
                     Ok(ShutdownOutcome::TimedOutStillRunning) | Err(_) => Some(replacement),
-                    Ok(ShutdownOutcome::Graceful | ShutdownOutcome::Forced) => None,
+                    Ok(ShutdownOutcome::Graceful | ShutdownOutcome::Killed) => None,
                 };
                 AppServerRestartCompletion {
                     child,
@@ -212,7 +222,8 @@ mod tests {
         );
         let stop_intent = StopIntent::default();
         stop_intent.request();
-        let completion = restart_app_server(config, launch_plan, None, stop_intent).await;
+        let (progress, _received) = tokio::sync::mpsc::channel(4);
+        let completion = restart_app_server(config, launch_plan, None, stop_intent, progress).await;
         if completion.child.is_some() || completion.succeeded {
             return Err("stop intent spawned an app-server replacement".into());
         }

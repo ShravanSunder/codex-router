@@ -57,6 +57,7 @@ const fn drain_operation(
 pub(super) struct OperatorWork {
     pub(super) request: OperatorRequest,
     pub(super) response: mpsc::Sender<OperatorFrame>,
+    pub(super) reexecuting_ack: tokio::sync::oneshot::Receiver<()>,
 }
 
 pub(super) struct ActiveAppServerRestart {
@@ -64,6 +65,8 @@ pub(super) struct ActiveAppServerRestart {
     pub(super) stop_intent: crate::explicit_app_server_restart::StopIntent,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) started_at: tokio::time::Instant,
+    pub(super) request: OperatorRequest,
+    pub(super) operation: HostOperation,
 }
 
 pub(super) struct ActiveRouterRestart {
@@ -86,6 +89,7 @@ pub(super) struct ActiveHostReplacement {
     pub(super) request: OperatorRequest,
     pub(super) operation: HostOperation,
     pub(super) started_at: tokio::time::Instant,
+    pub(super) reexecuting_ack: tokio::sync::oneshot::Receiver<()>,
 }
 
 pub(super) struct ActiveStatusObservation {
@@ -123,17 +127,20 @@ pub(super) fn spawn_operator_connection(
         else {
             return;
         };
-        let (response_sender, mut response_receiver) = mpsc::channel(2);
+        let (response_sender, mut response_receiver) = mpsc::channel(16);
+        let (reexecuting_ack_sender, reexecuting_ack_receiver) = tokio::sync::oneshot::channel();
         if operator_sender
             .send(OperatorWork {
                 request,
                 response: response_sender,
+                reexecuting_ack: reexecuting_ack_receiver,
             })
             .await
             .is_err()
         {
             return;
         }
+        let mut reexecuting_ack_sender = Some(reexecuting_ack_sender);
         while let Some(frame) = response_receiver.recv().await {
             let terminal = matches!(frame, OperatorFrame::Terminal(_));
             let write_deadline_at = tokio::time::Instant::now() + request_deadline;
@@ -146,6 +153,13 @@ pub(super) fn spawn_operator_connection(
             .is_err()
             {
                 return;
+            }
+            if matches!(
+                frame,
+                OperatorFrame::Progress(crate::HostProgress::ReExecuting)
+            ) && let Some(sender) = reexecuting_ack_sender.take()
+            {
+                let _ = sender.send(());
             }
             if terminal {
                 let _shutdown_result = crate::operator_connection::shutdown_operator_stream(
@@ -240,12 +254,14 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 future: crate::host_replacement_activation::activate_host_replacement(
                     context.app_server.take(),
                     context.router_child.take(),
+                    work.response.clone(),
                 ),
                 response: work.response,
                 replacement_command: replacement_command.with_executable(executable),
                 request,
                 operation: HostOperation::RestartHost,
                 started_at: tokio::time::Instant::now(),
+                reexecuting_ack: work.reexecuting_ack,
             });
         }
         OperatorRequest::Status | OperatorRequest::AwaitHostStart => {
@@ -270,6 +286,10 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             });
         }
         OperatorRequest::RestartAppServer => {
+            send_progress(
+                &work.response,
+                crate::operator_messages::HostProgress::PreparingAppServer,
+            );
             let current_child = context.app_server.take();
             context.state.phase = HostPhase::Mutating {
                 operation: HostOperation::RestartAppServer,
@@ -288,10 +308,13 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                     context.child_launch_plans.app_server.clone(),
                     current_child,
                     stop_intent.clone(),
+                    work.response.clone(),
                 ),
                 stop_intent,
                 response: work.response,
                 started_at: tokio::time::Instant::now(),
+                request: OperatorRequest::RestartAppServer,
+                operation: HostOperation::RestartAppServer,
             });
         }
         OperatorRequest::RestartRouter
@@ -306,6 +329,10 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             );
         }
         OperatorRequest::RestartRouter => {
+            send_progress(
+                &work.response,
+                crate::operator_messages::HostProgress::PreparingRouter,
+            );
             let current_child = context.router_child.take();
             let Some(router_command) = context.child_launch_plans.router_command.clone() else {
                 *context.router_child = current_child;
@@ -330,6 +357,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                     router_command,
                     current_child,
                     stop_intent.clone(),
+                    work.response.clone(),
                 ),
                 stop_intent,
                 response: work.response,
@@ -337,6 +365,10 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
             });
         }
         OperatorRequest::UpdateCodex => {
+            send_progress(
+                &work.response,
+                crate::operator_messages::HostProgress::UpdatingAppServer,
+            );
             context.state.phase = HostPhase::Mutating {
                 operation: HostOperation::UpdateCodex,
                 phase: "running-official-updater".to_owned(),
@@ -345,6 +377,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 future: crate::codex_update_preparation::start_update(
                     context.config.managed_executable().to_owned(),
                     context.update_inputs.update_deadlines,
+                    context.update_inputs.updater_command.clone(),
                 ),
                 response: work.response,
                 started_at: tokio::time::Instant::now(),
@@ -377,6 +410,13 @@ pub(super) fn send_terminal_response(
 ) {
     let response = HostTerminalResponse::new(request, classification, snapshot, message.to_owned());
     let _send_result = response_sender.try_send(OperatorFrame::terminal(response));
+}
+
+pub(super) fn send_progress(
+    response_sender: &mpsc::Sender<OperatorFrame>,
+    progress: crate::operator_messages::HostProgress,
+) {
+    let _send_result = response_sender.try_send(OperatorFrame::Progress(progress));
 }
 
 #[cfg(test)]

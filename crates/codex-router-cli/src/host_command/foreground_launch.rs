@@ -42,7 +42,9 @@ pub(super) async fn run_foreground_host(
     coordination_paths: HostCoordinationPaths,
     context: &CliContext,
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
+    stdout: &mut (impl std::io::Write + Send),
 ) -> Result<(), HostCommandError> {
+    let launch_started_at = std::time::Instant::now();
     let isolated_debug = cfg!(all(debug_assertions, not(test)))
         && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none();
     if isolated_debug {
@@ -73,12 +75,16 @@ pub(super) async fn run_foreground_host(
     } else {
         app_server_spec
     };
+    codex_router_host::record_debug_readiness_timing("profileAndSpec", launch_started_at);
     // Validate the native destination before touching state or launch policy.
     tokio::fs::create_dir_all(&router_root).await?;
+    codex_router_host::record_debug_readiness_timing("routerRootReady", launch_started_at);
     if !isolated_debug {
+        let started_at = std::time::Instant::now();
         DesktopLaunchPolicyCommand::new(launchctl_executable(context)?)
             .apply()
             .await?;
+        codex_router_host::record_debug_readiness_timing("launchctlPolicy", started_at);
     }
     let inherited_marker = std::env::var_os(codex_router_host::inherited_lock_environment());
     let instance = match inherited_marker.as_deref() {
@@ -86,21 +92,31 @@ pub(super) async fn run_foreground_host(
         None => HostInstance::acquire(coordination_paths.clone()),
     }
     .map_err(codex_router_host::HostError::from)?;
+    codex_router_host::record_debug_readiness_timing("singletonAcquired", launch_started_at);
+    let identity_started_at = std::time::Instant::now();
     let running_identity =
         codex_native_integration::executable_identity(&codex_paths.managed_executable()).await?;
+    codex_router_host::record_debug_readiness_timing("executableIdentity", identity_started_at);
+    let version_started_at = std::time::Instant::now();
     let running_version =
         codex_native_integration::managed_executable_version(&codex_paths.managed_executable())
             .await?;
+    codex_router_host::record_debug_readiness_timing(
+        "managedExecutableVersion",
+        version_started_at,
+    );
     let mut app_server_command = ChildCommandSpec::new(app_server_spec.executable())
         .with_arguments(app_server_spec.arguments())
         .with_output(ChildOutput::Telemetry);
     for (key, value) in app_server_spec.environment() {
         app_server_command = app_server_command.with_environment(key, value);
     }
-    let mut app_server =
+    let app_server =
         AppServerLaunchPlan::new(app_server_command, running_identity, running_version)
             .with_schema_directory(router_root.join("agent-communication"));
-    app_server.prepare_schema().await;
+    codex_router_host::record_debug_readiness_timing("appServerPlanBuilt", launch_started_at);
+    // Schema export is optional raw-native enrichment; do not delay app-server
+    // socket startup on this best-effort operation.
     let current_executable = std::env::current_exe()?;
     let otlp_endpoint = crate::telemetry::foreground_host_otlp_endpoint(
         context.env_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
@@ -139,7 +155,25 @@ pub(super) async fn run_foreground_host(
         update_inputs =
             update_inputs.with_pre_exec_telemetry(Arc::new(HostPreExecTelemetry(telemetry)));
     }
-    HostRuntime::run_acquired(config, child_launch_plans, update_inputs, instance).await?;
+    let mut presenter =
+        crate::presentation::host::HostProgressPresenter::new(context.stdout_is_terminal());
+    let mut emit = |progress| {
+        let _ = match progress {
+            Some(progress) => presenter.accept(
+                stdout,
+                &codex_router_host::OperatorFrame::Progress(progress),
+            ),
+            None => presenter.finish_success(stdout),
+        };
+    };
+    HostRuntime::run_acquired_with_progress(
+        config,
+        child_launch_plans,
+        update_inputs,
+        instance,
+        Some(&mut emit),
+    )
+    .await?;
     Ok(())
 }
 
