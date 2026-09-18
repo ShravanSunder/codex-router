@@ -55,12 +55,10 @@ First upgrade from an older protocol (U5)
 - Clients must reconnect and initialize the resumed thread within the upstream
   Codex reconnect window (approximately 15 seconds) after an intentional
   replacement; uninterrupted TCP continuity is not promised.
-- Host shutdown uses SIGTERM, waits up to 500 ms for exit, sends a second
-  SIGTERM only if still running, waits to one second total, then uses
-  process-group SIGKILL as a backstop before bounded reap. An interrupted turn
-  may leave upstream-spawned MCP/tool children running because they use their
-  own process groups and upstream forced exit skips Drop cleanup; this is an
-  accepted-for-now owner decision.
+- Host shutdown sends one SIGTERM, waits up to one second for exit, then uses
+  process-group SIGKILL as a backstop before bounded reap. The one-second
+  boundary is shared by Host-owned app-server replacement paths so clients can
+  reconnect within the upstream window.
 - No automatic rollback, PID discovery/signalling, legacy request shim, status
   dashboard, Host binary-drift status, or production process replacement is in
   scope.

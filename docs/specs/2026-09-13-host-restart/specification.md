@@ -90,13 +90,9 @@ No public process-control surface, binary download service, or dashboard is adde
 
 ### Shutdown and command shape
 
-Managed app-server shutdown sends SIGTERM, waits up to 500 ms for exit, sends a
-second SIGTERM only if still running, waits to one second total, then uses
-process-group SIGKILL as a backstop before bounded reap. Outcomes are
-`Graceful`, `ForcedDrain`, `Killed`, and `TimedOutStillRunning`. An interrupted
-turn may leave upstream-spawned MCP/tool children running because they use
-their own process groups and upstream forced exit skips Drop cleanup; this is
-an accepted-for-now owner decision. The supported command
+Managed app-server shutdown sends one SIGTERM, waits up to one second for exit,
+then uses process-group SIGKILL as a backstop before bounded reap. Outcomes are
+`Graceful`, `Killed`, and `TimedOutStillRunning`. The supported command
 shape is `host`, `host status`, `host restart`, `host router restart`,
 `host app-server restart`, and `host app-server update`.
 
