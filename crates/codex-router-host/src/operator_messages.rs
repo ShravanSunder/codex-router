@@ -134,6 +134,12 @@ impl HostTerminalResponse {
         self.classification
     }
 
+    /// Returns the request that produced this terminal response.
+    #[must_use]
+    pub const fn request(&self) -> &OperatorRequest {
+        &self.request
+    }
+
     /// Returns the live snapshot captured with this terminal result.
     #[must_use]
     pub const fn snapshot(&self) -> &HostSnapshot {

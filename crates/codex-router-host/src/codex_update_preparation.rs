@@ -7,7 +7,6 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use codex_native_integration::ExecutableIdentityTask;
-use codex_native_integration::UpdaterCommandSpec;
 use codex_native_integration::start_executable_identity;
 use thiserror::Error;
 
@@ -27,6 +26,11 @@ pub enum UpdateResult {
     /// Changed executable was activated by a locally ready replacement host.
     UpdatedAndHostRestarted {
         /// Replacement lifetime's terminal startup snapshot.
+        snapshot: HostSnapshot,
+    },
+    /// Managed executable changed and the app-server child was restarted in place.
+    UpdatedAndAppServerRestarted {
+        /// Current Host snapshot after app-server readiness.
         snapshot: HostSnapshot,
     },
     /// Executable changed, but teardown or replacement activation failed.
@@ -110,13 +114,15 @@ pub(crate) type UpdateFuture = Pin<Box<dyn Future<Output = UpdatePreparation> + 
 pub(crate) fn start_update(
     managed_executable: PathBuf,
     deadlines: UpdateDeadlines,
+    updater_command: Option<crate::ChildCommandSpec>,
 ) -> UpdateFuture {
-    Box::pin(async move { prepare_update(&managed_executable, deadlines).await })
+    Box::pin(async move { prepare_update(&managed_executable, deadlines, updater_command).await })
 }
 
 pub(crate) async fn prepare_update(
     managed_executable: &Path,
     deadlines: UpdateDeadlines,
+    updater_command: Option<crate::ChildCommandSpec>,
 ) -> UpdatePreparation {
     let mut initial_identity_task = start_executable_identity(managed_executable);
     let initial_identity =
@@ -132,12 +138,15 @@ pub(crate) async fn prepare_update(
             }
         };
 
-    let updater_spec = UpdaterCommandSpec::new(&initial_identity);
-    let mut updater_command = tokio::process::Command::new(updater_spec.executable());
-    updater_command
-        .args(updater_spec.arguments())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    let mut updater_command = updater_command
+        .map(|command| command.command())
+        .unwrap_or_else(|| {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.args(["-c", "curl -fsSL https://chatgpt.com/codex/install.sh | sh"]);
+            command
+        });
+    updater_command.stdout(std::process::Stdio::null());
+    updater_command.stderr(std::process::Stdio::null());
     let mut updater = match ProcessGroupChild::spawn(&mut updater_command) {
         Ok(child) => child,
         Err(_error) => return failed("official Codex updater failed to start", None, None),

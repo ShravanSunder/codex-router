@@ -83,6 +83,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         .app_server_socket();
     let managed_executable = codex_home.join("packages/standalone/current/codex");
     let launchctl_executable = directory.path().join("launchctl");
+    let curl_executable = directory.path().join("curl");
     let launchctl_log = directory.path().join("launchctl.log");
     let process_log = directory.path().join("app-generations.log");
     std::fs::create_dir_all(
@@ -92,6 +93,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     )?;
     install_managed_fixture(&managed_executable)?;
     install_launchctl_fixture(&launchctl_executable)?;
+    install_curl_fixture(&curl_executable)?;
     let port = reserve_loopback_port()?;
     let candidate_binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
     let prior_binary = std::env::var_os("CODEX_ROUTER_RESTART_PRIOR_BINARY").map(PathBuf::from);
@@ -145,6 +147,11 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     .env("CODEX_ROUTER_COMPILED_CLI_APP_CHILD", "1")
     .env("CODEX_ROUTER_COMPILED_CLI_PROCESS_LOG", &process_log)
     .env("CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES", "1")
+    .env("CODEX_ROUTER_COMPILED_CLI_MANAGED", &managed_executable)
+    .env(
+        "PATH",
+        prepend_path(curl_executable.parent().ok_or("curl parent is missing")?)?,
+    )
     .env("CODEX_ROUTER_DEBUG_READINESS_TIMING", "1")
     .stdout(Stdio::null())
     .stderr(Stdio::from(std::fs::File::create(&host_stderr)?));
@@ -222,11 +229,11 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         )?;
         let update_stdout = String::from_utf8(update.stdout)?;
         check(
-            update_stdout.contains("update_result: updated and host restarted"),
+            update_stdout.contains("update_result: updated and app-server restarted"),
             &update_stdout,
         )?;
 
-        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 2, "changed update did not replace Host once")?;
+        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 1, "app-server update replaced the Host")?;
         check(std::fs::read_to_string(&process_log)?.lines().count() == 3, "changed update child generation missing")?;
         let host_process_id = host.id().ok_or("owned Host PID missing")?;
         verify_host_image(host_process_id, &binary)?;
@@ -253,7 +260,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         check(host.try_wait()?.is_none(), "original Host PID exited instead of replacing its image")?;
         verify_host_image(host_process_id, &replacement_binary)?;
         check(std::fs::metadata(&lock_path)?.ino() == lock_inode, "Host replaced its stable lock artifact")?;
-        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 3, "whole Host restart did not activate once")?;
+        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 2, "whole Host restart did not activate once")?;
         let generations = std::fs::read_to_string(&process_log)?;
         check(generations.lines().count() == 4, "whole Host restart child generation missing")?;
         for former_pid in generations.lines().take(3) {
@@ -471,6 +478,18 @@ async fn wait_for_operator_socket(
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        while !std::fs::read_to_string(stderr)
+            .map(|contents| contents.contains("executableIdentity"))
+            .unwrap_or(false)
+        {
+            if let Some(status) = host.try_wait()? {
+                return Err(std::io::Error::other(format!(
+                    "fixture Host exited {status}: {}",
+                    std::fs::read_to_string(stderr)?
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         Ok::<(), std::io::Error>(())
     })
     .await??;
@@ -491,6 +510,22 @@ fn install_launchctl_fixture(executable: &Path) -> std::io::Result<()> {
         b"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG\"\n",
     )?;
     std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
+}
+
+fn install_curl_fixture(executable: &Path) -> std::io::Result<()> {
+    std::fs::write(
+        executable,
+        b"#!/bin/sh\ncat <<'INSTALLER'\n#!/bin/sh\nif [ \"$CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES\" = \"1\" ]; then\n  printf '\\n# changed by update fixture\\n' >> \"$CODEX_ROUTER_COMPILED_CLI_MANAGED\"\nfi\nINSTALLER\n",
+    )?;
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
+}
+
+fn prepend_path(directory: &Path) -> std::io::Result<std::ffi::OsString> {
+    let existing =
+        std::env::var_os("PATH").ok_or_else(|| std::io::Error::other("PATH is missing"))?;
+    let mut paths = std::env::split_paths(&existing).collect::<Vec<_>>();
+    paths.insert(0, directory.to_owned());
+    std::env::join_paths(paths).map_err(std::io::Error::other)
 }
 
 fn install_rejected_launchctl_fixture(executable: &Path) -> std::io::Result<()> {

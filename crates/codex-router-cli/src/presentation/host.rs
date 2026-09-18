@@ -210,6 +210,10 @@ pub(crate) fn render_update_result<W: Write>(
             writeln!(stdout, "update_result: updated and host restarted")?;
             render_snapshot(stdout, snapshot)
         }
+        UpdateResult::UpdatedAndAppServerRestarted { snapshot } => {
+            writeln!(stdout, "update_result: updated and app-server restarted")?;
+            render_snapshot(stdout, snapshot)
+        }
         UpdateResult::UpdatedButReplacementFailed {
             message,
             recovery_action,

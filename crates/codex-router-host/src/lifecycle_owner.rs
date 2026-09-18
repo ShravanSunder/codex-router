@@ -79,6 +79,7 @@ impl ManagedChildLaunchPlans {
 /// Inputs for conditional managed-Codex updates and whole-Host replacement.
 pub struct ManagedUpdateInputs {
     update_deadlines: crate::UpdateDeadlines,
+    updater_command: Option<ChildCommandSpec>,
     replacement_command: Option<ChildCommandSpec>,
     pre_exec_telemetry: Option<Arc<dyn PreExecTelemetry>>,
 }
@@ -89,6 +90,7 @@ impl ManagedUpdateInputs {
     pub fn production() -> Self {
         Self {
             update_deadlines: crate::UpdateDeadlines::production(),
+            updater_command: None,
             replacement_command: None,
             pre_exec_telemetry: None,
         }
@@ -98,6 +100,13 @@ impl ManagedUpdateInputs {
     #[must_use]
     pub const fn with_deadlines(mut self, deadlines: crate::UpdateDeadlines) -> Self {
         self.update_deadlines = deadlines;
+        self
+    }
+
+    /// Supplies a fixture updater command; production uses the official installer pipeline.
+    #[must_use]
+    pub fn with_updater_command(mut self, command: ChildCommandSpec) -> Self {
+        self.updater_command = Some(command);
         self
     }
 
@@ -420,8 +429,11 @@ impl HostRuntime {
                             state.apply_readiness(readiness);
                         }
                         state.recovery_budget = RecoveryBudget::Available;
+                        if active.operation == HostOperation::UpdateCodex {
+                            state.executable_relation = ExecutableRelation::Match;
+                        }
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
-                            operation: HostOperation::RestartAppServer,
+                            operation: active.operation,
                             classification: restart_lifecycle_classification(
                                 true,
                                 restart_completion.shutdown_outcome,
@@ -436,7 +448,7 @@ impl HostRuntime {
                         };
                         state.remote_control = RemoteControlCondition::Unavailable;
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
-                            operation: HostOperation::RestartAppServer,
+                            operation: active.operation,
                             classification: restart_lifecycle_classification(
                                 false,
                                 restart_completion.shutdown_outcome,
@@ -452,7 +464,7 @@ impl HostRuntime {
                     );
                     request_admission::send_terminal_response(
                         active.response,
-                        OperatorRequest::RestartAppServer,
+                        active.request,
                         classification,
                         state.snapshot(),
                         restart_completion.message,
@@ -505,10 +517,10 @@ impl HostRuntime {
                         preparation: update_preparation,
                         active,
                         state: &mut state,
-                        update_inputs: &update_inputs,
+                        config: &config,
+                        child_launch_plans: &child_launch_plans,
+                        active_app_server_restart: &mut active_restart,
                         app_server: &mut app_server,
-                        router: &mut router_child,
-                        activation: &mut active_host_replacement,
                         pending_identity: &mut pending_identity,
                         retained_updater: &mut retained_updater,
                     });

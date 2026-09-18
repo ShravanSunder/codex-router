@@ -56,94 +56,21 @@ async fn update_matrix_uses_exact_managed_executable_and_preserves_children_befo
     )
     .await?;
     run_update_case(UpdateFixtureMode::Failure, TerminalClassification::Failed).await?;
-    run_update_case(UpdateFixtureMode::Changed, TerminalClassification::Failed).await?;
+    run_update_case(
+        UpdateFixtureMode::Changed,
+        TerminalClassification::Succeeded,
+    )
+    .await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn changed_update_tears_down_children_and_reexecs_with_continuous_lock()
--> Result<(), Box<dyn std::error::Error>> {
-    let directory = TestDirectory::new("changed-reexec")?;
-    let router = PersistentRouterHealthFixture::start().await?;
-    let managed_executable = directory.path().join("managed-codex");
-    install_updater_fixture(&managed_executable, UpdateFixtureMode::Changed)?;
-    let coordination_paths = HostCoordinationPaths::new(
-        directory.path().join("operator.sock"),
-        directory.path().join("instance.lock"),
-    );
-    let app_server_socket = directory.path().join("app.sock");
-    let app_server_log = directory.path().join("app-pids.log");
-    let replacement_marker = directory.path().join("replacement.log");
-    std::fs::write(&app_server_log, b"")?;
-
-    let mut host_process = tokio::process::Command::new(std::env::current_exe()?);
-    host_process
-        .args([
-            "--exact",
-            "changed_update_host_child_entrypoint",
-            "--nocapture",
-        ])
-        .env("CODEX_HOST_UPDATE_CHILD", "1")
-        .env(
-            "CODEX_HOST_UPDATE_OPERATOR_SOCKET",
-            coordination_paths.operator_socket(),
-        )
-        .env(
-            "CODEX_HOST_UPDATE_INSTANCE_LOCK",
-            coordination_paths.instance_lock(),
-        )
-        .env("CODEX_HOST_UPDATE_ROUTER", router.address().to_string())
-        .env("CODEX_HOST_UPDATE_APP_SOCKET", &app_server_socket)
-        .env("CODEX_HOST_UPDATE_APP_LOG", &app_server_log)
-        .env("CODEX_HOST_UPDATE_MANAGED", &managed_executable)
-        .env("CODEX_HOST_UPDATE_REPLACEMENT_MARKER", &replacement_marker)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let host_process = host_process.spawn()?;
-
-    let frames = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::UpdateCodex,
-        Duration::from_secs(20),
+async fn changed_update_restarts_only_the_app_server() -> Result<(), Box<dyn std::error::Error>> {
+    run_update_case(
+        UpdateFixtureMode::Changed,
+        TerminalClassification::Succeeded,
     )
-    .await?;
-    check(
-        frames.iter().any(|frame| {
-            matches!(
-                frame,
-                OperatorFrame::Progress(codex_router_host::HostProgress::UpdatingAppServer)
-            )
-        }) && frames.iter().any(|frame| {
-            matches!(
-                frame,
-                OperatorFrame::Progress(codex_router_host::HostProgress::ReplacementStarting)
-            )
-        }),
-        "changed update must emit typed update and replacement progress before old-host EOF",
-    )?;
-    let output =
-        tokio::time::timeout(Duration::from_secs(20), host_process.wait_with_output()).await??;
-    check(
-        output.status.success(),
-        &format!(
-            "replacement bootstrap fixture failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ),
-    )?;
-    check_equal(
-        std::fs::read_to_string(&replacement_marker)?,
-        "replacement-lock-valid\n".to_owned(),
-        "replacement must validate and consume the continuously held lock",
-    )?;
-    let app_server_pid = wait_for_process_id(&app_server_log).await?;
-    check(
-        !process_is_running(app_server_pid),
-        "changed update must stop the old app-server before exec",
-    )?;
-    let reacquired = HostInstance::acquire(coordination_paths)?;
-    drop(reacquired);
-    router.finish().await?;
-    Ok(())
+    .await
 }
 
 #[tokio::test]

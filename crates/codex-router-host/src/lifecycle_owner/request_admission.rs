@@ -65,6 +65,8 @@ pub(super) struct ActiveAppServerRestart {
     pub(super) stop_intent: crate::explicit_app_server_restart::StopIntent,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) started_at: tokio::time::Instant,
+    pub(super) request: OperatorRequest,
+    pub(super) operation: HostOperation,
 }
 
 pub(super) struct ActiveRouterRestart {
@@ -78,7 +80,6 @@ pub(super) struct ActiveUpdate {
     pub(super) future: crate::codex_update_preparation::UpdateFuture,
     pub(super) response: mpsc::Sender<OperatorFrame>,
     pub(super) started_at: tokio::time::Instant,
-    pub(super) reexecuting_ack: tokio::sync::oneshot::Receiver<()>,
 }
 
 pub(super) struct ActiveHostReplacement {
@@ -312,6 +313,8 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 stop_intent,
                 response: work.response,
                 started_at: tokio::time::Instant::now(),
+                request: OperatorRequest::RestartAppServer,
+                operation: HostOperation::RestartAppServer,
             });
         }
         OperatorRequest::RestartRouter
@@ -374,10 +377,10 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                 future: crate::codex_update_preparation::start_update(
                     context.config.managed_executable().to_owned(),
                     context.update_inputs.update_deadlines,
+                    context.update_inputs.updater_command.clone(),
                 ),
                 response: work.response,
                 started_at: tokio::time::Instant::now(),
-                reexecuting_ack: work.reexecuting_ack,
             });
         }
     }

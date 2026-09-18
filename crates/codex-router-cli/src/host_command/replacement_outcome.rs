@@ -56,6 +56,14 @@ async fn complete_update_result_with_deadline(
         .iter()
         .any(|frame| matches!(frame, OperatorFrame::Progress(_)));
     if let Some(OperatorFrame::Terminal(response)) = frames.last() {
+        if response.request() == &OperatorRequest::UpdateCodex
+            && response.classification() == TerminalClassification::Succeeded
+            && response.message() == "app-server restarted"
+        {
+            return UpdateResult::UpdatedAndAppServerRestarted {
+                snapshot: response.snapshot().clone(),
+            };
+        }
         if replacement_started {
             return UpdateResult::UpdatedButReplacementFailed {
                 message: response.message().to_owned(),
