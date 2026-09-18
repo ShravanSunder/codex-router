@@ -39,11 +39,7 @@ pub(crate) fn activate_host_replacement(
                 .send(OperatorFrame::Progress(HostProgress::StoppingAppServer))
                 .await;
             match child.shutdown().await {
-                Ok(
-                    outcome @ (ShutdownOutcome::Graceful
-                    | ShutdownOutcome::ForcedDrain
-                    | ShutdownOutcome::Killed),
-                ) => {
+                Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Killed)) => {
                     app_server_shutdown = Some(outcome);
                     app_server = None;
                     crate::record_debug_readiness_timing("appServerStopped", activation_started_at);

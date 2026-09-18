@@ -418,7 +418,7 @@ impl HostRuntime {
                     };
                     app_server = restart_completion.child;
                     let classification = if restart_completion.succeeded {
-                        if matches!(restart_completion.shutdown_outcome, Some(crate::ShutdownOutcome::ForcedDrain | crate::ShutdownOutcome::Killed)) {
+                        if matches!(restart_completion.shutdown_outcome, Some(crate::ShutdownOutcome::Killed)) {
                             request_admission::send_progress(&active.response, crate::HostProgress::AppServerKilled);
                         }
                         if let Some(readiness) = restart_completion.readiness {

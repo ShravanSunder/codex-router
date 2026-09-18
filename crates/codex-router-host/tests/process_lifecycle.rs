@@ -44,10 +44,6 @@ fn app_server_shutdown_policy_uses_fast_grace_and_reap_boundaries() {
         ShutdownAction::SendTerminate
     );
     assert_eq!(
-        expected_exit.next_action(Duration::from_millis(500), true),
-        ShutdownAction::SendForceTerminate
-    );
-    assert_eq!(
         expected_exit.next_action(Duration::from_millis(999), true),
         ShutdownAction::Wait
     );
@@ -74,7 +70,7 @@ fn app_server_shutdown_policy_uses_fast_grace_and_reap_boundaries() {
 #[test]
 fn shutdown_deadlines_reject_kill_boundary_at_or_after_total() {
     assert!(
-        AppServerShutdownDeadlines::new(Duration::from_millis(400), Duration::from_millis(800),)
+        AppServerShutdownDeadlines::new(Duration::from_millis(800), Duration::from_millis(800),)
             .is_none()
     );
 }
@@ -164,36 +160,6 @@ async fn app_server_force_escalation_signals_and_reaps_once()
     check(
         std::fs::read_to_string(&event_file)?.starts_with("ready\nsigterm\n"),
         "fixture must observe the initial TERM before SIGKILL",
-    )?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn app_server_second_sigterm_exits_gracefully_before_backstop()
--> Result<(), Box<dyn std::error::Error>> {
-    let directory = TestDirectory::new("second-term")?;
-    let event_file = directory.path().join("events.log");
-    let identity = executable_identity(&std::env::current_exe()?).await?;
-    let mut command =
-        signal_fixture_command(SignalFixtureMode::ExitOnSecondTerminate, &event_file)?;
-    let process = ProcessGroupChild::spawn(&mut command)?;
-    wait_for_fixture_ready(&event_file).await?;
-    let mut app_server = AppServerChild::new(process, identity);
-    let started_at = tokio::time::Instant::now();
-    let outcome = app_server.shutdown().await?;
-    let events = std::fs::read_to_string(&event_file)?;
-    check(
-        outcome == ShutdownOutcome::ForcedDrain,
-        &format!("second SIGTERM should preserve graceful cleanup: {outcome:?}, events={events:?}"),
-    )?;
-    check(
-        started_at.elapsed() < Duration::from_secs(1),
-        "second SIGTERM path exceeded one-second grace",
-    )?;
-    check_equal(
-        events,
-        "ready\nsigterm\nsigterm\n".to_owned(),
-        "fixture must observe two SIGTERMs",
     )?;
     Ok(())
 }
