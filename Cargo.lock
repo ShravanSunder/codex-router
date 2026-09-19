@@ -675,9 +675,12 @@ version = "0.1.30"
 dependencies = [
  "agent-collaboration",
  "bytes",
+ "codex-acp-adapter",
+ "codex-native-integration",
  "collaboration-client",
  "collaboration-protocol",
  "collaboration-service",
+ "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -691,6 +694,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tower-service",
 ]
