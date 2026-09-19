@@ -4,6 +4,46 @@ use collaboration_protocol::WakeupId;
 use collaboration_protocol::{
     FireReceipt, WakeChange, WakeChanged, WakeShowRequest, WakeState, WakeSubscription,
 };
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub enum WakeWaitFailureKind {
+    #[serde(rename = "wakeNotFound")]
+    NotFound,
+    #[serde(rename = "waitUnavailable")]
+    Unavailable,
+    #[serde(rename = "wakePaused")]
+    Paused,
+    #[serde(rename = "wakeCancelled")]
+    Cancelled,
+    #[serde(rename = "wakeExpired")]
+    Expired,
+    #[serde(rename = "wakeFinishedWithoutFiring")]
+    FinishedWithoutFiring,
+    #[serde(rename = "connectionUnavailable")]
+    Connection,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WakeWaitFailure {
+    pub kind: WakeWaitFailureKind,
+    pub stage: String,
+    pub effect: crate::OperationEffect,
+    pub message: String,
+    pub wakeup_id: Option<WakeupId>,
+    pub first_occurrence_id: Option<String>,
+    pub next_action: String,
+    pub effects: WakeWaitEffects,
+    pub connection: Option<crate::OperationFailure>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WakeWaitEffects {
+    pub first_fire: String,
+}
 #[derive(Debug, thiserror::Error)]
 pub enum WakeWaitError {
     #[error(
@@ -22,6 +62,87 @@ pub enum WakeWaitError {
     FinishedWithoutFiring { wakeup_id: WakeupId },
     #[error(transparent)]
     Connection(#[from] ClientError),
+}
+
+impl WakeWaitError {
+    #[must_use]
+    pub fn into_operation_failure(self) -> WakeWaitFailure {
+        let message = self.to_string();
+        let (kind, stage, wakeup_id, next_action, first_fire, connection) = match self {
+            Self::NotFound { wakeup_id } => (
+                WakeWaitFailureKind::NotFound,
+                "subscribe",
+                Some(wakeup_id),
+                "verifyWakeupAddress",
+                "unknown",
+                None,
+            ),
+            Self::Unavailable { wakeup_id } => (
+                WakeWaitFailureKind::Unavailable,
+                "wait",
+                Some(wakeup_id),
+                "reconnectWait",
+                "unknown",
+                None,
+            ),
+            Self::Paused { wakeup_id } => (
+                WakeWaitFailureKind::Paused,
+                "wait",
+                Some(wakeup_id),
+                "resumeWakeup",
+                "notRecorded",
+                None,
+            ),
+            Self::Cancelled { wakeup_id } => (
+                WakeWaitFailureKind::Cancelled,
+                "wait",
+                Some(wakeup_id),
+                "createWakeup",
+                "notRecorded",
+                None,
+            ),
+            Self::Expired { wakeup_id } => (
+                WakeWaitFailureKind::Expired,
+                "wait",
+                Some(wakeup_id),
+                "createWakeup",
+                "notRecorded",
+                None,
+            ),
+            Self::FinishedWithoutFiring { wakeup_id } => (
+                WakeWaitFailureKind::FinishedWithoutFiring,
+                "wait",
+                Some(wakeup_id),
+                "createWakeup",
+                "notRecorded",
+                None,
+            ),
+            Self::Connection(error) => (
+                WakeWaitFailureKind::Connection,
+                "connection",
+                None,
+                "reconnectWait",
+                "unknown",
+                Some(crate::OperationFailure::from_client_error(
+                    error,
+                    crate::OperationEffect::None,
+                )),
+            ),
+        };
+        WakeWaitFailure {
+            kind,
+            stage: stage.to_owned(),
+            effect: crate::OperationEffect::None,
+            message,
+            wakeup_id,
+            first_occurrence_id: None,
+            next_action: next_action.to_owned(),
+            effects: WakeWaitEffects {
+                first_fire: first_fire.to_owned(),
+            },
+            connection,
+        }
+    }
 }
 pub struct WakeWaitConnection {
     client: ControlClient,
@@ -155,4 +276,26 @@ fn cursor_sequence(
         return Err(ClientError::Protocol("wake cursor scope mismatch"));
     }
     Ok(sequence)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WakeWaitError, WakeWaitFailureKind};
+
+    #[test]
+    fn shared_wake_failure_preserves_effect_and_recovery_action() {
+        let wakeup_id: collaboration_protocol::WakeupId = "01a0bb62-9a72-7161-8103-b6c2c691bec8"
+            .to_owned()
+            .try_into()
+            .expect("wake ID");
+        let paused = WakeWaitError::Paused {
+            wakeup_id: wakeup_id.clone(),
+        }
+        .into_operation_failure();
+        assert_eq!(paused.kind, WakeWaitFailureKind::Paused);
+        assert_eq!(paused.wakeup_id, Some(wakeup_id));
+        assert_eq!(paused.next_action, "resumeWakeup");
+        assert_eq!(paused.effects.first_fire, "notRecorded");
+        assert_eq!(paused.effect, crate::OperationEffect::None);
+    }
 }

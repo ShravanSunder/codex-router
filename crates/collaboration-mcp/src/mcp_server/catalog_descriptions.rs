@@ -1,7 +1,7 @@
 pub(super) fn operation_description(name: &str) -> &'static str {
     match name {
         "instruction_create" => {
-            "Creates one durable automation instruction from validated text. Requires an optional operation identity only for the existing mutation contract; creation is local state, not native agent acceptance or completion."
+            "Creates one durable automation instruction from validated text and a required operation identity. Creation is local state, not native agent acceptance or completion."
         }
         "instruction_update" => {
             "Revises an existing instruction using its identity and expected revision guard. Returns the stored snapshot; a successful update does not start native work."
@@ -16,7 +16,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Lists a bounded page of revisions for one instruction. Read-only and ordered by the stored revision history."
         }
         "wake_send" => {
-            "Creates a durable timed wake with its target, sender, delivery mode and timing. Creation confirms local scheduling only; a firing, native input acceptance, completed turn and agent reply are distinct later evidence."
+            "Creates a durable timed wake with its required operation identity, target, sender, delivery mode and timing. Creation confirms local scheduling only; a firing, native input acceptance, completed turn and agent reply are distinct later evidence."
         }
         "wake_show" => {
             "Reads one wake definition, state, next due time and recorded first-fire evidence. Read-only; it does not wait for or replay delivery."
@@ -25,13 +25,13 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Lists a bounded page of stored wakes and their current scheduling state. Read-only and does not fire or deliver them."
         }
         "wake_pause" => {
-            "Pauses an active wake using its wake identity and optional operation identity. The mutation affects future eligibility; it does not retract an already accepted native input."
+            "Pauses an active wake using its wake identity and required operation identity. The mutation affects future eligibility; it does not retract an already accepted native input."
         }
         "wake_resume" => {
-            "Resumes a paused wake using its identity and optional operation identity. This restores scheduling eligibility but does not itself fire or deliver a message."
+            "Resumes a paused wake using its identity and required operation identity. This restores scheduling eligibility but does not itself fire or deliver a message."
         }
         "wake_cancel" => {
-            "Cancels a wake using its identity and optional operation identity. Cancellation prevents future eligibility when still applicable; it is not proof that earlier delivery effects stopped."
+            "Cancels a wake using its identity and required operation identity. Cancellation prevents future eligibility when still applicable; it is not proof that earlier delivery effects stopped."
         }
         "delivery_show" => {
             "Reads one delivery record, including eligibility, attempts and any known native acceptance evidence. Read-only; acceptance is not turn completion or an agent reply."
@@ -70,7 +70,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Disables a schedule using its identity and existing mutation contract. It prevents future eligibility when applicable but does not cancel already accepted native work."
         }
         "schedule_prepare" => {
-            "Prepares one schedule for execution using the requested fresh/reuse workspace inputs. Preparation mutates stored run-planning state; it does not prove native input acceptance, turn completion or an agent reply."
+            "Prepares one reuseThread schedule for execution. Fresh or fork destinations allocate a native conversation; existing destinations load the supplied conversation. Preparation mutates stored run-planning state; it does not prove native input acceptance, turn completion or an agent reply."
         }
         "run_show" => {
             "Reads one run snapshot and its separately recorded execution and summary evidence. Read-only; stored worker outcome is distinct from summary outcome."
@@ -200,7 +200,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Cancels the supplied reader's active board listener. It stops future listener delivery but does not unwatch threads or acknowledge activity."
         }
         "board_inbox_fetch" => {
-            "Fetches bounded unread activity for the supplied reader across the selected project. Fetching does not acknowledge activity or prove a model processed it."
+            "Fetches bounded activity for the supplied reader and selected project/board/topic scope. Latest mode initializes unread tracking without acknowledging activity; other modes retain their existing mutation evidence. Fetching does not prove a model processed it."
         }
         "board_inbox_acknowledge" => {
             "Advances the supplied reader's acknowledgement for exactly the requested inbox scope and activity sequence. It mutates attention state only."

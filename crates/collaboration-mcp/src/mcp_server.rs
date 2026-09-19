@@ -23,7 +23,14 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 mod catalog_descriptions;
 mod catalog_tools;
@@ -39,10 +46,41 @@ use schema_binding::{bind_native_schema_refs, load_advertised_native_definitions
 pub(crate) struct CollaborationMcpServer {
     service_directory: PathBuf,
     tool_router: ToolRouter<Self>,
+    _lifecycle: ActiveServiceGuard,
+}
+
+#[derive(Debug)]
+struct ActiveServiceGuard(Arc<AtomicUsize>);
+
+impl ActiveServiceGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Clone for ActiveServiceGuard {
+    fn clone(&self) -> Self {
+        Self::new(Arc::clone(&self.0))
+    }
+}
+
+impl Drop for ActiveServiceGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl CollaborationMcpServer {
+    #[cfg(test)]
     pub(crate) fn new(service_directory: PathBuf) -> Self {
+        Self::with_lifecycle(service_directory, Arc::new(AtomicUsize::new(0)))
+    }
+
+    pub(crate) fn with_lifecycle(
+        service_directory: PathBuf,
+        active_services: Arc<AtomicUsize>,
+    ) -> Self {
         let mut tool_router = Self::tool_router();
         register_board_tools(&mut tool_router);
         register_automation_inspection_tools(&mut tool_router);
@@ -50,6 +88,7 @@ impl CollaborationMcpServer {
         Self {
             service_directory,
             tool_router,
+            _lifecycle: ActiveServiceGuard::new(active_services),
         }
     }
 
@@ -339,9 +378,8 @@ impl CollaborationMcpServer {
         Parameters(request): Parameters<ExistingConversationPromptRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
-        structured_result(
+        existing_prompt_tool_result(
             AcpConversation::prompt_existing(&self.service_directory, request, context.ct).await,
-            OperationEffect::Unknown,
         )
     }
 
@@ -355,6 +393,47 @@ impl CollaborationMcpServer {
             NativeObservation::observe_bounded(&self.service_directory, request, context.ct).await,
             OperationEffect::None,
         )
+    }
+}
+
+fn existing_prompt_tool_result(
+    result: Result<
+        ExistingConversationPromptResult,
+        collaboration_client::ExistingConversationPromptError,
+    >,
+) -> CallToolResult {
+    match result {
+        Ok(value) => structured_result(Ok(value), OperationEffect::None),
+        Err(error) => {
+            let (target, source, effect) = match error {
+                collaboration_client::ExistingConversationPromptError::BeforeDispatch {
+                    target,
+                    source,
+                } => (Some(target), source, OperationEffect::None),
+                collaboration_client::ExistingConversationPromptError::LoadFailed {
+                    target,
+                    source,
+                } => (Some(target), source, OperationEffect::Unknown),
+                collaboration_client::ExistingConversationPromptError::AfterTarget {
+                    target,
+                    source,
+                } => (Some(target), source, OperationEffect::Unknown),
+            };
+            let mut failure =
+                serde_json::to_value(OperationFailure::from_client_error(source, effect))
+                    .unwrap_or_else(|_| {
+                        serde_json::json!({
+                            "kind":"protocolViolation",
+                            "stage":"validation",
+                            "effect":"none",
+                            "message":"collaboration error encoding failed"
+                        })
+                    });
+            if let Some(fields) = failure.as_object_mut() {
+                fields.insert("target".to_owned(), serde_json::json!(target));
+            }
+            CallToolResult::structured_error(failure)
+        }
     }
 }
 
@@ -373,8 +452,9 @@ fn structured_result<TValue: serde::Serialize>(
 fn message_tool_result(result: Result<NativeSendReceipt, MessageSendError>) -> CallToolResult {
     match result {
         Ok(receipt) => structured_result(Ok(receipt), OperationEffect::None),
-        Err(MessageSendError::Preparation(error)) => failure(error, OperationEffect::None),
-        Err(MessageSendError::Submission(error)) => failure(error, OperationEffect::Unknown),
+        Err(error) => serde_json::to_value(error.into_operation_failure())
+            .map(CallToolResult::structured_error)
+            .unwrap_or_else(|_| validation_failure("collaboration error encoding failed")),
     }
 }
 
@@ -525,28 +605,9 @@ domain_error_converter!(
 );
 
 fn wake_wait_failure(error: collaboration_client::WakeWaitError) -> CallToolResult {
-    use collaboration_client::WakeWaitError;
-    match error {
-        WakeWaitError::Connection(error) => failure(error, OperationEffect::None),
-        WakeWaitError::NotFound { wakeup_id } => CallToolResult::structured_error(
-            serde_json::json!({"kind":"notFound","stage":"subscribe","effect":"none","wakeupId":wakeup_id}),
-        ),
-        WakeWaitError::Unavailable { wakeup_id } => CallToolResult::structured_error(
-            serde_json::json!({"kind":"unavailable","stage":"wait","effect":"none","wakeupId":wakeup_id}),
-        ),
-        WakeWaitError::Paused { wakeup_id } => CallToolResult::structured_error(
-            serde_json::json!({"kind":"paused","stage":"wait","effect":"none","wakeupId":wakeup_id}),
-        ),
-        WakeWaitError::Cancelled { wakeup_id } => CallToolResult::structured_error(
-            serde_json::json!({"kind":"cancelled","stage":"wait","effect":"none","wakeupId":wakeup_id}),
-        ),
-        WakeWaitError::Expired { wakeup_id } => CallToolResult::structured_error(
-            serde_json::json!({"kind":"expired","stage":"wait","effect":"none","wakeupId":wakeup_id}),
-        ),
-        WakeWaitError::FinishedWithoutFiring { wakeup_id } => CallToolResult::structured_error(
-            serde_json::json!({"kind":"finishedWithoutFiring","stage":"wait","effect":"none","wakeupId":wakeup_id}),
-        ),
-    }
+    serde_json::to_value(error.into_operation_failure())
+        .map(CallToolResult::structured_error)
+        .unwrap_or_else(|_| validation_failure("wake wait error encoding failed"))
 }
 
 fn validation_failure(message: &str) -> CallToolResult {

@@ -3,7 +3,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use collaboration_client::protocol::ConversationRecord;
 use collaboration_client::{
     AcpConversation, ClientError, ConversationCreateRequest, ConversationEnd, ConversationEvent,
-    ConversationPromptRequest, PublicPromptContent,
+    ConversationPromptRequest, OperationEffect, OperationFailure, OperationFailureKind,
+    PublicPromptContent,
 };
 use serde_json::json;
 use std::{
@@ -239,17 +240,18 @@ fn report_create_failure(
             error,
             ClientError::InvalidRequest(_) | ClientError::UnsupportedCapability(_)
         ) {
-        "notDispatched"
+        OperationEffect::None
     } else {
-        "unknown"
+        OperationEffect::Unknown
     };
-    let record = json!({"kind":"conversationError","target":target,"stage":"new","effect":effect,"message":error.to_string()});
+    let failure = OperationFailure::from_client_error(error, effect);
+    let record = json!({"kind":"conversationError","target":target,"error":failure});
     if json_output {
         let _printed = writeln!(io::stdout(), "{record}");
     } else {
-        let _printed = writeln!(io::stderr(), "{error}");
+        let _printed = writeln!(io::stderr(), "{}", failure.message);
     }
-    if effect == "unknown" { 5 } else { 2 }
+    operation_failure_exit(&failure)
 }
 
 fn run_prompt(args: PromptArguments) -> i32 {
@@ -354,9 +356,7 @@ fn run_prompt(args: PromptArguments) -> i32 {
         }.await;
         signal_task.abort();let _joined=signal_task.await;
         match result{
-            Ok(ConversationEnd::Completed)=>0,
-            Ok(ConversationEnd::TimedOut)=>124,
-            Ok(ConversationEnd::Cancelled)=>130,
+            Ok(end) => conversation_end_exit(end),
             Err(error)=>{
                 if stage == "connect"
                     && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
@@ -367,19 +367,33 @@ fn run_prompt(args: PromptArguments) -> i32 {
                 {
                     return code;
                 }
-                let effect=if !matches!(error,ClientError::UnsupportedCapability(_)) && matches!(stage,"new"|"load"|"prompt"){"unknown"}else{"notDispatched"};
-                let exit=match &error{ClientError::UnsupportedCapability(_)=>2,ClientError::Rejected{..}=>4,_ if effect=="unknown"=>5,_=>3};
-                let message = match &error {
-                    ClientError::Rejected { data: Some(data), .. } => {
-                        format!("ACP conversation rejected: {data}; no operation replayed")
-                    }
-                    _ => "ACP conversation failed; no operation replayed".to_owned(),
-                };
-                let record=json!({"kind":"conversationError","target":target,"stage":stage,"effect":effect,"message":message});
+                let effect=if !matches!(error,ClientError::UnsupportedCapability(_) | ClientError::InvalidRequest(_) | ClientError::Discovery { .. }) && matches!(stage,"new"|"load"|"prompt"){OperationEffect::Unknown}else{OperationEffect::None};
+                let failure = OperationFailure::from_client_error(error, effect);
+                let exit = operation_failure_exit(&failure);
+                let record=json!({"kind":"conversationError","target":target,"error":failure});
                 let _printed=writeln!(io::stdout(),"{record}");exit
             }
         }
     })
+}
+
+fn operation_failure_exit(failure: &OperationFailure) -> i32 {
+    match failure.kind {
+        OperationFailureKind::Rejected => 4,
+        _ if failure.effect == OperationEffect::Unknown => 5,
+        OperationFailureKind::UnsupportedCapability | OperationFailureKind::ProtocolViolation => 2,
+        OperationFailureKind::Unavailable if failure.effect == OperationEffect::None => 3,
+        OperationFailureKind::Timeout => 124,
+        _ => 4,
+    }
+}
+
+const fn conversation_end_exit(end: ConversationEnd) -> i32 {
+    match end {
+        ConversationEnd::Completed => 0,
+        ConversationEnd::TimedOut => 124,
+        ConversationEnd::Cancelled => 130,
+    }
 }
 fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
     let dispatch_count = usize::from(args.new_session)
@@ -528,6 +542,22 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
             ConversationRecord::PermissionRequired { target }
         }
         ConversationEvent::PromptResult { target, result } => {
+            let stop_reason = result.get("stopReason").and_then(serde_json::Value::as_str);
+            if matches!(stop_reason, Some("cancelled")) {
+                let record = cancelled_settlement_record(target, result);
+                if machine {
+                    writeln!(io::stdout(), "{record}")?;
+                } else {
+                    writeln!(
+                        io::stdout(),
+                        "{}",
+                        serde_json::to_string_pretty(&record).map_err(|_| {
+                            ClientError::Protocol("conversation output encoding failed")
+                        })?
+                    )?;
+                }
+                return Ok(());
+            }
             let effective_model = result
                 .pointer("/_meta/codexRouter/effectiveModel")
                 .and_then(serde_json::Value::as_str)
@@ -604,10 +634,47 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
     Ok(())
 }
 
+fn cancelled_settlement_record(
+    target: collaboration_client::protocol::SessionRef,
+    result: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "kind":"conversationSettlement",
+        "target":target,
+        "terminalReason":"cancelled",
+        "result":result,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConversationArguments, ConversationCommand};
+    use super::{
+        ConversationArguments, ConversationCommand, cancelled_settlement_record,
+        conversation_end_exit, operation_failure_exit,
+    };
     use clap::Parser;
+    use collaboration_client::{
+        ClientError, OperationEffect, OperationFailure, OperationFailureKind,
+    };
+
+    #[test]
+    fn conversation_exit_preserves_rejection_and_post_dispatch_unknown_precedence() {
+        let rejection = OperationFailure::from_client_error(
+            ClientError::Rejected {
+                code: -32603,
+                data: Some(serde_json::json!({"kind":"nativeRejected"})),
+            },
+            OperationEffect::Unknown,
+        );
+        assert_eq!(rejection.kind, OperationFailureKind::Rejected);
+        assert_eq!(operation_failure_exit(&rejection), 4);
+
+        let malformed = OperationFailure::from_client_error(
+            ClientError::Protocol("malformed result"),
+            OperationEffect::Unknown,
+        );
+        assert_eq!(operation_failure_exit(&malformed), 5);
+    }
 
     #[test]
     fn create_is_a_standalone_machine_composable_command() {
@@ -628,5 +695,35 @@ mod tests {
         ])
         .expect("standalone create arguments");
         assert!(matches!(parsed.command, ConversationCommand::Create(_)));
+    }
+
+    #[test]
+    fn cancelled_acp_settlement_without_success_settings_keeps_target_and_terminal_exit() {
+        let target: collaboration_client::protocol::SessionRef = serde_json::from_value(
+            serde_json::json!({
+                "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
+                "sessionId":"cancelled-thread"
+            }),
+        )
+        .expect("target");
+        let receipt = serde_json::json!({
+            "stopReason":"cancelled",
+            "_meta":{"codexRouter":{"interruption":{"requested":true}}}
+        });
+        let record = cancelled_settlement_record(target.clone(), receipt.clone());
+        assert_eq!(
+            record["target"],
+            serde_json::to_value(target).expect("target JSON")
+        );
+        assert_eq!(record["result"], receipt);
+        assert_eq!(record["terminalReason"], "cancelled");
+        assert_eq!(
+            conversation_end_exit(collaboration_client::ConversationEnd::Cancelled),
+            130
+        );
+        assert_eq!(
+            conversation_end_exit(collaboration_client::ConversationEnd::TimedOut),
+            124
+        );
     }
 }

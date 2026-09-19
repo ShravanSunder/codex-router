@@ -1,5 +1,5 @@
 //! Shared message preparation and generation discovery for CLI and MCP callers.
-use crate::{ClientError, ControlClient};
+use crate::{ClientError, ControlClient, OperationEffect, OperationFailure};
 use collaboration_protocol::{
     ChannelDescription, CodexGeneration, MessageContent, MessageDelivery, NativeSendParams,
     NativeSendReceipt, NonEmptyText, SessionRef,
@@ -25,6 +25,20 @@ pub enum MessageSendError {
     Preparation(ClientError),
     #[error(transparent)]
     Submission(ClientError),
+}
+
+impl MessageSendError {
+    #[must_use]
+    pub fn into_operation_failure(self) -> OperationFailure {
+        match self {
+            Self::Preparation(error) => {
+                OperationFailure::from_client_error(error, OperationEffect::None)
+            }
+            Self::Submission(error) => {
+                OperationFailure::from_client_error(error, OperationEffect::Unknown)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

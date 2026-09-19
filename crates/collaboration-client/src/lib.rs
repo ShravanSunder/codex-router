@@ -46,7 +46,7 @@ mod acp_conversation;
 pub use acp_conversation::{
     AcpConversation, ConversationCreatePromptError, ConversationCreatePromptRequest,
     ConversationCreatePromptResult, ConversationCreateRequest, ConversationCreateResult,
-    ConversationEnd, ConversationEvent, ConversationPromptRequest,
+    ConversationEnd, ConversationEvent, ConversationPromptRequest, ExistingConversationPromptError,
     ExistingConversationPromptRequest, ExistingConversationPromptResult, PublicPromptContent,
 };
 mod acp_transport_connection;
@@ -58,6 +58,7 @@ pub use wakeup_operations::WakeClientError;
 
 mod wakeup_waiting;
 pub use wakeup_waiting::{WakeWaitConnection, WakeWaitError};
+pub use wakeup_waiting::{WakeWaitFailure, WakeWaitFailureKind};
 mod automation_inspection_operations;
 mod schedule_operations;
 pub use automation_inspection_operations::AutomationInspectionClientError;

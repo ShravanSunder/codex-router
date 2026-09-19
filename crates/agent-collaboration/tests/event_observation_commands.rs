@@ -17,6 +17,8 @@ mod tests {
         BufferedEvents,
         NativeRejection,
         GenerationChanged,
+        ByteSaturation,
+        LateEvent,
     }
 
     #[tokio::test]
@@ -96,6 +98,42 @@ mod tests {
         assert_eq!(result["events"].as_array().map(Vec::len), Some(2));
     }
 
+    #[tokio::test]
+    async fn bounded_cli_observe_stops_at_actual_encoded_byte_budget() {
+        let output = run_observation_case(AttachmentCase::ByteSaturation, "byte-limit", true).await;
+        assert!(output.status.success());
+        let records = output_records(&output);
+        let [result] = records.as_slice() else {
+            panic!("expected one bounded result");
+        };
+        assert_eq!(result["attached"], true);
+        assert_eq!(result["endReason"], "resultLimitReached");
+        assert_eq!(result["continuationGap"], true);
+        assert_eq!(result["events"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn late_and_concurrent_bounded_observations_remain_call_local() {
+        let (first, second) = tokio::join!(
+            run_observation_case(AttachmentCase::LateEvent, "concurrent-a", true),
+            run_observation_case(AttachmentCase::LateEvent, "concurrent-b", true),
+        );
+        for output in [first, second] {
+            assert!(output.status.success());
+            let records = output_records(&output);
+            let [result] = records.as_slice() else {
+                panic!("expected one bounded result");
+            };
+            assert_eq!(result["attached"], true);
+            assert_eq!(result["endReason"], "backendDisconnected");
+            assert!(result["events"].as_array().is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["params"]["delta"] == "late-output")
+            }));
+        }
+    }
+
     fn endpoint_description(generation: u64) -> EndpointDescription {
         serde_json::from_value(json!({
             "endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},
@@ -161,7 +199,26 @@ mod tests {
             if matches!(case, AttachmentCase::NativeRejection) {
                 send_native(&mut socket, json!({"id":resume["id"],"error":{"code":-32602,"message":"Unknown fixture thread"}})).await;
             } else {
-                send_native(&mut socket, json!({"method":"item/agentMessage/delta","params":{"threadId":"observed-thread","turnId":"observed-turn","delta":"buffered-output"}})).await;
+                if matches!(case, AttachmentCase::LateEvent) {
+                    send_native(
+                        &mut socket,
+                        json!({"id":resume["id"],"result":{"thread":{"id":"observed-thread"}}}),
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    send_native(&mut socket, json!({"method":"item/agentMessage/delta","params":{"threadId":"observed-thread","turnId":"observed-turn","delta":"late-output"}})).await;
+                    socket
+                        .close(None)
+                        .await
+                        .unwrap_or_else(|error| panic!("observation fixture: {error}"));
+                    return;
+                }
+                let delta = if matches!(case, AttachmentCase::ByteSaturation) {
+                    "x".repeat(256)
+                } else {
+                    "buffered-output".to_owned()
+                };
+                send_native(&mut socket, json!({"method":"item/agentMessage/delta","params":{"threadId":"observed-thread","turnId":"observed-turn","delta":delta}})).await;
                 send_native(&mut socket, json!({"id":"permission-request","method":"item/commandExecution/requestApproval","params":{"threadId":"observed-thread","turnId":"observed-turn"}})).await;
                 if matches!(case, AttachmentCase::GenerationChanged) {
                     directory
@@ -174,7 +231,10 @@ mod tests {
                 )
                 .await;
             }
-            if matches!(case, AttachmentCase::BufferedEvents) {
+            if matches!(
+                case,
+                AttachmentCase::BufferedEvents | AttachmentCase::ByteSaturation
+            ) {
                 // This scenario models server loss. Rejected/stale attachment instead
                 // makes the client disconnect; a server close write would race that exit.
                 socket
@@ -202,6 +262,9 @@ mod tests {
             "--service-directory",
         ]);
         command.arg(&root).kill_on_drop(true);
+        if matches!(case, AttachmentCase::ByteSaturation) {
+            command.args(["--max-events", "64", "--max-bytes", "128"]);
+        }
         let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
         stop.cancel();
         service

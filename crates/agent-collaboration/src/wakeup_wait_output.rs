@@ -1,6 +1,6 @@
 //! First-fire wait output is distinct from durable creation and native acceptance.
 use collaboration_client::protocol::{WakeShowRequest, WakeupId};
-use collaboration_client::{ControlClient, WakeWaitError};
+use collaboration_client::{ControlClient, WakeWaitFailureKind};
 use serde_json::{Value, json};
 use std::{
     io::{self, Write},
@@ -26,22 +26,18 @@ pub(crate) async fn wait(directory: &Path, wakeup_id: WakeupId, machine: bool) -
     let (record, code) = match result {
         Ok(fire) => (crate::endpoint_commands::result_envelope(json!(fire)), 0),
         Err(error) => {
-            let (kind, next_action, first_fire) = match &error {
-                WakeWaitError::Paused { .. } => ("wakePaused", "resumeWakeup", "notRecorded"),
-                WakeWaitError::Cancelled { .. } => ("wakeCancelled", "createWakeup", "notRecorded"),
-                WakeWaitError::Expired { .. } => ("wakeExpired", "createWakeup", "notRecorded"),
-                WakeWaitError::FinishedWithoutFiring { .. } => {
-                    ("wakeFinishedWithoutFiring", "createWakeup", "notRecorded")
-                }
-                WakeWaitError::NotFound { .. } => {
-                    ("wakeNotFound", "verifyWakeupAddress", "unknown")
-                }
-                _ => ("waitUnavailable", "reconnectWait", "unknown"),
+            let failure = error.into_operation_failure();
+            let code = if matches!(
+                failure.kind,
+                WakeWaitFailureKind::Unavailable
+                    | WakeWaitFailureKind::NotFound
+                    | WakeWaitFailureKind::Connection
+            ) {
+                3
+            } else {
+                4
             };
-            (
-                json!({"kind":"error","error":{"kind":kind,"stage":"waitForFirstFire","message":error.to_string(),"wakeupId":wakeup_id,"firstOccurrenceId":null,"nextAction":next_action,"effects":{"firstFire":first_fire}}}),
-                if first_fire == "unknown" { 3 } else { 4 },
-            )
+            (json!({"kind":"error","error":failure}), code)
         }
     };
     print(record, machine, code)

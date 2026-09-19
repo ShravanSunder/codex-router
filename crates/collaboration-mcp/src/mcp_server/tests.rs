@@ -32,6 +32,25 @@ fn message_adapter_preserves_preparation_and_submission_effects() {
             .and_then(|value| value.get("effect")),
         Some(&serde_json::json!("unknown"))
     );
+
+    let rejection =
+        super::message_tool_result(Err(collaboration_client::MessageSendError::Preparation(
+            collaboration_client::ClientError::Rejected {
+                code: -32050,
+                data: Some(serde_json::json!({
+                    "kind":"staleGeneration",
+                    "stage":"discovery",
+                    "expected":2
+                })),
+            },
+        )));
+    let structured = rejection.structured_content.expect("structured rejection");
+    assert_eq!(structured["kind"], "rejected");
+    assert_eq!(structured["serviceKind"], "staleGeneration");
+    assert_eq!(structured["stage"], "discovery");
+    assert_eq!(structured["effect"], "none");
+    assert_eq!(structured["code"], -32050);
+    assert_eq!(structured["data"]["expected"], 2);
 }
 
 #[test]
@@ -55,6 +74,163 @@ fn create_and_prompt_failure_retains_created_target_and_unknown_effect() {
     assert_eq!(structured["target"], serde_json::json!(target));
     assert_eq!(structured["effect"], "unknown");
     assert_eq!(structured["kind"], "rejected");
+}
+
+#[test]
+fn resumed_prompt_failure_retains_known_target_and_rejection_evidence() {
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"existing-thread"
+    }))
+    .expect("target");
+    let result = super::existing_prompt_tool_result(Err(
+        collaboration_client::ExistingConversationPromptError::AfterTarget {
+            target: target.clone(),
+            source: collaboration_client::ClientError::Rejected {
+                code: -32603,
+                data: Some(serde_json::json!({"kind":"nativeRejected","detail":"busy"})),
+            },
+        },
+    ));
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured error");
+    assert_eq!(structured["target"], serde_json::json!(target));
+    assert_eq!(structured["effect"], "unknown");
+    assert_eq!(structured["kind"], "rejected");
+    assert_eq!(structured["serviceKind"], "nativeRejected");
+    assert_eq!(structured["code"], -32603);
+    assert_eq!(structured["data"]["detail"], "busy");
+}
+
+#[test]
+fn prompt_carrier_preserves_permission_required_and_explicit_approver() {
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"created-thread"
+    }))
+    .expect("target");
+    let approver: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"approver-thread"
+    }))
+    .expect("approver");
+    let request = collaboration_client::ConversationCreatePromptRequest {
+        create: collaboration_client::ConversationCreateRequest {
+            endpoint: target.endpoint.clone(),
+            cwd: "/tmp/collaboration-mcp-fixture".into(),
+            session: None,
+            fork: None,
+            model: Some("gpt-5.6-sol".into()),
+            effort: Some("low".into()),
+            access: Some("workspace-write".into()),
+            created_by: Some(approver.clone()),
+            approver: Some(approver.clone()),
+            root_message_id: None,
+        },
+        prompt: collaboration_client::ConversationPromptRequest {
+            message: collaboration_client::PublicPromptContent::HumanUser {
+                text: "permission fixture"
+                    .to_owned()
+                    .try_into()
+                    .expect("prompt text"),
+            },
+            effort: Some("low".into()),
+            timeout_seconds: 3,
+        },
+    };
+    let encoded = serde_json::to_value(&request).expect("request encoding");
+    assert_eq!(encoded["create"]["approver"], serde_json::json!(approver));
+
+    let result = super::create_prompt_tool_result(Ok(
+        collaboration_client::ConversationCreatePromptResult {
+            target,
+            end: collaboration_client::ConversationEnd::Cancelled,
+            updates: vec![],
+            permission_required: true,
+            result: Some(serde_json::json!({"stopReason":"cancelled"})),
+        },
+    ));
+    assert_eq!(result.is_error, Some(false));
+    let structured = result.structured_content.expect("structured result");
+    assert_eq!(structured["permissionRequired"], true);
+    assert_eq!(structured["end"], "cancelled");
+}
+
+#[test]
+fn prompt_carrier_preserves_busy_precondition_rejection_without_auto_retry() {
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"busy-thread"
+    }))
+    .expect("target");
+    let result = super::existing_prompt_tool_result(Err(
+        collaboration_client::ExistingConversationPromptError::AfterTarget {
+            target,
+            source: collaboration_client::ClientError::Rejected {
+                code: -32050,
+                data: Some(serde_json::json!({
+                    "kind":"nativeRejected",
+                    "stage":"prompt",
+                    "reason":"busy",
+                    "nextAction":"inspectTarget"
+                })),
+            },
+        },
+    ));
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured rejection");
+    assert_eq!(structured["kind"], "rejected");
+    assert_eq!(structured["serviceKind"], "nativeRejected");
+    assert_eq!(structured["stage"], "prompt");
+    assert_eq!(structured["effect"], "unknown");
+    assert_eq!(structured["data"]["reason"], "busy");
+    assert_eq!(structured["data"]["nextAction"], "inspectTarget");
+}
+
+#[test]
+fn resumed_prompt_preflight_failure_retains_requested_target_without_effect() {
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"existing-thread"
+    }))
+    .expect("target");
+    let result = super::existing_prompt_tool_result(Err(
+        collaboration_client::ExistingConversationPromptError::BeforeDispatch {
+            target: target.clone(),
+            source: collaboration_client::ClientError::InvalidRequest(
+                "prompt timeout must be at least one second",
+            ),
+        },
+    ));
+    let structured = result.structured_content.expect("structured error");
+    assert_eq!(structured["target"], serde_json::json!(target));
+    assert_eq!(structured["effect"], "none");
+    assert_eq!(structured["kind"], "protocolViolation");
+    assert_eq!(structured["stage"], "validation");
+}
+
+#[test]
+fn resumed_prompt_load_response_loss_retains_target_with_unknown_effect() {
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"existing-thread"
+    }))
+    .expect("target");
+    let result = super::existing_prompt_tool_result(Err(
+        collaboration_client::ExistingConversationPromptError::LoadFailed {
+            target: target.clone(),
+            source: collaboration_client::ClientError::Transport(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "fixture",
+            )),
+        },
+    ));
+    let structured = result.structured_content.expect("structured error");
+    assert_eq!(structured["target"], serde_json::json!(target));
+    assert_eq!(structured["effect"], "unknown");
+    assert_eq!(structured["kind"], "unavailable");
+    assert_eq!(structured["stage"], "transport");
+    assert_eq!(structured["data"]["ioKind"], "ConnectionReset");
 }
 
 #[test]
@@ -159,12 +335,25 @@ fn representative_catalog_descriptions_explain_operation_specific_behavior() {
         ),
         (
             "wake_send",
-            &["local scheduling", "native input acceptance", "agent reply"][..],
+            &[
+                "required operation identity",
+                "local scheduling",
+                "native input acceptance",
+                "agent reply",
+            ][..],
         ),
         (
             "schedule_prepare",
-            &["Preparation", "native input acceptance"][..],
+            &[
+                "Preparation",
+                "reuseThread",
+                "allocate a native conversation",
+                "native input acceptance",
+            ][..],
         ),
+        ("instruction_create", &["required operation identity"][..]),
+        ("wake_pause", &["required operation identity"][..]),
+        ("board_inbox_fetch", &["Latest mode", "unread tracking"][..]),
         (
             "board_message_post",
             &["Saving the message", "reply", "assignment success"][..],

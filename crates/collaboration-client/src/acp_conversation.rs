@@ -15,6 +15,40 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const FRAME_LIMIT: usize = 64 * 1024 * 1024;
+const MAX_PROMPT_RESULT_UPDATES: usize = 1024;
+const MAX_PROMPT_RESULT_BYTES: usize = FRAME_LIMIT;
+
+struct BoundedPromptUpdates {
+    updates: Vec<Value>,
+    bytes: usize,
+}
+
+impl BoundedPromptUpdates {
+    const fn new() -> Self {
+        Self {
+            updates: Vec::new(),
+            bytes: 0,
+        }
+    }
+
+    fn push(&mut self, update: Value) -> Result<(), ClientError> {
+        let bytes = serde_json::to_vec(&update)
+            .map_err(|_| ClientError::Protocol("ACP update encoding failed"))?
+            .len();
+        if self.updates.len() >= MAX_PROMPT_RESULT_UPDATES
+            || self.bytes.saturating_add(bytes) > MAX_PROMPT_RESULT_BYTES
+        {
+            return Err(ClientError::Protocol("ACP prompt updates overflow"));
+        }
+        self.bytes += bytes;
+        self.updates.push(update);
+        Ok(())
+    }
+
+    fn into_updates(self) -> Vec<Value> {
+        self.updates
+    }
+}
 pub enum ConversationEvent {
     SessionReady(SessionRef),
     SessionUpdate { target: SessionRef, update: Value },
@@ -147,6 +181,41 @@ pub enum ConversationCreatePromptError {
     },
 }
 
+/// A resumed prompt may fail after its target has been loaded. Keep that known
+/// recovery identity in the operation result without inventing a turn receipt.
+#[derive(Debug, thiserror::Error)]
+pub enum ExistingConversationPromptError {
+    #[error("conversation {target:?} prompt failed before dispatch: {source}")]
+    BeforeDispatch {
+        target: SessionRef,
+        #[source]
+        source: ClientError,
+    },
+    #[error("conversation {target:?} load failed after submission: {source}")]
+    LoadFailed {
+        target: SessionRef,
+        #[source]
+        source: ClientError,
+    },
+    #[error("conversation {target:?} was loaded, but its prompt failed: {source}")]
+    AfterTarget {
+        target: SessionRef,
+        #[source]
+        source: ClientError,
+    },
+}
+
+impl ExistingConversationPromptError {
+    #[must_use]
+    pub fn target(&self) -> &SessionRef {
+        match self {
+            Self::BeforeDispatch { target, .. }
+            | Self::LoadFailed { target, .. }
+            | Self::AfterTarget { target, .. } => target,
+        }
+    }
+}
+
 impl ConversationCreatePromptError {
     #[must_use]
     pub fn target(&self) -> Option<&SessionRef> {
@@ -188,6 +257,8 @@ impl AcpConversation {
             .prompt
             .validate()
             .map_err(ConversationCreatePromptError::BeforeCreation)?;
+        validate_conversation_create_request(&request.create)
+            .map_err(ConversationCreatePromptError::BeforeCreation)?;
         if request.create.session.is_some() || request.create.fork.is_some() {
             return Err(ConversationCreatePromptError::BeforeCreation(
                 ClientError::InvalidRequest(
@@ -201,12 +272,12 @@ impl AcpConversation {
             .map_err(ConversationCreatePromptError::BeforeCreation)?;
         validate_conversation_endpoint(conversation.endpoint(), &request.create.endpoint)
             .map_err(ConversationCreatePromptError::BeforeCreation)?;
-        let mut updates = Vec::new();
+        let mut updates = BoundedPromptUpdates::new();
         let mut permission_required = false;
         let mut prompt_result = None;
         let mut emit = |event| {
             match event {
-                ConversationEvent::SessionUpdate { update, .. } => updates.push(update),
+                ConversationEvent::SessionUpdate { update, .. } => updates.push(update)?,
                 ConversationEvent::PermissionRequired(_) => permission_required = true,
                 ConversationEvent::PromptResult { result, .. } => prompt_result = Some(result),
                 ConversationEvent::SessionReady(_) => {}
@@ -219,7 +290,7 @@ impl AcpConversation {
         Ok(ConversationCreatePromptResult {
             target,
             end,
-            updates,
+            updates: updates.into_updates(),
             permission_required,
             result: prompt_result,
         })
@@ -253,16 +324,33 @@ impl AcpConversation {
         directory: &Path,
         request: ExistingConversationPromptRequest,
         cancel: CancellationToken,
-    ) -> Result<ExistingConversationPromptResult, ClientError> {
-        let endpoint = request.target.endpoint.clone();
-        let mut conversation = Self::connect(directory, endpoint.endpoint_id.clone()).await?;
-        validate_conversation_endpoint(conversation.endpoint(), &endpoint)?;
-        let mut updates = Vec::new();
+    ) -> Result<ExistingConversationPromptResult, ExistingConversationPromptError> {
+        let requested_target = request.target.clone();
+        request.prompt.validate().map_err(|source| {
+            ExistingConversationPromptError::BeforeDispatch {
+                target: requested_target.clone(),
+                source,
+            }
+        })?;
+        let endpoint = requested_target.endpoint.clone();
+        let mut conversation = Self::connect(directory, endpoint.endpoint_id.clone())
+            .await
+            .map_err(|source| ExistingConversationPromptError::BeforeDispatch {
+                target: requested_target.clone(),
+                source,
+            })?;
+        validate_conversation_endpoint(conversation.endpoint(), &endpoint).map_err(|source| {
+            ExistingConversationPromptError::BeforeDispatch {
+                target: requested_target.clone(),
+                source,
+            }
+        })?;
+        let mut updates = BoundedPromptUpdates::new();
         let mut permission_required = false;
         let mut prompt_result = None;
         let mut emit = |event| {
             match event {
-                ConversationEvent::SessionUpdate { update, .. } => updates.push(update),
+                ConversationEvent::SessionUpdate { update, .. } => updates.push(update)?,
                 ConversationEvent::PermissionRequired(_) => permission_required = true,
                 ConversationEvent::PromptResult { result, .. } => prompt_result = Some(result),
                 ConversationEvent::SessionReady(_) => {}
@@ -281,18 +369,29 @@ impl AcpConversation {
             approver: None,
             root_message_id: None,
         };
-        let target = conversation.open_session(&create, &mut emit).await?;
+        let target = conversation
+            .open_session(&create, &mut emit)
+            .await
+            .map_err(|source| ExistingConversationPromptError::LoadFailed {
+                target: requested_target.clone(),
+                source,
+            })?;
         let end = conversation
             .prompt_and_wait(request.prompt, cancel, &mut emit)
-            .await?;
+            .await
+            .map_err(|source| ExistingConversationPromptError::AfterTarget {
+                target: target.clone(),
+                source,
+            })?;
         Ok(ExistingConversationPromptResult {
             target,
             end,
-            updates,
+            updates: updates.into_updates(),
             permission_required,
             result: prompt_result,
         })
     }
+
     #[must_use]
     pub fn endpoint(&self) -> &EndpointRef {
         &self.endpoint
@@ -338,6 +437,7 @@ impl AcpConversation {
         request: ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<(Self, ConversationCreateResult), ClientError> {
+        validate_conversation_create_request(&request)?;
         let endpoint_id = request.endpoint.endpoint_id.clone();
         let mut client = Self::connect(directory, endpoint_id).await?;
         validate_conversation_endpoint(&client.endpoint, &request.endpoint)?;
@@ -349,6 +449,7 @@ impl AcpConversation {
         request: &ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<SessionRef, ClientError> {
+        validate_conversation_create_request(request)?;
         // A requested switch retires the previous selection even when setup rejects
         // or its future is cancelled. Only completed setup may enable a prompt.
         self.session_ready = false;
@@ -720,88 +821,37 @@ fn validate_conversation_endpoint(
     Ok(())
 }
 
-#[cfg(test)]
-mod public_contract_tests {
-    use super::{
-        AcpConversation, ConversationCreatePromptError, ConversationCreatePromptRequest,
-        ConversationCreateRequest, ConversationPromptRequest, PublicPromptContent,
-        validate_conversation_endpoint,
-    };
-    use collaboration_protocol::{
-        EndpointId, EndpointRef, MessageText, SessionId, SessionRef, UuidIdentity,
-    };
-    use tokio_util::sync::CancellationToken;
-
-    fn endpoint(service_id: &str) -> EndpointRef {
-        EndpointRef {
-            service_id: UuidIdentity::try_from(service_id.to_owned()).expect("valid service UUID"),
-            endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("valid endpoint"),
-        }
+fn validate_conversation_create_request(
+    request: &ConversationCreateRequest,
+) -> Result<(), ClientError> {
+    if !request.cwd.is_absolute() {
+        return Err(ClientError::InvalidRequest("ACP cwd must be absolute"));
     }
-
-    #[test]
-    fn wrong_service_is_rejected_by_read_only_validation_before_session_open() {
-        let observed = endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f");
-        let requested = endpoint("018f47d2-24d5-7a68-b9ec-6f759c394590");
-        let error = validate_conversation_endpoint(&observed, &requested)
-            .expect_err("wrong service must be rejected");
-        assert_eq!(
-            error.to_string(),
-            "invalid collaboration request: conversation endpoint belongs to another service"
-        );
-    }
-
-    #[test]
-    fn public_prompt_schema_cannot_decode_router_authored_content() {
-        let result = serde_json::from_value::<PublicPromptContent>(serde_json::json!({
-            "kind": "router",
-            "text": "internal"
-        }));
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn invalid_prompt_deadline_fails_before_discovery_or_creation() {
-        let endpoint = endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f");
-        let sender = SessionRef {
-            endpoint: endpoint.clone(),
-            session_id: SessionId::try_from("sender".to_owned()).expect("session ID"),
-        };
-        let error = AcpConversation::create_and_prompt(
-            std::path::Path::new("/path-that-must-not-be-read"),
-            ConversationCreatePromptRequest {
-                create: ConversationCreateRequest {
-                    endpoint,
-                    cwd: std::path::PathBuf::from("/tmp/project"),
-                    session: None,
-                    fork: None,
-                    model: Some("gpt-5.6-luna".to_owned()),
-                    effort: Some("low".to_owned()),
-                    access: Some("workspace-write".to_owned()),
-                    created_by: Some(sender.clone()),
-                    approver: Some(sender.clone()),
-                    root_message_id: None,
-                },
-                prompt: ConversationPromptRequest {
-                    message: PublicPromptContent::Agent {
-                        sender,
-                        text: MessageText::try_from("prompt".to_owned()).expect("message"),
-                    },
-                    effort: Some("low".to_owned()),
-                    timeout_seconds: 0,
-                },
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("invalid prompt timeout must fail before connection");
-        assert!(matches!(
-            error,
-            ConversationCreatePromptError::BeforeCreation(crate::ClientError::InvalidRequest(
-                "prompt timeout must be at least one second"
-            ))
+    if request.session.is_some() && request.fork.is_some() {
+        return Err(ClientError::InvalidRequest(
+            "session and fork cannot be selected together",
         ));
     }
+    if request.session.is_some()
+        && (request.model.is_some()
+            || request.access.is_some()
+            || request.created_by.is_some()
+            || request.approver.is_some()
+            || request.root_message_id.is_some())
+    {
+        return Err(ClientError::InvalidRequest(
+            "existing session cannot change creation settings",
+        ));
+    }
+    if request.session.is_none()
+        && request.fork.is_none()
+        && (request.model.is_none() || request.effort.is_none() || request.access.is_none())
+    {
+        return Err(ClientError::InvalidRequest(
+            "new conversation requires model, effort, and access",
+        ));
+    }
+    Ok(())
 }
 
 fn create_private_scratch(path: &Path) -> Result<(), ClientError> {
@@ -844,41 +894,5 @@ fn session_scratch_scope() -> String {
 }
 
 #[cfg(test)]
-mod access_tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn only_write_restricted_access_creates_project_write_areas() {
-        // Arrange: one empty project directory per access selection.
-        let root =
-            std::env::temp_dir().join(format!("router-client-access-{}", uuid::Uuid::now_v7()));
-        let restricted = root.join("restricted");
-        let workspace = root.join("workspace");
-        std::fs::create_dir_all(&restricted).unwrap();
-        std::fs::create_dir_all(&workspace).unwrap();
-
-        // Act.
-        prepare_project_write_areas(&restricted, Some("write-restricted")).unwrap();
-        prepare_project_write_areas(&workspace, Some("workspace-write")).unwrap();
-
-        // Assert: workspace-write leaves the worktree exactly as it found it.
-        assert!(restricted.join("tmp").is_dir());
-        assert!(restricted.join("docs/wip").is_dir());
-        assert!(!workspace.join("tmp").exists());
-        assert!(!workspace.join("docs").exists());
-    }
-
-    #[test]
-    fn session_scratch_scopes_are_unique_and_owner_private() {
-        let first = session_scratch_scope();
-        let second = session_scratch_scope();
-        assert_ne!(first, second);
-        let path = std::env::temp_dir()
-            .join("router-client-scratch")
-            .join(first);
-        assert!(create_private_scratch(&path).is_ok());
-        let metadata = std::fs::metadata(path).unwrap();
-        assert_eq!(metadata.permissions().mode() & 0o077, 0);
-    }
-}
+#[path = "acp_conversation_tests.rs"]
+mod tests;
