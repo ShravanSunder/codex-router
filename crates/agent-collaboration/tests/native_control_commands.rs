@@ -15,7 +15,7 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
     let digest = format!("sha256:{}", "a".repeat(64));
-    let manifest = serde_json::from_value(json!({"version":1,"serviceId":service_id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest})).unwrap_or_else(|error| panic!("manifest: {error}"));
+    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap_or_else(|error| panic!("manifest: {error}"));
     let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
         .unwrap_or_else(|error| panic!("publish: {error}"));
     let fixture = tokio::spawn(async move {

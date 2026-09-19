@@ -30,7 +30,7 @@ mod native_schema_references;
 mod native_session_catalog;
 pub use message_content::{
     AcceptedResumeEffect, MessageContent, MessageDelivery, MessageInputKind, MessageRepresentation,
-    MessageText, MessageTextError,
+    MessageText, MessageTextError, RenderedMessage, render_message,
 };
 pub use native_control_contract::{
     NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,
@@ -73,7 +73,10 @@ pub use endpoint_description::{
 pub use endpoint_description::NonEmptyText;
 
 mod service_manifest;
-pub use service_manifest::{ControlSelector, ControlSocketPath, ControlTransport, ServiceManifest};
+pub use service_manifest::{
+    ControlSelector, ControlSocketPath, ControlTransport, McpSelector, McpTransport,
+    ServiceManifest,
+};
 mod lifecycle_observation;
 pub use lifecycle_observation::{
     BackendStatus, LifecycleChange, LifecycleObservation, LifecycleSubject, NativeActiveFlag,

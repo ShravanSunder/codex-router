@@ -209,6 +209,7 @@ mod tests {
                 std::path::PathBuf::from("/unused/instance.lock"),
             ),
             router_endpoint: "127.0.0.1:9".parse()?,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket: std::path::PathBuf::from("/unused/app.sock"),
             managed_executable: std::path::PathBuf::from("/unused/codex"),
             deadlines: crate::HostDeadlines::production(),

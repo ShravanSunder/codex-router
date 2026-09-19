@@ -217,6 +217,7 @@ async fn invalid_host_restart_executable_fails_before_child_teardown()
         HostConfig::new(HostConfigInputs {
             coordination_paths: coordination_paths.clone(),
             router_endpoint: router.address(),
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable,
             deadlines: fixture_host_deadlines()?,
@@ -327,6 +328,7 @@ async fn host_restart_exec_failure_releases_singleton_after_settling_children()
         HostConfig::new(HostConfigInputs {
             coordination_paths: coordination_paths.clone(),
             router_endpoint: router.address(),
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable: directory.path().join("unused-managed-codex"),
             deadlines: fixture_host_deadlines()?,
@@ -433,6 +435,7 @@ async fn explicit_host_restart_child_entrypoint() -> Result<(), Box<dyn std::err
         HostConfig::new(HostConfigInputs {
             coordination_paths: HostCoordinationPaths::new(operator_socket, instance_lock),
             router_endpoint,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable: PathBuf::from("/unused/managed-codex"),
             deadlines: fixture_host_deadlines()?,
@@ -530,6 +533,7 @@ async fn changed_update_host_child_entrypoint() -> Result<(), Box<dyn std::error
         HostConfig::new(HostConfigInputs {
             coordination_paths: HostCoordinationPaths::new(operator_socket, instance_lock),
             router_endpoint,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable,
             deadlines: fixture_host_deadlines()?,

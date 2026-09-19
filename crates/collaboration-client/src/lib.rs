@@ -5,8 +5,12 @@ pub use collaboration_protocol as protocol;
 pub use message_board as board;
 mod control_connection;
 mod endpoint_notification_state;
+mod message_operation;
+mod operation_error;
 pub use collaboration_protocol::{ControlInitializationResult, EndpointInventory, ProtocolVersion};
 pub use control_connection::{ClientError, ControlClient};
+pub use message_operation::{MessageSendError, MessageSendRequest, PublicMessageContent};
+pub use operation_error::{OperationEffect, OperationFailure, OperationFailureKind};
 static OBSERVED_SERVICE_VERSION: std::sync::OnceLock<std::sync::Mutex<String>> =
     std::sync::OnceLock::new();
 pub(crate) fn record_service_version(version: &str) {
@@ -34,11 +38,15 @@ mod native_endpoint_selector;
 pub use native_endpoint_selector::resolve_public_native;
 
 mod observation_session;
-pub use observation_session::NativeObservation;
+pub use observation_session::{
+    BoundedObservationRequest, BoundedObservationResult, NativeObservation, ObservationEndReason,
+};
 
 mod acp_conversation;
 pub use acp_conversation::{
-    AcpConversation, ConversationEnd, ConversationEvent, ConversationSessionRequest,
+    AcpConversation, ConversationCreateRequest, ConversationCreateResult, ConversationEnd,
+    ConversationEvent, ConversationPromptRequest, ExistingConversationPromptRequest,
+    ExistingConversationPromptResult, PublicPromptContent,
 };
 mod acp_transport_connection;
 pub use acp_transport_connection::AcpTransportConnection;

@@ -126,8 +126,8 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
         .with_automation_store(Arc::clone(&store));
     let listener = LocalControlService::bind(&root.join("control.sock"), identity)?;
     let manifest = serde_json::from_value(
-        json!({"version":1,"serviceId":service_id,"serviceEpoch":service_id,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest}),
+        json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,
+        "control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}}),
     )?;
     let publication = ManifestPublication::publish(&root, &manifest)?;
     let stop = CancellationToken::new();

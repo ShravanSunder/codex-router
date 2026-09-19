@@ -35,7 +35,10 @@ impl From<UuidIdentity> for String {
     }
 }
 
-/// Stable name within one logical Host installation.
+/// Stable name for a named adapter endpoint within one Router service.
+///
+/// An endpoint identifies the adapter that interprets a [`SessionId`]. It is
+/// not a computer, process, transport connection, or conversation identity.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct EndpointId(String);
@@ -80,7 +83,10 @@ impl From<SessionId> for String {
     }
 }
 
-/// An endpoint identity independent of the locator used to contact it.
+/// An adapter endpoint within one Router service, independent of its locator.
+///
+/// `service_id` identifies the Router service; `endpoint_id` selects the
+/// stable named adapter endpoint within that service.
 #[derive(
     schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize,
 )]
@@ -90,7 +96,10 @@ pub struct EndpointRef {
     pub endpoint_id: EndpointId,
 }
 
-/// A native conversation scoped to the endpoint that interprets its ID.
+/// A conversation scoped to the endpoint that interprets its opaque ID.
+///
+/// The `session_id` value is owned and interpreted by the referenced endpoint;
+/// it is not a Router-wide, computer-wide, process, or connection identity.
 #[derive(
     schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize,
 )]

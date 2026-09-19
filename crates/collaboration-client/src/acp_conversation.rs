@@ -1,6 +1,11 @@
 //! Reusable ACP conversation client; native process and translation ownership stay server-side.
 use crate::{AcpTransportConnection, ClientError};
-use collaboration_protocol::{AcpSchemaCatalog, EndpointId, EndpointRef, SessionRef};
+use collaboration_protocol::{
+    AcpSchemaCatalog, EndpointId, EndpointRef, MessageContent, SessionId, SessionRef, UuidIdentity,
+    render_message,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 use tokio::{
@@ -16,23 +21,85 @@ pub enum ConversationEvent {
     PermissionRequired(SessionRef),
     PromptResult { target: SessionRef, result: Value },
 }
-pub struct ConversationSessionRequest<'a> {
-    pub session: Option<&'a str>,
-    pub fork: Option<&'a str>,
-    pub model: Option<&'a str>,
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationCreateRequest {
+    pub endpoint: EndpointRef,
+    pub cwd: std::path::PathBuf,
+    pub session: Option<SessionId>,
+    pub fork: Option<SessionId>,
+    pub model: Option<String>,
     /// Absent on resume, where the thread keeps the effort it was created with,
     /// and on fork, where the source thread's effort is inherited.
-    pub effort: Option<&'a str>,
-    pub access: Option<&'a str>,
-    pub created_by: Option<&'a SessionRef>,
-    pub approver: Option<&'a SessionRef>,
-    pub root_message_id: Option<&'a str>,
+    pub effort: Option<String>,
+    pub access: Option<String>,
+    pub created_by: Option<SessionRef>,
+    pub approver: Option<SessionRef>,
+    pub root_message_id: Option<UuidIdentity>,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+
+/// The existing backend conversation address returned after creation or load.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationCreateResult {
+    pub target: SessionRef,
+}
+
+/// A public prompt submission. Router-authored content is intentionally absent
+/// from this operation: it is an internal service delivery variant.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationPromptRequest {
+    pub message: PublicPromptContent,
+    pub effort: Option<String>,
+    #[schemars(range(min = 1))]
+    pub timeout_seconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PublicPromptContent {
+    Agent {
+        sender: SessionRef,
+        text: collaboration_protocol::MessageText,
+    },
+    HumanUser {
+        text: collaboration_protocol::MessageText,
+    },
+}
+
+impl From<PublicPromptContent> for MessageContent {
+    fn from(value: PublicPromptContent) -> Self {
+        match value {
+            PublicPromptContent::Agent { sender, text } => Self::Agent { sender, text },
+            PublicPromptContent::HumanUser { text } => Self::HumanUser { text },
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ConversationEnd {
     Completed,
     TimedOut,
     Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExistingConversationPromptRequest {
+    pub target: SessionRef,
+    pub cwd: std::path::PathBuf,
+    pub prompt: ConversationPromptRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExistingConversationPromptResult {
+    pub target: SessionRef,
+    pub end: ConversationEnd,
+    pub updates: Vec<Value>,
+    pub permission_required: bool,
+    pub result: Option<Value>,
 }
 pub struct AcpConversation {
     stream: BufReader<UnixStream>,
@@ -50,6 +117,50 @@ pub struct AcpConversation {
     failed: bool,
 }
 impl AcpConversation {
+    pub async fn prompt_existing(
+        directory: &Path,
+        request: ExistingConversationPromptRequest,
+        cancel: CancellationToken,
+    ) -> Result<ExistingConversationPromptResult, ClientError> {
+        let endpoint = request.target.endpoint.clone();
+        let mut conversation = Self::connect(directory, endpoint.endpoint_id.clone()).await?;
+        validate_conversation_endpoint(conversation.endpoint(), &endpoint)?;
+        let mut updates = Vec::new();
+        let mut permission_required = false;
+        let mut prompt_result = None;
+        let mut emit = |event| {
+            match event {
+                ConversationEvent::SessionUpdate { update, .. } => updates.push(update),
+                ConversationEvent::PermissionRequired(_) => permission_required = true,
+                ConversationEvent::PromptResult { result, .. } => prompt_result = Some(result),
+                ConversationEvent::SessionReady(_) => {}
+            }
+            Ok(())
+        };
+        let create = ConversationCreateRequest {
+            endpoint,
+            cwd: request.cwd,
+            session: Some(request.target.session_id.clone()),
+            fork: None,
+            model: None,
+            effort: request.prompt.effort.clone(),
+            access: None,
+            created_by: None,
+            approver: None,
+            root_message_id: None,
+        };
+        let target = conversation.open_session(&create, &mut emit).await?;
+        let end = conversation
+            .prompt_and_wait(request.prompt, cancel, &mut emit)
+            .await?;
+        Ok(ExistingConversationPromptResult {
+            target,
+            end,
+            updates,
+            permission_required,
+            result: prompt_result,
+        })
+    }
     #[must_use]
     pub fn endpoint(&self) -> &EndpointRef {
         &self.endpoint
@@ -87,10 +198,23 @@ impl AcpConversation {
             == Some(true);
         Ok(client)
     }
+    /// Connects, initializes, and selects exactly one existing or newly-created
+    /// Codex conversation. The returned client remains attached for a following
+    /// prompt; dropping it never deletes the backend conversation.
+    pub async fn create(
+        directory: &Path,
+        request: ConversationCreateRequest,
+        emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
+    ) -> Result<(Self, ConversationCreateResult), ClientError> {
+        let endpoint_id = request.endpoint.endpoint_id.clone();
+        let mut client = Self::connect(directory, endpoint_id).await?;
+        validate_conversation_endpoint(&client.endpoint, &request.endpoint)?;
+        let target = client.open_session(&request, emit).await?;
+        Ok((client, ConversationCreateResult { target }))
+    }
     pub async fn open_session(
         &mut self,
-        request: ConversationSessionRequest<'_>,
-        cwd: &Path,
+        request: &ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<SessionRef, ClientError> {
         // A requested switch retires the previous selection even when setup rejects
@@ -99,24 +223,21 @@ impl AcpConversation {
         self.target = None;
         self.pending_updates.clear();
         self.pending_bytes = 0;
-        if !cwd.is_absolute() {
+        if !request.cwd.is_absolute() {
             return Err(ClientError::Protocol("ACP cwd must be absolute"));
         }
-        let target = if let Some(id) = request.session {
+        let target = if let Some(id) = &request.session {
             if !self.load_supported {
                 return Err(ClientError::UnsupportedCapability("ACP session/load"));
             }
             let target = SessionRef {
                 endpoint: self.endpoint.clone(),
-                session_id: id
-                    .to_owned()
-                    .try_into()
-                    .map_err(|_| ClientError::Protocol("invalid session ID"))?,
+                session_id: id.clone(),
             };
             self.target = Some(target.clone());
             self.request(
                 "session/load",
-                json!({"sessionId":id,"cwd":cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata_effort(request.effort)}}),
+                json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata_effort(request.effort.as_deref())}}),
                 "LoadSessionRequest",
                 "LoadSessionResponse",
             )
@@ -126,10 +247,10 @@ impl AcpConversation {
             // An absent model or effort is omitted, not sent as null: on fork the
             // adapter reads the source thread to fill it.
             let mut router_metadata = serde_json::Map::new();
-            if let Some(model) = request.model {
+            if let Some(model) = &request.model {
                 router_metadata.insert("model".to_owned(), json!(model));
             }
-            if let Some(effort) = request.effort {
+            if let Some(effort) = &request.effort {
                 router_metadata.insert("effort".to_owned(), json!(effort));
             }
             router_metadata.extend([
@@ -139,7 +260,8 @@ impl AcpConversation {
             ]);
             let scratch_scope = request
                 .root_message_id
-                .map(str::to_owned)
+                .as_ref()
+                .map(|value| String::from(value.clone()))
                 .unwrap_or_else(session_scratch_scope);
             let scratch_path = self
                 .service_directory
@@ -147,15 +269,16 @@ impl AcpConversation {
                 .ok_or(ClientError::Protocol("service directory has no owner root"))?
                 .join("scratch")
                 .join(&scratch_scope);
-            prepare_project_write_areas(cwd, request.access)?;
+            prepare_project_write_areas(&request.cwd, request.access.as_deref())?;
             create_private_scratch(&scratch_path)?;
             router_metadata.insert("rootMessageId".into(), json!(request.root_message_id));
             router_metadata.insert("scratchScope".into(), json!(scratch_scope));
             router_metadata.insert("scratchPath".into(), json!(scratch_path));
-            if let Some(source_thread_id) = request.fork {
+            if let Some(source_thread_id) = &request.fork {
                 router_metadata.insert("forkThreadId".into(), json!(source_thread_id));
             }
-            let params = json!({"cwd":cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata}});
+            let params =
+                json!({"cwd":request.cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata}});
             let result = self
                 .request(
                     "session/new",
@@ -249,6 +372,35 @@ impl AcpConversation {
             emit(ConversationEvent::PromptResult { target, result })?;
             return Ok(end);
         }
+    }
+    /// Renders caller-declared public content once, then waits for the ACP
+    /// response on the selected conversation connection.
+    pub async fn prompt_and_wait(
+        &mut self,
+        request: ConversationPromptRequest,
+        cancel: CancellationToken,
+        emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
+    ) -> Result<ConversationEnd, ClientError> {
+        if request.timeout_seconds == 0 {
+            return Err(ClientError::Protocol(
+                "prompt timeout must be at least one second",
+            ));
+        }
+        let target = self
+            .target
+            .as_ref()
+            .ok_or(ClientError::Protocol("ACP session not opened"))?;
+        let message = MessageContent::from(request.message);
+        let rendered = render_message(target, &message)
+            .map_err(|_| ClientError::Protocol("conversation message rendering failed"))?;
+        self.prompt(
+            &rendered.text,
+            request.effort.as_deref(),
+            Duration::from_secs(request.timeout_seconds),
+            cancel,
+            emit,
+        )
+        .await
     }
     async fn request(
         &mut self,
@@ -422,6 +574,52 @@ impl AcpConversation {
                 return Ok(value);
             }
         }
+    }
+}
+
+fn validate_conversation_endpoint(
+    observed: &EndpointRef,
+    requested: &EndpointRef,
+) -> Result<(), ClientError> {
+    if observed != requested {
+        return Err(ClientError::InvalidRequest(
+            "conversation endpoint belongs to another service",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod public_contract_tests {
+    use super::{PublicPromptContent, validate_conversation_endpoint};
+    use collaboration_protocol::{EndpointId, EndpointRef, UuidIdentity};
+
+    fn endpoint(service_id: &str) -> EndpointRef {
+        EndpointRef {
+            service_id: UuidIdentity::try_from(service_id.to_owned()).expect("valid service UUID"),
+            endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("valid endpoint"),
+        }
+    }
+
+    #[test]
+    fn wrong_service_is_rejected_by_read_only_validation_before_session_open() {
+        let observed = endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f");
+        let requested = endpoint("018f47d2-24d5-7a68-b9ec-6f759c394590");
+        let error = validate_conversation_endpoint(&observed, &requested)
+            .expect_err("wrong service must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid collaboration request: conversation endpoint belongs to another service"
+        );
+    }
+
+    #[test]
+    fn public_prompt_schema_cannot_decode_router_authored_content() {
+        let result = serde_json::from_value::<PublicPromptContent>(serde_json::json!({
+            "kind": "router",
+            "text": "internal"
+        }));
+        assert!(result.is_err());
     }
 }
 

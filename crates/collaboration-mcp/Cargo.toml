@@ -1,0 +1,33 @@
+[package]
+name = "collaboration-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+collaboration-client = { path = "../collaboration-client", version = "0.1.30" }
+collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.30" }
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+thiserror.workspace = true
+tower-service = "0.3.3"
+
+[dev-dependencies]
+agent-collaboration = { path = "../agent-collaboration", version = "0.1.30" }
+collaboration-service = { path = "../collaboration-service", version = "0.1.30" }
+jsonschema.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+tempfile = "3.27.0"

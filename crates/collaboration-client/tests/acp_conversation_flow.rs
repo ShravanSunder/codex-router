@@ -1,6 +1,8 @@
 use collaboration_client::{
-    AcpConversation, ConversationEnd, ConversationEvent, ConversationSessionRequest,
+    AcpConversation, ConversationCreateRequest, ConversationEnd, ConversationEvent,
+    ConversationPromptRequest, PublicPromptContent,
 };
+use collaboration_protocol::{MessageText, SessionId};
 use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
 use serde_json::{Value, json};
 use std::{os::unix::fs::DirBuilderExt, time::Duration};
@@ -20,7 +22,7 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
     let endpoint = json!({"serviceId":id,"endpointId":"codex-local"});
     let identity=ServiceIdentity::new(id,id,&digest).unwrap().with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint,"label":"ACP fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]})).unwrap()]).unwrap();
     let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":1,"serviceId":id,"serviceEpoch":id,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest})).unwrap();
+    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":id,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
     let manifest = ManifestPublication::publish(&root, &manifest).unwrap();
     let stop = CancellationToken::new();
     let service = tokio::spawn(listener.run(stop.clone()));
@@ -102,27 +104,32 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
     };
     client
         .open_session(
-            ConversationSessionRequest {
-                session: Some("owned"),
+            &ConversationCreateRequest {
+                endpoint: client.endpoint().clone(),
+                cwd: root.clone(),
+                session: Some(SessionId::try_from("owned".to_owned()).unwrap()),
                 fork: None,
                 model: None,
-                effort: Some("medium"),
+                effort: Some("medium".to_owned()),
                 access: None,
                 created_by: None,
                 approver: None,
                 root_message_id: None,
             },
-            &root,
             &mut emit,
         )
         .await
         .unwrap();
     assert_eq!(
         client
-            .prompt(
-                "question",
-                Some("medium"),
-                Duration::from_secs(3),
+            .prompt_and_wait(
+                ConversationPromptRequest {
+                    message: PublicPromptContent::HumanUser {
+                        text: MessageText::try_from("question".to_owned()).unwrap(),
+                    },
+                    effort: Some("medium".to_owned()),
+                    timeout_seconds: 3,
+                },
                 CancellationToken::new(),
                 &mut emit
             )
@@ -138,10 +145,14 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
     });
     assert_eq!(
         client
-            .prompt(
-                "cancel this",
-                Some("medium"),
-                Duration::from_secs(3),
+            .prompt_and_wait(
+                ConversationPromptRequest {
+                    message: PublicPromptContent::HumanUser {
+                        text: MessageText::try_from("cancel this".to_owned()).unwrap(),
+                    },
+                    effort: Some("medium".to_owned()),
+                    timeout_seconds: 3,
+                },
                 cancel,
                 &mut emit
             )

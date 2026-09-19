@@ -16,6 +16,7 @@ async fn host_supplies_automation_storage_without_native_backend()
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("absent-native.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
     })
     .await?;

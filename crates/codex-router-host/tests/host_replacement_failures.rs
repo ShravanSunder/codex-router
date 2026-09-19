@@ -91,6 +91,7 @@ async fn retained_router_teardown_failure_keeps_restart_busy_and_never_executes(
         HostConfig::new(HostConfigInputs {
             coordination_paths: coordination_paths.clone(),
             router_endpoint: router_address,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable: directory.path().join("unused-managed-codex"),
             deadlines: fixture_host_deadlines()?,
@@ -346,6 +347,7 @@ async fn host_replacement_signal_child_entrypoint() -> Result<(), Box<dyn std::e
                 required_path("CODEX_HOST_SIGNAL_INSTANCE_LOCK")?,
             ),
             router_endpoint: router_address,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable: PathBuf::from("/unused/managed-codex"),
             deadlines: fixture_host_deadlines()?,

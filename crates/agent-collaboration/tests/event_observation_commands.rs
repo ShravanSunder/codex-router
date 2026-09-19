@@ -22,7 +22,7 @@ mod tests {
     #[tokio::test]
     async fn listener_orders_readiness_before_buffered_events_and_reports_connection_loss() {
         // Arrange / Act: the native peer emits content and a reverse request during resume.
-        let output = run_observation_case(AttachmentCase::BufferedEvents, "buffered").await;
+        let output = run_observation_case(AttachmentCase::BufferedEvents, "buffered", false).await;
         let records = output_records(&output);
         // Assert: callbacks remain visible, unanswered, and in original native order.
         assert_eq!(output.status.code(), Some(3));
@@ -53,7 +53,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_native_attachment_emits_no_listener_readiness() {
         // Arrange / Act: native resume rejects this exact identity.
-        let output = run_observation_case(AttachmentCase::NativeRejection, "rejected").await;
+        let output = run_observation_case(AttachmentCase::NativeRejection, "rejected", false).await;
         // Assert: failed attachment is never presented as an established observer.
         assert_eq!(output.status.code(), Some(3));
         let records = output_records(&output);
@@ -67,7 +67,8 @@ mod tests {
     #[tokio::test]
     async fn replacement_during_attachment_emits_no_stale_listener_readiness() {
         // Arrange / Act: the endpoint publishes a successor before resume returns.
-        let output = run_observation_case(AttachmentCase::GenerationChanged, "replacement").await;
+        let output =
+            run_observation_case(AttachmentCase::GenerationChanged, "replacement", false).await;
         // Assert: buffered output from that retired generation is not advertised as ready.
         assert_eq!(output.status.code(), Some(3));
         let records = output_records(&output);
@@ -76,6 +77,23 @@ mod tests {
         };
         assert_eq!(error_record["kind"], "error");
         assert!(!String::from_utf8_lossy(&output.stdout).contains("listenerReady"));
+    }
+
+    #[tokio::test]
+    async fn bounded_cli_observe_returns_the_shared_sdk_result() {
+        let output = run_observation_case(AttachmentCase::BufferedEvents, "bounded", true).await;
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let records = output_records(&output);
+        let [result] = records.as_slice() else {
+            panic!("expected one bounded result");
+        };
+        assert_eq!(result["target"]["sessionId"], "observed-thread");
+        assert_eq!(result["generation"]["generation"], 1);
+        assert_eq!(result["attached"], true);
+        assert_eq!(result["endReason"], "backendDisconnected");
+        assert_eq!(result["continuationGap"], true);
+        assert_eq!(result["events"].as_array().map(Vec::len), Some(2));
     }
 
     fn endpoint_description(generation: u64) -> EndpointDescription {
@@ -90,7 +108,11 @@ mod tests {
         .unwrap_or_else(|error| panic!("observation fixture: {error}"))
     }
 
-    async fn run_observation_case(case: AttachmentCase, suffix: &str) -> std::process::Output {
+    async fn run_observation_case(
+        case: AttachmentCase,
+        suffix: &str,
+        bounded: bool,
+    ) -> std::process::Output {
         let root = PathBuf::from(format!("/tmp/event-cli-{}-{suffix}", std::process::id()));
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -105,9 +127,10 @@ mod tests {
         let control = LocalControlService::bind(&root.join("control.sock"), identity)
             .unwrap_or_else(|error| panic!("observation fixture: {error}"));
         let manifest: ServiceManifest = serde_json::from_value(json!({
-            "version":1,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
+            "version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
             "control":{"transport":"unixJsonLines","path":"control.sock"},
-            "controlSchemaDigest":digest
+            "controlSchemaDigest":digest,
+            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
         }))
         .unwrap_or_else(|error| panic!("observation fixture: {error}"));
         let publication = ManifestPublication::publish(&root, &manifest)
@@ -167,24 +190,19 @@ mod tests {
                 );
             }
         });
-        let output = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
-                .args([
-                    "events",
-                    "listen",
-                    "--endpoint",
-                    "codex-local",
-                    "--session",
-                    "observed-thread",
-                    "--attach",
-                    "--service-directory",
-                ])
-                .arg(&root)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
+        command.args([
+            "events",
+            if bounded { "observe" } else { "listen" },
+            "--endpoint",
+            "codex-local",
+            "--session",
+            "observed-thread",
+            "--attach",
+            "--service-directory",
+        ]);
+        command.arg(&root).kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
         stop.cancel();
         service
             .await

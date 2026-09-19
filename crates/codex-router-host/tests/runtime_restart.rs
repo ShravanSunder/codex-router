@@ -91,6 +91,7 @@ async fn owned_router_restart_replaces_only_router_and_preserves_app_server_stat
     let config = HostConfig::new(HostConfigInputs {
         coordination_paths: coordination_paths.clone(),
         router_endpoint: router_address,
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         app_server_socket,
         managed_executable,
         deadlines: HostDeadlines::new(HostDeadlineInputs {

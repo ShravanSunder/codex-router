@@ -28,7 +28,7 @@ mod tests {
             .with_endpoints(vec![endpoint])
             .unwrap();
         let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({"version":1,"serviceId":id,"serviceEpoch":id,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest})).unwrap();
+        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":id,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
         let publication = ManifestPublication::publish(&root, &manifest).unwrap();
         let stop = CancellationToken::new();
         let service = tokio::spawn(listener.run(stop.clone()));

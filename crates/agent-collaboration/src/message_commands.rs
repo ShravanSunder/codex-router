@@ -1,8 +1,8 @@
 //! Descriptive message submission through the public Rust client.
 use crate::message_input_arguments::{SendArguments, prepare};
 use clap::{Parser, Subcommand};
-use collaboration_client::protocol::{ChannelDescription, NativeSendParams, NativeSendReceipt};
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::protocol::NativeSendReceipt;
+use collaboration_client::{ClientError, ControlClient, MessageSendError, MessageSendRequest};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -52,67 +52,42 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
             );
         }
     };
-    let mut submitted = false;
-    let result = runtime.block_on(async {
+    let outcome = runtime.block_on(async {
         let mut client =
             ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await?;
+                .await
+                .map_err(MessageSendError::Preparation)?;
         let saved = prepared
             .resolve(&client.identity().service_id)
-            .map_err(|_| ClientError::Protocol("invalid session target"))?;
-        let target = saved.target;
-        let content = saved.content;
-        let inventory = client.list_endpoints().await?;
-        let generation = inventory
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.endpoint == target.endpoint)
-            .and_then(|endpoint| {
-                endpoint.channels.iter().find_map(|channel| match channel {
-                    ChannelDescription::NativeCodex {
-                        generation: Some(generation),
-                        ..
-                    } => Some(generation.clone()),
-                    _ => None,
-                })
-            })
-            .ok_or(ClientError::Rejected {
-                code: -32050,
-                data: Some(json!({"kind":"unavailable","stage":"discovery"})),
+            .map_err(|_| {
+                MessageSendError::Preparation(ClientError::InvalidRequest("invalid session target"))
             })?;
-        let generation = if let (Some(epoch), Some(number)) =
-            (&args.expected_service_epoch, args.expected_generation)
-        {
-            let expected =
-                serde_json::from_value(json!({"serviceEpoch":epoch,"generation":number}))
-                    .map_err(|_| ClientError::Protocol("invalid expected generation"))?;
-            if expected != generation {
-                return Err(ClientError::Rejected {
-                    code: -32050,
-                    data: Some(json!({"kind":"staleGeneration","stage":"discovery"})),
-                });
-            }
-            expected
-        } else {
-            generation
-        };
-        let params = NativeSendParams {
-            target,
-            generation,
-            message: content,
+        let request = MessageSendRequest {
+            target: saved.target,
+            message: saved
+                .content
+                .try_into()
+                .map_err(MessageSendError::Preparation)?,
             delivery: saved.delivery,
+            generation_guard: saved.generation_guard,
             client_user_message_id: None,
         };
-        submitted = true;
-        let result = if args.human_user {
-            client.send_human_input(params).await
-        } else {
-            client.send_agent_message(params).await
-        };
+        let result = client.send_message(request).await;
         let _closed = client.close().await;
         result
     });
+    let (result, submitted) = classify_send_outcome(outcome);
     report(result, machine, submitted)
+}
+
+fn classify_send_outcome(
+    outcome: Result<NativeSendReceipt, MessageSendError>,
+) -> (Result<NativeSendReceipt, ClientError>, bool) {
+    match outcome {
+        Ok(receipt) => (Ok(receipt), true),
+        Err(MessageSendError::Preparation(error)) => (Err(error), false),
+        Err(MessageSendError::Submission(error)) => (Err(error), true),
+    }
 }
 
 fn report(result: Result<NativeSendReceipt, ClientError>, machine: bool, submitted: bool) -> i32 {
@@ -177,9 +152,35 @@ fn safe_connection_failure(error: &ClientError) -> String {
             format!("IO {:?} (OS code {:?})", error.kind(), error.raw_os_error())
         }
         ClientError::Timeout => "request deadline".to_owned(),
+        ClientError::InvalidRequest(_) => "request validation".to_owned(),
         ClientError::Protocol(_) => "protocol validation".to_owned(),
         ClientError::UnsupportedCapability(_) => "unsupported capability".to_owned(),
         ClientError::Rejected { .. } => "server rejection".to_owned(),
     };
     format!("Connection failed: {category}; no message replayed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_send_outcome;
+    use collaboration_client::{ClientError, MessageSendError};
+
+    #[test]
+    fn adapter_distinguishes_preparation_loss_from_post_dispatch_loss() {
+        let transport = || {
+            ClientError::Transport(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "fixture",
+            ))
+        };
+        let (preparation, submitted) =
+            classify_send_outcome(Err(MessageSendError::Preparation(transport())));
+        assert!(!submitted);
+        assert!(matches!(preparation, Err(ClientError::Transport(_))));
+
+        let (submission, submitted) =
+            classify_send_outcome(Err(MessageSendError::Submission(transport())));
+        assert!(submitted);
+        assert!(matches!(submission, Err(ClientError::Transport(_))));
+    }
 }

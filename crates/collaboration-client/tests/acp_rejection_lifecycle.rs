@@ -2,7 +2,7 @@
 #[cfg(test)]
 mod tests {
     use collaboration_client::{
-        AcpConversation, ClientError, ConversationEvent, ConversationSessionRequest,
+        AcpConversation, ClientError, ConversationCreateRequest, ConversationEvent,
     };
     use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
     use serde_json::{Value, json};
@@ -79,9 +79,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("fixture identity: {error}"));
         let listener = LocalControlService::bind(&root.join("control.sock"), identity)
             .unwrap_or_else(|error| panic!("fixture listener: {error}"));
-        let manifest = serde_json::from_value(json!({"version":1,"serviceId":service_id,
+        let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,
         "serviceEpoch":service_id,"control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest}))
+        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}}))
         .unwrap_or_else(|error| panic!("fixture manifest: {error}"));
         let publication = ManifestPublication::publish(&root, &manifest)
             .unwrap_or_else(|error| panic!("fixture publication: {error}"));
@@ -152,17 +152,18 @@ mod tests {
         };
         let load_error = client
             .open_session(
-                ConversationSessionRequest {
-                    session: Some("rejected-thread"),
+                &ConversationCreateRequest {
+                    endpoint: client.endpoint().clone(),
+                    cwd: root.clone(),
+                    session: Some("rejected-thread".to_owned().try_into().unwrap()),
                     fork: None,
                     model: None,
-                    effort: Some("medium"),
+                    effort: Some("medium".to_owned()),
                     access: None,
                     created_by: None,
                     approver: None,
                     root_message_id: None,
                 },
-                &root,
                 &mut emit,
             )
             .await
@@ -171,17 +172,18 @@ mod tests {
         let next_failed = if reopen {
             client
                 .open_session(
-                    ConversationSessionRequest {
-                        session: Some("another-thread"),
+                    &ConversationCreateRequest {
+                        endpoint: client.endpoint().clone(),
+                        cwd: root.clone(),
+                        session: Some("another-thread".to_owned().try_into().unwrap()),
                         fork: None,
                         model: None,
-                        effort: Some("medium"),
+                        effort: Some("medium".to_owned()),
                         access: None,
                         created_by: None,
                         approver: None,
                         root_message_id: None,
                     },
-                    &root,
                     &mut emit,
                 )
                 .await

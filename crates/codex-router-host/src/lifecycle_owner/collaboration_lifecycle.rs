@@ -9,6 +9,7 @@ pub(super) struct CollaborationLifecycle {
     directory: PathBuf,
     codex_home: PathBuf,
     backend_socket: PathBuf,
+    mcp_bind: std::net::SocketAddr,
     runtime: Option<CollaborationRuntime>,
     published_child: Option<u32>,
     schema_digest: Option<[u8; 32]>,
@@ -28,6 +29,7 @@ impl CollaborationLifecycle {
                 .ok_or_else(|| io::Error::other("collaboration requires explicit Codex home"))?
                 .to_owned(),
             backend_socket: config.app_server_socket().to_owned(),
+            mcp_bind: config.mcp_bind(),
             runtime: None,
             published_child: None,
             schema_digest: None,
@@ -76,6 +78,7 @@ impl CollaborationLifecycle {
                     directory: self.directory.clone(),
                     codex_home: self.codex_home.clone(),
                     backend_socket: self.backend_socket.clone(),
+                    mcp_bind: self.mcp_bind,
                     native_schema: export.clone(),
                 })
                 .await?,

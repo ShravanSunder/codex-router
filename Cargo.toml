@@ -8,6 +8,7 @@ members = [
     "crates/codex-acp-adapter",
     "crates/lifecycle-observation",
     "crates/collaboration-client",
+    "crates/collaboration-mcp",
     "crates/collaboration-service",
     "crates/collaboration-protocol",
     "crates/agent-collaboration",
@@ -69,6 +70,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_json_canonicalizer = "0.3.2"
 jsonschema = { version = "0.53.0", default-features = false }
+rmcp = { version = "=3.4.0", default-features = false, features = ["macros", "server", "transport-streamable-http-server"] }
 schemars = "1.2.2"
 sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }

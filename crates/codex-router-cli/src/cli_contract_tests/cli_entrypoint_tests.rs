@@ -38,6 +38,39 @@ fn host_commands_parse_with_explicit_router_root() {
 }
 
 #[test]
+fn host_mcp_bind_accepts_only_explicit_loopback_addresses() {
+    let command = CliCommand::parse(
+        ["codex-router", "host", "--mcp-bind", "127.0.0.1:19000"].map(OsString::from),
+    )
+    .expect("loopback MCP bind parses");
+    let CliCommand::Host(command) = command else {
+        panic!("host command expected");
+    };
+    assert_eq!(
+        command.mcp_bind(),
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 19000)))
+    );
+    assert!(
+        CliCommand::parse(
+            ["codex-router", "host", "--mcp-bind", "0.0.0.0:19000"].map(OsString::from)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn host_mcp_bind_defaults_are_stable_for_normal_and_debug_modes() {
+    assert_eq!(
+        crate::host_command::default_mcp_bind(false),
+        std::net::SocketAddr::from(([127, 0, 0, 1], 8788))
+    );
+    assert_eq!(
+        crate::host_command::default_mcp_bind(true),
+        std::net::SocketAddr::from(([127, 0, 0, 1], 18788))
+    );
+}
+
+#[test]
 fn development_router_root_defaults_to_home_debug_root() {
     let home = PathBuf::from("/tmp/codex-router-dev-home");
 
