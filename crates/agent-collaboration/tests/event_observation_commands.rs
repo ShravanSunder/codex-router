@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn late_and_concurrent_bounded_observations_remain_call_local() {
+    async fn independent_late_bounded_observations_remain_call_local() {
         let (first, second) = tokio::join!(
             run_observation_case(AttachmentCase::LateEvent, "concurrent-a", true),
             run_observation_case(AttachmentCase::LateEvent, "concurrent-b", true),
