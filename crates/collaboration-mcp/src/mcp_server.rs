@@ -1,6 +1,7 @@
 use collaboration_client::{
     AcpConversation, BoundedObservationRequest, BoundedObservationResult, ClientError,
-    ControlClient, ConversationCreateRequest, ConversationCreateResult,
+    ControlClient, ConversationCreatePromptError, ConversationCreatePromptRequest,
+    ConversationCreatePromptResult, ConversationCreateRequest, ConversationCreateResult,
     ExistingConversationPromptRequest, ExistingConversationPromptResult, MessageSendError,
     MessageSendRequest, NativeObservation, OperationEffect, OperationFailure,
 };
@@ -24,8 +25,10 @@ use rmcp::{
 use serde::Deserialize;
 use std::{path::PathBuf, time::Duration};
 
+mod catalog_descriptions;
 mod catalog_tools;
 mod schema_binding;
+use catalog_descriptions::operation_description;
 use catalog_tools::{
     EmptyToolInput, ThreadWaitToolInput, register_automation_inspection_tools,
     register_automation_mutation_tools, register_board_tools,
@@ -161,7 +164,7 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::Unknown)
     }
 
-    #[tool(name = "message_send", description = "Submits one agent-authored or explicit human message with exact auto, queue, or steer semantics. Router-authored content is not a public caller input; uncertain dispatch is never replayed automatically.", output_schema = rmcp::handler::server::tool::schema_for_type::<NativeSendReceipt>())]
+    #[tool(name = "message_send", description = "Submits one agent-authored or explicit human message with exact auto, queue, or steer semantics and their loaded/active prerequisites. A returned receipt proves native input was accepted or queued as stated; it does not prove turn completion, assignment success or an agent reply. Router-authored content is not a public caller input, and uncertain dispatch is never replayed automatically.", output_schema = rmcp::handler::server::tool::schema_for_type::<NativeSendReceipt>())]
     async fn message_send(
         &self,
         Parameters(request): Parameters<MessageSendRequest>,
@@ -319,6 +322,17 @@ impl CollaborationMcpServer {
         }
     }
 
+    #[tool(name = "conversation_create_and_prompt", description = "Creates one fresh Codex conversation and submits its first Agent- or Human-authored prompt on the same call-local ACP connection, then waits for correlated settlement. Requires explicit endpoint, cwd, model, effort, access, creator and approver inputs. The returned target is the actual conversation ID; a completed turn is not an assignment verdict or peer reply. Application deadlines return structured settlement when deliverable, while MCP cancellation or disconnection may suppress the response and does not guarantee every spawned effect ceased. A post-create failure retains the created target when known and is never replayed.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreatePromptResult>())]
+    async fn conversation_create_and_prompt(
+        &self,
+        Parameters(request): Parameters<ConversationCreatePromptRequest>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> CallToolResult {
+        create_prompt_tool_result(
+            AcpConversation::create_and_prompt(&self.service_directory, request, context.ct).await,
+        )
+    }
+
     #[tool(name = "conversation_prompt", description = "Loads an existing materialized conversation, renders the explicit current sender, submits one prompt, and waits for correlated settlement. For a newly created empty conversation, use message_send for its first input (or the CLI create-and-prompt convenience) before this history-resuming operation. Backend rejection remains explicit; no seed or fallback is sent. Cancellation requests backend cancellation but does not prove cessation.", output_schema = rmcp::handler::server::tool::schema_for_type::<ExistingConversationPromptResult>())]
     async fn conversation_prompt(
         &self,
@@ -361,6 +375,42 @@ fn message_tool_result(result: Result<NativeSendReceipt, MessageSendError>) -> C
         Ok(receipt) => structured_result(Ok(receipt), OperationEffect::None),
         Err(MessageSendError::Preparation(error)) => failure(error, OperationEffect::None),
         Err(MessageSendError::Submission(error)) => failure(error, OperationEffect::Unknown),
+    }
+}
+
+fn create_prompt_tool_result(
+    result: Result<ConversationCreatePromptResult, ConversationCreatePromptError>,
+) -> CallToolResult {
+    match result {
+        Ok(value) => structured_result(Ok(value), OperationEffect::None),
+        Err(error) => {
+            let (target, source) = error.into_parts();
+            let effect = if target.is_some()
+                || !matches!(
+                    &source,
+                    ClientError::InvalidRequest(_)
+                        | ClientError::UnsupportedCapability(_)
+                        | ClientError::Discovery { .. }
+                ) {
+                OperationEffect::Unknown
+            } else {
+                OperationEffect::None
+            };
+            let mut failure =
+                serde_json::to_value(OperationFailure::from_client_error(source, effect))
+                    .unwrap_or_else(|_| {
+                        serde_json::json!({
+                            "kind":"protocolViolation",
+                            "stage":"validation",
+                            "effect":"none",
+                            "message":"collaboration error encoding failed"
+                        })
+                    });
+            if let Some(fields) = failure.as_object_mut() {
+                fields.insert("target".to_owned(), serde_json::json!(target));
+            }
+            CallToolResult::structured_error(failure)
+        }
     }
 }
 

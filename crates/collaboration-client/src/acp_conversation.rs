@@ -56,6 +56,20 @@ pub struct ConversationPromptRequest {
     pub timeout_seconds: u64,
 }
 
+impl ConversationPromptRequest {
+    pub fn validate(&self) -> Result<(), ClientError> {
+        if self.timeout_seconds == 0 {
+            return Err(ClientError::InvalidRequest(
+                "prompt timeout must be at least one second",
+            ));
+        }
+        tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(self.timeout_seconds))
+            .ok_or(ClientError::InvalidRequest("invalid prompt deadline"))?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum PublicPromptContent {
@@ -101,6 +115,54 @@ pub struct ExistingConversationPromptResult {
     pub permission_required: bool,
     pub result: Option<Value>,
 }
+
+/// Creates a fresh conversation and submits its first correlated prompt on the
+/// same ACP connection, so an empty thread never needs to be resumed first.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationCreatePromptRequest {
+    pub create: ConversationCreateRequest,
+    pub prompt: ConversationPromptRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationCreatePromptResult {
+    pub target: SessionRef,
+    pub end: ConversationEnd,
+    pub updates: Vec<Value>,
+    pub permission_required: bool,
+    pub result: Option<Value>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConversationCreatePromptError {
+    #[error(transparent)]
+    BeforeCreation(ClientError),
+    #[error("conversation {target:?} was created, but its first prompt failed: {source}")]
+    AfterCreation {
+        target: SessionRef,
+        #[source]
+        source: ClientError,
+    },
+}
+
+impl ConversationCreatePromptError {
+    #[must_use]
+    pub fn target(&self) -> Option<&SessionRef> {
+        match self {
+            Self::BeforeCreation(_) => None,
+            Self::AfterCreation { target, .. } => Some(target),
+        }
+    }
+
+    pub fn into_parts(self) -> (Option<SessionRef>, ClientError) {
+        match self {
+            Self::BeforeCreation(error) => (None, error),
+            Self::AfterCreation { target, source } => (Some(target), source),
+        }
+    }
+}
 pub struct AcpConversation {
     stream: BufReader<UnixStream>,
     frame: Vec<u8>,
@@ -117,6 +179,76 @@ pub struct AcpConversation {
     failed: bool,
 }
 impl AcpConversation {
+    pub async fn create_and_prompt(
+        directory: &Path,
+        request: ConversationCreatePromptRequest,
+        cancel: CancellationToken,
+    ) -> Result<ConversationCreatePromptResult, ConversationCreatePromptError> {
+        request
+            .prompt
+            .validate()
+            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+        if request.create.session.is_some() || request.create.fork.is_some() {
+            return Err(ConversationCreatePromptError::BeforeCreation(
+                ClientError::InvalidRequest(
+                    "create-and-prompt requires a fresh conversation request",
+                ),
+            ));
+        }
+        let endpoint_id = request.create.endpoint.endpoint_id.clone();
+        let mut conversation = Self::connect(directory, endpoint_id)
+            .await
+            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+        validate_conversation_endpoint(conversation.endpoint(), &request.create.endpoint)
+            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+        let mut updates = Vec::new();
+        let mut permission_required = false;
+        let mut prompt_result = None;
+        let mut emit = |event| {
+            match event {
+                ConversationEvent::SessionUpdate { update, .. } => updates.push(update),
+                ConversationEvent::PermissionRequired(_) => permission_required = true,
+                ConversationEvent::PromptResult { result, .. } => prompt_result = Some(result),
+                ConversationEvent::SessionReady(_) => {}
+            }
+            Ok(())
+        };
+        let (target, end) = conversation
+            .open_and_prompt(&request.create, request.prompt, cancel, &mut emit)
+            .await?;
+        Ok(ConversationCreatePromptResult {
+            target,
+            end,
+            updates,
+            permission_required,
+            result: prompt_result,
+        })
+    }
+
+    pub async fn open_and_prompt(
+        &mut self,
+        create: &ConversationCreateRequest,
+        prompt: ConversationPromptRequest,
+        cancel: CancellationToken,
+        emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
+    ) -> Result<(SessionRef, ConversationEnd), ConversationCreatePromptError> {
+        prompt
+            .validate()
+            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+        let target = self
+            .open_session(create, emit)
+            .await
+            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+        let end = self
+            .prompt_and_wait(prompt, cancel, emit)
+            .await
+            .map_err(|source| ConversationCreatePromptError::AfterCreation {
+                target: target.clone(),
+                source,
+            })?;
+        Ok((target, end))
+    }
+
     pub async fn prompt_existing(
         directory: &Path,
         request: ExistingConversationPromptRequest,
@@ -321,6 +453,9 @@ impl AcpConversation {
         if cancel.is_cancelled() {
             return Ok(ConversationEnd::Cancelled);
         }
+        tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or(ClientError::InvalidRequest("invalid prompt deadline"))?;
         if !self.session_ready {
             return Err(ClientError::Protocol("ACP session setup has not completed"));
         }
@@ -338,7 +473,7 @@ impl AcpConversation {
             .await?;
         let mut deadline = tokio::time::Instant::now()
             .checked_add(timeout)
-            .ok_or(ClientError::Protocol("invalid prompt timeout"))?;
+            .ok_or(ClientError::InvalidRequest("invalid prompt deadline"))?;
         let mut end = ConversationEnd::Completed;
         loop {
             let frame = tokio::select! {
@@ -381,11 +516,7 @@ impl AcpConversation {
         cancel: CancellationToken,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<ConversationEnd, ClientError> {
-        if request.timeout_seconds == 0 {
-            return Err(ClientError::Protocol(
-                "prompt timeout must be at least one second",
-            ));
-        }
+        request.validate()?;
         let target = self
             .target
             .as_ref()
@@ -591,8 +722,15 @@ fn validate_conversation_endpoint(
 
 #[cfg(test)]
 mod public_contract_tests {
-    use super::{PublicPromptContent, validate_conversation_endpoint};
-    use collaboration_protocol::{EndpointId, EndpointRef, UuidIdentity};
+    use super::{
+        AcpConversation, ConversationCreatePromptError, ConversationCreatePromptRequest,
+        ConversationCreateRequest, ConversationPromptRequest, PublicPromptContent,
+        validate_conversation_endpoint,
+    };
+    use collaboration_protocol::{
+        EndpointId, EndpointRef, MessageText, SessionId, SessionRef, UuidIdentity,
+    };
+    use tokio_util::sync::CancellationToken;
 
     fn endpoint(service_id: &str) -> EndpointRef {
         EndpointRef {
@@ -620,6 +758,49 @@ mod public_contract_tests {
             "text": "internal"
         }));
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_prompt_deadline_fails_before_discovery_or_creation() {
+        let endpoint = endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f");
+        let sender = SessionRef {
+            endpoint: endpoint.clone(),
+            session_id: SessionId::try_from("sender".to_owned()).expect("session ID"),
+        };
+        let error = AcpConversation::create_and_prompt(
+            std::path::Path::new("/path-that-must-not-be-read"),
+            ConversationCreatePromptRequest {
+                create: ConversationCreateRequest {
+                    endpoint,
+                    cwd: std::path::PathBuf::from("/tmp/project"),
+                    session: None,
+                    fork: None,
+                    model: Some("gpt-5.6-luna".to_owned()),
+                    effort: Some("low".to_owned()),
+                    access: Some("workspace-write".to_owned()),
+                    created_by: Some(sender.clone()),
+                    approver: Some(sender.clone()),
+                    root_message_id: None,
+                },
+                prompt: ConversationPromptRequest {
+                    message: PublicPromptContent::Agent {
+                        sender,
+                        text: MessageText::try_from("prompt".to_owned()).expect("message"),
+                    },
+                    effort: Some("low".to_owned()),
+                    timeout_seconds: 0,
+                },
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("invalid prompt timeout must fail before connection");
+        assert!(matches!(
+            error,
+            ConversationCreatePromptError::BeforeCreation(crate::ClientError::InvalidRequest(
+                "prompt timeout must be at least one second"
+            ))
+        ));
     }
 }
 

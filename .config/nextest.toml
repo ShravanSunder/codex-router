@@ -20,3 +20,4 @@ process-runtime = { max-threads = 1 }
 [[profile.ci.overrides]]
 filter = "binary(update_reexec) | binary(runtime_restart) | binary(compiled_cli_host_acceptance) | binary(quota_reset_pty_test)"
 test-group = "process-runtime"
+threads-required = "num-test-threads"

@@ -345,7 +345,31 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
         assert!(tool_names.contains(&"endpoints_list"));
-        assert_eq!(tool_names.len(), 89);
+        assert_eq!(tool_names.len(), 90);
+        let tools = tools_body
+            .pointer("/result/tools")
+            .and_then(Value::as_array)
+            .expect("tool array");
+        for (name, phrase) in [
+            ("wake_send", "native input acceptance"),
+            ("schedule_prepare", "Preparation mutates"),
+            ("board_message_post", "Saving the message"),
+            (
+                "conversation_create_and_prompt",
+                "same call-local ACP connection",
+            ),
+        ] {
+            let description = tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .and_then(|tool| tool.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("missing live description for {name}"));
+            assert!(
+                description.contains(phrase),
+                "{name} description missing {phrase:?}: {description}"
+            );
+        }
 
         let endpoint_call = client
             .post(listener.local_url())

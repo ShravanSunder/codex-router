@@ -35,18 +35,41 @@ fn message_adapter_preserves_preparation_and_submission_effects() {
 }
 
 #[test]
+fn create_and_prompt_failure_retains_created_target_and_unknown_effect() {
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"created-thread"
+    }))
+    .expect("target");
+    let result = super::create_prompt_tool_result(Err(
+        collaboration_client::ConversationCreatePromptError::AfterCreation {
+            target: target.clone(),
+            source: collaboration_client::ClientError::Rejected {
+                code: -32603,
+                data: Some(serde_json::json!({"reason":"prompt rejected"})),
+            },
+        },
+    ));
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured error");
+    assert_eq!(structured["target"], serde_json::json!(target));
+    assert_eq!(structured["effect"], "unknown");
+    assert_eq!(structured["kind"], "rejected");
+}
+
+#[test]
 fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let tools = server.resolved_tools();
-    assert_eq!(tools.len(), 89);
+    assert_eq!(tools.len(), 90);
     let mut names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 89);
+    assert_eq!(names.len(), 90);
     for tool in tools {
         let input = serde_json::to_value(&tool.input_schema).expect("input schema JSON");
         jsonschema::validator_for(&input)
@@ -84,6 +107,7 @@ fn typed_tool_names_cover_every_control_domain_operation() {
         .map(|method| expected_tool_name(method))
         .chain([
             "conversation_create".to_owned(),
+            "conversation_create_and_prompt".to_owned(),
             "conversation_prompt".to_owned(),
             "events_observe".to_owned(),
         ])
@@ -96,10 +120,70 @@ fn sdk_only_operations_are_advertised_by_both_cli_and_mcp_catalogs() {
     let help = agent_collaboration::command_help();
     for (tool, cli_command) in [
         ("conversation_create", "conversation create"),
+        ("conversation_create_and_prompt", "conversation prompt"),
         ("conversation_prompt", "conversation prompt"),
         ("events_observe", "events observe"),
     ] {
         assert!(help.contains(cli_command), "CLI adapter missing for {tool}");
+    }
+}
+
+#[test]
+fn representative_catalog_descriptions_explain_operation_specific_behavior() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let descriptions = server
+        .resolved_tools()
+        .into_iter()
+        .map(|tool| {
+            (
+                tool.name.into_owned(),
+                tool.description.unwrap_or_default().into_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for description in descriptions.values() {
+        assert!(!description.contains("Calls the existing typed"));
+        assert!(!description.contains("Undocumented collaboration operation"));
+    }
+    for (name, required_phrases) in [
+        ("endpoints_list", &["Read-only"][..]),
+        ("message_send", &["accepted", "replayed"][..]),
+        (
+            "conversation_create_and_prompt",
+            &[
+                "same call-local ACP connection",
+                "completed turn",
+                "peer reply",
+            ][..],
+        ),
+        (
+            "wake_send",
+            &["local scheduling", "native input acceptance", "agent reply"][..],
+        ),
+        (
+            "schedule_prepare",
+            &["Preparation", "native input acceptance"][..],
+        ),
+        (
+            "board_message_post",
+            &["Saving the message", "reply", "assignment success"][..],
+        ),
+        (
+            "board_thread_listen",
+            &["Listener readiness", "model activation"][..],
+        ),
+        ("operation_reconcile", &["never replays"][..]),
+    ] {
+        let description = descriptions
+            .get(name)
+            .unwrap_or_else(|| panic!("missing tool {name}"));
+        for phrase in required_phrases {
+            assert!(
+                description.contains(phrase),
+                "{name} description missing {phrase:?}: {description}"
+            );
+        }
     }
 }
 

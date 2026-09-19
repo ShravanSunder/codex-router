@@ -44,9 +44,10 @@ pub use observation_session::{
 
 mod acp_conversation;
 pub use acp_conversation::{
-    AcpConversation, ConversationCreateRequest, ConversationCreateResult, ConversationEnd,
-    ConversationEvent, ConversationPromptRequest, ExistingConversationPromptRequest,
-    ExistingConversationPromptResult, PublicPromptContent,
+    AcpConversation, ConversationCreatePromptError, ConversationCreatePromptRequest,
+    ConversationCreatePromptResult, ConversationCreateRequest, ConversationCreateResult,
+    ConversationEnd, ConversationEvent, ConversationPromptRequest,
+    ExistingConversationPromptRequest, ExistingConversationPromptResult, PublicPromptContent,
 };
 mod acp_transport_connection;
 pub use acp_transport_connection::AcpTransportConnection;

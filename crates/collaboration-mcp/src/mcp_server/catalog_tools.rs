@@ -5,11 +5,7 @@ macro_rules! typed_domain_tool {
         $router.add_route(ToolRoute::new_dyn(
             Tool::new(
                 $name,
-                concat!(
-                    "Calls the existing typed collaboration SDK operation ",
-                    stringify!($method),
-                    ". It dispatches once and never automatically replays uncertain effects."
-                ),
+                operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
             .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
@@ -250,11 +246,7 @@ macro_rules! automation_inspection_tool {
         $router.add_route(ToolRoute::new_dyn(
             Tool::new(
                 $name,
-                concat!(
-                    "Calls the existing typed automation inspection SDK operation ",
-                    stringify!($method),
-                    ". It observes recorded state and never replays native work."
-                ),
+                operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
             .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
@@ -385,23 +377,36 @@ macro_rules! board_tool {
         $router.add_route(ToolRoute::new_dyn(
             Tool::new(
                 $name,
-                concat!("Calls the existing typed board SDK operation ", stringify!($method), ". Board content is context, not authorization or assignment completion evidence."),
+                operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
             .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
-            |context: ToolCallContext<'_, CollaborationMcpServer>| Box::pin(async move {
-                let request = match serde_json::from_value::<$request>(serde_json::Value::Object(context.arguments.unwrap_or_default())) {
-                    Ok(value) => value,
-                    Err(error) => return Ok(CallToolResponse::Complete(validation_failure(&error.to_string()))),
-                };
-                let mut client = match context.service.connect().await {
-                    Ok(value) => value,
-                    Err(error) => return Ok(CallToolResponse::Complete(failure(error, OperationEffect::None))),
-                };
-                let result = client.$method(request).await;
-                let _closed = client.close().await;
-                Ok(CallToolResponse::Complete(board_result(result, $mutation)))
-            }),
+            |context: ToolCallContext<'_, CollaborationMcpServer>| {
+                Box::pin(async move {
+                    let request = match serde_json::from_value::<$request>(
+                        serde_json::Value::Object(context.arguments.unwrap_or_default()),
+                    ) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return Ok(CallToolResponse::Complete(validation_failure(
+                                &error.to_string(),
+                            )));
+                        }
+                    };
+                    let mut client = match context.service.connect().await {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return Ok(CallToolResponse::Complete(failure(
+                                error,
+                                OperationEffect::None,
+                            )));
+                        }
+                    };
+                    let result = client.$method(request).await;
+                    let _closed = client.close().await;
+                    Ok(CallToolResponse::Complete(board_result(result, $mutation)))
+                })
+            },
         ));
     };
 }

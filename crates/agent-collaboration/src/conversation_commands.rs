@@ -318,8 +318,6 @@ fn run_prompt(args: PromptArguments) -> i32 {
                     .transpose()
                     .map_err(|_| ClientError::Protocol("invalid root message ID"))?,
             };
-            target=Some(client.open_session(&request, &mut emit).await?);
-            stage="prompt";
             let sender = current_session_ref(&client.endpoint().service_id)
                 .map_err(|_| ClientError::Protocol("current sender identity unavailable"))?;
             let message = PublicPromptContent::Agent {
@@ -328,15 +326,31 @@ fn run_prompt(args: PromptArguments) -> i32 {
                     .try_into()
                     .map_err(|_| ClientError::Protocol("invalid conversation content"))?,
             };
-            client.prompt_and_wait(
-                ConversationPromptRequest {
-                    message,
-                    effort: args.effort.clone(),
-                    timeout_seconds: args.timeout_seconds,
-                },
+            let prompt = ConversationPromptRequest {
+                message,
+                effort: args.effort.clone(),
+                timeout_seconds: args.timeout_seconds,
+            };
+            match client.open_and_prompt(
+                &request,
+                prompt,
                 cancel,
                 &mut emit,
-            ).await
+            ).await {
+                Ok((created_target, end)) => {
+                    target = Some(created_target);
+                    stage = "prompt";
+                    Ok(end)
+                }
+                Err(error) => {
+                    let (created_target, source) = error.into_parts();
+                    if created_target.is_some() {
+                        target = created_target;
+                        stage = "prompt";
+                    }
+                    Err(source)
+                }
+            }
         }.await;
         signal_task.abort();let _joined=signal_task.await;
         match result{
