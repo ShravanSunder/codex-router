@@ -99,14 +99,18 @@ fn report(result: Result<NativeSendReceipt, MessageSendError>, machine: bool) ->
             5,
         ),
         Err(error) => {
-            let failure = error.into_operation_failure();
+            let (failure, target) = error.into_operation_failure_and_target();
             let exit = operation_failure_exit(&failure);
             let write_failure = if failure.effect == OperationEffect::Unknown {
                 5
             } else {
                 3
             };
-            (json!({"kind":"error","error":failure}), exit, write_failure)
+            (
+                json!({"kind":"error","target":target,"error":failure}),
+                exit,
+                write_failure,
+            )
         }
     };
     let written = if machine {
@@ -128,6 +132,21 @@ fn report(result: Result<NativeSendReceipt, MessageSendError>, machine: bool) ->
 
 fn operation_failure_exit(failure: &OperationFailure) -> i32 {
     match failure.kind {
+        OperationFailureKind::Rejected
+            if failure.service_kind.as_deref() == Some("outcomeUnknown") =>
+        {
+            5
+        }
+        OperationFailureKind::Rejected
+            if failure.service_kind.as_deref() == Some("unsupportedCapability") =>
+        {
+            2
+        }
+        OperationFailureKind::Rejected
+            if failure.service_kind.as_deref() == Some("unavailable") =>
+        {
+            3
+        }
         OperationFailureKind::Rejected => 4,
         _ if failure.effect == OperationEffect::Unknown => 5,
         OperationFailureKind::UnsupportedCapability | OperationFailureKind::ProtocolViolation => 2,
@@ -149,24 +168,59 @@ mod tests {
                 "fixture",
             ))
         };
-        let preparation = MessageSendError::Preparation(transport()).into_operation_failure();
+        let (preparation, preparation_target) =
+            MessageSendError::Preparation(transport()).into_operation_failure_and_target();
+        assert!(preparation_target.is_none());
         assert_eq!(preparation.effect, OperationEffect::None);
         assert_eq!(
             preparation.kind,
             collaboration_client::OperationFailureKind::Unavailable
         );
 
-        let submission = MessageSendError::Submission(transport()).into_operation_failure();
+        let (submission, submission_target) = MessageSendError::Submission {
+            target: serde_json::from_value(serde_json::json!({
+                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+                "sessionId":"target"
+            }))
+            .expect("target"),
+            source: transport(),
+        }
+        .into_operation_failure_and_target();
+        assert!(submission_target.is_some());
         assert_eq!(submission.effect, OperationEffect::Unknown);
         assert_eq!(
             submission.kind,
             collaboration_client::OperationFailureKind::Unavailable
         );
 
-        let malformed_after_dispatch =
-            MessageSendError::Submission(ClientError::Protocol("malformed result"))
-                .into_operation_failure();
+        let (malformed_after_dispatch, malformed_target) = MessageSendError::Submission {
+            target: serde_json::from_value(serde_json::json!({
+                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+                "sessionId":"target"
+            }))
+            .expect("target"),
+            source: ClientError::Protocol("malformed result"),
+        }
+        .into_operation_failure_and_target();
+        assert!(malformed_target.is_some());
         assert_eq!(malformed_after_dispatch.effect, OperationEffect::Unknown);
         assert_eq!(operation_failure_exit(&malformed_after_dispatch), 5);
+    }
+
+    #[test]
+    fn adapter_preserves_established_service_rejection_exit_codes() {
+        for (service_kind, expected) in [
+            ("outcomeUnknown", 5),
+            ("unsupportedCapability", 2),
+            ("unavailable", 3),
+            ("nativeRejected", 4),
+        ] {
+            let (failure, _) = MessageSendError::Preparation(ClientError::Rejected {
+                code: -32050,
+                data: Some(serde_json::json!({"kind":service_kind})),
+            })
+            .into_operation_failure_and_target();
+            assert_eq!(operation_failure_exit(&failure), expected, "{service_kind}");
+        }
     }
 }

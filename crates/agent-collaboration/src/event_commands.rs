@@ -139,31 +139,34 @@ async fn listen(
     timeout_seconds: u64,
 ) -> i32 {
     let attached = async {
-        let endpoint_id = endpoint
-            .try_into()
-            .map_err(|_| collaboration_client::ClientError::Protocol("invalid endpoint"))?;
-        let session_id = session
-            .try_into()
-            .map_err(|_| collaboration_client::ClientError::Protocol("invalid session"))?;
-        NativeObservation::attach_by_ids(directory, endpoint_id, session_id).await
+        let endpoint_id = endpoint.try_into().map_err(|_| {
+            collaboration_client::OperationError::before_dispatch(
+                "observation-validation",
+                None,
+                collaboration_client::ClientError::Protocol("invalid endpoint"),
+            )
+        })?;
+        let session_id = session.try_into().map_err(|_| {
+            collaboration_client::OperationError::before_dispatch(
+                "observation-validation",
+                None,
+                collaboration_client::ClientError::Protocol("invalid session"),
+            )
+        })?;
+        NativeObservation::attach_by_ids_with_context(directory, endpoint_id, session_id).await
     }
     .await;
     let mut observation = match attached {
         Ok(value) => value,
         Err(error) => {
-            return crate::permission_diagnostic_reporting::report_permission_error(
-                &error,
+            if let Some(exit) = crate::permission_diagnostic_reporting::report_permission_error(
+                error.source(),
                 crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
                 true,
-            )
-            .unwrap_or_else(|| {
-                crate::endpoint_commands::report_failure(
-                    "unavailable",
-                    "Native attachment failed; no listener readiness",
-                    3,
-                    true,
-                )
-            });
+            ) {
+                return exit;
+            }
+            return report_observation_error(error);
         }
     };
     let target = observation.target().clone();
@@ -197,6 +200,22 @@ async fn listen(
                 Err(_)=>{let _printed=writeln!(io::stdout(),"{}",json!({"kind":"connectionClosed","reason":"nativeConnectionLost"}));return 3;}
             }
     }
+}
+
+fn report_observation_error(error: collaboration_client::OperationError) -> i32 {
+    let (failure, target, turn_id) = error.into_parts();
+    let exit = if failure.effect == collaboration_client::OperationEffect::Unknown {
+        5
+    } else if failure.kind == collaboration_client::OperationFailureKind::Timeout {
+        124
+    } else {
+        3
+    };
+    let record = serde_json::json!({
+        "kind":"error", "target":target, "turnId":turn_id, "error":failure
+    });
+    let _printed = writeln!(io::stdout(), "{record}");
+    exit
 }
 
 async fn observe(
@@ -284,13 +303,20 @@ async fn observe(
             Ok(()) => 0,
             Err(_) => 3,
         },
-        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
-            &error,
-            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
-            true,
-        )
-        .unwrap_or_else(|| {
-            crate::endpoint_commands::report_failure("unavailable", &error.to_string(), 3, true)
-        }),
+        Err(error) => {
+            let (failure, target, turn_id) = error.into_parts();
+            let exit = if failure.effect == collaboration_client::OperationEffect::Unknown {
+                5
+            } else if failure.kind == collaboration_client::OperationFailureKind::Timeout {
+                124
+            } else {
+                3
+            };
+            let record = serde_json::json!({
+                "kind":"error", "target":target, "turnId":turn_id, "error":failure
+            });
+            let _printed = writeln!(io::stdout(), "{record}");
+            exit
+        }
     }
 }

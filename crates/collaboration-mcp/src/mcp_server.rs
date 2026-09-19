@@ -3,7 +3,7 @@ use collaboration_client::{
     ControlClient, ConversationCreatePromptError, ConversationCreatePromptRequest,
     ConversationCreatePromptResult, ConversationCreateRequest, ConversationCreateResult,
     ExistingConversationPromptRequest, ExistingConversationPromptResult, MessageSendError,
-    MessageSendRequest, NativeObservation, OperationEffect, OperationFailure,
+    MessageSendRequest, NativeObservation, OperationEffect, operation_failure_from_client_error,
 };
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
@@ -242,7 +242,13 @@ impl CollaborationMcpServer {
         };
         let result = client.decide_approval(request).await;
         let _closed = client.close().await;
-        structured_result(result, OperationEffect::Unknown)
+        match result {
+            Ok(value) => structured_result(Ok(value), OperationEffect::None),
+            Err(error) => {
+                let (failure, target, turn_id) = error.into_parts();
+                operation_error_result(failure, target, turn_id)
+            }
+        }
     }
 
     #[tool(name = "journal_status", description = "Reads lifecycle-journal availability and bounds without mutating state.", output_schema = rmcp::handler::server::tool::schema_for_type::<JournalStatus>())]
@@ -334,16 +340,22 @@ impl CollaborationMcpServer {
     async fn wake_wait_until_first_fire(
         &self,
         Parameters(request): Parameters<collaboration_protocol::WakeShowRequest>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
         let client = match self.connect().await {
             Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
+            Err(error) => {
+                return wake_wait_failure(collaboration_client::WakeWaitError::Connection(error));
+            }
         };
         let wait = match client.subscribe_wakeup(request).await {
             Ok(value) => value,
             Err(error) => return wake_wait_failure(error),
         };
-        match wait.wait_until_first_fire().await {
+        match wait
+            .wait_until_first_fire_with_cancellation(context.ct)
+            .await
+        {
             Ok(value) => structured_result(Ok(value), OperationEffect::None),
             Err(error) => wake_wait_failure(error),
         }
@@ -357,7 +369,10 @@ impl CollaborationMcpServer {
         let mut emit = |_event| Ok(());
         match AcpConversation::create(&self.service_directory, request, &mut emit).await {
             Ok((_conversation, result)) => structured_result(Ok(result), OperationEffect::Unknown),
-            Err(error) => failure(error, OperationEffect::Unknown),
+            Err(error) => {
+                let (failure, target, turn_id) = error.into_parts();
+                operation_error_result(failure, target, turn_id)
+            }
         }
     }
 
@@ -389,10 +404,14 @@ impl CollaborationMcpServer {
         Parameters(request): Parameters<BoundedObservationRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
-        structured_result(
-            NativeObservation::observe_bounded(&self.service_directory, request, context.ct).await,
-            OperationEffect::None,
-        )
+        match NativeObservation::observe_bounded(&self.service_directory, request, context.ct).await
+        {
+            Ok(value) => structured_result(Ok(value), OperationEffect::None),
+            Err(error) => {
+                let (failure, target, turn_id) = error.into_parts();
+                operation_error_result(failure, target, turn_id)
+            }
+        }
     }
 }
 
@@ -405,34 +424,8 @@ fn existing_prompt_tool_result(
     match result {
         Ok(value) => structured_result(Ok(value), OperationEffect::None),
         Err(error) => {
-            let (target, source, effect) = match error {
-                collaboration_client::ExistingConversationPromptError::BeforeDispatch {
-                    target,
-                    source,
-                } => (Some(target), source, OperationEffect::None),
-                collaboration_client::ExistingConversationPromptError::LoadFailed {
-                    target,
-                    source,
-                } => (Some(target), source, OperationEffect::Unknown),
-                collaboration_client::ExistingConversationPromptError::AfterTarget {
-                    target,
-                    source,
-                } => (Some(target), source, OperationEffect::Unknown),
-            };
-            let mut failure =
-                serde_json::to_value(OperationFailure::from_client_error(source, effect))
-                    .unwrap_or_else(|_| {
-                        serde_json::json!({
-                            "kind":"protocolViolation",
-                            "stage":"validation",
-                            "effect":"none",
-                            "message":"collaboration error encoding failed"
-                        })
-                    });
-            if let Some(fields) = failure.as_object_mut() {
-                fields.insert("target".to_owned(), serde_json::json!(target));
-            }
-            CallToolResult::structured_error(failure)
+            let (failure, target, turn_id) = error.into_parts();
+            operation_error_result(failure, target, turn_id)
         }
     }
 }
@@ -449,12 +442,36 @@ fn structured_result<TValue: serde::Serialize>(
     }
 }
 
+fn operation_error_result(
+    failure: collaboration_protocol::AdapterOperationFailure,
+    target: Option<collaboration_protocol::SessionRef>,
+    turn_id: Option<collaboration_protocol::NonEmptyText>,
+) -> CallToolResult {
+    serde_json::to_value(failure)
+        .map(|mut value| {
+            if let Some(fields) = value.as_object_mut() {
+                fields.insert("target".to_owned(), serde_json::json!(target));
+                fields.insert("turnId".to_owned(), serde_json::json!(turn_id));
+            }
+            CallToolResult::structured_error(value)
+        })
+        .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))
+}
+
 fn message_tool_result(result: Result<NativeSendReceipt, MessageSendError>) -> CallToolResult {
     match result {
         Ok(receipt) => structured_result(Ok(receipt), OperationEffect::None),
-        Err(error) => serde_json::to_value(error.into_operation_failure())
-            .map(CallToolResult::structured_error)
-            .unwrap_or_else(|_| validation_failure("collaboration error encoding failed")),
+        Err(error) => {
+            let (failure, target) = error.into_operation_failure_and_target();
+            serde_json::to_value(failure)
+                .map(|mut value| {
+                    if let Some(fields) = value.as_object_mut() {
+                        fields.insert("target".to_owned(), serde_json::json!(target));
+                    }
+                    CallToolResult::structured_error(value)
+                })
+                .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))
+        }
     }
 }
 
@@ -464,38 +481,14 @@ fn create_prompt_tool_result(
     match result {
         Ok(value) => structured_result(Ok(value), OperationEffect::None),
         Err(error) => {
-            let (target, source) = error.into_parts();
-            let effect = if target.is_some()
-                || !matches!(
-                    &source,
-                    ClientError::InvalidRequest(_)
-                        | ClientError::UnsupportedCapability(_)
-                        | ClientError::Discovery { .. }
-                ) {
-                OperationEffect::Unknown
-            } else {
-                OperationEffect::None
-            };
-            let mut failure =
-                serde_json::to_value(OperationFailure::from_client_error(source, effect))
-                    .unwrap_or_else(|_| {
-                        serde_json::json!({
-                            "kind":"protocolViolation",
-                            "stage":"validation",
-                            "effect":"none",
-                            "message":"collaboration error encoding failed"
-                        })
-                    });
-            if let Some(fields) = failure.as_object_mut() {
-                fields.insert("target".to_owned(), serde_json::json!(target));
-            }
-            CallToolResult::structured_error(failure)
+            let (failure, target, turn_id) = error.into_parts();
+            operation_error_result(failure, target, turn_id)
         }
     }
 }
 
 fn failure(error: ClientError, possible_effect: OperationEffect) -> CallToolResult {
-    let failure = OperationFailure::from_client_error(error, possible_effect);
+    let failure = operation_failure_from_client_error(error, possible_effect);
     serde_json::to_value(failure)
         .map(CallToolResult::structured_error)
         .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))

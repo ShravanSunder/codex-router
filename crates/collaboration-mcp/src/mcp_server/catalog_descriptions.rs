@@ -70,7 +70,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Disables a schedule using its identity and existing mutation contract. It prevents future eligibility when applicable but does not cancel already accepted native work."
         }
         "schedule_prepare" => {
-            "Prepares one reuseThread schedule for execution. Fresh or fork destinations allocate a native conversation; existing destinations load the supplied conversation. Preparation mutates stored run-planning state; it does not prove native input acceptance, turn completion or an agent reply."
+            "Prepares one reuseThread schedule for execution. Fresh or fork destinations allocate a native conversation; existing destinations use ReadThread to validate the supplied conversation identity/workspace and record its binding, without loading or resuming it. Preparation mutates stored run-planning state; it does not prove native input acceptance, turn completion or an agent reply."
         }
         "run_show" => {
             "Reads one run snapshot and its separately recorded execution and summary evidence. Read-only; stored worker outcome is distinct from summary outcome."
@@ -200,7 +200,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Cancels the supplied reader's active board listener. It stops future listener delivery but does not unwatch threads or acknowledge activity."
         }
         "board_inbox_fetch" => {
-            "Fetches bounded activity for the supplied reader and selected project/board/topic scope. Latest mode initializes unread tracking without acknowledging activity; other modes retain their existing mutation evidence. Fetching does not prove a model processed it."
+            "Fetches bounded activity for the supplied reader and selected project/board/topic scope. Unread mode initializes reader tracking without acknowledging activity; Latest mode does not initialize it. Fetching does not prove a model processed it."
         }
         "board_inbox_acknowledge" => {
             "Advances the supplied reader's acknowledgement for exactly the requested inbox scope and activity sequence. It mutates attention state only."

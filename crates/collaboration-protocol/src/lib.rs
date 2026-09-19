@@ -1,8 +1,12 @@
 //! Public communication contracts without process, storage or transport ownership.
 mod cli_output_contract;
 pub use cli_output_contract::{
-    ConversationEffect, ConversationRecord, ConversationStage, EffortChange, FiniteCommandRecord,
+    ConversationRecord, ConversationTerminalReason, EffortChange, FiniteCommandRecord,
     NativeObservationRecord, ObservationCloseReason,
+};
+mod operation_failure_contract;
+pub use operation_failure_contract::{
+    AdapterOperationFailure, OperationEffect, OperationFailureKind,
 };
 mod access_contract;
 mod approval_contract;

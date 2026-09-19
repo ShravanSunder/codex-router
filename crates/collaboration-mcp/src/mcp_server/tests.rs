@@ -21,9 +21,16 @@ fn message_adapter_preserves_preparation_and_submission_effects() {
             .and_then(|value| value.get("effect")),
         Some(&serde_json::json!("none"))
     );
-    let submission = super::message_tool_result(Err(
-        collaboration_client::MessageSendError::Submission(transport()),
-    ));
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"message-thread"
+    }))
+    .expect("target");
+    let submission =
+        super::message_tool_result(Err(collaboration_client::MessageSendError::Submission {
+            target: target.clone(),
+            source: transport(),
+        }));
     assert_eq!(submission.is_error, Some(true));
     assert_eq!(
         submission
@@ -31,6 +38,13 @@ fn message_adapter_preserves_preparation_and_submission_effects() {
             .as_ref()
             .and_then(|value| value.get("effect")),
         Some(&serde_json::json!("unknown"))
+    );
+    assert_eq!(
+        submission
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("target")),
+        Some(&serde_json::json!(target))
     );
 
     let rejection =
@@ -61,13 +75,15 @@ fn create_and_prompt_failure_retains_created_target_and_unknown_effect() {
     }))
     .expect("target");
     let result = super::create_prompt_tool_result(Err(
-        collaboration_client::ConversationCreatePromptError::AfterCreation {
-            target: target.clone(),
-            source: collaboration_client::ClientError::Rejected {
+        collaboration_client::OperationError::after_dispatch(
+            "prompt",
+            Some(target.clone()),
+            None,
+            collaboration_client::ClientError::Rejected {
                 code: -32603,
                 data: Some(serde_json::json!({"reason":"prompt rejected"})),
             },
-        },
+        ),
     ));
     assert_eq!(result.is_error, Some(true));
     let structured = result.structured_content.expect("structured error");
@@ -84,13 +100,15 @@ fn resumed_prompt_failure_retains_known_target_and_rejection_evidence() {
     }))
     .expect("target");
     let result = super::existing_prompt_tool_result(Err(
-        collaboration_client::ExistingConversationPromptError::AfterTarget {
-            target: target.clone(),
-            source: collaboration_client::ClientError::Rejected {
+        collaboration_client::OperationError::after_dispatch(
+            "prompt",
+            Some(target.clone()),
+            None,
+            collaboration_client::ClientError::Rejected {
                 code: -32603,
                 data: Some(serde_json::json!({"kind":"nativeRejected","detail":"busy"})),
             },
-        },
+        ),
     ));
     assert_eq!(result.is_error, Some(true));
     let structured = result.structured_content.expect("structured error");
@@ -164,9 +182,11 @@ fn prompt_carrier_preserves_busy_precondition_rejection_without_auto_retry() {
     }))
     .expect("target");
     let result = super::existing_prompt_tool_result(Err(
-        collaboration_client::ExistingConversationPromptError::AfterTarget {
-            target,
-            source: collaboration_client::ClientError::Rejected {
+        collaboration_client::OperationError::after_dispatch(
+            "prompt",
+            Some(target),
+            None,
+            collaboration_client::ClientError::Rejected {
                 code: -32050,
                 data: Some(serde_json::json!({
                     "kind":"nativeRejected",
@@ -175,7 +195,7 @@ fn prompt_carrier_preserves_busy_precondition_rejection_without_auto_retry() {
                     "nextAction":"inspectTarget"
                 })),
             },
-        },
+        ),
     ));
     assert_eq!(result.is_error, Some(true));
     let structured = result.structured_content.expect("structured rejection");
@@ -195,12 +215,13 @@ fn resumed_prompt_preflight_failure_retains_requested_target_without_effect() {
     }))
     .expect("target");
     let result = super::existing_prompt_tool_result(Err(
-        collaboration_client::ExistingConversationPromptError::BeforeDispatch {
-            target: target.clone(),
-            source: collaboration_client::ClientError::InvalidRequest(
+        collaboration_client::OperationError::before_dispatch(
+            "validation",
+            Some(target.clone()),
+            collaboration_client::ClientError::InvalidRequest(
                 "prompt timeout must be at least one second",
             ),
-        },
+        ),
     ));
     let structured = result.structured_content.expect("structured error");
     assert_eq!(structured["target"], serde_json::json!(target));
@@ -217,19 +238,21 @@ fn resumed_prompt_load_response_loss_retains_target_with_unknown_effect() {
     }))
     .expect("target");
     let result = super::existing_prompt_tool_result(Err(
-        collaboration_client::ExistingConversationPromptError::LoadFailed {
-            target: target.clone(),
-            source: collaboration_client::ClientError::Transport(std::io::Error::new(
+        collaboration_client::OperationError::after_dispatch(
+            "load",
+            Some(target.clone()),
+            None,
+            collaboration_client::ClientError::Transport(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,
                 "fixture",
             )),
-        },
+        ),
     ));
     let structured = result.structured_content.expect("structured error");
     assert_eq!(structured["target"], serde_json::json!(target));
     assert_eq!(structured["effect"], "unknown");
     assert_eq!(structured["kind"], "unavailable");
-    assert_eq!(structured["stage"], "transport");
+    assert_eq!(structured["stage"], "load");
     assert_eq!(structured["data"]["ioKind"], "ConnectionReset");
 }
 
@@ -348,12 +371,20 @@ fn representative_catalog_descriptions_explain_operation_specific_behavior() {
                 "Preparation",
                 "reuseThread",
                 "allocate a native conversation",
+                "ReadThread",
+                "without loading or resuming",
                 "native input acceptance",
             ][..],
         ),
         ("instruction_create", &["required operation identity"][..]),
         ("wake_pause", &["required operation identity"][..]),
-        ("board_inbox_fetch", &["Latest mode", "unread tracking"][..]),
+        (
+            "board_inbox_fetch",
+            &[
+                "Unread mode initializes reader tracking",
+                "Latest mode does not initialize",
+            ][..],
+        ),
         (
             "board_message_post",
             &["Saving the message", "reply", "assignment success"][..],

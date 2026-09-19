@@ -13,7 +13,17 @@ use collaboration_service::{
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, ffi::OsString, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -28,6 +38,8 @@ struct ApprovalFixture {
     approver: SessionRef,
     control_stop: CancellationToken,
     control_task: tokio::task::JoinHandle<std::io::Result<()>>,
+    fault_task: Option<tokio::task::JoinHandle<()>>,
+    forwarded_decisions: Option<Arc<AtomicUsize>>,
     backend_task: tokio::task::JoinHandle<()>,
     delivery_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<usize>>,
     publication: ManifestPublication,
@@ -35,6 +47,13 @@ struct ApprovalFixture {
 
 impl ApprovalFixture {
     async fn start(delivery_count: usize) -> Self {
+        Self::start_with_dropped_decision_reply(delivery_count, false).await
+    }
+
+    async fn start_with_dropped_decision_reply(
+        delivery_count: usize,
+        drop_decision_reply: bool,
+    ) -> Self {
         let directory = tempfile::tempdir_in("/tmp").expect("private service directory");
         #[cfg(unix)]
         {
@@ -124,8 +143,22 @@ impl ApprovalFixture {
             .with_native_backend(native_backend)
             .expect("native backend")
             .with_approval_broker(Arc::clone(&broker));
-        let control = LocalControlService::bind(&directory.path().join("control.sock"), identity)
-            .expect("control bind");
+        let control_path = directory.path().join(if drop_decision_reply {
+            "broker-control.sock"
+        } else {
+            "control.sock"
+        });
+        let control = LocalControlService::bind(&control_path, identity).expect("control bind");
+        let forwarded_decisions = drop_decision_reply.then(|| Arc::new(AtomicUsize::new(0)));
+        let fault_task = forwarded_decisions.as_ref().map(|forwarded_decisions| {
+            let listener = tokio::net::UnixListener::bind(directory.path().join("control.sock"))
+                .expect("fault proxy bind");
+            let target = control_path.clone();
+            let forwarded_decisions = Arc::clone(forwarded_decisions);
+            tokio::spawn(async move {
+                drop_approval_decision_reply(listener, target, forwarded_decisions).await;
+            })
+        });
         let manifest = serde_json::from_value(json!({
             "version":2, "serviceId":SERVICE_ID, "serviceEpoch":SERVICE_EPOCH,
             "control":{"transport":"unixJsonLines","path":"control.sock"},
@@ -145,6 +178,8 @@ impl ApprovalFixture {
             approver,
             control_stop,
             control_task,
+            fault_task,
+            forwarded_decisions,
             backend_task,
             delivery_rx: tokio::sync::Mutex::new(delivery_rx),
             publication,
@@ -232,12 +267,21 @@ impl ApprovalFixture {
         assert_eq!(delivered, expected);
     }
 
+    fn forwarded_decision_count(&self) -> usize {
+        self.forwarded_decisions
+            .as_ref()
+            .map_or(0, |count| count.load(Ordering::SeqCst))
+    }
+
     async fn shutdown(self) {
         self.control_stop.cancel();
         self.control_task
             .await
             .expect("control join")
             .expect("control shutdown");
+        if let Some(fault_task) = self.fault_task {
+            fault_task.await.expect("fault proxy join");
+        }
         self.backend_task.await.expect("backend join");
         drop(self.publication);
     }
@@ -348,6 +392,49 @@ async fn serve_approval_deliveries(
     }
 }
 
+async fn drop_approval_decision_reply(
+    listener: tokio::net::UnixListener,
+    target: PathBuf,
+    forwarded_decisions: Arc<AtomicUsize>,
+) {
+    let (client, _) = listener.accept().await.expect("fault proxy accept");
+    let broker = tokio::net::UnixStream::connect(target)
+        .await
+        .expect("fault proxy broker connect");
+    let (client_read, mut client_write) = client.into_split();
+    let (broker_read, mut broker_write) = broker.into_split();
+    let mut client_lines = BufReader::new(client_read).lines();
+    let mut broker_lines = BufReader::new(broker_read).lines();
+
+    while let Some(request) = client_lines
+        .next_line()
+        .await
+        .expect("fault proxy client frame")
+    {
+        let method =
+            serde_json::from_str::<Value>(&request).expect("fault proxy client JSON")["method"]
+                .as_str()
+                .map(str::to_owned);
+        broker_write
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .expect("fault proxy forward request");
+        let response = broker_lines
+            .next_line()
+            .await
+            .expect("fault proxy broker frame")
+            .expect("fault proxy broker response");
+        if method.as_deref() == Some("approval/decide") {
+            forwarded_decisions.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
+        client_write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .expect("fault proxy forward response");
+    }
+}
+
 fn cli_actor(actor: &SessionRef) -> String {
     serde_json::to_string(actor).expect("actor JSON")
 }
@@ -368,6 +455,45 @@ async fn run_cli_decision(directory: &Path, request_id: &str, actor: &SessionRef
     tokio::task::spawn_blocking(move || agent_collaboration::run_approval_command(arguments))
         .await
         .expect("CLI decision join")
+}
+
+#[tokio::test]
+async fn cli_decision_response_loss_after_real_broker_effect_is_unknown_without_replay() {
+    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true).await;
+    let request = fixture.begin_permission_request("cli-response-loss").await;
+    let pending = fixture.pending_record().await;
+    fixture.await_delivery(0).await;
+
+    assert_eq!(
+        run_cli_decision(
+            fixture.service_directory(),
+            &pending.request_id,
+            &fixture.approver,
+        )
+        .await,
+        5,
+        "the actual CLI entry projects post-dispatch response loss as unknown",
+    );
+    assert_eq!(
+        fixture.forwarded_decision_count(),
+        1,
+        "the SDK did not replay"
+    );
+    assert_eq!(
+        request
+            .await
+            .expect("request join")
+            .expect("broker request"),
+        BrokeredApprovalOutcome::Selected {
+            option_id: "native-accept".to_owned()
+        },
+        "the real broker applied the decision before its Control receipt was lost",
+    );
+    let approvals = fixture.broker.list(false).await.approvals;
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].request_id, pending.request_id);
+    assert_eq!(approvals[0].decision, Some(ApprovalDecision::Allow));
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -593,4 +719,169 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
     );
     listener.shutdown().await.expect("MCP shutdown");
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn initialized_http_decision_response_loss_after_real_broker_effect_is_unknown_without_replay()
+ {
+    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true).await;
+    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
+        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
+        service_directory: fixture.service_directory().to_owned(),
+        allowed_origins: vec!["http://localhost".to_owned()],
+    })
+    .await
+    .expect("MCP listener");
+    let client = reqwest::Client::new();
+    let initialize = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .json(&json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"approval-response-loss","version":"1"}
+            }
+        }))
+        .send()
+        .await
+        .expect("initialize");
+    let session_id = initialize
+        .headers()
+        .get("mcp-session-id")
+        .cloned()
+        .expect("MCP session id");
+    let _body = initialize.text().await.expect("initialize body");
+    let initialized = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id.clone())
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .expect("initialized notification");
+    assert!(initialized.status().is_success());
+
+    let request = fixture.begin_permission_request("mcp-response-loss").await;
+    let pending = fixture.pending_record().await;
+    fixture.await_delivery(0).await;
+    let response = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        2,
+        "approval_decide",
+        json!({
+            "requestId":pending.request_id,"decision":"allow","actor":fixture.approver
+        }),
+    )
+    .await;
+    let failure = &response["result"]["structuredContent"];
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(failure["effect"], "unknown");
+    assert_eq!(failure["stage"], "approval-decision");
+    assert_eq!(
+        fixture.forwarded_decision_count(),
+        1,
+        "the SDK did not replay"
+    );
+    assert_eq!(
+        request
+            .await
+            .expect("request join")
+            .expect("broker request"),
+        BrokeredApprovalOutcome::Selected {
+            option_id: "native-accept".to_owned()
+        },
+        "the real broker applied the decision before its Control receipt was lost",
+    );
+    let approvals = fixture.broker.list(false).await.approvals;
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].request_id, pending.request_id);
+    assert_eq!(approvals[0].decision, Some(ApprovalDecision::Allow));
+    listener.shutdown().await.expect("MCP shutdown");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn initialized_http_create_reports_manifest_preflight_without_creation_uncertainty() {
+    // The listener is real and initialized, but its service directory deliberately
+    // has no manifest. This reaches the MCP adapter's actual create entry point
+    // while proving that discovery failure occurred before ACP setup/dispatch.
+    let directory = tempfile::tempdir_in("/tmp").expect("private service directory");
+    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
+        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
+        service_directory: directory.path().to_owned(),
+        allowed_origins: vec!["http://localhost".to_owned()],
+    })
+    .await
+    .expect("MCP listener");
+    let client = reqwest::Client::new();
+    let initialize = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .json(&json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"fault-entry-proof","version":"1"}
+            }
+        }))
+        .send()
+        .await
+        .expect("initialize");
+    let session_id = initialize
+        .headers()
+        .get("mcp-session-id")
+        .cloned()
+        .expect("MCP session id");
+    let _body = initialize.text().await.expect("initialize body");
+    let initialized = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id.clone())
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .expect("initialized notification");
+    assert!(initialized.status().is_success());
+
+    let response = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        2,
+        "conversation_create",
+        json!({
+            "endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},
+            "cwd":"/tmp", "session":null, "fork":null,
+            "model":"gpt-5.6-sol", "effort":"low", "access":"workspace-write",
+            "createdBy":null, "approver":null, "rootMessageId":null
+        }),
+    )
+    .await;
+    let failure = &response["result"]["structuredContent"];
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(failure["target"], Value::Null);
+    assert_eq!(failure["effect"], "none");
+    assert_eq!(failure["stage"], "connect");
+
+    let wake_response = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        3,
+        "wake_wait_until_first_fire",
+        json!({"wakeupId":"01985b1e-8d90-7fff-8000-000000000099"}),
+    )
+    .await;
+    let wake_failure = &wake_response["result"]["structuredContent"];
+    assert_eq!(
+        wake_failure["kind"], "connectionUnavailable",
+        "{wake_response}"
+    );
+    assert_eq!(wake_failure["effect"], "none");
+    listener.shutdown().await.expect("MCP shutdown");
 }

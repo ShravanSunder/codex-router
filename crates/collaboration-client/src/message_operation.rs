@@ -1,5 +1,8 @@
 //! Shared message preparation and generation discovery for CLI and MCP callers.
-use crate::{ClientError, ControlClient, OperationEffect, OperationFailure};
+use crate::{
+    ClientError, ControlClient, OperationEffect, OperationFailure,
+    operation_failure_from_client_error,
+};
 use collaboration_protocol::{
     ChannelDescription, CodexGeneration, MessageContent, MessageDelivery, NativeSendParams,
     NativeSendReceipt, NonEmptyText, SessionRef,
@@ -23,20 +26,26 @@ pub struct MessageSendRequest {
 pub enum MessageSendError {
     #[error(transparent)]
     Preparation(ClientError),
-    #[error(transparent)]
-    Submission(ClientError),
+    #[error("{source}")]
+    Submission {
+        target: SessionRef,
+        #[source]
+        source: ClientError,
+    },
 }
 
 impl MessageSendError {
     #[must_use]
-    pub fn into_operation_failure(self) -> OperationFailure {
+    pub fn into_operation_failure_and_target(self) -> (OperationFailure, Option<SessionRef>) {
         match self {
-            Self::Preparation(error) => {
-                OperationFailure::from_client_error(error, OperationEffect::None)
-            }
-            Self::Submission(error) => {
-                OperationFailure::from_client_error(error, OperationEffect::Unknown)
-            }
+            Self::Preparation(error) => (
+                operation_failure_from_client_error(error, OperationEffect::None),
+                None,
+            ),
+            Self::Submission { target, source } => (
+                operation_failure_from_client_error(source, OperationEffect::Unknown),
+                Some(target),
+            ),
         }
     }
 }
@@ -117,6 +126,7 @@ impl ControlClient {
             }));
         }
         let is_agent = matches!(request.message, PublicMessageContent::Agent { .. });
+        let target = request.target.clone();
         let params = NativeSendParams {
             target: request.target,
             generation,
@@ -127,11 +137,14 @@ impl ControlClient {
         if is_agent {
             self.send_agent_message(params)
                 .await
-                .map_err(MessageSendError::Submission)
+                .map_err(|source| MessageSendError::Submission {
+                    target: target.clone(),
+                    source,
+                })
         } else {
             self.send_human_input(params)
                 .await
-                .map_err(MessageSendError::Submission)
+                .map_err(|source| MessageSendError::Submission { target, source })
         }
     }
 }
@@ -364,10 +377,13 @@ mod tests {
         let mut client = ControlClient::initialize(client_stream, "message-test", "1")
             .await
             .expect("initialize");
-        assert!(matches!(
-            client.send_message(fixture_request(None)).await,
-            Err(super::MessageSendError::Submission(_))
-        ));
+        let error = client
+            .send_message(fixture_request(None))
+            .await
+            .expect_err("response loss after dispatch must fail");
+        let (failure, target) = error.into_operation_failure_and_target();
+        assert_eq!(failure.effect, crate::OperationEffect::Unknown);
+        assert_eq!(target, Some(fixture_request(None).target));
         peer.await.expect("join peer");
     }
 

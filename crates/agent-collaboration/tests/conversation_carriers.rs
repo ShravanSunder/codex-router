@@ -1,7 +1,7 @@
 use collaboration_client::protocol::{ConversationRecord, SessionRef};
 use collaboration_client::{
     ClientError, ConversationCreatePromptResult, ConversationEnd, OperationEffect,
-    OperationFailure, OperationFailureKind,
+    OperationFailureKind, operation_failure_from_client_error,
 };
 use serde_json::json;
 
@@ -39,7 +39,7 @@ fn cli_conversation_carrier_preserves_permission_required_and_approver_identity(
 
 #[test]
 fn cli_conversation_carrier_preserves_busy_rejection_and_unknown_effect() {
-    let failure = OperationFailure::from_client_error(
+    let failure = operation_failure_from_client_error(
         ClientError::Rejected {
             code: -32050,
             data: Some(json!({

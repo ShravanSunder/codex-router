@@ -57,12 +57,16 @@ mod tests {
         // Arrange / Act: native resume rejects this exact identity.
         let output = run_observation_case(AttachmentCase::NativeRejection, "rejected", false).await;
         // Assert: failed attachment is never presented as an established observer.
-        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.status.code(), Some(5));
         let records = output_records(&output);
         let [error_record] = records.as_slice() else {
             panic!("expected one attachment failure: {records:?}");
         };
         assert_eq!(error_record["kind"], "error");
+        assert_eq!(error_record["target"]["sessionId"], "observed-thread");
+        assert_eq!(error_record["error"]["stage"], "observation-attach");
+        assert_eq!(error_record["error"]["effect"], "unknown");
+        assert_eq!(error_record["error"]["kind"], "protocolViolation");
         assert!(!String::from_utf8_lossy(&output.stdout).contains("listenerReady"));
     }
 
@@ -72,12 +76,16 @@ mod tests {
         let output =
             run_observation_case(AttachmentCase::GenerationChanged, "replacement", false).await;
         // Assert: buffered output from that retired generation is not advertised as ready.
-        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.status.code(), Some(5));
         let records = output_records(&output);
         let [error_record] = records.as_slice() else {
             panic!("expected one attachment failure: {records:?}");
         };
         assert_eq!(error_record["kind"], "error");
+        assert_eq!(error_record["target"]["sessionId"], "observed-thread");
+        assert_eq!(error_record["error"]["stage"], "observation-attach");
+        assert_eq!(error_record["error"]["effect"], "unknown");
+        assert_eq!(error_record["error"]["kind"], "protocolViolation");
         assert!(!String::from_utf8_lossy(&output.stdout).contains("listenerReady"));
     }
 

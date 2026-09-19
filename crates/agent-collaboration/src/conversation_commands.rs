@@ -1,12 +1,11 @@
 //! Unattended ACP conversation command using the reusable client and explicit cancellation.
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use collaboration_client::protocol::ConversationRecord;
+use collaboration_client::protocol::{ConversationRecord, ConversationTerminalReason};
 use collaboration_client::{
     AcpConversation, ClientError, ConversationCreateRequest, ConversationEnd, ConversationEvent,
     ConversationPromptRequest, OperationEffect, OperationFailure, OperationFailureKind,
-    PublicPromptContent,
+    PublicPromptContent, operation_failure_from_client_error,
 };
-use serde_json::json;
 use std::{
     ffi::OsString,
     io::{self, Read, Write},
@@ -157,9 +156,9 @@ fn run_create(args: CreateArguments) -> i32 {
                 );
             }
         };
-        let client = match AcpConversation::connect(&directory, endpoint).await {
+        let client = match AcpConversation::connect_with_context(&directory, endpoint).await {
             Ok(value) => value,
-            Err(error) => return report_create_failure(error, None, false, args.json),
+            Err(error) => return report_create_failure(error, args.json),
         };
         let creator = match current_session_ref(&client.endpoint().service_id) {
             Ok(value) => value,
@@ -212,42 +211,37 @@ fn run_create(args: CreateArguments) -> i32 {
         let mut emit = |event| emit_record(event, args.json);
         match AcpConversation::create(&directory, request, &mut emit).await {
             Ok((_conversation, result)) => {
-                if writeln!(
-                    io::stdout(),
-                    "{}",
-                    json!({"kind":"conversationCreated","target":result.target})
-                )
-                .is_ok()
-                {
-                    0
-                } else {
-                    3
+                let record = ConversationRecord::ConversationCreated {
+                    target: result.target,
+                };
+                match serde_json::to_string(&record) {
+                    Ok(encoded) if writeln!(io::stdout(), "{encoded}").is_ok() => 0,
+                    Ok(_) | Err(_) => 3,
                 }
             }
-            Err(error) => report_create_failure(error, None, true, args.json),
+            Err(error) => report_create_failure(error, args.json),
         }
     })
 }
 
-fn report_create_failure(
-    error: ClientError,
+fn report_create_failure(error: collaboration_client::OperationError, json_output: bool) -> i32 {
+    let (failure, target, _turn_id) = error.into_parts();
+    report_conversation_failure(failure, target, json_output)
+}
+
+fn report_conversation_failure(
+    failure: OperationFailure,
     target: Option<collaboration_client::protocol::SessionRef>,
-    possible_effect: bool,
     json_output: bool,
 ) -> i32 {
-    let effect = if !possible_effect
-        || matches!(
-            error,
-            ClientError::InvalidRequest(_) | ClientError::UnsupportedCapability(_)
-        ) {
-        OperationEffect::None
-    } else {
-        OperationEffect::Unknown
+    let record = ConversationRecord::ConversationError {
+        target,
+        error: failure.clone(),
     };
-    let failure = OperationFailure::from_client_error(error, effect);
-    let record = json!({"kind":"conversationError","target":target,"error":failure});
     if json_output {
-        let _printed = writeln!(io::stdout(), "{record}");
+        if let Ok(encoded) = serde_json::to_string(&record) {
+            let _printed = writeln!(io::stdout(), "{encoded}");
+        }
     } else {
         let _printed = writeln!(io::stderr(), "{}", failure.message);
     }
@@ -274,13 +268,26 @@ fn run_prompt(args: PromptArguments) -> i32 {
         let signal_task=tokio::spawn(async move{let _signal=tokio::signal::ctrl_c().await;signal.cancel();});
         let mut target=None;
         let mut stage="connect";
+        let mut operation_failure=None;
+        let mut permission_exit=None;
         let result=async{
             let endpoint = if args.new_session {
                 args.endpoint.clone().ok_or(ClientError::Protocol("--endpoint is required with --new"))?.try_into().map_err(|_| ClientError::Protocol("invalid endpoint ID"))?
             } else {
                 conversation_target(&args).map_err(|_| ClientError::Protocol("invalid session target"))?.endpoint_id()
             };
-            let mut client=AcpConversation::connect(&directory,endpoint).await?;
+            let mut client=match AcpConversation::connect_with_context(&directory,endpoint).await {
+                Ok(client) => client,
+                Err(error) => {
+                    permission_exit = crate::permission_diagnostic_reporting::report_permission_error(
+                        error.source(),
+                        crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                        args.json,
+                    );
+                    operation_failure = Some(error.into_parts().0);
+                    return Err(ClientError::Protocol("conversation connection failed"));
+                }
+            };
             let creator = if args.new_session || args.fork.is_some() {
                 Some(current_session_ref(&client.endpoint().service_id).map_err(|_| ClientError::Protocol("current session identity unavailable"))?)
             } else { None };
@@ -345,12 +352,12 @@ fn run_prompt(args: PromptArguments) -> i32 {
                     Ok(end)
                 }
                 Err(error) => {
-                    let (created_target, source) = error.into_parts();
+                    let (failure, created_target, _turn_id) = error.into_parts();
                     if created_target.is_some() {
                         target = created_target;
-                        stage = "prompt";
                     }
-                    Err(source)
+                    operation_failure = Some(failure);
+                    Err(ClientError::Protocol("conversation operation failed"))
                 }
             }
         }.await;
@@ -358,6 +365,9 @@ fn run_prompt(args: PromptArguments) -> i32 {
         match result{
             Ok(end) => conversation_end_exit(end),
             Err(error)=>{
+                if let Some(exit) = permission_exit {
+                    return exit;
+                }
                 if stage == "connect"
                     && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
                         &error,
@@ -367,11 +377,19 @@ fn run_prompt(args: PromptArguments) -> i32 {
                 {
                     return code;
                 }
-                let effect=if !matches!(error,ClientError::UnsupportedCapability(_) | ClientError::InvalidRequest(_) | ClientError::Discovery { .. }) && matches!(stage,"new"|"load"|"prompt"){OperationEffect::Unknown}else{OperationEffect::None};
-                let failure = OperationFailure::from_client_error(error, effect);
+                let failure = operation_failure.unwrap_or_else(|| {
+                    let effect=if !matches!(error,ClientError::UnsupportedCapability(_) | ClientError::InvalidRequest(_) | ClientError::Discovery { .. }) && matches!(stage,"new"|"load"|"prompt"){OperationEffect::Unknown}else{OperationEffect::None};
+                    operation_failure_from_client_error(error, effect)
+                });
                 let exit = operation_failure_exit(&failure);
-                let record=json!({"kind":"conversationError","target":target,"error":failure});
-                let _printed=writeln!(io::stdout(),"{record}");exit
+                let record = ConversationRecord::ConversationError {
+                    target,
+                    error: failure,
+                };
+                if let Ok(encoded) = serde_json::to_string(&record) {
+                    let _printed = writeln!(io::stdout(), "{encoded}");
+                }
+                exit
             }
         }
     })
@@ -546,7 +564,13 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
             if matches!(stop_reason, Some("cancelled")) {
                 let record = cancelled_settlement_record(target, result);
                 if machine {
-                    writeln!(io::stdout(), "{record}")?;
+                    writeln!(
+                        io::stdout(),
+                        "{}",
+                        serde_json::to_string(&record).map_err(|_| {
+                            ClientError::Protocol("conversation output encoding failed")
+                        })?
+                    )?;
                 } else {
                     writeln!(
                         io::stdout(),
@@ -637,13 +661,12 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
 fn cancelled_settlement_record(
     target: collaboration_client::protocol::SessionRef,
     result: serde_json::Value,
-) -> serde_json::Value {
-    json!({
-        "kind":"conversationSettlement",
-        "target":target,
-        "terminalReason":"cancelled",
-        "result":result,
-    })
+) -> ConversationRecord {
+    ConversationRecord::ConversationSettlement {
+        target,
+        terminal_reason: ConversationTerminalReason::Cancelled,
+        result,
+    }
 }
 
 #[cfg(test)]
@@ -654,12 +677,12 @@ mod tests {
     };
     use clap::Parser;
     use collaboration_client::{
-        ClientError, OperationEffect, OperationFailure, OperationFailureKind,
+        ClientError, OperationEffect, OperationFailureKind, operation_failure_from_client_error,
     };
 
     #[test]
     fn conversation_exit_preserves_rejection_and_post_dispatch_unknown_precedence() {
-        let rejection = OperationFailure::from_client_error(
+        let rejection = operation_failure_from_client_error(
             ClientError::Rejected {
                 code: -32603,
                 data: Some(serde_json::json!({"kind":"nativeRejected"})),
@@ -669,7 +692,7 @@ mod tests {
         assert_eq!(rejection.kind, OperationFailureKind::Rejected);
         assert_eq!(operation_failure_exit(&rejection), 4);
 
-        let malformed = OperationFailure::from_client_error(
+        let malformed = operation_failure_from_client_error(
             ClientError::Protocol("malformed result"),
             OperationEffect::Unknown,
         );
@@ -711,6 +734,7 @@ mod tests {
             "_meta":{"codexRouter":{"interruption":{"requested":true}}}
         });
         let record = cancelled_settlement_record(target.clone(), receipt.clone());
+        let record = serde_json::to_value(record).expect("settlement JSON");
         assert_eq!(
             record["target"],
             serde_json::to_value(target).expect("target JSON")

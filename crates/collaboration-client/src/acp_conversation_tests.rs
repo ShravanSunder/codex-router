@@ -78,11 +78,10 @@ fn resumed_prompt_failures_retain_the_known_target_for_rejection_and_post_dispat
             "fixture EOF after dispatch",
         )),
     ] {
-        let failure = ExistingConversationPromptError::AfterTarget {
-            target: target.clone(),
-            source,
-        };
-        assert_eq!(failure.target(), &target);
+        let failure =
+            crate::OperationError::after_dispatch("prompt", Some(target.clone()), None, source);
+        let (_, failure_target, _) = failure.into_parts();
+        assert_eq!(failure_target.as_ref(), Some(&target));
     }
 }
 
@@ -121,12 +120,14 @@ async fn invalid_prompt_deadline_fails_before_discovery_or_creation() {
     )
     .await
     .expect_err("invalid prompt timeout must fail before connection");
-    assert!(matches!(
-        error,
-        ConversationCreatePromptError::BeforeCreation(crate::ClientError::InvalidRequest(
-            "prompt timeout must be at least one second"
-        ))
-    ));
+    let (failure, target, turn_id) = error.into_parts();
+    assert_eq!(
+        failure.message,
+        "invalid collaboration request: prompt timeout must be at least one second"
+    );
+    assert_eq!(failure.effect, crate::OperationEffect::None);
+    assert!(target.is_none());
+    assert!(turn_id.is_none());
 }
 
 #[test]
@@ -158,3 +159,5 @@ fn session_scratch_scopes_are_unique_and_owner_private() {
     let metadata = std::fs::metadata(path).unwrap();
     assert_eq!(metadata.permissions().mode() & 0o077, 0);
 }
+use crate::PublicPromptContent;
+use collaboration_protocol::{SessionId, UuidIdentity};

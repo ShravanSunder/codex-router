@@ -190,18 +190,18 @@ async fn create_and_first_prompt_backend_rejection_retains_created_target() {
     )
     .await
     .expect_err("backend prompt rejection must be returned");
-    let target = error.target().expect("created target retained");
+    let (failure, target, turn_id) = error.into_parts();
+    let target = target.expect("created target retained");
     assert_eq!(
         String::from(target.session_id.clone()),
         "created-before-rejection"
     );
-    assert!(matches!(
-        error,
-        collaboration_client::ConversationCreatePromptError::AfterCreation {
-            source: collaboration_client::ClientError::Rejected { code: -32603, .. },
-            ..
-        }
-    ));
+    assert_eq!(failure.code, Some(-32603));
+    assert_eq!(
+        failure.effect,
+        collaboration_protocol::OperationEffect::Unknown
+    );
+    assert!(turn_id.is_none());
     peer.await.unwrap();
     stop.cancel();
     service.await.unwrap().unwrap();
@@ -295,17 +295,17 @@ async fn streamed_prompt_updates_hit_aggregate_count_bound_and_retain_target() {
     )
     .await
     .expect_err("aggregate update overflow must fail explicitly");
+    let (failure, target, turn_id) = error.into_parts();
+    assert_eq!(String::from(target.unwrap().session_id), "aggregate-thread");
     assert_eq!(
-        String::from(error.target().unwrap().session_id.clone()),
-        "aggregate-thread"
+        failure.message,
+        "Control protocol violation: ACP prompt updates overflow"
     );
-    assert!(matches!(
-        error,
-        collaboration_client::ConversationCreatePromptError::AfterCreation {
-            source: collaboration_client::ClientError::Protocol("ACP prompt updates overflow"),
-            ..
-        }
-    ));
+    assert_eq!(
+        failure.effect,
+        collaboration_protocol::OperationEffect::Unknown
+    );
+    assert!(turn_id.is_none());
     peer.await.unwrap();
     stop.cancel();
     service.await.unwrap().unwrap();

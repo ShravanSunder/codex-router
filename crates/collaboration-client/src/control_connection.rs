@@ -318,20 +318,45 @@ impl ControlClient {
     pub async fn decide_approval(
         &mut self,
         params: collaboration_protocol::ApprovalDecideParams,
-    ) -> Result<collaboration_protocol::ApprovalDecideResult, ClientError> {
+    ) -> Result<collaboration_protocol::ApprovalDecideResult, crate::OperationError> {
         let request_id = params.request_id.clone();
+        let encoded = serde_json::to_value(params).map_err(|_| {
+            crate::OperationError::before_dispatch(
+                "approval-decision",
+                None,
+                ClientError::InvalidRequest("invalid approval decision"),
+            )
+        })?;
+        self.connection
+            .validate_call_before_transmission("approval/decide", &encoded)
+            .map_err(|source| {
+                crate::OperationError::before_dispatch("approval-decision", None, source)
+            })?;
         let value = self
             .connection
-            .call("approval/decide", json!(params))
-            .await?;
+            .call("approval/decide", encoded)
+            .await
+            .map_err(|source| {
+                crate::OperationError::after_dispatch("approval-decision", None, None, source)
+            })?;
         let result: collaboration_protocol::ApprovalDecideResult = serde_json::from_value(value)
-            .map_err(|_| ClientError::Protocol("invalid approval decision receipt"))?;
+            .map_err(|_| {
+                crate::OperationError::after_dispatch(
+                    "approval-decision",
+                    None,
+                    None,
+                    ClientError::Protocol("invalid approval decision receipt"),
+                )
+            })?;
         if result.request_id != request_id
             || result.state != collaboration_protocol::ApprovalState::Decided
         {
             self.connection.failed = true;
-            return Err(ClientError::Protocol(
-                "inconsistent approval decision receipt",
+            return Err(crate::OperationError::after_dispatch(
+                "approval-decision",
+                None,
+                None,
+                ClientError::Protocol("inconsistent approval decision receipt"),
             ));
         }
         Ok(result)

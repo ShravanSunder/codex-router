@@ -1,11 +1,14 @@
 //! Reusable ACP conversation client; native process and translation ownership stay server-side.
+use crate::conversation_contract::{
+    ConversationCreatePromptError, ConversationCreatePromptRequest, ConversationCreatePromptResult,
+    ConversationCreateRequest, ConversationCreateResult, ConversationEnd, ConversationEvent,
+    ConversationPromptRequest, ExistingConversationPromptError, ExistingConversationPromptRequest,
+    ExistingConversationPromptResult,
+};
 use crate::{AcpTransportConnection, ClientError};
 use collaboration_protocol::{
-    AcpSchemaCatalog, EndpointId, EndpointRef, MessageContent, SessionId, SessionRef, UuidIdentity,
-    render_message,
+    AcpSchemaCatalog, EndpointId, EndpointRef, MessageContent, SessionRef, render_message,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 use tokio::{
@@ -49,189 +52,6 @@ impl BoundedPromptUpdates {
         self.updates
     }
 }
-pub enum ConversationEvent {
-    SessionReady(SessionRef),
-    SessionUpdate { target: SessionRef, update: Value },
-    PermissionRequired(SessionRef),
-    PromptResult { target: SessionRef, result: Value },
-}
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ConversationCreateRequest {
-    pub endpoint: EndpointRef,
-    pub cwd: std::path::PathBuf,
-    pub session: Option<SessionId>,
-    pub fork: Option<SessionId>,
-    pub model: Option<String>,
-    /// Absent on resume, where the thread keeps the effort it was created with,
-    /// and on fork, where the source thread's effort is inherited.
-    pub effort: Option<String>,
-    pub access: Option<String>,
-    pub created_by: Option<SessionRef>,
-    pub approver: Option<SessionRef>,
-    pub root_message_id: Option<UuidIdentity>,
-}
-
-/// The existing backend conversation address returned after creation or load.
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ConversationCreateResult {
-    pub target: SessionRef,
-}
-
-/// A public prompt submission. Router-authored content is intentionally absent
-/// from this operation: it is an internal service delivery variant.
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ConversationPromptRequest {
-    pub message: PublicPromptContent,
-    pub effort: Option<String>,
-    #[schemars(range(min = 1))]
-    pub timeout_seconds: u64,
-}
-
-impl ConversationPromptRequest {
-    pub fn validate(&self) -> Result<(), ClientError> {
-        if self.timeout_seconds == 0 {
-            return Err(ClientError::InvalidRequest(
-                "prompt timeout must be at least one second",
-            ));
-        }
-        tokio::time::Instant::now()
-            .checked_add(Duration::from_secs(self.timeout_seconds))
-            .ok_or(ClientError::InvalidRequest("invalid prompt deadline"))?;
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-pub enum PublicPromptContent {
-    Agent {
-        sender: SessionRef,
-        text: collaboration_protocol::MessageText,
-    },
-    HumanUser {
-        text: collaboration_protocol::MessageText,
-    },
-}
-
-impl From<PublicPromptContent> for MessageContent {
-    fn from(value: PublicPromptContent) -> Self {
-        match value {
-            PublicPromptContent::Agent { sender, text } => Self::Agent { sender, text },
-            PublicPromptContent::HumanUser { text } => Self::HumanUser { text },
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ConversationEnd {
-    Completed,
-    TimedOut,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ExistingConversationPromptRequest {
-    pub target: SessionRef,
-    pub cwd: std::path::PathBuf,
-    pub prompt: ConversationPromptRequest,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ExistingConversationPromptResult {
-    pub target: SessionRef,
-    pub end: ConversationEnd,
-    pub updates: Vec<Value>,
-    pub permission_required: bool,
-    pub result: Option<Value>,
-}
-
-/// Creates a fresh conversation and submits its first correlated prompt on the
-/// same ACP connection, so an empty thread never needs to be resumed first.
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ConversationCreatePromptRequest {
-    pub create: ConversationCreateRequest,
-    pub prompt: ConversationPromptRequest,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ConversationCreatePromptResult {
-    pub target: SessionRef,
-    pub end: ConversationEnd,
-    pub updates: Vec<Value>,
-    pub permission_required: bool,
-    pub result: Option<Value>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ConversationCreatePromptError {
-    #[error(transparent)]
-    BeforeCreation(ClientError),
-    #[error("conversation {target:?} was created, but its first prompt failed: {source}")]
-    AfterCreation {
-        target: SessionRef,
-        #[source]
-        source: ClientError,
-    },
-}
-
-/// A resumed prompt may fail after its target has been loaded. Keep that known
-/// recovery identity in the operation result without inventing a turn receipt.
-#[derive(Debug, thiserror::Error)]
-pub enum ExistingConversationPromptError {
-    #[error("conversation {target:?} prompt failed before dispatch: {source}")]
-    BeforeDispatch {
-        target: SessionRef,
-        #[source]
-        source: ClientError,
-    },
-    #[error("conversation {target:?} load failed after submission: {source}")]
-    LoadFailed {
-        target: SessionRef,
-        #[source]
-        source: ClientError,
-    },
-    #[error("conversation {target:?} was loaded, but its prompt failed: {source}")]
-    AfterTarget {
-        target: SessionRef,
-        #[source]
-        source: ClientError,
-    },
-}
-
-impl ExistingConversationPromptError {
-    #[must_use]
-    pub fn target(&self) -> &SessionRef {
-        match self {
-            Self::BeforeDispatch { target, .. }
-            | Self::LoadFailed { target, .. }
-            | Self::AfterTarget { target, .. } => target,
-        }
-    }
-}
-
-impl ConversationCreatePromptError {
-    #[must_use]
-    pub fn target(&self) -> Option<&SessionRef> {
-        match self {
-            Self::BeforeCreation(_) => None,
-            Self::AfterCreation { target, .. } => Some(target),
-        }
-    }
-
-    pub fn into_parts(self) -> (Option<SessionRef>, ClientError) {
-        match self {
-            Self::BeforeCreation(error) => (None, error),
-            Self::AfterCreation { target, source } => (Some(target), source),
-        }
-    }
-}
 pub struct AcpConversation {
     stream: BufReader<UnixStream>,
     frame: Vec<u8>,
@@ -256,22 +76,22 @@ impl AcpConversation {
         request
             .prompt
             .validate()
-            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+            .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         validate_conversation_create_request(&request.create)
-            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+            .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         if request.create.session.is_some() || request.create.fork.is_some() {
-            return Err(ConversationCreatePromptError::BeforeCreation(
+            return Err(crate::OperationError::before_dispatch(
+                "validation",
+                None,
                 ClientError::InvalidRequest(
                     "create-and-prompt requires a fresh conversation request",
                 ),
             ));
         }
         let endpoint_id = request.create.endpoint.endpoint_id.clone();
-        let mut conversation = Self::connect(directory, endpoint_id)
-            .await
-            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+        let mut conversation = Self::connect_with_context(directory, endpoint_id).await?;
         validate_conversation_endpoint(conversation.endpoint(), &request.create.endpoint)
-            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+            .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         let mut updates = BoundedPromptUpdates::new();
         let mut permission_required = false;
         let mut prompt_result = None;
@@ -305,17 +125,13 @@ impl AcpConversation {
     ) -> Result<(SessionRef, ConversationEnd), ConversationCreatePromptError> {
         prompt
             .validate()
-            .map_err(ConversationCreatePromptError::BeforeCreation)?;
-        let target = self
-            .open_session(create, emit)
-            .await
-            .map_err(ConversationCreatePromptError::BeforeCreation)?;
+            .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
+        let target = self.open_session_with_context(create, emit).await?;
         let end = self
             .prompt_and_wait(prompt, cancel, emit)
             .await
-            .map_err(|source| ConversationCreatePromptError::AfterCreation {
-                target: target.clone(),
-                source,
+            .map_err(|source| {
+                crate::OperationError::after_dispatch("prompt", Some(target.clone()), None, source)
             })?;
         Ok((target, end))
     }
@@ -327,23 +143,22 @@ impl AcpConversation {
     ) -> Result<ExistingConversationPromptResult, ExistingConversationPromptError> {
         let requested_target = request.target.clone();
         request.prompt.validate().map_err(|source| {
-            ExistingConversationPromptError::BeforeDispatch {
-                target: requested_target.clone(),
+            crate::OperationError::before_dispatch(
+                "validation",
+                Some(requested_target.clone()),
                 source,
-            }
+            )
         })?;
         let endpoint = requested_target.endpoint.clone();
-        let mut conversation = Self::connect(directory, endpoint.endpoint_id.clone())
+        let mut conversation = Self::connect_with_context(directory, endpoint.endpoint_id.clone())
             .await
-            .map_err(|source| ExistingConversationPromptError::BeforeDispatch {
-                target: requested_target.clone(),
-                source,
-            })?;
+            .map_err(|error| error.with_known_target(requested_target.clone()))?;
         validate_conversation_endpoint(conversation.endpoint(), &endpoint).map_err(|source| {
-            ExistingConversationPromptError::BeforeDispatch {
-                target: requested_target.clone(),
+            crate::OperationError::before_dispatch(
+                "validation",
+                Some(requested_target.clone()),
                 source,
-            }
+            )
         })?;
         let mut updates = BoundedPromptUpdates::new();
         let mut permission_required = false;
@@ -370,18 +185,13 @@ impl AcpConversation {
             root_message_id: None,
         };
         let target = conversation
-            .open_session(&create, &mut emit)
-            .await
-            .map_err(|source| ExistingConversationPromptError::LoadFailed {
-                target: requested_target.clone(),
-                source,
-            })?;
+            .open_session_with_context(&create, &mut emit)
+            .await?;
         let end = conversation
             .prompt_and_wait(request.prompt, cancel, &mut emit)
             .await
-            .map_err(|source| ExistingConversationPromptError::AfterTarget {
-                target: target.clone(),
-                source,
+            .map_err(|source| {
+                crate::OperationError::after_dispatch("prompt", Some(target.clone()), None, source)
             })?;
         Ok(ExistingConversationPromptResult {
             target,
@@ -397,17 +207,38 @@ impl AcpConversation {
         &self.endpoint
     }
     pub async fn connect(directory: &Path, endpoint_id: EndpointId) -> Result<Self, ClientError> {
-        let transport = AcpTransportConnection::connect(directory, endpoint_id).await?;
+        Self::connect_with_context(directory, endpoint_id)
+            .await
+            .map_err(crate::OperationError::into_source)
+    }
+
+    pub async fn connect_with_context(
+        directory: &Path,
+        endpoint_id: EndpointId,
+    ) -> Result<Self, crate::OperationError> {
+        let transport = AcpTransportConnection::connect(directory, endpoint_id)
+            .await
+            .map_err(|source| crate::OperationError::before_dispatch("connect", None, source))?;
         if String::from(transport.schema_digest.clone())
             != format!("sha256:{}", collaboration_protocol::ACP_SCHEMA_DIGEST)
         {
-            return Err(ClientError::UnsupportedCapability("ACP schema profile"));
+            return Err(crate::OperationError::before_dispatch(
+                "connect",
+                None,
+                ClientError::UnsupportedCapability("ACP schema profile"),
+            ));
         }
+        let schemas = AcpSchemaCatalog::load().map_err(|_| {
+            crate::OperationError::before_dispatch(
+                "initialize",
+                None,
+                ClientError::Protocol("ACP schema unavailable"),
+            )
+        })?;
         let mut client = Self {
             stream: BufReader::new(transport.stream),
             frame: Vec::new(),
-            schemas: AcpSchemaCatalog::load()
-                .map_err(|_| ClientError::Protocol("ACP schema unavailable"))?,
+            schemas,
             endpoint: transport.endpoint,
             service_directory: directory.to_owned(),
             target: None,
@@ -419,9 +250,28 @@ impl AcpConversation {
             load_supported: false,
             failed: false,
         };
-        let result=client.request("initialize",json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"agent-collaboration","version":env!("CARGO_PKG_VERSION")}}),"InitializeRequest","InitializeResponse").await?;
+        let initialize = json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"agent-collaboration","version":env!("CARGO_PKG_VERSION")}});
+        client
+            .validate("InitializeRequest", &initialize)
+            .map_err(|source| crate::OperationError::before_dispatch("initialize", None, source))?;
+        let result = client
+            .request(
+                "initialize",
+                initialize,
+                "InitializeRequest",
+                "InitializeResponse",
+            )
+            .await
+            .map_err(|source| {
+                crate::OperationError::after_dispatch("initialize", None, None, source)
+            })?;
         if result.get("protocolVersion") != Some(&json!(1)) {
-            return Err(ClientError::Protocol("unsupported ACP version"));
+            return Err(crate::OperationError::after_dispatch(
+                "initialize",
+                None,
+                None,
+                ClientError::Protocol("unsupported ACP version"),
+            ));
         }
         client.load_supported = result
             .pointer("/agentCapabilities/loadSession")
@@ -436,12 +286,14 @@ impl AcpConversation {
         directory: &Path,
         request: ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
-    ) -> Result<(Self, ConversationCreateResult), ClientError> {
-        validate_conversation_create_request(&request)?;
+    ) -> Result<(Self, ConversationCreateResult), crate::OperationError> {
+        validate_conversation_create_request(&request)
+            .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         let endpoint_id = request.endpoint.endpoint_id.clone();
-        let mut client = Self::connect(directory, endpoint_id).await?;
-        validate_conversation_endpoint(&client.endpoint, &request.endpoint)?;
-        let target = client.open_session(&request, emit).await?;
+        let mut client = Self::connect_with_context(directory, endpoint_id).await?;
+        validate_conversation_endpoint(&client.endpoint, &request.endpoint)
+            .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
+        let target = client.open_session_with_context(&request, emit).await?;
         Ok((client, ConversationCreateResult { target }))
     }
     pub async fn open_session(
@@ -449,7 +301,18 @@ impl AcpConversation {
         request: &ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<SessionRef, ClientError> {
-        validate_conversation_create_request(request)?;
+        self.open_session_with_context(request, emit)
+            .await
+            .map_err(crate::OperationError::into_source)
+    }
+
+    async fn open_session_with_context(
+        &mut self,
+        request: &ConversationCreateRequest,
+        emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
+    ) -> Result<SessionRef, crate::OperationError> {
+        validate_conversation_create_request(request)
+            .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         // A requested switch retires the previous selection even when setup rejects
         // or its future is cancelled. Only completed setup may enable a prompt.
         self.session_ready = false;
@@ -457,24 +320,40 @@ impl AcpConversation {
         self.pending_updates.clear();
         self.pending_bytes = 0;
         if !request.cwd.is_absolute() {
-            return Err(ClientError::Protocol("ACP cwd must be absolute"));
+            return Err(crate::OperationError::before_dispatch(
+                "validation",
+                None,
+                ClientError::Protocol("ACP cwd must be absolute"),
+            ));
         }
         let target = if let Some(id) = &request.session {
-            if !self.load_supported {
-                return Err(ClientError::UnsupportedCapability("ACP session/load"));
-            }
             let target = SessionRef {
                 endpoint: self.endpoint.clone(),
                 session_id: id.clone(),
             };
+            if !self.load_supported {
+                return Err(crate::OperationError::before_dispatch(
+                    "load",
+                    Some(target),
+                    ClientError::UnsupportedCapability("ACP session/load"),
+                ));
+            }
             self.target = Some(target.clone());
+            let params = json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata_effort(request.effort.as_deref())}});
+            self.validate("LoadSessionRequest", &params)
+                .map_err(|source| {
+                    crate::OperationError::before_dispatch("load", Some(target.clone()), source)
+                })?;
             self.request(
                 "session/load",
-                json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata_effort(request.effort.as_deref())}}),
+                params,
                 "LoadSessionRequest",
                 "LoadSessionResponse",
             )
-            .await?;
+            .await
+            .map_err(|source| {
+                crate::OperationError::after_dispatch("load", Some(target.clone()), None, source)
+            })?;
             target
         } else {
             // An absent model or effort is omitted, not sent as null: on fork the
@@ -499,11 +378,20 @@ impl AcpConversation {
             let scratch_path = self
                 .service_directory
                 .parent()
-                .ok_or(ClientError::Protocol("service directory has no owner root"))?
+                .ok_or(ClientError::Protocol("service directory has no owner root"))
+                .map_err(|source| {
+                    crate::OperationError::before_dispatch("preparation", None, source)
+                })?
                 .join("scratch")
                 .join(&scratch_scope);
-            prepare_project_write_areas(&request.cwd, request.access.as_deref())?;
-            create_private_scratch(&scratch_path)?;
+            prepare_project_write_areas(&request.cwd, request.access.as_deref())
+                .map_err(ClientError::from)
+                .map_err(|source| {
+                    crate::OperationError::before_dispatch("preparation", None, source)
+                })?;
+            create_private_scratch(&scratch_path).map_err(|source| {
+                crate::OperationError::before_dispatch("preparation", None, source)
+            })?;
             router_metadata.insert("rootMessageId".into(), json!(request.root_message_id));
             router_metadata.insert("scratchScope".into(), json!(scratch_scope));
             router_metadata.insert("scratchPath".into(), json!(scratch_path));
@@ -512,6 +400,13 @@ impl AcpConversation {
             }
             let params =
                 json!({"cwd":request.cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata}});
+            let stage = if request.fork.is_some() {
+                "fork"
+            } else {
+                "new"
+            };
+            self.validate("NewSessionRequest", &params)
+                .map_err(|source| crate::OperationError::before_dispatch(stage, None, source))?;
             let result = self
                 .request(
                     "session/new",
@@ -519,24 +414,42 @@ impl AcpConversation {
                     "NewSessionRequest",
                     "NewSessionResponse",
                 )
-                .await?;
+                .await
+                .map_err(|source| {
+                    crate::OperationError::after_dispatch(stage, None, None, source)
+                })?;
             SessionRef {
                 endpoint: self.endpoint.clone(),
                 session_id: result
                     .get("sessionId")
                     .and_then(Value::as_str)
-                    .ok_or(ClientError::Protocol("ACP session ID missing"))?
+                    .ok_or(ClientError::Protocol("ACP session ID missing"))
+                    .map_err(|source| {
+                        crate::OperationError::after_dispatch(stage, None, None, source)
+                    })?
                     .to_owned()
                     .try_into()
-                    .map_err(|_| ClientError::Protocol("invalid session ID"))?,
+                    .map_err(|_| {
+                        crate::OperationError::after_dispatch(
+                            stage,
+                            None,
+                            None,
+                            ClientError::Protocol("invalid session ID"),
+                        )
+                    })?,
             }
         };
         self.target = Some(target.clone());
-        emit(ConversationEvent::SessionReady(target.clone()))?;
+        emit(ConversationEvent::SessionReady(target.clone())).map_err(|source| {
+            crate::OperationError::after_dispatch("setup", Some(target.clone()), None, source)
+        })?;
         for update in std::mem::take(&mut self.pending_updates) {
             emit(ConversationEvent::SessionUpdate {
                 target: target.clone(),
                 update,
+            })
+            .map_err(|source| {
+                crate::OperationError::after_dispatch("setup", Some(target.clone()), None, source)
             })?;
         }
         self.pending_bytes = 0;

@@ -7,10 +7,13 @@ mod control_connection;
 mod endpoint_notification_state;
 mod message_operation;
 mod operation_error;
+pub use collaboration_protocol::{
+    AdapterOperationFailure as OperationFailure, OperationEffect, OperationFailureKind,
+};
 pub use collaboration_protocol::{ControlInitializationResult, EndpointInventory, ProtocolVersion};
 pub use control_connection::{ClientError, ControlClient};
 pub use message_operation::{MessageSendError, MessageSendRequest, PublicMessageContent};
-pub use operation_error::{OperationEffect, OperationFailure, OperationFailureKind};
+pub use operation_error::{OperationError, operation_failure_from_client_error};
 static OBSERVED_SERVICE_VERSION: std::sync::OnceLock<std::sync::Mutex<String>> =
     std::sync::OnceLock::new();
 pub(crate) fn record_service_version(version: &str) {
@@ -43,11 +46,13 @@ pub use observation_session::{
 };
 
 mod acp_conversation;
-pub use acp_conversation::{
-    AcpConversation, ConversationCreatePromptError, ConversationCreatePromptRequest,
-    ConversationCreatePromptResult, ConversationCreateRequest, ConversationCreateResult,
-    ConversationEnd, ConversationEvent, ConversationPromptRequest, ExistingConversationPromptError,
-    ExistingConversationPromptRequest, ExistingConversationPromptResult, PublicPromptContent,
+pub use acp_conversation::AcpConversation;
+mod conversation_contract;
+pub use conversation_contract::{
+    ConversationCreatePromptError, ConversationCreatePromptRequest, ConversationCreatePromptResult,
+    ConversationCreateRequest, ConversationCreateResult, ConversationEnd, ConversationEvent,
+    ConversationPromptRequest, ExistingConversationPromptError, ExistingConversationPromptRequest,
+    ExistingConversationPromptResult, PublicPromptContent,
 };
 mod acp_transport_connection;
 pub use acp_transport_connection::AcpTransportConnection;

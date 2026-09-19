@@ -56,24 +56,45 @@ impl NativeObservation {
         directory: &Path,
         request: BoundedObservationRequest,
         cancel: CancellationToken,
-    ) -> Result<BoundedObservationResult, ClientError> {
-        validate_observation_bounds(&request)?;
+    ) -> Result<BoundedObservationResult, crate::OperationError> {
+        let target = request.target.clone();
+        validate_observation_bounds(&request).map_err(|source| {
+            crate::OperationError::before_dispatch(
+                "observation-validation",
+                Some(target.clone()),
+                source,
+            )
+        })?;
         let deadline = tokio::time::Instant::now()
             .checked_add(Duration::from_secs(request.timeout_seconds))
-            .ok_or(ClientError::InvalidRequest("invalid observation deadline"))?;
+            .ok_or_else(|| {
+                crate::OperationError::before_dispatch(
+                    "observation-validation",
+                    Some(target.clone()),
+                    ClientError::InvalidRequest("invalid observation deadline"),
+                )
+            })?;
         let observation = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                return Err(ClientError::InvalidRequest("observation cancelled before attachment"));
+                return Err(crate::OperationError::before_dispatch("observation-attach", Some(target.clone()), ClientError::InvalidRequest("observation cancelled before attachment")));
             }
             _ = tokio::time::sleep_until(deadline) => {
-                return Err(ClientError::Timeout);
+                return Err(crate::OperationError::before_dispatch("observation-attach", Some(target.clone()), ClientError::Timeout));
             }
-            observation = Self::attach(directory, request.target) => observation?,
+            observation = Self::attach_with_context(directory, request.target) => observation?,
         };
         observation
             .collect_until(deadline, request.max_events, request.max_bytes, cancel)
             .await
+            .map_err(|source| {
+                crate::OperationError::after_dispatch(
+                    "observation-collect",
+                    Some(target),
+                    None,
+                    source,
+                )
+            })
     }
     /// Binds the endpoint to the discovered service before attaching the native session ID.
     pub async fn attach_by_ids(
@@ -81,7 +102,20 @@ impl NativeObservation {
         endpoint_id: EndpointId,
         session_id: SessionId,
     ) -> Result<Self, ClientError> {
-        let control = Self::connect_control(directory).await?;
+        Self::attach_by_ids_with_context(directory, endpoint_id, session_id)
+            .await
+            .map_err(crate::OperationError::into_source)
+    }
+
+    /// Retains the known target and possible-effect stage when native resume was submitted.
+    pub async fn attach_by_ids_with_context(
+        directory: &Path,
+        endpoint_id: EndpointId,
+        session_id: SessionId,
+    ) -> Result<Self, crate::OperationError> {
+        let control = Self::connect_control(directory).await.map_err(|source| {
+            crate::OperationError::before_dispatch("observation-connect", None, source)
+        })?;
         let target = SessionRef {
             endpoint: EndpointRef {
                 service_id: control.identity().service_id.clone(),
@@ -89,13 +123,28 @@ impl NativeObservation {
             },
             session_id,
         };
-        Self::attach_with_control(directory, control, target).await
+        Self::attach_with_control_context(directory, control, target).await
     }
 
     /// May load the target through native resume; readiness is returned only after attachment.
     pub async fn attach(directory: &Path, target: SessionRef) -> Result<Self, ClientError> {
-        let control = Self::connect_control(directory).await?;
-        Self::attach_with_control(directory, control, target).await
+        Self::attach_with_context(directory, target)
+            .await
+            .map_err(crate::OperationError::into_source)
+    }
+
+    async fn attach_with_context(
+        directory: &Path,
+        target: SessionRef,
+    ) -> Result<Self, crate::OperationError> {
+        let control = Self::connect_control(directory).await.map_err(|source| {
+            crate::OperationError::before_dispatch(
+                "observation-connect",
+                Some(target.clone()),
+                source,
+            )
+        })?;
+        Self::attach_with_control_context(directory, control, target).await
     }
 
     async fn connect_control(directory: &Path) -> Result<ControlClient, ClientError> {
@@ -107,22 +156,32 @@ impl NativeObservation {
         .await
     }
 
-    async fn attach_with_control(
+    async fn attach_with_control_context(
         directory: &Path,
         mut control: ControlClient,
         target: SessionRef,
-    ) -> Result<Self, ClientError> {
-        let inventory = control.list_endpoints().await?;
+    ) -> Result<Self, crate::OperationError> {
+        let before = |source| {
+            crate::OperationError::before_dispatch(
+                "observation-attach",
+                Some(target.clone()),
+                source,
+            )
+        };
+        let inventory = control.list_endpoints().await.map_err(before)?;
         let endpoint = inventory
             .endpoints
             .into_iter()
             .find(|e| e.endpoint == target.endpoint)
-            .ok_or(ClientError::Protocol("observation endpoint missing"))?;
+            .ok_or(ClientError::Protocol("observation endpoint missing"))
+            .map_err(before)?;
         if !matches!(
             endpoint.availability,
             EndpointAvailability::Available { .. }
         ) {
-            return Err(ClientError::Protocol("observation endpoint unavailable"));
+            return Err(before(ClientError::Protocol(
+                "observation endpoint unavailable",
+            )));
         }
         let (path, generation) = endpoint
             .channels
@@ -135,32 +194,69 @@ impl NativeObservation {
                 } => Some((String::from(path), g)),
                 _ => None,
             })
-            .ok_or(ClientError::Protocol("native observation unsupported"))?;
+            .ok_or(ClientError::Protocol("native observation unsupported"))
+            .map_err(before)?;
         let relative = Path::new(&path);
         if relative.is_absolute()
             || relative
                 .components()
                 .any(|c| !matches!(c, std::path::Component::Normal(_)))
         {
-            return Err(ClientError::Protocol("invalid native observation path"));
+            return Err(before(ClientError::Protocol(
+                "invalid native observation path",
+            )));
         }
-        let root = std::fs::canonicalize(directory)?;
-        let socket = std::fs::canonicalize(root.join(relative))?;
+        let root = std::fs::canonicalize(directory)
+            .map_err(ClientError::from)
+            .map_err(before)?;
+        let socket = std::fs::canonicalize(root.join(relative))
+            .map_err(ClientError::from)
+            .map_err(before)?;
         if socket.parent() != Some(root.as_path()) {
-            return Err(ClientError::Protocol("observation path escaped service"));
+            return Err(before(ClientError::Protocol(
+                "observation path escaped service",
+            )));
         }
         let mut connection = NativeProtocolConnection::connect(&socket)
             .await
-            .map_err(|_| ClientError::Protocol("native observation connection failed"))?;
+            .map_err(|_| ClientError::Protocol("native observation connection failed"))
+            .map_err(before)?;
         connection
             .resume_thread(&String::from(target.session_id.clone()))
             .await
-            .map_err(|_| ClientError::Protocol("native attachment failed or uncertain"))?;
-        let current = control.list_endpoints().await?;
+            .map_err(|_| ClientError::Protocol("native attachment failed or uncertain"))
+            .map_err(|source| {
+                crate::OperationError::after_dispatch(
+                    "observation-attach",
+                    Some(target.clone()),
+                    None,
+                    source,
+                )
+            })?;
+        let current = control.list_endpoints().await.map_err(|source| {
+            crate::OperationError::after_dispatch(
+                "observation-attach",
+                Some(target.clone()),
+                None,
+                source,
+            )
+        })?;
         let unchanged = current.endpoints.iter().find(|e| e.endpoint == target.endpoint).is_some_and(|e| e.channels.iter().any(|c| matches!(c, ChannelDescription::NativeCodex { generation:Some(g),.. } if g == &generation)));
-        control.close().await?;
+        control.close().await.map_err(|source| {
+            crate::OperationError::after_dispatch(
+                "observation-attach",
+                Some(target.clone()),
+                None,
+                source,
+            )
+        })?;
         if !unchanged {
-            return Err(ClientError::Protocol("backend changed during attachment"));
+            return Err(crate::OperationError::after_dispatch(
+                "observation-attach",
+                Some(target.clone()),
+                None,
+                ClientError::Protocol("backend changed during attachment"),
+            ));
         }
         Ok(Self {
             connection,
@@ -343,9 +439,13 @@ mod bounded_observation_tests {
         )
         .await
         .expect_err("pre-cancelled observation must stop before attachment");
-        assert!(matches!(
-            error,
-            crate::ClientError::InvalidRequest("observation cancelled before attachment")
-        ));
+        let (failure, target, turn_id) = error.into_parts();
+        assert_eq!(
+            failure.message,
+            "invalid collaboration request: observation cancelled before attachment"
+        );
+        assert_eq!(failure.effect, crate::OperationEffect::None);
+        assert!(target.is_some());
+        assert!(turn_id.is_none());
     }
 }

@@ -6,6 +6,7 @@ use collaboration_protocol::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub enum WakeWaitFailureKind {
@@ -60,6 +61,8 @@ pub enum WakeWaitError {
     Expired { wakeup_id: WakeupId },
     #[error("Wake-up has no future firing; its one-shot tick was skipped while paused.")]
     FinishedWithoutFiring { wakeup_id: WakeupId },
+    #[error("Wake-up first-fire wait was cancelled by its caller.")]
+    CallerCancelled { wakeup_id: WakeupId },
     #[error(transparent)]
     Connection(#[from] ClientError),
 }
@@ -117,13 +120,21 @@ impl WakeWaitError {
                 "notRecorded",
                 None,
             ),
+            Self::CallerCancelled { wakeup_id } => (
+                WakeWaitFailureKind::Unavailable,
+                "wait",
+                Some(wakeup_id),
+                "reconnectWait",
+                "unknown",
+                None,
+            ),
             Self::Connection(error) => (
                 WakeWaitFailureKind::Connection,
                 "connection",
                 None,
                 "reconnectWait",
                 "unknown",
-                Some(crate::OperationFailure::from_client_error(
+                Some(crate::operation_failure_from_client_error(
                     error,
                     crate::OperationEffect::None,
                 )),
@@ -207,7 +218,15 @@ impl WakeWaitConnection {
     pub fn subscription(&self) -> &WakeSubscription {
         &self.subscription
     }
-    pub async fn wait_until_first_fire(mut self) -> Result<FireReceipt, WakeWaitError> {
+    pub async fn wait_until_first_fire(self) -> Result<FireReceipt, WakeWaitError> {
+        self.wait_until_first_fire_with_cancellation(CancellationToken::new())
+            .await
+    }
+
+    pub async fn wait_until_first_fire_with_cancellation(
+        mut self,
+        cancellation: CancellationToken,
+    ) -> Result<FireReceipt, WakeWaitError> {
         let id = self.subscription.snapshot.definition.wakeup_id.clone();
         if let Some(fire) = self.subscription.snapshot.first_fire.take() {
             return Ok(fire);
@@ -223,7 +242,10 @@ impl WakeWaitConnection {
         }
         let previous = cursor_sequence(&self.subscription.after, self.client.identity())?;
         {
-            let frame = self.client.next_wake_notification().await?;
+            let frame = tokio::select! {
+                _ = cancellation.cancelled() => return Err(WakeWaitError::CallerCancelled { wakeup_id: id.clone() }),
+                frame = self.client.next_wake_notification() => frame?,
+            };
             let changed: WakeChanged = serde_json::from_value(frame.get("params").cloned().ok_or(
                 ClientError::Protocol("wake notification parameters missing"),
             )?)
