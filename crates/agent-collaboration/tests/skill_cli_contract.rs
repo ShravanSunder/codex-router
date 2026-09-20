@@ -11,11 +11,10 @@ mod tests {
 
     const CLI_NAME: &str = "agent-collaboration";
 
-    /// Closed flag vocabularies the skill states in prose or examples.
+    /// Supported CLI vocabularies checked when a skill invocation uses the flag.
     ///
-    /// Hard-coded rather than scraped so a reworded sentence cannot silently drop a
-    /// value. Sources: `references/message-board.md` (`--role`, `--lifetime`,
-    /// `--deliver`), `references/session-messaging.md` (`--access`, `--source`).
+    /// Hard-coded rather than scraped so a reworded sentence cannot silently accept
+    /// an unsupported value.
     const CLOSED_FLAG_VALUES: &[(&str, &[&str])] = &[
         (
             "--role",
@@ -257,9 +256,8 @@ mod tests {
         // Arrange
         let invocations = skill_invocations();
         assert!(
-            invocations.len() >= 20,
-            "the skill parser found only {} invocations; the extractor is broken",
-            invocations.len()
+            !invocations.is_empty(),
+            "the skill must retain its CLI help entrypoint; extractor breadth is covered by the dedicated fixture"
         );
         let mut flags_by_path: BTreeMap<Vec<String>, BTreeSet<String>> = BTreeMap::new();
         for invocation in &invocations {
