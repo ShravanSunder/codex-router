@@ -251,7 +251,7 @@ impl MessageSession {
             let resumed = self
                 .call(
                     NativeOperation::ResumeThread,
-                    json!({"threadId":id}),
+                    json!({"threadId":id,"excludeTurns":true}),
                     "resume",
                 )
                 .await?;

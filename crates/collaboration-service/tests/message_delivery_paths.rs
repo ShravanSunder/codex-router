@@ -86,6 +86,7 @@ async fn auto_resume_preserves_effect_when_submission_rejected() {
         error["clientUserMessageId"],
         requests[2]["params"]["clientUserMessageId"]
     );
+    assert_eq!(requests[1]["params"]["excludeTurns"], true);
 }
 #[tokio::test]
 async fn lost_resume_receipt_never_submits_input() {
@@ -107,6 +108,7 @@ async fn lost_resume_receipt_never_submits_input() {
         json!({"resume":"unknown","submission":"notDispatched"})
     );
     assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["params"]["excludeTurns"], true);
 }
 #[tokio::test]
 async fn auto_active_steers_exact_turn_without_loading_history() {

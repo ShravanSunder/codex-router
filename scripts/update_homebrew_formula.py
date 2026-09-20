@@ -106,9 +106,9 @@ def update_codex_router_formula(
             1,
         )
 
-    legacy_binary_install = '    bin.install "agent-sessions"'
+    legacy_binary_install = '    bin.install "agent-session"'
     collaboration_binary_install = '    bin.install "agent-collaboration"'
-    session_binary_install = '    bin.install "agent-session"'
+    session_binary_install = '    bin.install "agent-sessions"'
     if legacy_binary_install in updated_formula:
         replacement = (
             ""
