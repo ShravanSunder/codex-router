@@ -28,11 +28,12 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         .with_board_store(Arc::clone(&store));
     let service = LocalControlService::bind(&root.join("control.sock"), identity)?;
     let manifest = serde_json::from_value(serde_json::json!({
-        "version":1,
+        "version":2,
         "serviceId":SERVICE_ID,
         "serviceEpoch":SERVICE_EPOCH,
         "control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
     }))?;
     let publication = ManifestPublication::publish(&root, &manifest)?;
     let stop = CancellationToken::new();

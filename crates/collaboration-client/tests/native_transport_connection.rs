@@ -47,7 +47,7 @@ async fn client_opens_advertised_native_websocket_without_protocol_initializatio
         .unwrap_or_else(|error| panic!("register: {error}"));
     let listener = LocalControlService::bind(&root.join("control.sock"), identity)
         .unwrap_or_else(|error| panic!("bind: {error}"));
-    let manifest=serde_json::from_value(serde_json::json!({"version":1,"serviceId":"00000000-0000-4000-8000-000000000001","serviceEpoch":"00000000-0000-4000-8000-000000000002","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest})).unwrap_or_else(|error|panic!("manifest: {error}"));
+    let manifest=serde_json::from_value(serde_json::json!({"version":2,"serviceId":"00000000-0000-4000-8000-000000000001","serviceEpoch":"00000000-0000-4000-8000-000000000002","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap_or_else(|error|panic!("manifest: {error}"));
     let publication = ManifestPublication::publish(&root, &manifest)
         .unwrap_or_else(|error| panic!("publish: {error}"));
     let stop = tokio_util::sync::CancellationToken::new();
@@ -119,11 +119,12 @@ async fn client_rejects_unavailable_and_escaped_native_endpoints_without_connect
     let listener = LocalControlService::bind(&root.join("control.sock"), identity)
         .unwrap_or_else(|error| panic!("bind: {error}"));
     let manifest = serde_json::from_value(serde_json::json!({
-        "version":1,
+        "version":2,
         "serviceId":"00000000-0000-4000-8000-000000000011",
         "serviceEpoch":"00000000-0000-4000-8000-000000000012",
         "control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest
+        "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
     .unwrap_or_else(|error| panic!("manifest: {error}"));
     let publication = ManifestPublication::publish(&root, &manifest)

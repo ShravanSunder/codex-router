@@ -140,7 +140,11 @@ impl PendingAcpPrompt {
         if message.get("id").is_some() && message.get("method").is_some() {
             if matches!(
                 message.get("method").and_then(Value::as_str),
-                Some("item/commandExecution/requestApproval" | "item/fileChange/requestApproval")
+                Some(
+                    "item/commandExecution/requestApproval"
+                        | "item/fileChange/requestApproval"
+                        | "item/permissions/requestApproval"
+                )
             ) {
                 let params = message
                     .get("params")

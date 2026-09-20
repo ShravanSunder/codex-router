@@ -8,3 +8,16 @@ status-level = "slow"
 final-status-level = "slow"
 # Reporting only: process/PTY deadlines are owned by their permanent tests.
 slow-timeout = "60s"
+
+# These suites own subprocesses, process groups, PTYs, fixed readiness budgets,
+# and loopback/Unix listeners. Running them against each other creates host-level
+# scheduling starvation that their semantic deadlines correctly report as failure.
+# Keep only this resource-heavy group mutually exclusive; the rest of the workspace
+# remains fully parallel.
+[test-groups]
+process-runtime = { max-threads = 1 }
+
+[[profile.ci.overrides]]
+filter = "binary(update_reexec) | binary(runtime_restart) | binary(compiled_cli_host_acceptance) | binary(quota_reset_pty_test)"
+test-group = "process-runtime"
+threads-required = "num-test-threads"

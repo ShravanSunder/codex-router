@@ -14,6 +14,7 @@ async fn cli_configures_and_inspects_future_attempt_budgets()
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("absent.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
     })
     .await?;

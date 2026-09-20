@@ -84,6 +84,7 @@ pub(super) async fn run_update_case(
         HostConfig::new(HostConfigInputs {
             coordination_paths: coordination_paths.clone(),
             router_endpoint: router.address(),
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable: managed_executable.clone(),
             deadlines: HostDeadlines::new(HostDeadlineInputs {

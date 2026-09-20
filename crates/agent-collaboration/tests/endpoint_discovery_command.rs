@@ -69,7 +69,7 @@ async fn executable_discovers_an_isolated_published_service() {
     let endpoints = identity.endpoint_directory();
     let listener = LocalControlService::bind(&root.join("control.sock"), identity)
         .unwrap_or_else(|e| panic!("bind: {e}"));
-    let manifest=serde_json::from_value(serde_json::json!({"version":1,"serviceId":"00000000-0000-4000-8000-000000000001","serviceEpoch":"00000000-0000-4000-8000-000000000002","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest})).unwrap_or_else(|e|panic!("manifest: {e}"));
+    let manifest=serde_json::from_value(serde_json::json!({"version":2,"serviceId":"00000000-0000-4000-8000-000000000001","serviceEpoch":"00000000-0000-4000-8000-000000000002","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap_or_else(|e|panic!("manifest: {e}"));
     let publication =
         ManifestPublication::publish(&root, &manifest).unwrap_or_else(|e| panic!("publish: {e}"));
     let stop = tokio_util::sync::CancellationToken::new();

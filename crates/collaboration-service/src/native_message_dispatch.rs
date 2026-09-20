@@ -1,8 +1,5 @@
 //! Native message composition with explicit delivery and retained partial effects.
-use crate::{
-    agent_declaration::render_message, message_effect_state::MessageEffects,
-    native_control_dispatch::NativeControlRequest,
-};
+use crate::{message_effect_state::MessageEffects, native_control_dispatch::NativeControlRequest};
 use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
@@ -54,7 +51,8 @@ pub(crate) async fn dispatch_message(request: NativeControlRequest<'_>) -> Value
     {
         return effects.failure("unsupportedCapability", "queue");
     }
-    let Ok(rendered) = render_message(&params.target, &params.message) else {
+    let Ok(rendered) = collaboration_protocol::render_message(&params.target, &params.message)
+    else {
         return effects.failure("overloaded", "inspect");
     };
     let correlation = match &params.client_user_message_id {

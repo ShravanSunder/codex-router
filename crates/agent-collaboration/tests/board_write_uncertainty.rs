@@ -97,11 +97,12 @@ async fn run_lost_project_create(
     let listener = tokio::net::UnixListener::bind(root.join("control.sock"))?;
     let digest = format!("sha256:{}", "a".repeat(64));
     let manifest = serde_json::from_value(json!({
-        "version":1,
+        "version":2,
         "serviceId":SERVICE_ID,
         "serviceEpoch":SERVICE_EPOCH,
         "control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
     }))?;
     let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)?;
     let fixture_digest = digest.clone();
@@ -211,9 +212,10 @@ async fn run_known_project_rejection() -> TestResult<std::process::Output> {
     let listener = tokio::net::UnixListener::bind(root.join("control.sock"))?;
     let digest = format!("sha256:{}", "b".repeat(64));
     let manifest = serde_json::from_value(json!({
-        "version":1,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
+        "version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
         "control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
     }))?;
     let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)?;
     let fixture = tokio::spawn(async move {

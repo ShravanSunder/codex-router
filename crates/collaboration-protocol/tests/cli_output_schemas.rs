@@ -8,6 +8,11 @@ fn cli_catalog_covers_closed_envelopes_and_pinned_acp_variants() {
     assert!(!finite.is_valid(&serde_json::json!({"kind":"result","result":{},"unexpected":true})));
     let id = "00000000-0000-4000-8000-000000000001";
     let target = serde_json::json!({"endpoint":{"serviceId":id,"endpointId":"codex-local"},"sessionId":"thread"});
+    assert!(finite.is_valid(&serde_json::json!({
+        "kind":"error",
+        "target":target,
+        "error":{"kind":"unavailable","effect":"unknown"}
+    })));
     let observation = validator("NativeObservationRecord");
     assert!(observation.is_valid(&serde_json::json!({"kind":"listenerReady","target":target,"generation":{"serviceEpoch":id,"generation":1}})));
     assert!(
@@ -24,8 +29,41 @@ fn cli_catalog_covers_closed_envelopes_and_pinned_acp_variants() {
     assert!(conversation.is_valid(&serde_json::json!({"kind":"promptResult","target":target,"effectiveModel":"gpt-5.6-sol","effectiveEffort":"medium","effectiveAccess":null,"settingsObservation":{"kind":"unavailable","reason":"noRecordedAccessRoute"},"idleSeconds":0,"result":{"stopReason":"end_turn"}})));
     assert!(!conversation.is_valid(&serde_json::json!({"kind":"promptResult","target":target,"effectiveModel":"gpt-5.6-sol","effectiveEffort":"medium","effectiveAccess":null,"settingsObservation":{"kind":"unavailable","reason":"inventedReason"},"idleSeconds":0,"result":{"stopReason":"end_turn"}})));
     assert!(!conversation.is_valid(&serde_json::json!({"kind":"sessionUpdate","target":target,"update":{"sessionUpdate":"invented"}})));
-    assert!(conversation.is_valid(&serde_json::json!({"kind":"conversationError","target":null,"stage":"connect","effect":"notDispatched","message":"Unavailable"})));
-    assert!(!conversation.is_valid(&serde_json::json!({"kind":"conversationError","stage":"connect","effect":"notDispatched","message":"Unavailable"})));
+    assert!(!conversation.is_valid(&serde_json::json!({"kind":"conversationError","target":null,"stage":"connect","effect":"notDispatched","message":"Unavailable"})));
+    assert!(!conversation.is_valid(&serde_json::json!({"kind":"conversationError","target":null,"error":{"kind":"unavailable"}})));
+
+    // These are the machine records emitted after the normal ACP event stream.
+    // Keep the export bound to that real CLI contract rather than a stale
+    // fixture-only subset of its variants.
+    assert!(conversation.is_valid(&serde_json::json!({
+        "kind":"conversationCreated",
+        "target":target,
+    })));
+    assert!(conversation.is_valid(&serde_json::json!({
+        "kind":"conversationSettlement",
+        "target":target,
+        "terminalReason":"cancelled",
+        "result":{"stopReason":"cancelled"},
+    })));
+    assert!(conversation.is_valid(&serde_json::json!({
+        "kind":"conversationSettlement",
+        "target":target,
+        "terminalReason":"timedOut",
+        "result":{"stopReason":"cancelled"},
+    })));
+    assert!(conversation.is_valid(&serde_json::json!({
+        "kind":"conversationError",
+        "target":null,
+        "error":{
+            "kind":"unavailable",
+            "serviceKind":null,
+            "stage":"transport",
+            "effect":"unknown",
+            "message":"connection lost",
+            "code":null,
+            "data":null,
+        },
+    })));
 }
 
 /// One real sample per command kind, and no wrapper key left under `result`.

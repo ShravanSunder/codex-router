@@ -1,5 +1,7 @@
 //! CLI envelopes; operation payloads retain their Control/native/ACP contracts.
-use crate::{CodexGeneration, NonEmptyText, RouterAccess, SessionRef, SettingsObservation};
+use crate::{
+    AdapterOperationFailure, CodexGeneration, RouterAccess, SessionRef, SettingsObservation,
+};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -19,6 +21,9 @@ pub enum FiniteCommandRecord<TResult, TError> {
         result: TResult,
     },
     Error {
+        /// Known operation target retained when failure follows target resolution.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        target: Option<SessionRef>,
         error: TError,
     },
 }
@@ -55,6 +60,9 @@ pub enum ObservationCloseReason {
     deny_unknown_fields
 )]
 pub enum ConversationRecord {
+    ConversationCreated {
+        target: SessionRef,
+    },
     SessionReady {
         target: SessionRef,
     },
@@ -81,12 +89,23 @@ pub enum ConversationRecord {
         #[schemars(schema_with = "acp_result_schema")]
         result: Value,
     },
+    ConversationSettlement {
+        target: SessionRef,
+        terminal_reason: ConversationTerminalReason,
+        #[schemars(schema_with = "acp_result_schema")]
+        result: Value,
+    },
     ConversationError {
         target: Option<SessionRef>,
-        stage: ConversationStage,
-        effect: ConversationEffect,
-        message: NonEmptyText,
+        error: AdapterOperationFailure,
     },
+}
+
+#[derive(JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConversationTerminalReason {
+    Cancelled,
+    TimedOut,
 }
 /// One resume's reasoning-effort change, as the caller asked and the thread held.
 #[derive(JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -94,23 +113,6 @@ pub enum ConversationRecord {
 pub struct EffortChange {
     pub previous: String,
     pub requested: String,
-}
-
-#[derive(JsonSchema, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ConversationStage {
-    Connect,
-    Initialize,
-    New,
-    Load,
-    Prompt,
-    Cancel,
-}
-#[derive(JsonSchema, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ConversationEffect {
-    NotDispatched,
-    Unknown,
 }
 
 fn acp_update_schema(_: &mut SchemaGenerator) -> Schema {

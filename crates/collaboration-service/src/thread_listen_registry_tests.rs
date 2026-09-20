@@ -110,6 +110,12 @@ impl ListenFixture {
     }
 
     async fn finish(self) {
+        for _ in 0..1024 {
+            if Arc::strong_count(&self.store) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         Arc::try_unwrap(self.store)
             .ok()
             .unwrap()
@@ -687,6 +693,12 @@ async fn drive_session_delivery(
     }
     for _ in 0..minutes {
         if settled(&records.lock().await) {
+            // Finalization is published before the detached delivery task drops
+            // its last store reference. Let that task finish so fixture cleanup
+            // observes ownership rather than racing publication.
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
             return;
         }
         tokio::time::advance(std::time::Duration::from_secs(60)).await;

@@ -176,6 +176,9 @@ pub fn run_endpoint_command(arguments: Vec<OsString>) -> i32 {
         Err(ClientError::Rejected { .. }) => {
             report_failure("rejected", "Endpoint discovery rejected", 4, machine_output)
         }
+        Err(ClientError::Protocol(message)) => {
+            report_failure("unavailable", message, 3, machine_output)
+        }
         Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
             &error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,

@@ -16,6 +16,7 @@ async fn host_persists_configured_budgets_and_loads_them_on_restart()
             directory: root.clone(),
             codex_home: root.clone(),
             backend_socket: root.join("absent.sock"),
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
         })
         .await?;

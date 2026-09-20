@@ -26,6 +26,7 @@ async fn owned_host_automatically_prunes_events_without_deleting_current_state()
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("unavailable.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
     })
     .await?;
