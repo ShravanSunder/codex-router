@@ -158,34 +158,59 @@ async fn worker_timeout_crash_child() -> TestResult<()> {
     let listener = tokio::net::UnixListener::bind(&socket)?;
     let witness = root.join("interrupt-witness.json");
     let _backend = tokio::spawn(async move {
-        for method in ["thread/read", "turn/interrupt"] {
-            let (stream, _) = listener.accept().await?;
-            let mut stream = tokio_tungstenite::accept_async(stream).await?;
-            let request = request_after_initialize(&mut stream).await?;
-            if request.get("method").and_then(Value::as_str) != Some(method) {
-                return Err("unexpected native method".into());
-            }
-            let result = if method == "thread/read" {
-                history("inProgress")
-            } else {
-                if request.pointer("/params/threadId").and_then(Value::as_str)
-                    != Some("recorded-thread")
-                    || request.pointer("/params/turnId").and_then(Value::as_str)
-                        != Some("recorded-turn")
-                {
-                    return Err("wrong interrupt identity".into());
-                }
-                std::fs::write(&witness, serde_json::to_vec(&request)?)?;
-                json!({})
-            };
-            stream
-                .send(Message::Text(
-                    json!({"id":request.get("id"),"result":result})
-                        .to_string()
-                        .into(),
-                ))
-                .await?;
+        let (stream, _) = listener.accept().await?;
+        let mut stream = tokio_tungstenite::accept_async(stream).await?;
+        let request = request_after_initialize(&mut stream).await?;
+        if request.get("method").and_then(Value::as_str) != Some("thread/read")
+            || request.pointer("/params/threadId").and_then(Value::as_str)
+                != Some("recorded-thread")
+            || request.pointer("/params/includeTurns") != Some(&json!(false))
+        {
+            return Err("worker observation did not load thread metadata".into());
         }
+        stream
+            .send(Message::Text(
+                json!({"id":request.get("id"),"result":{"thread":{"id":"recorded-thread","model":"gpt-5.6-sol","reasoningEffort":"medium"}}})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        let request: Value =
+            serde_json::from_str(stream.next().await.ok_or("turn page missing")??.to_text()?)?;
+        if request.get("method").and_then(Value::as_str) != Some("thread/turns/list")
+            || request.pointer("/params/threadId") != Some(&json!("recorded-thread"))
+            || request.pointer("/params/cursor") != Some(&Value::Null)
+            || request.pointer("/params/limit") != Some(&json!(1))
+            || request.pointer("/params/sortDirection") != Some(&json!("desc"))
+            || request.pointer("/params/itemsView") != Some(&json!("full"))
+        {
+            return Err("worker observation did not request the bounded full turn page".into());
+        }
+        stream
+            .send(Message::Text(
+                json!({"id":request.get("id"),"result":{"data":[{"id":"recorded-turn","status":"inProgress","items":[]}],"nextCursor":null}})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        let (stream, _) = listener.accept().await?;
+        let mut stream = tokio_tungstenite::accept_async(stream).await?;
+        let request = request_after_initialize(&mut stream).await?;
+        if request.get("method").and_then(Value::as_str) != Some("turn/interrupt")
+            || request.pointer("/params/threadId").and_then(Value::as_str)
+                != Some("recorded-thread")
+            || request.pointer("/params/turnId").and_then(Value::as_str) != Some("recorded-turn")
+        {
+            return Err("wrong interrupt identity".into());
+        }
+        std::fs::write(&witness, serde_json::to_vec(&request)?)?;
+        stream
+            .send(Message::Text(
+                json!({"id":request.get("id"),"result":{}})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     });
     let worker = fixture_worker(
@@ -222,12 +247,54 @@ async fn recover(root: &Path) -> TestResult<()> {
             if request.get("method").and_then(Value::as_str) != Some("thread/read")
                 || request.pointer("/params/threadId").and_then(Value::as_str)
                     != Some("recorded-thread")
+                || request.pointer("/params/includeTurns") != Some(&json!(false))
             {
                 return Err("recovery resent interrupt or read another thread".into());
             }
             stream
                 .send(Message::Text(
-                    json!({"id":request.get("id"),"result":history(status)})
+                    json!({"id":request.get("id"),"result":{"thread":{"id":"recorded-thread","model":"gpt-5.6-sol","reasoningEffort":"medium"}}})
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+            let request: Value =
+                serde_json::from_str(stream.next().await.ok_or("turn page missing")??.to_text()?)?;
+            if request.get("method").and_then(Value::as_str) != Some("thread/turns/list")
+                || request.pointer("/params/threadId") != Some(&json!("recorded-thread"))
+                || request.pointer("/params/cursor") != Some(&Value::Null)
+                || request.pointer("/params/limit") != Some(&json!(1))
+                || request.pointer("/params/sortDirection") != Some(&json!("desc"))
+                || request.pointer("/params/itemsView") != Some(&json!("full"))
+            {
+                return Err("recovery did not request the bounded full turn page".into());
+            }
+            stream
+                .send(Message::Text(
+                    json!({"id":request.get("id"),"result":{"data":[{"id":"unrelated-turn","status":"completed","items":[]}],"nextCursor":"older"}})
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+            let request: Value = serde_json::from_str(
+                stream
+                    .next()
+                    .await
+                    .ok_or("second turn page missing")??
+                    .to_text()?,
+            )?;
+            if request.get("method").and_then(Value::as_str) != Some("thread/turns/list")
+                || request.pointer("/params/threadId") != Some(&json!("recorded-thread"))
+                || request.pointer("/params/cursor") != Some(&json!("older"))
+                || request.pointer("/params/limit") != Some(&json!(1))
+                || request.pointer("/params/sortDirection") != Some(&json!("desc"))
+                || request.pointer("/params/itemsView") != Some(&json!("full"))
+            {
+                return Err("recovery did not follow the next turn cursor".into());
+            }
+            stream
+                .send(Message::Text(
+                    json!({"id":request.get("id"),"result":{"data":[{"id":"recorded-turn","status":status,"items":[]}],"nextCursor":null}})
                         .to_string()
                         .into(),
                 ))
@@ -278,9 +345,6 @@ async fn recover(root: &Path) -> TestResult<()> {
     drop(store);
     Ok(())
 }
-fn history(status: &str) -> Value {
-    json!({"thread":{"id":"recorded-thread","model":"gpt-5.6-sol","reasoningEffort":"medium","turns":[{"id":"unrelated-turn","status":"completed","items":[]},{"id":"recorded-turn","status":status,"items":[]}]}})
-}
 async fn request_after_initialize(
     stream: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
 ) -> TestResult<Value> {
@@ -314,6 +378,7 @@ fn fixture_worker(
     let mut definitions = serde_json::Map::new();
     for name in [
         "ThreadRead",
+        "ThreadTurnsList",
         "ThreadResume",
         "ThreadStart",
         "ThreadLoadedList",
