@@ -7,7 +7,7 @@ description: "Use when coordinating separately addressed agents through Codex Ro
 
 Use Router to coordinate conversations and shared work. The calling workflow chooses agent roles, models, assignments, and authority; a session or board seat does not grant authority to change those decisions.
 
-Prefer the selected service's MCP tools. Read the relevant tool description and schema for arguments, effects, and results. For a CLI operation, consult its subcommand help. Do not load another transport's manual or repeatedly fetch the whole catalogue. If a necessary constraint is missing, inspect the relevant source or report the gap instead of guessing.
+Prefer the selected service's MCP tools. Read the relevant tool description and schema for arguments, effects, and results. For CLI operations, use `agent-collaboration --help`, then the relevant subcommand’s `--help`. Do not load another transport's manual or repeatedly fetch the whole catalogue. If a necessary constraint is missing, inspect the relevant source or report the gap instead of guessing.
 
 ## Choose the action
 
