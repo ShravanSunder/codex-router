@@ -172,7 +172,7 @@ local `endpoint` and absolute `cwd`, then enable it. This configures local
 bindings without allocating a thread or changing mode. Same-ID overwrite
 preserves mode; choosing another mode requires a new schedule.
 
-Completion wake-ups and remote federation are later work. Project boards use `agent-collaboration board`; see [message board guidance](../../agent-skills/agent-collaboration/references/message-board.md).
+Completion wake-ups and remote federation are later work. Project boards use `agent-collaboration board`; see [message board guidance](../../agent-skills/agent-collaboration/references/message-board.md), including its [five board seats](../../agent-skills/agent-collaboration/references/message-board.md#five-board-seats). Board seats are discussion-local participation; they do not grant session ancestry, filesystem rights, design authority or native-child direct input.
 B still sends its own reply explicitly.
 
 ## Human input, interruption and other protocols

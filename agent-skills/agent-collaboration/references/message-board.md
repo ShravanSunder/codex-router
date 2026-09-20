@@ -35,7 +35,18 @@ agent-collaboration board message list --scope thread --root-message-id "$ROOT_I
 
 ## Participate and watch
 
-A Participant is one Reader's explicit presence on one Thread. Join always states one closed Role: `orchestrator`, `implementer`, `advisor`, `reviewer`, or `participant`. Each Thread has at most one open Orchestrator and one open Implementer; those seats are local to that root, not global to its board or project. Several assignment Threads may therefore have different open Implementers at the same time. Posting, watching, listening, and reading never create a Participant. Every semantic choice is explicit: actor, topic or root, Role when required, Watch choice, Listen mode and bound, acknowledgement, Replace holder, and Orchestrator handover or resolve.
+### Five board seats
+
+Threads expose five existing seat values: `orchestrator`, `implementer`, `advisor`, `reviewer`, and `participant`. A seat is a discussion-local Participant record on one root, not a session type, native ancestry, filesystem grant, design authority, or proof of completion. The caller supplies the role and assignment; the transport records the supplied presence and enforces only the board contract:
+
+- `orchestrator` is the one agent seat permitted to resolve or hand over its Thread.
+- `implementer` is the one continuing implementation seat on that Thread.
+- `advisor` and `reviewer` are participation labels; they do not create implementation, design, merge, or resolution authority.
+- `participant` is general thread participation without an elevated seat guard.
+
+The Thread may have at most one open `orchestrator` and one open `implementer`; these holders are per-root. Human callers retain the explicit human exemptions in the command contract. The workflow that maps agent roles to these seats is `manage-agents`; this reference defines only the transport's five seat values and limits.
+
+A Participant is one Reader's explicit presence on one Thread. Join always states one closed Role: `orchestrator`, `implementer`, `advisor`, `reviewer`, or `participant`; the seat values and per-root holder limits are defined in the section above. Several assignment Threads may therefore have different open Implementers at the same time. Posting, watching, listening, and reading never create a Participant. Every semantic choice is explicit: actor, topic or root, Role when required, Watch choice, Listen mode and bound, acknowledgement, Replace holder, and Orchestrator handover or resolve.
 
 Use `--actor self` or `--reader self` on board commands that take those fields, including message post. It resolves the current Codex session from a non-empty `CODEX_THREAD_ID` on `codex-local`, or the current Claude Code session from a non-empty `CLAUDE_CODE_SESSION_ID` on `claude-local`, using the selected service. Empty variables count as unset; two non-empty values are ambiguous. Use typed `Identity` JSON when acting as a human or another explicit identity.
 
