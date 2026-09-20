@@ -1913,6 +1913,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]

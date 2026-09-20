@@ -13,6 +13,7 @@ pub mod provider_error;
 pub mod routes;
 mod secret_store_factory;
 pub mod server;
+pub mod session_account_affinity_cache;
 pub mod telemetry;
 #[cfg(test)]
 mod test_log_capture;
@@ -2337,7 +2338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_cache_account_affinity_reuses_mapped_account_inside_sixty_five_minutes() {
+    async fn prompt_cache_account_affinity_reuses_mapped_account_inside_two_hours() {
         let temp_dir = ProxyTestTempDir::new("prompt_cache_account_affinity_reuses_inside_ttl");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
@@ -2395,7 +2396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_cache_account_affinity_expires_at_exactly_sixty_five_minutes() {
+    async fn prompt_cache_account_affinity_expires_at_exactly_two_hours() {
         let temp_dir = ProxyTestTempDir::new("prompt_cache_account_affinity_expires_at_ttl");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
@@ -5842,6 +5843,191 @@ mod tests {
     }
 
     #[test]
+    fn assembled_http_runtime_reuses_live_session_affinity_and_persists_timestamp() {
+        const RETENTION_NOW: u64 = 10 * 86_400;
+        const EVENT_RETENTION: u64 = 7 * 86_400;
+        let temp_dir = ProxyTestTempDir::new("runtime_http_session_affinity");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = SqliteStateStore::open(&database_path).expect("state store should open");
+        let secrets = FileSecretStore::open(&secret_path).expect("secret store should open");
+        let alpha = AccountRecord::new(
+            account_id("acct_http_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(account_id("acct_http_beta"), "beta", AccountStatus::Enabled);
+        persist_account_with_snapshot_and_token(&state, &secrets, &alpha, 50, "http-alpha-token");
+        persist_account_with_snapshot_and_token(&state, &secrets, &beta, 50, "http-beta-token");
+        drop(state);
+        seed_completed_active_session(
+            &database_path,
+            alpha.account_id(),
+            "startup-expired",
+            1,
+            RETENTION_NOW - EVENT_RETENTION - 1,
+        );
+        seed_completed_active_session(
+            &database_path,
+            alpha.account_id(),
+            "startup-exact-cutoff",
+            2,
+            RETENTION_NOW - EVENT_RETENTION,
+        );
+
+        let upstream_listener =
+            TcpListener::bind("127.0.0.1:0").expect("mock upstream should bind");
+        let upstream_address = upstream_listener
+            .local_addr()
+            .expect("mock upstream address should read");
+        let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (mut first_stream, _) = upstream_listener
+                .accept()
+                .expect("mock upstream should accept first connection");
+            let first_request = read_test_http_request(&mut first_stream);
+            upstream_sender
+                .send(first_request)
+                .expect("first request should record");
+
+            let (mut second_stream, _) = upstream_listener
+                .accept()
+                .expect("mock upstream should accept second connection");
+            let second_request = read_test_http_request(&mut second_stream);
+            upstream_sender
+                .send(second_request)
+                .expect("second request should record");
+
+            for stream in [&mut second_stream, &mut first_stream] {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .expect("mock upstream should write response");
+            }
+        });
+        let endpoint = UpstreamEndpoint::new(format!("http://{upstream_address}/v1"))
+            .expect("mock endpoint should validate");
+        let bind_address =
+            LoopbackBindAddress::new("127.0.0.1", 0).expect("router bind address should validate");
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path.clone(),
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(RETENTION_NOW, 60);
+        let runtime = LoopbackRouterRuntime::start(config).expect("router runtime should start");
+        wait_for_active_session_absent(&database_path, "startup-expired");
+        assert!(
+            active_session_reservation_ids(&database_path)
+                .iter()
+                .any(|reservation_id| reservation_id == "startup-exact-cutoff"),
+            "startup maintenance must preserve the exact-cutoff completed session"
+        );
+        seed_completed_active_session(
+            &database_path,
+            alpha.account_id(),
+            "first-accepted-expired",
+            3,
+            RETENTION_NOW - EVENT_RETENTION - 1,
+        );
+        let router_address = runtime.local_addr();
+        let runtime_thread = thread::spawn(move || runtime.serve_protocol_connections(2));
+        let first_client = thread::spawn(move || {
+            send_loopback_request_with_session(
+                router_address,
+                "assembled-http-session",
+                br#"{"model":"gpt-5","turn":1}"#,
+            )
+        });
+        let first_request = upstream_receiver
+            .recv()
+            .expect("first upstream request should record");
+        wait_for_active_session_absent(&database_path, "first-accepted-expired");
+        seed_completed_active_session(
+            &database_path,
+            alpha.account_id(),
+            "accepted-expired",
+            4,
+            RETENTION_NOW - EVENT_RETENTION - 1,
+        );
+        let second_client = thread::spawn(move || {
+            send_loopback_request_with_session(
+                router_address,
+                "assembled-http-session",
+                br#"{"model":"gpt-5","turn":2}"#,
+            )
+        });
+
+        assert_eq!(
+            runtime_thread
+                .join()
+                .expect("runtime thread should not panic")
+                .expect("runtime should serve two connections"),
+            2
+        );
+        for client in [first_client, second_client] {
+            assert!(
+                client
+                    .join()
+                    .expect("client thread should not panic")
+                    .starts_with("HTTP/1.1 200 OK\r\n")
+            );
+        }
+        let second_request = upstream_receiver
+            .recv()
+            .expect("second upstream request should record");
+        for (request, expected_body) in [
+            (&first_request, r#"{"model":"gpt-5","turn":1}"#),
+            (&second_request, r#"{"model":"gpt-5","turn":2}"#),
+        ] {
+            assert!(request.contains("authorization: Bearer http-alpha-token\r\n"));
+            assert!(request.ends_with(expected_body));
+        }
+        assert!(!second_request.contains("http-beta-token"));
+        assert!(
+            !active_session_reservation_ids(&database_path)
+                .iter()
+                .any(|reservation_id| reservation_id == "accepted-expired"),
+            "accepted-connection maintenance must delete newly eligible completed sessions"
+        );
+        assert!(
+            active_session_reservation_ids(&database_path)
+                .iter()
+                .any(|reservation_id| reservation_id == "startup-exact-cutoff"),
+            "accepted-connection maintenance must preserve exact-cutoff sessions"
+        );
+
+        upstream_thread
+            .join()
+            .expect("upstream thread should not panic");
+        let observation_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("observation runtime should build");
+        let persisted = observation_runtime.block_on(async {
+            let state = AsyncSqliteStateStore::open(&database_path)
+                .await
+                .expect("async state should open");
+            state
+                .load_session_account_affinity("assembled-http-session")
+                .await
+                .expect("session affinity should load")
+        });
+        assert_eq!(
+            persisted,
+            Some(SessionAccountAffinity::new(
+                "assembled-http-session",
+                alpha.account_id().clone(),
+                RETENTION_NOW,
+            ))
+        );
+    }
+
+    #[test]
     fn assembled_loopback_router_runtime_writes_redacted_private_audit_events() {
         let temp_dir = ProxyTestTempDir::new("assembled_runtime_audit");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -6350,8 +6536,20 @@ mod tests {
             if let Err(error) = upstream_sender.send((first_frame.to_string(), None)) {
                 panic!("mock websocket upstream first frame should record: {error}");
             }
+            if let Err(error) = websocket.send(Message::text(r#"{"type":"session.ready"}"#)) {
+                panic!("mock websocket upstream should send ready response: {error}");
+            }
+            let established_frame = match websocket.read() {
+                Ok(message) => message,
+                Err(error) => {
+                    panic!("mock websocket upstream should read established frame: {error}")
+                }
+            };
+            if let Err(error) = upstream_sender.send((established_frame.to_string(), None)) {
+                panic!("mock websocket upstream established frame should record: {error}");
+            }
             if let Err(error) = websocket.send(Message::text(r#"{"type":"response.completed"}"#)) {
-                panic!("mock websocket upstream should send response: {error}");
+                panic!("mock websocket upstream should send completed response: {error}");
             }
         });
 
@@ -6366,20 +6564,21 @@ mod tests {
         let config = LoopbackRouterRuntimeConfig::new(
             bind_address,
             endpoint,
-            database_path,
+            database_path.clone(),
             secret_path,
             LocalRouterTokenRecord::new(
                 SecretString::new("current-token"),
                 TokenGeneration::new(1),
             ),
         )
-        .with_quota_clock(1_030, 60)
         .with_audit_file(audit_path.clone());
         let runtime = match LoopbackRouterRuntime::start(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
         let router_address = runtime.local_addr();
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let (continue_sender, continue_receiver) = mpsc::channel();
         let client_thread = thread::spawn(move || {
             let mut request =
                 match format!("ws://{router_address}/v1/responses").into_client_request() {
@@ -6390,6 +6589,10 @@ mod tests {
                 "Authorization",
                 HeaderValue::from_static("Bearer current-token"),
             );
+            request.headers_mut().insert(
+                "session-id",
+                HeaderValue::from_static("assembled-websocket-session"),
+            );
             let (mut client, _response) = match connect(request) {
                 Ok(connection) => connection,
                 Err(error) => panic!("local websocket client should connect: {error}"),
@@ -6398,19 +6601,54 @@ mod tests {
             if let Err(error) = client.send(Message::text(first_frame)) {
                 panic!("local websocket client should send first frame: {error}");
             }
-            let response = match client.read() {
+            let ready_response = match client.read() {
                 Ok(message) => message.to_string(),
-                Err(error) => panic!("local websocket client should read response: {error}"),
+                Err(error) => panic!("local websocket client should read ready response: {error}"),
             };
+            assert_eq!(ready_response, r#"{"type":"session.ready"}"#);
+            ready_sender
+                .send(())
+                .expect("client should announce established tunnel");
+            continue_receiver
+                .recv()
+                .expect("client should await later activity time");
+            let established_frame = r#"{"type":"response.create","established":true}"#;
+            client
+                .send(Message::text(established_frame))
+                .expect("local websocket client should send established frame");
+            let response = client
+                .read()
+                .expect("local websocket client should read completed response")
+                .to_string();
             if let Err(error) = client.close(None) {
                 panic!("local websocket client should close cleanly: {error}");
             }
             response
         });
 
-        let handled = match runtime.serve_protocol_connections(1) {
-            Ok(handled) => handled,
-            Err(error) => panic!("router runtime should serve websocket connection: {error}"),
+        let runtime_thread = thread::spawn(move || runtime.serve_protocol_connections(1));
+        ready_receiver
+            .recv()
+            .expect("established websocket should report ready");
+        let initial_affinity =
+            wait_for_session_affinity(&database_path, "assembled-websocket-session", |affinity| {
+                affinity.account_id().as_str() == "acct_ws_runtime"
+            });
+        let advance_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while test_unix_seconds() <= initial_affinity.last_seen_unix_seconds() {
+            assert!(
+                std::time::Instant::now() < advance_deadline,
+                "wall clock should advance for established activity proof"
+            );
+            thread::yield_now();
+        }
+        continue_sender
+            .send(())
+            .expect("established websocket should continue");
+        let handled = match runtime_thread.join() {
+            Ok(Ok(handled)) => handled,
+            Ok(Err(error)) => panic!("router runtime should serve websocket connection: {error}"),
+            Err(error) => panic!("router runtime thread panicked: {error:?}"),
         };
         assert_eq!(handled, 1);
         let client_response = match client_thread.join() {
@@ -6432,11 +6670,24 @@ mod tests {
             recorded_first_frame,
             r#"{"type":"response.create","runtime":true}"#
         );
+        let (recorded_established_frame, _) = upstream_receiver
+            .recv()
+            .expect("upstream established frame should record");
+        assert_eq!(
+            recorded_established_frame,
+            r#"{"type":"response.create","established":true}"#
+        );
 
         match upstream_thread.join() {
             Ok(()) => {}
             Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
         }
+
+        let renewed_affinity =
+            wait_for_session_affinity(&database_path, "assembled-websocket-session", |affinity| {
+                affinity.last_seen_unix_seconds() > initial_affinity.last_seen_unix_seconds()
+            });
+        assert_eq!(renewed_affinity.account_id().as_str(), "acct_ws_runtime");
 
         let audit_contents = match fs::read_to_string(&audit_path) {
             Ok(contents) => contents,
@@ -8268,6 +8519,140 @@ mod tests {
         }
 
         response
+    }
+
+    fn send_loopback_request_with_session(
+        server_address: std::net::SocketAddr,
+        session_id: &str,
+        body: &[u8],
+    ) -> String {
+        let mut client =
+            TcpStream::connect(server_address).expect("client should connect to loopback listener");
+        let request = format!(
+            "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nX-Codex-Router-Token: current-token\r\nsession-id: {session_id}\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        client
+            .write_all(request.as_bytes())
+            .expect("client request write should succeed");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client write shutdown should succeed");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("client response read should succeed");
+        response
+    }
+
+    fn wait_for_session_affinity(
+        database_path: &Path,
+        session_id: &str,
+        predicate: impl Fn(&SessionAccountAffinity) -> bool,
+    ) -> SessionAccountAffinity {
+        let observation_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("observation runtime should build");
+        observation_runtime.block_on(async {
+            let state = AsyncSqliteStateStore::open(database_path)
+                .await
+                .expect("async state should open");
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Some(affinity) = state
+                        .load_session_account_affinity(session_id)
+                        .await
+                        .expect("session affinity should load")
+                        && predicate(&affinity)
+                    {
+                        return affinity;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("session affinity observation should arrive")
+        })
+    }
+
+    fn seed_completed_active_session(
+        database_path: &Path,
+        account_id: &AccountId,
+        reservation_id: &str,
+        started_unix_seconds: u64,
+        ended_unix_seconds: u64,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("active-session fixture runtime should build");
+        runtime.block_on(async {
+            let state = AsyncSqliteStateStore::open(database_path)
+                .await
+                .expect("active-session fixture state should open");
+            let reservation_id = ReservationId::new(reservation_id);
+            state
+                .record_active_client_acquired(
+                    "responses",
+                    "retention-fixture",
+                    &reservation_id,
+                    account_id,
+                    started_unix_seconds,
+                    8,
+                )
+                .await
+                .expect("active-session acquisition should persist");
+            state
+                .record_active_client_released(
+                    "responses",
+                    "retention-fixture",
+                    &reservation_id,
+                    ended_unix_seconds,
+                )
+                .await
+                .expect("active-session release should persist");
+            state.close().await.expect("fixture state should close");
+        });
+    }
+
+    fn active_session_reservation_ids(database_path: &Path) -> Vec<String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("active-session observation runtime should build");
+        runtime.block_on(async {
+            let state = AsyncSqliteStateStore::open(database_path)
+                .await
+                .expect("active-session observation state should open");
+            let reservation_ids = state
+                .active_session_events_for_route_band("responses")
+                .await
+                .expect("active-session events should load")
+                .into_iter()
+                .map(|event| event.reservation_id().as_str().to_owned())
+                .collect();
+            state.close().await.expect("observation state should close");
+            reservation_ids
+        })
+    }
+
+    fn wait_for_active_session_absent(database_path: &Path, reservation_id: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if !active_session_reservation_ids(database_path)
+                .iter()
+                .any(|candidate| candidate == reservation_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "maintenance should delete completed session {reservation_id}"
+            );
+            thread::yield_now();
+        }
     }
 
     fn send_loopback_request_with_read_timeout(

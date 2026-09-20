@@ -449,7 +449,16 @@ async fn run_maintenance_actor(
                         receiver.close();
                         break;
                     }
-                    _result = repository.run_maintenance_hint(hint.clone()) => {}
+                    result = repository.run_maintenance_hint(hint.clone()) => {
+                        if result.is_err() {
+                            record_maintenance_lag_observed(
+                                hint.maintenance_class(),
+                                hint.route_band_label(),
+                                "degraded",
+                                lag_millis_since(enqueued_at),
+                            );
+                        }
+                    }
                 }
                 match pending.lock() {
                     Ok(mut pending) => {
@@ -498,6 +507,7 @@ mod tests {
     use super::MaintenanceRepository;
     use super::MaintenanceRepositoryError;
     use crate::test_log_capture::capture_log_output;
+    use crate::test_log_capture::capture_log_output_async;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -861,6 +871,37 @@ mod tests {
         actor.shutdown().await;
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_maintenance_hint_is_degraded_then_allows_a_later_normal_hint() {
+        let (rendered_log, ()) = capture_log_output_async(async {
+            let repository = Arc::new(FailingOnceMaintenanceRepository::default());
+            let actor = MaintenanceActor::start(repository.clone(), 8);
+            let hint = refresh_rollups_hint();
+
+            assert_eq!(
+                actor.try_enqueue(hint.clone()),
+                MaintenanceEnqueueResult::Enqueued
+            );
+            wait_for_maintenance_call(&repository, 1).await;
+            assert_eq!(
+                actor.try_enqueue(hint),
+                MaintenanceEnqueueResult::Enqueued,
+                "a failed hint must remove its pending key before the next normal hint"
+            );
+            wait_for_maintenance_call(&repository, 2).await;
+            assert_eq!(repository.calls.load(Ordering::Acquire), 2);
+
+            actor.shutdown().await;
+        })
+        .await;
+
+        assert!(rendered_log.contains("codex_router.maintenance_degraded"));
+        assert!(rendered_log.contains("active_session_rollup_refresh"));
+        assert!(rendered_log.contains("responses"));
+        assert!(rendered_log.contains("degraded"));
+        assert!(!rendered_log.contains("raw-maintenance-error-canary"));
+    }
+
     #[test]
     fn maintenance_actor_exposes_stale_cleanup_retention_and_compaction_hints() {
         let actor_source = include_str!("maintenance_actor.rs");
@@ -892,6 +933,45 @@ mod tests {
     struct BlockingMaintenanceRepository {
         entered: Notify,
         release: Notify,
+    }
+
+    #[derive(Default)]
+    struct FailingOnceMaintenanceRepository {
+        calls: AtomicUsize,
+    }
+
+    impl MaintenanceRepository for FailingOnceMaintenanceRepository {
+        fn run_maintenance_hint<'a>(
+            &'a self,
+            _hint: MaintenanceHint,
+        ) -> BoxFuture<'a, Result<(), MaintenanceRepositoryError>> {
+            Box::pin(async move {
+                let call_number = self.calls.fetch_add(1, Ordering::AcqRel);
+                if call_number == 0 {
+                    return Err(MaintenanceRepositoryError::State(
+                        codex_router_state::sqlite::StateStoreError::Sqlite {
+                            message: "raw-maintenance-error-canary".to_owned(),
+                        },
+                    ));
+                }
+                Ok(())
+            })
+        }
+    }
+
+    async fn wait_for_maintenance_call(
+        repository: &FailingOnceMaintenanceRepository,
+        expected_calls: usize,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while repository.calls.load(Ordering::Acquire) < expected_calls {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| {
+            panic!("maintenance actor should process hint {expected_calls}")
+        });
     }
 
     impl MaintenanceRepository for BlockingMaintenanceRepository {

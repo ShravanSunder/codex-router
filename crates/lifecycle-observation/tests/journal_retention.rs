@@ -22,12 +22,17 @@ async fn expired_prefix_keeps_checkpoint_and_rejects_old_cursor() {
     let mut journal = ObservationJournal::open(&path, id())
         .await
         .unwrap_or_else(|e| panic!("open: {e}"));
+    let cutoff = 10 * 86400;
     journal
-        .append(&observation(json!({"kind":"threadDiscovered"})), 1)
+        .append(&observation(json!({"kind":"threadDiscovered"})), cutoff - 1)
         .await
         .unwrap_or_else(|e| panic!("append: {e}"));
     journal
-        .append(&observation(json!({"kind":"threadArchived"})), 40 * 86400)
+        .append(&observation(json!({"kind":"threadArchived"})), cutoff)
+        .await
+        .unwrap_or_else(|e| panic!("append: {e}"));
+    journal
+        .append(&observation(json!({"kind":"threadDiscovered"})), cutoff + 1)
         .await
         .unwrap_or_else(|e| panic!("append: {e}"));
     assert_eq!(
@@ -41,13 +46,16 @@ async fn expired_prefix_keeps_checkpoint_and_rejects_old_cursor() {
         journal.read_after(0, 100).await,
         Err(JournalError::HistoryExpired)
     ));
+    let retained = journal
+        .read_after(1, 100)
+        .await
+        .unwrap_or_else(|e| panic!("suffix: {e}"));
     assert_eq!(
-        journal
-            .read_after(1, 100)
-            .await
-            .unwrap_or_else(|e| panic!("suffix: {e}"))
-            .len(),
-        1
+        retained
+            .iter()
+            .map(|row| row.retention_at)
+            .collect::<Vec<_>>(),
+        vec![cutoff, cutoff + 1]
     );
     journal.close().await;
     let mut journal = ObservationJournal::open(&path, id())
