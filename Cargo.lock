@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-automation"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "agent-collaboration"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -181,7 +181,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "automation-storage"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -395,7 +395,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codex-acp-adapter"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "codex-native-integration"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "futures-util",
  "jsonschema",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "codex-router-core",
  "codex-router-secret-store",
@@ -448,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "agent-collaboration",
  "base64 0.22.1",
@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "automation-storage",
  "chrono",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "bytes",
  "codex-router-auth",
@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "codex-native-integration",
  "codex-router-cli",
@@ -645,14 +645,14 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "iocraft",
 ]
 
 [[package]]
 name = "collaboration-client"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "codex-native-integration",
  "collaboration-protocol",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-mcp"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "agent-collaboration",
  "bytes",
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-protocol"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-service"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "lifecycle-observation"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2061,7 +2061,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "message-board"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "schemars",
  "serde",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "message-board-storage"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
