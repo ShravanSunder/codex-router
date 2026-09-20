@@ -44,6 +44,7 @@ use update_reexec_fixture::install_updater_fixture;
 use update_reexec_fixture::process_is_running;
 use update_reexec_fixture::required_path;
 use update_reexec_fixture::run_update_case;
+use update_reexec_fixture::run_update_with_blocked_installer_case;
 use update_reexec_fixture::terminal_classification;
 use update_reexec_fixture::wait_for_process_id;
 
@@ -71,6 +72,12 @@ async fn changed_update_restarts_only_the_app_server() -> Result<(), Box<dyn std
         TerminalClassification::Succeeded,
     )
     .await
+}
+
+#[tokio::test]
+async fn changed_update_keeps_app_server_ready_until_installer_finishes()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_update_with_blocked_installer_case().await
 }
 
 #[tokio::test]
@@ -578,4 +585,23 @@ async fn update_matrix_app_server_child_entrypoint() -> Result<(), Box<dyn std::
         Some(Path::new(&process_log)),
     )
     .await
+}
+
+#[tokio::test]
+async fn changed_update_installer_barrier_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(started_path) = std::env::var_os("CODEX_HOST_UPDATE_INSTALLER_STARTED") else {
+        return Ok(());
+    };
+    let release_path = required_path("CODEX_HOST_UPDATE_INSTALLER_RELEASE")?;
+    std::fs::write(started_path, b"started\n")?;
+    while !release_path.exists() {
+        tokio::task::yield_now().await;
+    }
+    let managed_executable = required_path("CODEX_HOST_UPDATE_MANAGED")?;
+    std::fs::copy(
+        required_path("CODEX_HOST_UPDATE_REPLACEMENT")?,
+        &managed_executable,
+    )?;
+    std::fs::set_permissions(managed_executable, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }

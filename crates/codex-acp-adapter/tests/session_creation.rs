@@ -279,6 +279,7 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
             }
             assert_eq!(request["method"], "thread/fork");
             assert_eq!(request["params"]["threadId"], "source-thread");
+            assert_eq!(request["params"]["excludeTurns"], true);
             assert_eq!(request["params"]["cwd"], "/work/project");
             assert_eq!(request["params"]["model"], "gpt-6-astra");
             assert_eq!(

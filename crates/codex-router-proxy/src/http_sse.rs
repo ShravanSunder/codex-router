@@ -1545,6 +1545,8 @@ fn audit_route_kind_for_route_kind(route_kind: RouteKind) -> AuditRouteKind {
         RouteKind::Models => AuditRouteKind::Models,
         RouteKind::MemoriesTraceSummarize => AuditRouteKind::MemoryTrace,
         RouteKind::ResponsesCompact => AuditRouteKind::Compact,
+        RouteKind::ImageGenerations => AuditRouteKind::ImageGenerations,
+        RouteKind::ImageEdits => AuditRouteKind::ImageEdits,
     }
 }
 
@@ -1625,4 +1627,24 @@ fn request_route_kind(request: &HttpProxyRequest) -> Result<RouteKind, HttpProxy
 fn path_without_query(path: &str) -> &str {
     path.split_once('?')
         .map_or(path, |(path_component, _query)| path_component)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::audit_route_kind_for_route_kind;
+    use codex_router_core::audit::RouteKind as AuditRouteKind;
+
+    use crate::routes::RouteKind;
+
+    #[test]
+    fn image_routes_map_to_distinct_audit_route_kinds() {
+        assert_eq!(
+            audit_route_kind_for_route_kind(RouteKind::ImageGenerations),
+            AuditRouteKind::ImageGenerations
+        );
+        assert_eq!(
+            audit_route_kind_for_route_kind(RouteKind::ImageEdits),
+            AuditRouteKind::ImageEdits
+        );
+    }
 }

@@ -78,7 +78,7 @@ impl CodexRouterProfile {
 name = "codex-router"
 base_url = "http://127.0.0.1:{}/v1"
 wire_api = "responses"
-requires_openai_auth = false
+requires_openai_auth = true
 supports_websockets = true
 "#,
             self.port
@@ -101,7 +101,7 @@ supports_websockets = true
                 self.port
             ),
             "model_providers.codex-router.wire_api=\"responses\"".to_owned(),
-            "model_providers.codex-router.requires_openai_auth=false".to_owned(),
+            "model_providers.codex-router.requires_openai_auth=true".to_owned(),
             "model_providers.codex-router.supports_websockets=true".to_owned(),
         ];
         overrides.extend(network_overrides("features.network_proxy", control_socket));

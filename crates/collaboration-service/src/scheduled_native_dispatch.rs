@@ -75,7 +75,7 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
             .request_validated(
                 &schemas,
                 NativeOperation::ResumeThread,
-                json!({"threadId":id}),
+                json!({"threadId":id,"excludeTurns":true}),
             )
             .await;
         match resumed {
