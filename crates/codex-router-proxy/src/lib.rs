@@ -370,6 +370,17 @@ mod tests {
             classify_route(Method::Post, "/v1/responses/compact", false),
             RouteClass::Supported(RouteKind::ResponsesCompact)
         );
+        for (path, expected_route_kind) in [
+            ("/v1/images/generations", RouteKind::ImageGenerations),
+            ("/v1/images/edits", RouteKind::ImageEdits),
+        ] {
+            assert_eq!(
+                classify_route(Method::Post, path, false),
+                RouteClass::Supported(expected_route_kind)
+            );
+            assert_eq!(expected_route_kind.route_band(), RouteBand::Responses);
+            assert!(!expected_route_kind.previous_response_affinity_capable());
+        }
         assert_eq!(
             classify_route(Method::Get, "/v1/realtime", true),
             RouteClass::Rejected {
@@ -453,6 +464,14 @@ mod tests {
         assert_eq!(
             endpoint.url_for_path("/v1/models"),
             "https://chatgpt.com/backend-api/codex/models"
+        );
+        assert_eq!(
+            endpoint.url_for_path("/v1/images/generations?output_format=png"),
+            "https://chatgpt.com/backend-api/codex/images/generations?output_format=png"
+        );
+        assert_eq!(
+            endpoint.url_for_path("/v1/images/edits"),
+            "https://chatgpt.com/backend-api/codex/images/edits"
         );
         assert_eq!(
             endpoint.websocket_url_for_path("/v1/responses"),

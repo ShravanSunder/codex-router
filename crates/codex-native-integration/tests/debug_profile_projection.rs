@@ -171,3 +171,33 @@ fn network_experiment_configuration_is_typed_and_closed() {
         assert!(DebugCodexProfile::parse(&rejected, 18787).is_err());
     }
 }
+
+#[test]
+fn image_generation_profile_accepts_openai_auth_without_weakening_network_validation() {
+    let image_profile = format!("{PROFILE}\n[features]\nimage_generation = true\n").replace(
+        "requires_openai_auth = false",
+        "requires_openai_auth = true",
+    );
+    let image_network_profile = NETWORK_PROFILE
+        .replace(
+            "[features.network_proxy]",
+            "[features]\nimage_generation = true\n[features.network_proxy]",
+        )
+        .replace(
+            "requires_openai_auth = false",
+            "requires_openai_auth = true",
+        );
+
+    assert!(DebugCodexProfile::parse(&image_profile, 18787).is_ok());
+    assert!(DebugCodexProfile::parse(&image_network_profile, 18787).is_ok());
+    for rejected in [
+        image_profile.replace("image_generation = true", "image_generation = \"true\""),
+        image_profile.replace(
+            "image_generation = true",
+            "image_generation = true\nunknown_feature = true",
+        ),
+        image_network_profile.replace("credential_broker = false", "credential_broker = true"),
+    ] {
+        assert!(DebugCodexProfile::parse(&rejected, 18787).is_err());
+    }
+}

@@ -26,6 +26,10 @@ pub enum RouteKind {
     MemoryTrace,
     /// Responses WebSocket.
     ResponsesWebSocket,
+    /// `/v1/images/generations`.
+    ImageGenerations,
+    /// `/v1/images/edits`.
+    ImageEdits,
 }
 
 /// Local decision outcome.
@@ -266,4 +270,21 @@ fn sync_file(file: &fs::File, path: &Path) -> Result<(), AuditSinkError> {
             path: path.to_path_buf(),
             source,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RouteKind;
+
+    #[test]
+    fn image_route_kinds_have_stable_audit_names() {
+        for (route_kind, expected_name) in [
+            (RouteKind::ImageGenerations, "image_generations"),
+            (RouteKind::ImageEdits, "image_edits"),
+        ] {
+            let serialized = serde_json::to_string(&route_kind)
+                .unwrap_or_else(|error| panic!("audit route kind should serialize: {error}"));
+            assert_eq!(serialized, format!("\"{expected_name}\""));
+        }
+    }
 }

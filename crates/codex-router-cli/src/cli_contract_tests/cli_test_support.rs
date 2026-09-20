@@ -99,7 +99,7 @@ pub(super) fn assert_router_profile_contract(output: &str, port: u16) {
     assert!(output.contains("name = \"codex-router\"\n"));
     assert!(output.contains(format!("base_url = \"http://127.0.0.1:{port}/v1\"\n").as_str()));
     assert!(output.contains("wire_api = \"responses\"\n"));
-    assert!(output.contains("requires_openai_auth = false\n"));
+    assert!(output.contains("requires_openai_auth = true\n"));
     assert!(output.contains("supports_websockets = true\n"));
     assert!(!output.contains("env_key"));
     assert!(!output.contains("env_http_headers"));

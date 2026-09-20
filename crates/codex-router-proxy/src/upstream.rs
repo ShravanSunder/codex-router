@@ -96,6 +96,8 @@ impl UpstreamEndpoint {
             "v1/responses" => "codex/responses",
             "v1/responses/compact" => "codex/responses/compact",
             "v1/models" => "codex/models",
+            "v1/images/generations" => "codex/images/generations",
+            "v1/images/edits" => "codex/images/edits",
             _ => path.strip_prefix("v1/").unwrap_or(path),
         };
         let url = if upstream_path.is_empty() || upstream_path == "v1" {
