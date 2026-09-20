@@ -11,7 +11,7 @@ fn profile_render_includes_codex_custom_provider_contract() {
     assert!(rendered.contains("name = \"codex-router\"\n"));
     assert!(rendered.contains("base_url = \"http://127.0.0.1:8787/v1\"\n"));
     assert!(rendered.contains("wire_api = \"responses\"\n"));
-    assert!(rendered.contains("requires_openai_auth = false\n"));
+    assert!(rendered.contains("requires_openai_auth = true\n"));
     assert!(rendered.contains("supports_websockets = true\n"));
     assert!(!rendered.contains("env_key"));
     assert!(!rendered.contains("env_http_headers"));

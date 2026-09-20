@@ -105,7 +105,7 @@ impl DebugCodexProfile {
             || provider
                 .get("requires_openai_auth")
                 .and_then(toml::Value::as_bool)
-                != Some(false)
+                .is_none()
             || provider
                 .get("supports_websockets")
                 .and_then(toml::Value::as_bool)
@@ -156,10 +156,30 @@ fn validate_projects(value: &toml::Value) -> Result<(), DebugProfileError> {
 }
 
 fn validate_network_experiment_configuration(table: &toml::Table) -> Result<(), DebugProfileError> {
-    let requested = table.contains_key("default_permissions")
+    let features = match table.get("features") {
+        Some(value) => {
+            let features = value
+                .as_table()
+                .filter(|features| {
+                    exact_keys(features, &["image_generation"])
+                        || exact_keys(features, &["network_proxy"])
+                        || exact_keys(features, &["image_generation", "network_proxy"])
+                })
+                .ok_or(DebugProfileError::UnsupportedSettings)?;
+            if features
+                .get("image_generation")
+                .is_some_and(|value| value.as_bool().is_none())
+            {
+                return Err(DebugProfileError::UnsupportedSettings);
+            }
+            Some(features)
+        }
+        None => None,
+    };
+    let network_requested = table.contains_key("default_permissions")
         || table.contains_key("permissions")
-        || table.contains_key("features");
-    if !requested {
+        || features.is_some_and(|features| features.contains_key("network_proxy"));
+    if !network_requested {
         return Ok(());
     }
     if table
@@ -186,11 +206,7 @@ fn validate_network_experiment_configuration(table: &toml::Table) -> Result<(), 
     if restricted_socket != workspace_socket {
         return Err(DebugProfileError::UnsupportedSettings);
     }
-    let features = table
-        .get("features")
-        .and_then(toml::Value::as_table)
-        .filter(|features| exact_keys(features, &["network_proxy"]))
-        .ok_or(DebugProfileError::UnsupportedSettings)?;
+    let features = features.ok_or(DebugProfileError::UnsupportedSettings)?;
     let proxy = features
         .get("network_proxy")
         .and_then(toml::Value::as_table)
