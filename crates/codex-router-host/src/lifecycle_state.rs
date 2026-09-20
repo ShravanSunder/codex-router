@@ -73,7 +73,7 @@ pub enum AppServerCondition {
     },
     /// Exact retained child is stopping.
     Stopping,
-    /// Upstream shutdown timed out and remains retained.
+    /// Bounded shutdown timed out and remains retained.
     ShutdownTimedOut,
     /// No app-server child or native endpoint is present.
     Absent,
@@ -177,7 +177,7 @@ pub enum LifecycleOutcomeClassification {
     Failed,
     /// A graceful stop required upstream force escalation.
     Forced,
-    /// A retained child remained after the upstream shutdown bound.
+    /// A retained child remained after the bounded shutdown timeout.
     TimedOut,
     /// A mutation was rejected because another mutation owns serialization.
     Busy,

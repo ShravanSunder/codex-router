@@ -28,6 +28,13 @@ request admission -> shared Host replacement activation
                       | publish collaboration and operator readiness
 CLI <-- EOF + progress; AwaitHostStart --> replacement Host
     <-- ready / local-ready-remote-degraded / failure
+
+Progress events represent phase starts and are closed by the next phase or
+terminal frame. Replacement startup streams router, app-server, and Remote
+Control convergence through the same operator presenter. The app-server
+socket must be accepting within the approximately 15-second upstream client
+reconnect window. Shutdown is TERM, TERM, one-second grace, then process-group
+KILL as a bounded backstop.
 ```
 
 | Source-backed current path | Target delta and consequence |

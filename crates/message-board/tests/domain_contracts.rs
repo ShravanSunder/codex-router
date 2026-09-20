@@ -85,6 +85,7 @@ fn session_identity_retains_the_complete_endpoint() {
             }
         })
     );
+    assert_eq!(identity.short_form(), "local:thread-42");
     assert!(
         serde_json::from_value::<Identity>(json!({
             "kind": "human", "humanId": "owner", "unexpected": true
@@ -199,6 +200,116 @@ fn activity_positions_fit_the_sqlite_signed_integer_domain() {
 }
 
 #[test]
+fn participant_role_note_and_closed_state_are_validated_in_rust() {
+    use message_board::{Participant, ParticipantClosedReason, ParticipantNote, ParticipantRole};
+    assert!(serde_json::from_value::<ParticipantRole>(json!("orchestrator")).is_ok());
+    assert!(serde_json::from_value::<ParticipantRole>(json!("driver")).is_err());
+    let note = ParticipantNote::try_from("  reviewing storage  ".to_owned()).unwrap();
+    assert_eq!(note.as_str(), "reviewing storage");
+    assert!(ParticipantNote::try_from("  ".to_owned()).is_err());
+    assert!(ParticipantNote::try_from("é".repeat(8_192)).is_ok());
+    assert!(ParticipantNote::try_from("é".repeat(8_193)).is_err());
+
+    let identity = Identity::Human {
+        human_id: HumanId::try_from("reviewer".to_owned()).unwrap(),
+    };
+    let replacement = Identity::Human {
+        human_id: HumanId::try_from("successor".to_owned()).unwrap(),
+    };
+    let joined = ActivitySequence::try_from(10).unwrap();
+    let closed = ActivitySequence::try_from(12).unwrap();
+    assert!(
+        Participant::new(
+            identity.clone(),
+            ParticipantRole::Reviewer,
+            Some(note),
+            joined,
+            joined,
+            None,
+            None,
+            None,
+        )
+        .is_ok()
+    );
+    assert!(
+        Participant::new(
+            identity.clone(),
+            ParticipantRole::Reviewer,
+            None,
+            joined,
+            closed,
+            Some(closed),
+            Some(ParticipantClosedReason::Left),
+            None,
+        )
+        .is_ok()
+    );
+    assert!(
+        Participant::new(
+            identity.clone(),
+            ParticipantRole::Reviewer,
+            None,
+            joined,
+            closed,
+            Some(closed),
+            Some(ParticipantClosedReason::Replaced),
+            Some(replacement.clone()),
+        )
+        .is_err(),
+        "only an Orchestrator can be closed as replaced"
+    );
+    assert!(
+        Participant::new(
+            identity.clone(),
+            ParticipantRole::Orchestrator,
+            None,
+            joined,
+            closed,
+            Some(closed),
+            Some(ParticipantClosedReason::Replaced),
+            Some(identity),
+        )
+        .is_err(),
+        "self replacement is not a valid stored state"
+    );
+    assert!(
+        Participant::new(
+            replacement,
+            ParticipantRole::Participant,
+            None,
+            closed,
+            joined,
+            None,
+            None,
+            None,
+        )
+        .is_err(),
+        "last-seen cannot precede Join"
+    );
+}
+
+#[test]
+fn participant_deserialization_rejects_unknown_closed_sets_and_cross_fields() {
+    let base = json!({
+        "identity": {"kind": "human", "humanId": "owner"},
+        "role": "orchestrator",
+        "note": null,
+        "joinedAtActivity": 1,
+        "lastSeenActivity": 2,
+        "closedAtActivity": 2,
+        "closedReason": "replaced",
+        "replacedBy": {"kind": "human", "humanId": "successor"}
+    });
+    assert!(serde_json::from_value::<message_board::Participant>(base.clone()).is_ok());
+    let mut unknown_reason = base.clone();
+    unknown_reason["closedReason"] = json!("expired");
+    assert!(serde_json::from_value::<message_board::Participant>(unknown_reason).is_err());
+    let mut missing_replacement = base;
+    missing_replacement["replacedBy"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<message_board::Participant>(missing_replacement).is_err());
+}
+
+#[test]
 fn repository_origins_strip_credentials_and_preserve_path_case() {
     assert_eq!(
         normalize_git_origin_url("https://token@GitHub.COM/ShravanSunder/MyRepo.git?x=1#fragment"),
@@ -298,6 +409,14 @@ fn every_public_operation_has_a_typed_schema_contract() {
         ThreadUnwatchResult,
         ThreadListRequest,
         ThreadListResult,
+        ThreadCreateRequest,
+        ThreadCreateResult,
+        ThreadJoinRequest,
+        ThreadJoinResult,
+        ThreadLeaveRequest,
+        ThreadLeaveResult,
+        ThreadParticipantListRequest,
+        ThreadParticipantListResult,
         InboxFetchRequest,
         InboxFetchResult,
         InboxAcknowledgeRequest,
@@ -309,7 +428,9 @@ fn every_public_operation_has_a_typed_schema_contract() {
 
 #[test]
 fn actionable_failure_factories_preserve_closed_details() {
-    use message_board::{BoardError, BoardErrorDetails, BoardFailureKind, BoardNextAction};
+    use message_board::{
+        BoardError, BoardErrorDetails, BoardFailureKind, BoardNextAction, MessageText, TopicId,
+    };
     let failure = BoardError::top_level_message_cooldown(7);
     assert_eq!(failure.kind, BoardFailureKind::TopLevelMessageCooldown);
     assert_eq!(failure.next_action, BoardNextAction::PostThreadMessage);
@@ -324,4 +445,17 @@ fn actionable_failure_factories_preserve_closed_details() {
         BoardError::thread_resolved().message,
         "This thread is resolved. Mark it unresolved before adding a thread message."
     );
+    let topic_id = TopicId::try_from(id_string(92)).expect("topic ID");
+    let text = MessageText::try_from("reuse this submitted root text".to_owned()).expect("text");
+    let topic_refusal = BoardError::session_topic_post(
+        topic_id,
+        Identity::Human {
+            human_id: HumanId::try_from("topic-author".to_owned()).expect("human ID"),
+        },
+        text.clone(),
+    );
+    let BoardErrorDetails::ThreadCreateRefusal { refusal } = topic_refusal.details else {
+        panic!("expected Thread Create refusal details");
+    };
+    assert_eq!(refusal.text, text);
 }

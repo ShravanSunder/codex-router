@@ -19,8 +19,17 @@ impl AcpStoredSessions for DelayedCatalog {
     }
 }
 
+const TEST_SCRATCH: &str =
+    "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
+fn ensure_test_scratch() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(std::fs::create_dir_all(TEST_SCRATCH).is_ok());
+    assert!(std::fs::set_permissions(TEST_SCRATCH, std::fs::Permissions::from_mode(0o700)).is_ok());
+}
+
 #[tokio::test]
 async fn pending_catalog_does_not_block_connection_routing_or_shutdown() {
+    ensure_test_scratch();
     // Arrange: the catalog cannot complete until explicitly released.
     let entered = tokio_util::sync::CancellationToken::new();
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -37,6 +46,7 @@ async fn pending_catalog_does_not_block_connection_routing_or_shutdown() {
                 entered: entered.clone(),
                 release: tokio_util::sync::CancellationToken::new(),
             }),
+            approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
             retired: tokio_util::sync::CancellationToken::new(),
         },
     ));
@@ -90,6 +100,7 @@ impl AcpStoredSessions for FixtureCatalog {
 }
 #[tokio::test]
 async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_fixture() {
+    ensure_test_scratch();
     use futures_util::{SinkExt, StreamExt};
     let socket = std::path::PathBuf::from(format!("/tmp/acp-dispatch-{}.sock", std::process::id()));
     let listener = tokio::net::UnixListener::bind(&socket)
@@ -122,18 +133,44 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                 continue;
             }
             if method == "thread/start" {
+                assert_eq!(request["params"]["model"], "gpt-5.6-sol");
+                assert_eq!(
+                    request["params"]["config"]["model_reasoning_effort"],
+                    "medium"
+                );
+                assert!(request["params"].get("approvalPolicy").is_none());
+                assert!(request["params"].get("approvalsReviewer").is_none());
                 assert_eq!(
                     request["params"]["config"]["mcp_servers"]["notes"]["command"],
                     "/usr/bin/example"
                 );
             }
             if method == "thread/resume" {
-                assert_eq!(request["params"], json!({"threadId":"created-thread"}));
+                assert_eq!(request["params"]["threadId"], "created-thread");
+                assert_eq!(request["params"]["permissions"], "router-workspace-write");
+                assert_eq!(
+                    request["params"]["config"]["default_permissions"],
+                    "router-workspace-write"
+                );
+                assert_eq!(
+                    request["params"]["config"]["permissions.router-workspace-write.extends"],
+                    ":workspace"
+                );
+                assert_eq!(
+                    request["params"]["config"]["permissions.router-workspace-write.filesystem"]
+                        [TEST_SCRATCH],
+                    "write"
+                );
+                assert!(
+                    request["params"]["config"]
+                        .get("permissions.router-workspace-write")
+                        .is_none()
+                );
             }
             let result = if method == "initialize" {
                 json!({})
             } else {
-                json!({"cwd":"/work","thread":{"id":"created-thread","cwd":"/work","turns":[]}})
+                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"created-thread","cwd":"/work","turns":[]}})
             };
             if method != "initialize" {
                 setup_entered.send(method).await.unwrap();
@@ -162,6 +199,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             generation,
             schemas,
             stored_sessions: Arc::new(FixtureCatalog),
+            approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
             retired: tokio_util::sync::CancellationToken::new(),
         },
     ));
@@ -179,7 +217,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
         (
             json!("new"),
             "session/new",
-            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}]}),
+            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
             "result",
         ),
         (

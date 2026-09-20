@@ -1,7 +1,9 @@
 //! Failed ACP setup cannot authorize a later prompt or erase protocol error data.
 #[cfg(test)]
 mod tests {
-    use collaboration_client::{AcpConversation, ClientError, ConversationEvent};
+    use collaboration_client::{
+        AcpConversation, ClientError, ConversationCreateRequest, ConversationEvent,
+    };
     use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
     use serde_json::{Value, json};
     use std::{os::unix::fs::DirBuilderExt, path::PathBuf, time::Duration};
@@ -77,9 +79,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("fixture identity: {error}"));
         let listener = LocalControlService::bind(&root.join("control.sock"), identity)
             .unwrap_or_else(|error| panic!("fixture listener: {error}"));
-        let manifest = serde_json::from_value(json!({"version":1,"serviceId":service_id,
+        let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,
         "serviceEpoch":service_id,"control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest}))
+        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}}))
         .unwrap_or_else(|error| panic!("fixture manifest: {error}"));
         let publication = ManifestPublication::publish(&root, &manifest)
             .unwrap_or_else(|error| panic!("fixture publication: {error}"));
@@ -149,19 +151,48 @@ mod tests {
             Ok(())
         };
         let load_error = client
-            .open_session(Some("rejected-thread"), &root, &mut emit)
+            .open_session(
+                &ConversationCreateRequest {
+                    endpoint: client.endpoint().clone(),
+                    cwd: root.clone(),
+                    session: Some("rejected-thread".to_owned().try_into().unwrap()),
+                    fork: None,
+                    model: None,
+                    effort: Some("medium".to_owned()),
+                    access: None,
+                    created_by: None,
+                    approver: None,
+                    root_message_id: None,
+                },
+                &mut emit,
+            )
             .await
             .err()
             .unwrap_or_else(|| panic!("fixture rejection must fail setup"));
         let next_failed = if reopen {
             client
-                .open_session(Some("another-thread"), &root, &mut emit)
+                .open_session(
+                    &ConversationCreateRequest {
+                        endpoint: client.endpoint().clone(),
+                        cwd: root.clone(),
+                        session: Some("another-thread".to_owned().try_into().unwrap()),
+                        fork: None,
+                        model: None,
+                        effort: Some("medium".to_owned()),
+                        access: None,
+                        created_by: None,
+                        approver: None,
+                        root_message_id: None,
+                    },
+                    &mut emit,
+                )
                 .await
                 .is_err()
         } else {
             client
                 .prompt(
                     "must not reach the peer",
+                    Some("medium"),
                     Duration::from_secs(2),
                     CancellationToken::new(),
                     &mut emit,

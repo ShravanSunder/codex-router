@@ -2,7 +2,6 @@ use std::error::Error;
 use std::path::Path;
 use std::time::Duration;
 
-use codex_router_host::HostProgress;
 use codex_router_host::MAX_OPERATOR_FRAME_BYTES;
 use codex_router_host::OperatorFrame;
 use codex_router_host::OperatorRequest;
@@ -63,10 +62,9 @@ pub(crate) async fn send_operator_request(
         frames.push(frame);
     }
     if !terminal_seen
-        && matches!(
-            frames.last(),
-            Some(OperatorFrame::Progress(HostProgress::ReplacementStarting))
-        )
+        && frames
+            .iter()
+            .any(|frame| matches!(frame, OperatorFrame::Progress(_)))
     {
         return Ok(frames);
     }

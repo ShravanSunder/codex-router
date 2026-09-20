@@ -33,7 +33,7 @@ mod tests {
             ),
             (
                 "codex/messageSend",
-                json!({"kind":"nativeRejected","stage":"start","message":"fixture rejection","effects":{"resume":"accepted","submission":"rejected"},"clientUserMessageId":"correlation"}),
+                json!({"kind":"nativeRejected","stage":"start","message":"fixture rejection","reason":"childThread","nextAction":"inspectTarget","effects":{"resume":"accepted","submission":"rejected"},"clientUserMessageId":"correlation"}),
             ),
         ];
         for (method, data) in cases {

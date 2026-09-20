@@ -9,6 +9,92 @@ use std::{
     io::{self, Write},
     path::PathBuf,
 };
+pub(crate) fn result_envelope(result: serde_json::Value) -> serde_json::Value {
+    let result = normalize_result(result);
+    let mut envelope =
+        serde_json::json!({"kind":"result","cliVersion":env!("CARGO_PKG_VERSION"),"result":result});
+    if let (Some(fields), Some(service_version)) = (
+        envelope.as_object_mut(),
+        collaboration_client::observed_service_version(),
+    ) {
+        fields.insert(
+            "serviceVersion".to_owned(),
+            serde_json::json!(service_version),
+        );
+    }
+    envelope
+}
+/// Publishes one mutation whose wire type carries no effect field of its own,
+/// so the command states its effects instead of the envelope inferring them.
+pub(crate) fn mutation_envelope(
+    record: serde_json::Value,
+    effects: serde_json::Value,
+) -> serde_json::Value {
+    let mut envelope = serde_json::json!({"kind":"result","cliVersion":env!("CARGO_PKG_VERSION"),
+        "result":{"record":record,"effects":effects}});
+    if let (Some(fields), Some(service_version)) = (
+        envelope.as_object_mut(),
+        collaboration_client::observed_service_version(),
+    ) {
+        fields.insert(
+            "serviceVersion".to_owned(),
+            serde_json::json!(service_version),
+        );
+    }
+    envelope
+}
+
+fn normalize_result(result: serde_json::Value) -> serde_json::Value {
+    let Some(fields) = result.as_object() else {
+        return serde_json::json!({"record":result});
+    };
+    if fields.contains_key("page") {
+        return result;
+    }
+    if let (Some(operation_id), Some(record)) = (fields.get("operationId"), fields.get("result")) {
+        if operation_id.is_null() {
+            return normalize_result(record.clone());
+        }
+        return serde_json::json!({"record":record,"effects":{"operationId":operation_id}});
+    }
+    for collection in [
+        "sessions",
+        "endpoints",
+        "entries",
+        "records",
+        "data",
+        "projects",
+        "boards",
+        "topics",
+        "messages",
+        "threads",
+    ] {
+        if let Some(records) = fields.get(collection).and_then(serde_json::Value::as_array) {
+            let mut page = fields.clone();
+            page.remove(collection);
+            page.insert("records".into(), serde_json::json!(records));
+            page.entry("nextCursor").or_insert(serde_json::Value::Null);
+            return serde_json::json!({"page":page});
+        }
+    }
+    let mutation = fields.contains_key("outcome")
+        || fields.contains_key("operationId")
+        || fields.contains_key("changeId")
+        || fields.contains_key("acceptance")
+        || fields.contains_key("created")
+        || fields.contains_key("updated")
+        || fields.contains_key("attached")
+        || fields.contains_key("archived");
+    if mutation {
+        let effects = fields
+            .get("effects")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        serde_json::json!({"record":result,"effects":effects})
+    } else {
+        serde_json::json!({"record":result})
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "endpoints")]
@@ -67,7 +153,13 @@ pub fn run_endpoint_command(arguments: Vec<OsString>) -> i32 {
         Ok(inventory) => {
             let mut out = io::stdout().lock();
             if machine_output {
-                if writeln!(out, "{}", json!({"kind":"result","result":inventory})).is_err() {
+                if writeln!(
+                    out,
+                    "{}",
+                    crate::endpoint_commands::result_envelope(json!(inventory))
+                )
+                .is_err()
+                {
                     return 3;
                 }
             } else {
@@ -83,6 +175,9 @@ pub fn run_endpoint_command(arguments: Vec<OsString>) -> i32 {
         }
         Err(ClientError::Rejected { .. }) => {
             report_failure("rejected", "Endpoint discovery rejected", 4, machine_output)
+        }
+        Err(ClientError::Protocol(message)) => {
+            report_failure("unavailable", message, 3, machine_output)
         }
         Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
             &error,
@@ -128,4 +223,52 @@ pub(crate) fn report_failure(kind: &str, message: &str, code: i32, machine_outpu
         let _printed = writeln!(io::stderr(), "{message}");
     }
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::result_envelope;
+    use serde_json::json;
+
+    #[test]
+    fn result_envelope_normalizes_list_read_and_mutation_shapes() {
+        let list = result_envelope(json!({"records":[{"id":1}],"nextCursor":"next"}));
+        let read = result_envelope(json!({"id":1}));
+        let mutation = result_envelope(json!({"operationId":"op","result":{"id":1}}));
+
+        for envelope in [&list, &read, &mutation] {
+            assert_eq!(envelope["kind"], "result");
+            assert!(
+                envelope["cliVersion"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+            );
+            // Unobserved before any handshake: omitted rather than empty.
+            assert!(
+                envelope
+                    .get("serviceVersion")
+                    .is_none_or(|version| version.as_str().is_some_and(|value| !value.is_empty()))
+            );
+        }
+        assert_eq!(list.pointer("/result/page/records/0/id"), Some(&json!(1)));
+        assert_eq!(
+            list.pointer("/result/page/nextCursor"),
+            Some(&json!("next"))
+        );
+        assert_eq!(read.pointer("/result/record/id"), Some(&json!(1)));
+        assert_eq!(mutation.pointer("/result/record/id"), Some(&json!(1)));
+        assert_eq!(
+            mutation.pointer("/result/effects/operationId"),
+            Some(&json!("op"))
+        );
+    }
+
+    #[test]
+    fn absent_operation_id_preserves_the_underlying_read_or_page_shape() {
+        let list =
+            result_envelope(json!({"operationId":null,"result":{"records":[],"nextCursor":null}}));
+        let read = result_envelope(json!({"operationId":null,"result":{"id":1}}));
+        assert!(list.pointer("/result/page/records").is_some());
+        assert_eq!(read.pointer("/result/record/id"), Some(&json!(1)));
+    }
 }

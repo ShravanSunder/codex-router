@@ -299,7 +299,7 @@ pub(crate) async fn recompute_project_unread(
              (a.kind='mainMessageCreated' AND prs.main_start IS NOT NULL \
                 AND a.activity_sequence>prs.main_start \
                 AND a.activity_sequence>COALESCE(tb.through_activity,0)) \
-             OR (a.kind<>'mainMessageCreated' AND w.active=1 \
+             OR (a.kind IN ('threadMessageCreated','threadResolved','threadUnresolved') AND w.active=1 \
                 AND a.activity_sequence>w.starts_after_activity \
                 AND a.activity_sequence>COALESCE(rb.through_activity,0)) \
            ) \
@@ -427,7 +427,7 @@ pub(crate) async fn validate_reader_activity_boundaries(
            EXISTS(SELECT 1 FROM board_activity activity \
              WHERE activity.activity_sequence=bookmark.through_activity \
                AND activity.root_id=bookmark.root_id \
-               AND activity.kind<>'mainMessageCreated') AS valid_scope \
+               AND activity.kind IN ('threadMessageCreated','threadResolved','threadUnresolved')) AS valid_scope \
          FROM thread_read_bookmarks bookmark \
          JOIN board_messages message ON message.message_id=bookmark.root_id \
          JOIN project_boards board ON board.board_id=message.board_id \

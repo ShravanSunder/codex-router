@@ -11,6 +11,7 @@ pub struct AcpChannelListener {
     socket: PrivateSocketListener,
     generations: NativeGenerationGate,
     stored_sessions: Arc<dyn AcpStoredSessions>,
+    approval_broker: Arc<dyn codex_acp_adapter::ApprovalBroker>,
     permits: Arc<Semaphore>,
 }
 impl AcpChannelListener {
@@ -18,12 +19,14 @@ impl AcpChannelListener {
         path: &Path,
         generations: NativeGenerationGate,
         stored_sessions: Arc<dyn AcpStoredSessions>,
+        approval_broker: Arc<dyn codex_acp_adapter::ApprovalBroker>,
     ) -> io::Result<Self> {
         let _schema = AcpSchemaCatalog::load().map_err(io::Error::other)?;
         Ok(Self {
             socket: PrivateSocketListener::bind(path)?,
             generations,
             stored_sessions,
+            approval_broker,
             permits: Arc::new(Semaphore::new(32)),
         })
     }
@@ -43,7 +46,7 @@ impl AcpChannelListener {
                     let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else { continue; };
                     let Ok(admission) = self.generations.acquire() else { continue; };
                     let Some(schemas) = admission.schemas().filter(|s| s.supports_server_messages()) else { continue; };
-                    let inputs = AcpConnectionInputs { backend_path:admission.backend_path().to_owned(), generation:admission.generation().clone(), schemas, stored_sessions:Arc::clone(&self.stored_sessions), retired:admission.retirement() };
+                    let inputs = AcpConnectionInputs { backend_path:admission.backend_path().to_owned(), generation:admission.generation().clone(), schemas, stored_sessions:Arc::clone(&self.stored_sessions), approval_broker:Arc::clone(&self.approval_broker), retired:admission.retirement() };
                     tasks.spawn(async move { let _permit = permit; serve_acp_connection(stream,inputs).await });
                 }
             }

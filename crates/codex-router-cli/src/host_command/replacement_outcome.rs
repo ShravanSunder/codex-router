@@ -10,11 +10,14 @@ use codex_router_host::OperatorRequest;
 use codex_router_host::TerminalClassification;
 use codex_router_host::UpdateResult;
 
+use super::operator_client::replacement_started_without_terminal;
 use super::operator_client::send_replacement_operator_request;
+use super::operator_client::send_replacement_operator_request_streaming;
 
 pub(super) const REPLACEMENT_CONVERGENCE_DEADLINE: Duration = Duration::from_secs(40);
 const REPLACEMENT_RECOVERY_ACTION: &str = "codex-router host";
 
+#[allow(dead_code)]
 pub(super) async fn complete_update_result(
     coordination_paths: &HostCoordinationPaths,
     frames: Vec<OperatorFrame>,
@@ -23,6 +26,23 @@ pub(super) async fn complete_update_result(
         coordination_paths,
         frames,
         REPLACEMENT_CONVERGENCE_DEADLINE,
+    )
+    .await
+}
+
+pub(super) async fn complete_update_result_with_progress<F>(
+    coordination_paths: &HostCoordinationPaths,
+    frames: Vec<OperatorFrame>,
+    on_frame: F,
+) -> UpdateResult
+where
+    F: FnMut(&OperatorFrame),
+{
+    complete_update_result_with_progress_and_deadline(
+        coordination_paths,
+        frames,
+        REPLACEMENT_CONVERGENCE_DEADLINE,
+        on_frame,
     )
     .await
 }
@@ -36,6 +56,14 @@ async fn complete_update_result_with_deadline(
         .iter()
         .any(|frame| matches!(frame, OperatorFrame::Progress(_)));
     if let Some(OperatorFrame::Terminal(response)) = frames.last() {
+        if response.request() == &OperatorRequest::UpdateCodex
+            && response.classification() == TerminalClassification::Succeeded
+            && response.message() == "app-server restarted"
+        {
+            return UpdateResult::UpdatedAndAppServerRestarted {
+                snapshot: response.snapshot().clone(),
+            };
+        }
         if replacement_started {
             return UpdateResult::UpdatedButReplacementFailed {
                 message: response.message().to_owned(),
@@ -65,6 +93,40 @@ async fn complete_update_result_with_deadline(
     }
 }
 
+async fn complete_update_result_with_progress_and_deadline<F>(
+    coordination_paths: &HostCoordinationPaths,
+    frames: Vec<OperatorFrame>,
+    replacement_deadline: Duration,
+    mut on_frame: F,
+) -> UpdateResult
+where
+    F: FnMut(&OperatorFrame),
+{
+    if frames
+        .iter()
+        .any(|frame| matches!(frame, OperatorFrame::Progress(_)))
+        && !frames
+            .iter()
+            .any(|frame| matches!(frame, OperatorFrame::Terminal(_)))
+    {
+        match observe_replacement_with_progress(
+            coordination_paths,
+            replacement_deadline,
+            &mut on_frame,
+        )
+        .await
+        {
+            Ok(snapshot) => UpdateResult::UpdatedAndHostRestarted { snapshot },
+            Err(message) => UpdateResult::UpdatedButReplacementFailed {
+                message,
+                recovery_action: REPLACEMENT_RECOVERY_ACTION.to_owned(),
+            },
+        }
+    } else {
+        complete_update_result_with_deadline(coordination_paths, frames, replacement_deadline).await
+    }
+}
+
 pub(crate) enum HostRestartResult {
     Restarted { snapshot: HostSnapshot },
     NotRestarted { response: HostTerminalResponse },
@@ -81,6 +143,7 @@ impl HostRestartResult {
     }
 }
 
+#[allow(dead_code)]
 pub(super) async fn complete_restart_result(
     coordination_paths: &HostCoordinationPaths,
     frames: Vec<OperatorFrame>,
@@ -93,6 +156,24 @@ pub(super) async fn complete_restart_result(
     .await
 }
 
+pub(super) async fn complete_restart_result_with_progress<F>(
+    coordination_paths: &HostCoordinationPaths,
+    frames: Vec<OperatorFrame>,
+    on_frame: F,
+) -> HostRestartResult
+where
+    F: FnMut(&OperatorFrame),
+{
+    complete_restart_result_with_progress_and_deadline(
+        coordination_paths,
+        frames,
+        REPLACEMENT_CONVERGENCE_DEADLINE,
+        on_frame,
+    )
+    .await
+}
+
+#[allow(dead_code)]
 async fn complete_restart_result_with_deadline(
     coordination_paths: &HostCoordinationPaths,
     frames: Vec<OperatorFrame>,
@@ -103,17 +184,37 @@ async fn complete_restart_result_with_deadline(
             response: response.clone(),
         };
     }
-    if !matches!(
-        frames.last(),
-        Some(OperatorFrame::Progress(
-            codex_router_host::HostProgress::ReplacementStarting
-        ))
-    ) {
+    if !replacement_started_without_terminal(&frames) {
         return HostRestartResult::ReplacementFailed {
             message: "Host returned no terminal restart result or replacement progress".to_owned(),
         };
     }
     match observe_replacement(coordination_paths, deadline).await {
+        Ok(snapshot) => HostRestartResult::Restarted { snapshot },
+        Err(message) => HostRestartResult::ReplacementFailed { message },
+    }
+}
+
+async fn complete_restart_result_with_progress_and_deadline<F>(
+    coordination_paths: &HostCoordinationPaths,
+    frames: Vec<OperatorFrame>,
+    deadline: Duration,
+    mut on_frame: F,
+) -> HostRestartResult
+where
+    F: FnMut(&OperatorFrame),
+{
+    if let Some(OperatorFrame::Terminal(response)) = frames.last() {
+        return HostRestartResult::NotRestarted {
+            response: response.clone(),
+        };
+    }
+    if !replacement_started_without_terminal(&frames) {
+        return HostRestartResult::ReplacementFailed {
+            message: "Host returned no terminal restart result or replacement progress".to_owned(),
+        };
+    }
+    match observe_replacement_with_progress(coordination_paths, deadline, &mut on_frame).await {
         Ok(snapshot) => HostRestartResult::Restarted { snapshot },
         Err(message) => HostRestartResult::ReplacementFailed { message },
     }
@@ -127,6 +228,36 @@ async fn observe_replacement(
         coordination_paths.operator_socket(),
         OperatorRequest::AwaitHostStart,
         deadline,
+    )
+    .await
+    .map_err(|error| format!("replacement Host did not become ready: {error}"))?;
+    match replacement.last() {
+        Some(OperatorFrame::Terminal(response))
+            if matches!(
+                response.classification(),
+                TerminalClassification::Ready | TerminalClassification::LocalReadyRemoteDegraded
+            ) =>
+        {
+            Ok(response.snapshot().clone())
+        }
+        Some(OperatorFrame::Terminal(response)) => Err(response.message().to_owned()),
+        _ => Err("replacement Host returned no terminal readiness".to_owned()),
+    }
+}
+
+async fn observe_replacement_with_progress<F>(
+    coordination_paths: &HostCoordinationPaths,
+    deadline: Duration,
+    on_frame: &mut F,
+) -> Result<HostSnapshot, String>
+where
+    F: FnMut(&OperatorFrame),
+{
+    let replacement = send_replacement_operator_request_streaming(
+        coordination_paths.operator_socket(),
+        OperatorRequest::AwaitHostStart,
+        deadline,
+        on_frame,
     )
     .await
     .map_err(|error| format!("replacement Host did not become ready: {error}"))?;

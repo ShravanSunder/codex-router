@@ -81,6 +81,7 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
     let config = HostConfig::new(HostConfigInputs {
         coordination_paths: coordination_paths.clone(),
         router_endpoint: router.address(),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         app_server_socket: app_server_socket.clone(),
         managed_executable: managed_executable.clone(),
         deadlines,
@@ -121,6 +122,25 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         terminal_snapshot(&initial_frames)?.hosted_readiness(),
         codex_router_host::HostedReadiness::Ready,
         "host startup must reach full readiness",
+    )?;
+    check(
+        initial_frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::RouterReady)
+            )
+        }) && initial_frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::AppServerReady)
+            )
+        }) && initial_frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(codex_router_host::HostProgress::RemoteControlReady)
+            )
+        }),
+        "host startup must stream router, app-server, and Remote Control readiness phases",
     )?;
     let mut collaboration = collaboration_client::ControlClient::connect(
         &collaboration_directory,

@@ -17,12 +17,15 @@ mod tests {
         BufferedEvents,
         NativeRejection,
         GenerationChanged,
+        ByteSaturation,
+        LateEvent,
+        MalformedFrame,
     }
 
     #[tokio::test]
     async fn listener_orders_readiness_before_buffered_events_and_reports_connection_loss() {
         // Arrange / Act: the native peer emits content and a reverse request during resume.
-        let output = run_observation_case(AttachmentCase::BufferedEvents, "buffered").await;
+        let output = run_observation_case(AttachmentCase::BufferedEvents, "buffered", false).await;
         let records = output_records(&output);
         // Assert: callbacks remain visible, unanswered, and in original native order.
         assert_eq!(output.status.code(), Some(3));
@@ -53,29 +56,113 @@ mod tests {
     #[tokio::test]
     async fn rejected_native_attachment_emits_no_listener_readiness() {
         // Arrange / Act: native resume rejects this exact identity.
-        let output = run_observation_case(AttachmentCase::NativeRejection, "rejected").await;
+        let output = run_observation_case(AttachmentCase::NativeRejection, "rejected", false).await;
         // Assert: failed attachment is never presented as an established observer.
-        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.status.code(), Some(5));
         let records = output_records(&output);
         let [error_record] = records.as_slice() else {
             panic!("expected one attachment failure: {records:?}");
         };
         assert_eq!(error_record["kind"], "error");
+        assert_eq!(error_record["target"]["sessionId"], "observed-thread");
+        assert_eq!(error_record["error"]["stage"], "observation-attach");
+        assert_eq!(error_record["error"]["effect"], "unknown");
+        assert_eq!(error_record["error"]["kind"], "protocolViolation");
         assert!(!String::from_utf8_lossy(&output.stdout).contains("listenerReady"));
     }
 
     #[tokio::test]
     async fn replacement_during_attachment_emits_no_stale_listener_readiness() {
         // Arrange / Act: the endpoint publishes a successor before resume returns.
-        let output = run_observation_case(AttachmentCase::GenerationChanged, "replacement").await;
+        let output =
+            run_observation_case(AttachmentCase::GenerationChanged, "replacement", false).await;
         // Assert: buffered output from that retired generation is not advertised as ready.
-        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.status.code(), Some(5));
         let records = output_records(&output);
         let [error_record] = records.as_slice() else {
             panic!("expected one attachment failure: {records:?}");
         };
         assert_eq!(error_record["kind"], "error");
+        assert_eq!(error_record["target"]["sessionId"], "observed-thread");
+        assert_eq!(error_record["error"]["stage"], "observation-attach");
+        assert_eq!(error_record["error"]["effect"], "unknown");
+        assert_eq!(error_record["error"]["kind"], "protocolViolation");
         assert!(!String::from_utf8_lossy(&output.stdout).contains("listenerReady"));
+    }
+
+    #[tokio::test]
+    async fn bounded_cli_observe_returns_the_shared_sdk_result() {
+        let output = run_observation_case(AttachmentCase::BufferedEvents, "bounded", true).await;
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let records = output_records(&output);
+        let [result] = records.as_slice() else {
+            panic!("expected one bounded result");
+        };
+        assert_eq!(result["target"]["sessionId"], "observed-thread");
+        assert_eq!(result["generation"]["generation"], 1);
+        assert_eq!(result["attached"], true);
+        assert_eq!(result["endReason"], "backendDisconnected");
+        assert_eq!(result["continuationGap"], true);
+        assert_eq!(result["events"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[tokio::test]
+    async fn bounded_cli_observe_distinguishes_malformed_frame_from_clean_eof() {
+        let malformed =
+            run_observation_case(AttachmentCase::MalformedFrame, "malformed", true).await;
+        assert_eq!(malformed.status.code(), Some(5));
+        let records = output_records(&malformed);
+        let [failure] = records.as_slice() else {
+            panic!("expected one malformed-frame failure: {records:?}");
+        };
+        assert_eq!(failure["error"]["kind"], "protocolViolation");
+        assert_eq!(failure["error"]["stage"], "observation-collect");
+        assert_eq!(failure["error"]["effect"], "unknown");
+
+        let clean = run_observation_case(AttachmentCase::BufferedEvents, "clean-eof", true).await;
+        assert!(clean.status.success());
+        let records = output_records(&clean);
+        let [result] = records.as_slice() else {
+            panic!("expected one clean-EOF result: {records:?}");
+        };
+        assert_eq!(result["endReason"], "backendDisconnected");
+    }
+
+    #[tokio::test]
+    async fn bounded_cli_observe_stops_at_actual_encoded_byte_budget() {
+        let output = run_observation_case(AttachmentCase::ByteSaturation, "byte-limit", true).await;
+        assert!(output.status.success());
+        let records = output_records(&output);
+        let [result] = records.as_slice() else {
+            panic!("expected one bounded result");
+        };
+        assert_eq!(result["attached"], true);
+        assert_eq!(result["endReason"], "resultLimitReached");
+        assert_eq!(result["continuationGap"], true);
+        assert_eq!(result["events"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn independent_late_bounded_observations_remain_call_local() {
+        let (first, second) = tokio::join!(
+            run_observation_case(AttachmentCase::LateEvent, "concurrent-a", true),
+            run_observation_case(AttachmentCase::LateEvent, "concurrent-b", true),
+        );
+        for output in [first, second] {
+            assert!(output.status.success());
+            let records = output_records(&output);
+            let [result] = records.as_slice() else {
+                panic!("expected one bounded result");
+            };
+            assert_eq!(result["attached"], true);
+            assert_eq!(result["endReason"], "backendDisconnected");
+            assert!(result["events"].as_array().is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["params"]["delta"] == "late-output")
+            }));
+        }
     }
 
     fn endpoint_description(generation: u64) -> EndpointDescription {
@@ -90,7 +177,11 @@ mod tests {
         .unwrap_or_else(|error| panic!("observation fixture: {error}"))
     }
 
-    async fn run_observation_case(case: AttachmentCase, suffix: &str) -> std::process::Output {
+    async fn run_observation_case(
+        case: AttachmentCase,
+        suffix: &str,
+        bounded: bool,
+    ) -> std::process::Output {
         let root = PathBuf::from(format!("/tmp/event-cli-{}-{suffix}", std::process::id()));
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -105,9 +196,10 @@ mod tests {
         let control = LocalControlService::bind(&root.join("control.sock"), identity)
             .unwrap_or_else(|error| panic!("observation fixture: {error}"));
         let manifest: ServiceManifest = serde_json::from_value(json!({
-            "version":1,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
+            "version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
             "control":{"transport":"unixJsonLines","path":"control.sock"},
-            "controlSchemaDigest":digest
+            "controlSchemaDigest":digest,
+            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
         }))
         .unwrap_or_else(|error| panic!("observation fixture: {error}"));
         let publication = ManifestPublication::publish(&root, &manifest)
@@ -138,7 +230,26 @@ mod tests {
             if matches!(case, AttachmentCase::NativeRejection) {
                 send_native(&mut socket, json!({"id":resume["id"],"error":{"code":-32602,"message":"Unknown fixture thread"}})).await;
             } else {
-                send_native(&mut socket, json!({"method":"item/agentMessage/delta","params":{"threadId":"observed-thread","turnId":"observed-turn","delta":"buffered-output"}})).await;
+                if matches!(case, AttachmentCase::LateEvent) {
+                    send_native(
+                        &mut socket,
+                        json!({"id":resume["id"],"result":{"thread":{"id":"observed-thread"}}}),
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    send_native(&mut socket, json!({"method":"item/agentMessage/delta","params":{"threadId":"observed-thread","turnId":"observed-turn","delta":"late-output"}})).await;
+                    socket
+                        .close(None)
+                        .await
+                        .unwrap_or_else(|error| panic!("observation fixture: {error}"));
+                    return;
+                }
+                let delta = if matches!(case, AttachmentCase::ByteSaturation) {
+                    "x".repeat(256)
+                } else {
+                    "buffered-output".to_owned()
+                };
+                send_native(&mut socket, json!({"method":"item/agentMessage/delta","params":{"threadId":"observed-thread","turnId":"observed-turn","delta":delta}})).await;
                 send_native(&mut socket, json!({"id":"permission-request","method":"item/commandExecution/requestApproval","params":{"threadId":"observed-thread","turnId":"observed-turn"}})).await;
                 if matches!(case, AttachmentCase::GenerationChanged) {
                     directory
@@ -150,8 +261,22 @@ mod tests {
                     json!({"id":resume["id"],"result":{"thread":{"id":"observed-thread"}}}),
                 )
                 .await;
+                if matches!(case, AttachmentCase::MalformedFrame) {
+                    socket
+                        .send(Message::Text("{".into()))
+                        .await
+                        .unwrap_or_else(|error| panic!("observation fixture: {error}"));
+                    socket
+                        .close(None)
+                        .await
+                        .unwrap_or_else(|error| panic!("observation fixture: {error}"));
+                    return;
+                }
             }
-            if matches!(case, AttachmentCase::BufferedEvents) {
+            if matches!(
+                case,
+                AttachmentCase::BufferedEvents | AttachmentCase::ByteSaturation
+            ) {
                 // This scenario models server loss. Rejected/stale attachment instead
                 // makes the client disconnect; a server close write would race that exit.
                 socket
@@ -167,24 +292,22 @@ mod tests {
                 );
             }
         });
-        let output = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
-                .args([
-                    "events",
-                    "listen",
-                    "--endpoint",
-                    "codex-local",
-                    "--session",
-                    "observed-thread",
-                    "--attach",
-                    "--service-directory",
-                ])
-                .arg(&root)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
+        command.args([
+            "events",
+            if bounded { "observe" } else { "listen" },
+            "--endpoint",
+            "codex-local",
+            "--session",
+            "observed-thread",
+            "--attach",
+            "--service-directory",
+        ]);
+        command.arg(&root).kill_on_drop(true);
+        if matches!(case, AttachmentCase::ByteSaturation) {
+            command.args(["--max-events", "64", "--max-bytes", "128"]);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
         stop.cancel();
         service
             .await

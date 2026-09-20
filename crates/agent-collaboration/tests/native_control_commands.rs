@@ -15,7 +15,7 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
     let digest = format!("sha256:{}", "a".repeat(64));
-    let manifest = serde_json::from_value(json!({"version":1,"serviceId":service_id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest})).unwrap_or_else(|error| panic!("manifest: {error}"));
+    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap_or_else(|error| panic!("manifest: {error}"));
     let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
         .unwrap_or_else(|error| panic!("publish: {error}"));
     let fixture = tokio::spawn(async move {
@@ -90,4 +90,138 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
         serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("output: {error}"));
     assert_eq!(result["error"]["kind"], "outcomeUnknown");
     assert!(output.stderr.is_empty());
+}
+
+#[tokio::test]
+async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distinct() {
+    for (label, rejection_kind, expected_exit) in [
+        ("response-loss", None, 5),
+        ("outcome-unknown", Some("outcomeUnknown"), 5),
+        ("native-refusal", Some("nativeRejected"), 4),
+    ] {
+        let root =
+            std::path::PathBuf::from(format!("/tmp/message-cli-{label}-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap_or_else(|error| panic!("directory: {error}"));
+        let listener = tokio::net::UnixListener::bind(root.join("control.sock"))
+            .unwrap_or_else(|error| panic!("listener: {error}"));
+        let service_id = "00000000-0000-4000-8000-000000000001";
+        let epoch = "00000000-0000-4000-8000-000000000002";
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let manifest = serde_json::from_value(json!({
+            "version":2,"serviceId":service_id,"serviceEpoch":epoch,
+            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+        }))
+        .unwrap_or_else(|error| panic!("manifest: {error}"));
+        let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
+            .unwrap_or_else(|error| panic!("publish: {error}"));
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("Control accept");
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            for method in ["control/initialize", "endpoint/list", "codex/messageSend"] {
+                let request: Value = serde_json::from_str(
+                    &lines
+                        .next_line()
+                        .await
+                        .expect("Control read")
+                        .expect("Control frame"),
+                )
+                .expect("Control JSON");
+                assert_eq!(request["method"], method);
+                if method == "codex/messageSend" {
+                    assert_eq!(request["params"]["target"]["sessionId"], "proof-thread");
+                    if let Some(kind) = rejection_kind {
+                        let mut data = json!({
+                            "kind":kind,"stage":"start","message":"Message operation failed",
+                            "effects":{"resume":"notRequested","submission":"unknown"}
+                        });
+                        if kind == "nativeRejected" {
+                            let fields = data.as_object_mut().expect("rejection fields");
+                            fields.insert("reason".to_owned(), json!("busy"));
+                            fields.insert("nextAction".to_owned(), json!("inspectTarget"));
+                        }
+                        let response = json!({
+                            "jsonrpc":"2.0","id":request["id"],
+                            "error":{"code":-32050,"message":"native response failed","data":data}
+                        });
+                        write
+                            .write_all(format!("{response}\n").as_bytes())
+                            .await
+                            .expect("rejection response");
+                    }
+                    break;
+                }
+                let result = if method == "control/initialize" {
+                    json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"controlSchemaDigest":digest})
+                } else {
+                    json!({"serviceEpoch":epoch,"sequence":0,"endpoints":[{
+                        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"Fixture Codex",
+                        "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
+                        "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"codex-native.sock","schemaDigest":null,"generation":{"serviceEpoch":epoch,"generation":1}}]
+                    }]})
+                };
+                write
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            json!({"jsonrpc":"2.0","id":request["id"],"result":result})
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("Control response");
+            }
+        });
+        let target = json!({"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"proof-thread"}).to_string();
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+                .args([
+                    "message",
+                    "send",
+                    "--human-user",
+                    "--to",
+                    &target,
+                    "--text",
+                    "proof",
+                    "--json",
+                    "--service-directory",
+                ])
+                .arg(&root)
+                .output(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{label} command deadline: {error}"))
+        .unwrap_or_else(|error| panic!("command: {error}"));
+        peer.await.expect("peer join");
+        drop(publication);
+        std::fs::remove_file(root.join("control.sock")).expect("socket cleanup");
+        std::fs::remove_dir(&root).expect("directory cleanup");
+
+        assert_eq!(output.status.code(), Some(expected_exit), "{label}");
+        let result: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
+        let schemas = collaboration_client::protocol::protocol_type_schemas()
+            .expect("protocol schema export");
+        let schema = schemas
+            .get("FiniteCommandRecord")
+            .expect("FiniteCommandRecord schema");
+        let validator = jsonschema::validator_for(schema).expect("finite record validator");
+        if let Err(error) = validator.validate(&result) {
+            panic!("{label} exported schema rejected actual stdout: {error}; {result}");
+        }
+        let _: collaboration_client::protocol::FiniteCommandRecord<
+            Value,
+            collaboration_client::protocol::AdapterOperationFailure,
+        > = serde_json::from_value(result.clone()).expect("published finite message record");
+        assert_eq!(result["target"]["sessionId"], "proof-thread", "{label}");
+        assert_eq!(result["error"]["effect"], "unknown", "{label}");
+        if let Some(kind) = rejection_kind {
+            assert_eq!(result["error"]["serviceKind"], kind, "{label}: {result}");
+        }
+        assert!(output.stderr.is_empty(), "{label}");
+    }
 }

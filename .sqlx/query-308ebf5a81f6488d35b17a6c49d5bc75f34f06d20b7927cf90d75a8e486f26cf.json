@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT topic_id FROM topic_watches WHERE reader_key=? AND active=1 ORDER BY topic_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "topic_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "topic_watches",
+            "name": "topic_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "308ebf5a81f6488d35b17a6c49d5bc75f34f06d20b7927cf90d75a8e486f26cf"
+}

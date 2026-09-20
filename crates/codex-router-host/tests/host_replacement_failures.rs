@@ -91,6 +91,7 @@ async fn retained_router_teardown_failure_keeps_restart_busy_and_never_executes(
         HostConfig::new(HostConfigInputs {
             coordination_paths: coordination_paths.clone(),
             router_endpoint: router_address,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable: directory.path().join("unused-managed-codex"),
             deadlines: fixture_host_deadlines()?,
@@ -263,7 +264,23 @@ async fn signal_owns_shutdown_while_host_replacement_teardown_is_retained()
         )?;
         let restart_frames = tokio::time::timeout(Duration::from_secs(2), restart_task).await???;
         check(
-            matches!(restart_frames.as_slice(), [OperatorFrame::Progress(_)]),
+            restart_frames
+                .iter()
+                .all(|frame| matches!(frame, OperatorFrame::Progress(_)))
+                && restart_frames.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        OperatorFrame::Progress(
+                            codex_router_host::HostProgress::ReplacementStarting
+                        )
+                    )
+                })
+                && !restart_frames.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        OperatorFrame::Progress(codex_router_host::HostProgress::ReExecuting)
+                    )
+                }),
             "signal-owned shutdown must close the restart exchange without finalizing replacement",
         )?;
         check(
@@ -330,6 +347,7 @@ async fn host_replacement_signal_child_entrypoint() -> Result<(), Box<dyn std::e
                 required_path("CODEX_HOST_SIGNAL_INSTANCE_LOCK")?,
             ),
             router_endpoint: router_address,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable: PathBuf::from("/unused/managed-codex"),
             deadlines: fixture_host_deadlines()?,

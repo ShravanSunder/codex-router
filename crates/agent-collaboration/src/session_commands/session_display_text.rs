@@ -1,5 +1,8 @@
 //! Bounded display titles, context and recency labels.
-use super::{SESSION_CONTEXT_MAX_CHARS, SESSION_TITLE_MAX_CHARS, SessionRecord};
+use super::{
+    SESSION_CONTEXT_MAX_CHARS, SESSION_MODEL_CHOICE_MAX_CHARS, SESSION_TITLE_MAX_CHARS,
+    SessionRecord,
+};
 use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -12,7 +15,7 @@ pub(super) fn human_session_row(record: &SessionRecord) -> String {
         .map(session_context_from_cwd)
         .unwrap_or_else(|| "-".to_owned());
     format!(
-        "{}\n  {}  {}  {}  id={}",
+        "{}\n  {}  {}  {}  {}  id={}",
         display_title_from_session_fields(
             record.name.as_deref(),
             record.title.as_deref(),
@@ -22,9 +25,32 @@ pub(super) fn human_session_row(record: &SessionRecord) -> String {
         .as_deref()
         .unwrap_or("Untitled session"),
         format_recency_at_ms(record.recency_at_ms),
+        session_model_choice(record.model.as_deref(), record.reasoning_effort.as_deref()),
         record.git_branch.as_deref().unwrap_or("-"),
         context,
         short_session_id(&record.session_id)
+    )
+}
+
+/// The model and reasoning effort a session last ran with, as one bounded column.
+///
+/// A resume carries these values back into the session, so the picker has to show what
+/// the caller is about to get. Both unknown collapses to a single placeholder.
+pub(super) fn session_model_choice(model: Option<&str>, reasoning_effort: Option<&str>) -> String {
+    let model = model.map(str::trim).filter(|value| !value.is_empty());
+    let reasoning_effort = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if model.is_none() && reasoning_effort.is_none() {
+        return "-".to_owned();
+    }
+    truncate_end(
+        &format!(
+            "{}/{}",
+            model.unwrap_or("-"),
+            reasoning_effort.unwrap_or("-")
+        ),
+        SESSION_MODEL_CHOICE_MAX_CHARS,
     )
 }
 

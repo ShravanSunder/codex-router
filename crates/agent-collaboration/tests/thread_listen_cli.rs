@@ -2,6 +2,7 @@ use collaboration_client::ControlClient;
 use collaboration_client::board::*;
 use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
 use message_board_storage::BoardStore;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -27,18 +28,19 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         .with_board_store(Arc::clone(&store));
     let service = LocalControlService::bind(&root.join("control.sock"), identity)?;
     let manifest = serde_json::from_value(serde_json::json!({
-        "version":1,
+        "version":2,
         "serviceId":SERVICE_ID,
         "serviceEpoch":SERVICE_EPOCH,
         "control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
     }))?;
     let publication = ManifestPublication::publish(&root, &manifest)?;
     let stop = CancellationToken::new();
     let service_task = tokio::spawn(service.run(stop.clone()));
     let mut client = ControlClient::connect(&root, "thread-listen-fixture", "1").await?;
     let owner = actor("owner")?;
-    let reader = actor("reader")?;
+    let reader = session_actor("thread-listen-self")?;
     let writer = actor("writer")?;
     let project_id = ProjectId::generate();
     let board_id = BoardId::generate();
@@ -83,17 +85,138 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         })
         .await?
         .message;
-    let reader_json = serde_json::to_string(&reader)?;
+    for (environment, expected) in [
+        (
+            "missing",
+            "requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID",
+        ),
+        ("both", "is ambiguous"),
+        (
+            "invalid",
+            "requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID",
+        ),
+    ] {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
+        command
+            .args(["board", "thread", "listen", "--root-message-id"])
+            .arg(root_message.message_id.as_str())
+            .args(["--once", "--max-wait", "1s", "--actor", "self"])
+            .arg("--no-acknowledge")
+            .arg("--service-directory")
+            .arg(&root)
+            .arg("--json")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .kill_on_drop(true);
+        match environment {
+            "both" => {
+                command
+                    .env("CODEX_THREAD_ID", "ambiguous-codex")
+                    .env("CLAUDE_CODE_SESSION_ID", "ambiguous-claude");
+            }
+            "invalid" => {
+                command.env("CODEX_THREAD_ID", "");
+            }
+            _ => {}
+        }
+        let output = command.output().await?;
+        if output.status.code() != Some(2)
+            || !String::from_utf8_lossy(&output.stdout).contains(expected)
+        {
+            return Err(format!(
+                "--actor self {environment} environment did not fail before mutation: status {:?}, stdout {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout)
+            )
+            .into());
+        }
+    }
+    for (environment, codex_thread_id, claude_code_session_id, expected) in [
+        (
+            "invalid Codex",
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            None,
+            "contain a non-empty session ID",
+        ),
+        (
+            "invalid Claude",
+            None,
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            "contain a non-empty session ID",
+        ),
+        (
+            "invalid Codex with Claude",
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            Some(std::ffi::OsString::from("ambiguous-claude")),
+            "is ambiguous",
+        ),
+        (
+            "Codex with invalid Claude",
+            Some(std::ffi::OsString::from("ambiguous-codex")),
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            "is ambiguous",
+        ),
+        (
+            "both invalid",
+            Some(std::ffi::OsString::from_vec(vec![0x80])),
+            Some(std::ffi::OsString::from_vec(vec![0x81])),
+            "is ambiguous",
+        ),
+    ] {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
+        command
+            .args(["board", "thread", "listen", "--root-message-id"])
+            .arg(root_message.message_id.as_str())
+            .args(["--once", "--max-wait", "1s", "--actor", "self"])
+            .arg("--no-acknowledge")
+            .arg("--service-directory")
+            .arg(&root)
+            .arg("--json")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .kill_on_drop(true);
+        if let Some(value) = codex_thread_id {
+            command.env("CODEX_THREAD_ID", value);
+        }
+        if let Some(value) = claude_code_session_id {
+            command.env("CLAUDE_CODE_SESSION_ID", value);
+        }
+        let output = command.output().await?;
+        if output.status.code() != Some(2)
+            || !String::from_utf8_lossy(&output.stdout).contains(expected)
+        {
+            return Err(format!(
+                "--actor self {environment} environment did not fail before mutation: status {:?}, stdout {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout)
+            )
+            .into());
+        }
+    }
+    if !client
+        .board_thread_participant_list(ThreadParticipantListRequest {
+            root_message_id: root_message.message_id.clone(),
+            page: PageRequest::default(),
+        })
+        .await?
+        .page
+        .records
+        .is_empty()
+    {
+        return Err("invalid --actor self attempts mutated Participant state".into());
+    }
     let mut listen = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
     listen
-        .args(["board", "thread", "listen", "--root-message-id"])
+        .args(["board", "thread", "join", "--root-message-id"])
         .arg(root_message.message_id.as_str())
-        .args(["--once", "--max-wait", "2m", "--actor"])
-        .arg(&reader_json)
+        .args(["--actor", "self", "--role", "advisor", "--watch"])
+        .args(["--listen", "once", "--max-wait", "1s"])
         .arg("--acknowledge")
         .arg("--service-directory")
         .arg(&root)
         .arg("--json")
+        .env("CODEX_THREAD_ID", "thread-listen-self")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .kill_on_drop(true);
     let listen_task = tokio::spawn(async move { listen.output().await });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -137,7 +260,28 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         )
         .into());
     }
-    let batch_set: ThreadListenBatchSet = serde_json::from_slice(&output.stdout)?;
+    let output_lines = String::from_utf8(output.stdout)?;
+    let mut output_lines = output_lines.lines();
+    let join_result: serde_json::Value = serde_json::from_str(
+        output_lines
+            .next()
+            .ok_or("Join-plus-Listen omitted the committed Join result")?,
+    )?;
+    if join_result.pointer("/result/record/participant").is_none() {
+        return Err("Join-plus-Listen did not write the Join result before waiting".into());
+    }
+    let batch_line = output_lines
+        .next()
+        .ok_or("Join-plus-Listen omitted its Batch set")?;
+    let finalization: ThreadListenFinalization = serde_json::from_str(
+        output_lines
+            .next()
+            .ok_or("Join-plus-Listen omitted its finalization")?,
+    )?;
+    if finalization.reason != ThreadListenEndReason::Emitted || output_lines.next().is_some() {
+        return Err("Join-plus-Listen wrote an invalid finalization sequence".into());
+    }
+    let batch_set: ThreadListenBatchSet = serde_json::from_str(batch_line)?;
     if batch_set.kind != ThreadListenOutputKind::BatchSet
         || batch_set.batches.len() != 1
         || batch_set.batches[0].messages.len() != 1
@@ -160,25 +304,104 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
     }
 
     let timeout = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
-        .args(["board", "thread", "listen", "--root-message-id"])
+        .args(["board", "thread", "wait", "--root-message-id"])
         .arg(root_message.message_id.as_str())
-        .args(["--once", "--max-wait", "1s", "--actor"])
-        .arg(reader_json)
+        .args(["--max-wait", "1s", "--actor", "self"])
         .arg("--no-acknowledge")
         .arg("--service-directory")
         .arg(&root)
         .arg("--json")
+        .env("CODEX_THREAD_ID", "thread-listen-self")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .kill_on_drop(true)
         .output()
         .await?;
-    if timeout.status.code() != Some(3) || !timeout.stdout.is_empty() {
+    let timeout_finalization: ThreadListenFinalization = serde_json::from_slice(&timeout.stdout)?;
+    if timeout.status.code() != Some(3)
+        || timeout_finalization.reason != ThreadListenEndReason::Timeout
+        || timeout_finalization.batches_delivered != 0
+    {
         return Err(format!(
-            "Re-armed Listen did not exit 3 silently: {:?} {}",
+            "Re-armed Listen did not exit 3 with timeout finalization: {:?} {}",
             timeout.status.code(),
             String::from_utf8_lossy(&timeout.stdout)
         )
         .into());
     }
+
+    let armed = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["board", "thread", "listen", "--root-message-id"])
+        .arg(root_message.message_id.as_str())
+        .args([
+            "--lifetime",
+            "short",
+            "--deliver",
+            "session",
+            "--actor",
+            "self",
+            "--no-acknowledge",
+            "--json",
+            "--service-directory",
+        ])
+        .arg(&root)
+        .env("CODEX_THREAD_ID", "thread-listen-self")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !armed.status.success() {
+        return Err(format!(
+            "session listen did not arm: {}",
+            String::from_utf8_lossy(&armed.stdout)
+        )
+        .into());
+    }
+    let armed: serde_json::Value = serde_json::from_slice(&armed.stdout)?;
+    let listen_id: ListenId = serde_json::from_value(
+        armed
+            .pointer("/result/record/listenId")
+            .cloned()
+            .ok_or("session listen omitted listenId")?,
+    )?;
+    // Retiring through the CLI reads back the same record shape listen show does.
+    let cancelled = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["board", "thread", "listen", "cancel", "--listen-id"])
+        .arg(listen_id.as_str())
+        .args(["--json", "--service-directory"])
+        .arg(&root)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !cancelled.status.success() {
+        return Err(format!(
+            "listen cancel failed: {}",
+            String::from_utf8_lossy(&cancelled.stdout)
+        )
+        .into());
+    }
+    let cancelled: serde_json::Value = serde_json::from_slice(&cancelled.stdout)?;
+    if cancelled.pointer("/result/record/listenId") != Some(&serde_json::json!(listen_id.as_str()))
+    {
+        return Err(format!(
+            "listen cancel did not return the snapshot as the record: {cancelled}"
+        )
+        .into());
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if client
+                .board_thread_listen_show(ThreadListenShowRequest {
+                    listen_id: listen_id.clone(),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
 
     client.close().await?;
     stop.cancel();
@@ -198,5 +421,17 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
 fn actor(value: &str) -> Result<Identity, IdentityValidationError> {
     Ok(Identity::Human {
         human_id: HumanId::try_from(value.to_owned())?,
+    })
+}
+
+fn session_actor(value: &str) -> Result<Identity, IdentityValidationError> {
+    Ok(Identity::Session {
+        session: SessionRef {
+            endpoint: SessionEndpointRef {
+                service_id: ServiceId::try_from(SERVICE_ID.to_owned())?,
+                endpoint_id: EndpointId::try_from("codex-local".to_owned())?,
+            },
+            session_id: SessionId::try_from(value.to_owned())?,
+        },
     })
 }

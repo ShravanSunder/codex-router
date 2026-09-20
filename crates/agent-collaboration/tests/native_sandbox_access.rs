@@ -26,6 +26,7 @@ async fn codex_sandbox_requires_exact_control_socket_permission() -> ProofResult
         directory: root.clone(),
         codex_home: home,
         backend_socket: root.join("absent.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
     })
     .await?;
@@ -84,7 +85,7 @@ async fn codex_sandbox_requires_exact_control_socket_permission() -> ProofResult
     }
     let response: serde_json::Value = serde_json::from_slice(&allowed.stdout)?;
     if response
-        .pointer("/result/endpoints")
+        .pointer("/result/page/endpoints")
         .and_then(serde_json::Value::as_array)
         .is_none()
     {

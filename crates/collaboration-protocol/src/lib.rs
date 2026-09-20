@@ -1,10 +1,23 @@
 //! Public communication contracts without process, storage or transport ownership.
 mod cli_output_contract;
 pub use cli_output_contract::{
-    ConversationEffect, ConversationRecord, ConversationStage, FiniteCommandRecord,
+    ConversationRecord, ConversationTerminalReason, EffortChange, FiniteCommandRecord,
     NativeObservationRecord, ObservationCloseReason,
 };
+mod operation_failure_contract;
+pub use operation_failure_contract::{
+    AdapterOperationFailure, OperationEffect, OperationFailureKind,
+};
+mod access_contract;
+mod approval_contract;
 mod permission_diagnostic;
+pub use access_contract::{
+    RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,
+};
+pub use approval_contract::{
+    ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListParams,
+    ApprovalListResult, ApprovalRequestRecord, ApprovalState,
+};
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,
     PermissionDiagnosticStage,
@@ -21,15 +34,15 @@ mod native_schema_references;
 mod native_session_catalog;
 pub use message_content::{
     AcceptedResumeEffect, MessageContent, MessageDelivery, MessageInputKind, MessageRepresentation,
-    MessageText, MessageTextError,
+    MessageText, MessageTextError, RenderedMessage, render_message,
 };
 pub use native_control_contract::{
     NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,
     NativeSendReceipt,
 };
 pub use native_session_catalog::{
-    NativeSessionListParams, NativeSessionListResult, NativeSessionObservation,
-    NativeSessionSummary, NativeSessionView,
+    NativeSessionListParams, NativeSessionListResult, NativeSessionObservation, NativeSessionScope,
+    NativeSessionSource, NativeSessionSummary, NativeSessionView,
 };
 mod control_initialization;
 mod endpoint_inventory;
@@ -43,7 +56,7 @@ pub use protocol_type_schemas::protocol_type_schemas;
 mod native_control_contract;
 pub use native_control_contract::{
     NativeInspectParams, NativeInspectResult, NativeInterruptKind, NativeInterruptParams,
-    NativeInterruptResult,
+    NativeInterruptResult, NativeRenameParams, NativeRenameResult,
 };
 mod endpoint_identity;
 pub use backend_generation::{CodexGeneration, GenerationNumber};
@@ -64,7 +77,10 @@ pub use endpoint_description::{
 pub use endpoint_description::NonEmptyText;
 
 mod service_manifest;
-pub use service_manifest::{ControlSelector, ControlSocketPath, ControlTransport, ServiceManifest};
+pub use service_manifest::{
+    ControlSelector, ControlSocketPath, ControlTransport, McpSelector, McpTransport,
+    ServiceManifest,
+};
 mod lifecycle_observation;
 pub use lifecycle_observation::{
     BackendStatus, LifecycleChange, LifecycleObservation, LifecycleSubject, NativeActiveFlag,

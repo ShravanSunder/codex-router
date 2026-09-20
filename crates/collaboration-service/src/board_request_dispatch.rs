@@ -90,7 +90,15 @@ pub(crate) async fn dispatch(
         "board/threadUnresolve" => call!(ThreadUnresolveRequest, unresolve_thread),
         "board/threadWatch" => call!(ThreadWatchRequest, watch_thread),
         "board/threadUnwatch" => call!(ThreadUnwatchRequest, unwatch_thread),
+        "board/topicWatch" => call!(TopicWatchRequest, watch_topic),
+        "board/topicUnwatch" => call!(TopicWatchRequest, unwatch_topic),
         "board/threadList" => call!(ThreadListRequest, list_threads),
+        "board/threadCreate" => call!(ThreadCreateRequest, create_thread),
+        "board/threadJoin" => call!(ThreadJoinRequest, join_thread),
+        "board/threadLeave" => call!(ThreadLeaveRequest, leave_thread),
+        "board/threadParticipantList" => {
+            call!(ThreadParticipantListRequest, list_thread_participants)
+        }
         "board/inboxFetch" => call!(InboxFetchRequest, fetch_inbox),
         "board/inboxAcknowledge" => call!(InboxAcknowledgeRequest, acknowledge_inbox),
         "board/inboxProjects" => call!(InboxProjectsRequest, list_inbox_projects),

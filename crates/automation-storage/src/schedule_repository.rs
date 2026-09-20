@@ -102,6 +102,27 @@ impl AutomationStore {
 pub(crate) fn validate_definition<TTarget, TEndpoint>(
     definition: &ScheduleDefinition<TTarget, TEndpoint>,
 ) -> Result<(), StorageError> {
+    let valid_choice = |value: Option<&String>| {
+        value.is_some_and(|value| {
+            !value.trim().is_empty() && !value.chars().any(char::is_whitespace)
+        })
+    };
+    if !valid_choice(definition.effort.as_ref()) {
+        return Err(StorageError::InvalidSchedule {
+            field: "effort",
+            reason: "is required and must not contain whitespace",
+        });
+    }
+    if matches!(
+        definition.destination,
+        ExecutionDestination::FreshEachRunUnprepared | ExecutionDestination::FreshEachRun { .. }
+    ) && !valid_choice(definition.model.as_ref())
+    {
+        return Err(StorageError::InvalidSchedule {
+            field: "model",
+            reason: "is required for fresh thread schedules and must not contain whitespace",
+        });
+    }
     match &definition.destination {
         ExecutionDestination::Unprepared | ExecutionDestination::FreshEachRunUnprepared
             if definition.enabled =>

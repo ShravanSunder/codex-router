@@ -19,6 +19,7 @@ async fn board_open_failure_keeps_unrelated_control_methods_available()
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("absent-native.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
     })
     .await?;

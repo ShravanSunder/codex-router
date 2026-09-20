@@ -132,7 +132,7 @@ async fn cross_project_references_and_unread_summaries_keep_independent_scope() 
             })
             .await
             .unwrap()
-            .message
+            .0
             .text
             .as_str(),
         "First project's finding"

@@ -117,7 +117,7 @@ pub fn run_journal_command(arguments: Vec<OsString>) -> i32 {
                 0
             };
             let output = if args.json {
-                json!({"kind":"result","result":result}).to_string()
+                crate::endpoint_commands::result_envelope(json!(result)).to_string()
             } else {
                 serde_json::to_string_pretty(&result)
                     .unwrap_or_else(|_| "Result encoding failed".into())

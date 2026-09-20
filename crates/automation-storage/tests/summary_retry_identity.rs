@@ -31,6 +31,8 @@ async fn summary_retry_keeps_same_run_and_rejects_stale_attempt()
                     cwd: "/isolated-fixture".into(),
                 },
                 execution_timeout_seconds: Some(120),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,

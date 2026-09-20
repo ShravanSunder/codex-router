@@ -16,6 +16,7 @@ pub struct ServiceIdentity {
     pub(crate) wake_wait_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
     pub(crate) native_backend: Option<crate::NativeControlBackend>,
+    pub(crate) approval_broker: Option<std::sync::Arc<crate::ServiceApprovalBroker>>,
     pub(crate) automation:
         Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
 }
@@ -84,6 +85,14 @@ impl ServiceIdentity {
         self.native_backend = Some(backend);
         Ok(self)
     }
+    #[must_use]
+    pub fn with_approval_broker(
+        mut self,
+        broker: std::sync::Arc<crate::ServiceApprovalBroker>,
+    ) -> Self {
+        self.approval_broker = Some(broker);
+        self
+    }
     /// Registers a bounded inventory without inferring endpoint liveness.
     pub fn with_endpoints(self, endpoints: Vec<EndpointDescription>) -> Result<Self, String> {
         let mut identities = std::collections::HashSet::new();
@@ -135,6 +144,7 @@ impl ServiceIdentity {
             schema_digest: digest,
             journal: None,
             native_backend: None,
+            approval_broker: None,
             wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,
             board: None,

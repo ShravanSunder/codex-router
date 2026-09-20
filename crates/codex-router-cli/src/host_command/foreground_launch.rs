@@ -11,6 +11,7 @@ use codex_native_integration::AppServerCommandSpec;
 use codex_native_integration::CodexPaths;
 use codex_native_integration::CodexRouterProfile;
 use codex_native_integration::DesktopLaunchPolicyCommand;
+use codex_native_integration::RouterControlSocketPath;
 use codex_router_host::AppServerLaunchPlan;
 use codex_router_host::ChildCommandSpec;
 use codex_router_host::ChildOutput;
@@ -38,10 +39,13 @@ impl PreExecTelemetry for HostPreExecTelemetry {
 pub(super) async fn run_foreground_host(
     router_root: PathBuf,
     port: u16,
+    mcp_bind: SocketAddr,
     coordination_paths: HostCoordinationPaths,
     context: &CliContext,
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
+    stdout: &mut (impl std::io::Write + Send),
 ) -> Result<(), HostCommandError> {
+    let launch_started_at = std::time::Instant::now();
     let isolated_debug = cfg!(all(debug_assertions, not(test)))
         && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none();
     if isolated_debug {
@@ -58,8 +62,12 @@ pub(super) async fn run_foreground_host(
     let codex_paths = CodexPaths::from_codex_home(codex_home.clone());
     let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
         .map_err(|message| HostCommandError::AppServerSocket(message.to_owned()))?;
+    let collaboration_directory = router_root.join("agent-communication");
+    let control_socket =
+        RouterControlSocketPath::in_collaboration_directory(&collaboration_directory)?;
     let profile = CodexRouterProfile::new(port);
-    let app_server_spec = AppServerCommandSpec::new(&codex_paths, &profile, &app_server_socket);
+    let app_server_spec =
+        AppServerCommandSpec::new(&codex_paths, &profile, &control_socket, &app_server_socket);
     let app_server_spec = if isolated_debug {
         app_server_spec.with_debug_profile(&codex_native_integration::DebugCodexProfile::read(
             &codex_home,
@@ -68,12 +76,16 @@ pub(super) async fn run_foreground_host(
     } else {
         app_server_spec
     };
+    codex_router_host::record_debug_readiness_timing("profileAndSpec", launch_started_at);
     // Validate the native destination before touching state or launch policy.
     tokio::fs::create_dir_all(&router_root).await?;
+    codex_router_host::record_debug_readiness_timing("routerRootReady", launch_started_at);
     if !isolated_debug {
+        let started_at = std::time::Instant::now();
         DesktopLaunchPolicyCommand::new(launchctl_executable(context)?)
             .apply()
             .await?;
+        codex_router_host::record_debug_readiness_timing("launchctlPolicy", started_at);
     }
     let inherited_marker = std::env::var_os(codex_router_host::inherited_lock_environment());
     let instance = match inherited_marker.as_deref() {
@@ -81,23 +93,32 @@ pub(super) async fn run_foreground_host(
         None => HostInstance::acquire(coordination_paths.clone()),
     }
     .map_err(codex_router_host::HostError::from)?;
+    codex_router_host::record_debug_readiness_timing("singletonAcquired", launch_started_at);
+    let identity_started_at = std::time::Instant::now();
     let running_identity =
         codex_native_integration::executable_identity(&codex_paths.managed_executable()).await?;
+    codex_router_host::record_debug_readiness_timing("executableIdentity", identity_started_at);
+    let version_started_at = std::time::Instant::now();
     let running_version =
         codex_native_integration::managed_executable_version(&codex_paths.managed_executable())
             .await?;
+    codex_router_host::record_debug_readiness_timing(
+        "managedExecutableVersion",
+        version_started_at,
+    );
     let mut app_server_command = ChildCommandSpec::new(app_server_spec.executable())
         .with_arguments(app_server_spec.arguments())
         .with_output(ChildOutput::Telemetry);
     for (key, value) in app_server_spec.environment() {
         app_server_command = app_server_command.with_environment(key, value);
     }
-    let mut app_server =
+    let app_server =
         AppServerLaunchPlan::new(app_server_command, running_identity, running_version)
             .with_schema_directory(router_root.join("agent-communication"));
-    app_server.prepare_schema().await;
+    codex_router_host::record_debug_readiness_timing("appServerPlanBuilt", launch_started_at);
+    // Schema export is optional raw-native enrichment; do not delay app-server
+    // socket startup on this best-effort operation.
     let current_executable = std::env::current_exe()?;
-    let collaboration_directory = router_root.join("agent-communication");
     let otlp_endpoint = crate::telemetry::foreground_host_otlp_endpoint(
         context.env_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
     );
@@ -113,16 +134,12 @@ pub(super) async fn run_foreground_host(
         ])
         .with_environment("OTEL_EXPORTER_OTLP_ENDPOINT", otlp_endpoint)
         .with_environment("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
-    let replacement_command = ChildCommandSpec::new(current_executable).with_arguments([
-        OsString::from("host"),
-        OsString::from("--router-root"),
-        router_root.into_os_string(),
-        OsString::from("--port"),
-        OsString::from(port.to_string()),
-    ]);
+    let replacement_command =
+        host_replacement_command(current_executable, router_root.clone(), port, mcp_bind);
     let config = HostConfig::new(HostConfigInputs {
         coordination_paths,
         router_endpoint: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
+        mcp_bind,
         app_server_socket,
         managed_executable: codex_paths.managed_executable(),
         deadlines: HostDeadlines::production(),
@@ -135,8 +152,43 @@ pub(super) async fn run_foreground_host(
         update_inputs =
             update_inputs.with_pre_exec_telemetry(Arc::new(HostPreExecTelemetry(telemetry)));
     }
-    HostRuntime::run_acquired(config, child_launch_plans, update_inputs, instance).await?;
+    let mut presenter =
+        crate::presentation::host::HostProgressPresenter::new(context.stdout_is_terminal());
+    let mut emit = |progress| {
+        let _ = match progress {
+            Some(progress) => presenter.accept(
+                stdout,
+                &codex_router_host::OperatorFrame::Progress(progress),
+            ),
+            None => presenter.finish_success(stdout),
+        };
+    };
+    HostRuntime::run_acquired_with_progress(
+        config,
+        child_launch_plans,
+        update_inputs,
+        instance,
+        Some(&mut emit),
+    )
+    .await?;
     Ok(())
+}
+
+fn host_replacement_command(
+    executable: PathBuf,
+    router_root: PathBuf,
+    port: u16,
+    mcp_bind: SocketAddr,
+) -> ChildCommandSpec {
+    ChildCommandSpec::new(executable).with_arguments([
+        OsString::from("host"),
+        OsString::from("--router-root"),
+        router_root.into_os_string(),
+        OsString::from("--port"),
+        OsString::from(port.to_string()),
+        OsString::from("--mcp-bind"),
+        OsString::from(mcp_bind.to_string()),
+    ])
 }
 
 fn launchctl_executable(context: &CliContext) -> Result<PathBuf, HostCommandError> {
@@ -160,4 +212,30 @@ fn resolve_codex_home(context: &CliContext) -> Result<PathBuf, HostCommandError>
         .env_var("HOME")
         .map(|home| PathBuf::from(home).join(".codex"))
         .ok_or(HostCommandError::CodexHomeUnavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_replacement_command;
+    use codex_router_host::ChildCommandSpec;
+    use std::{ffi::OsString, net::SocketAddr, path::PathBuf};
+
+    #[test]
+    fn replacement_command_preserves_explicit_mcp_bind() {
+        let executable = PathBuf::from("/tmp/codex-router");
+        let router_root = PathBuf::from("/tmp/router-root");
+        let mcp_bind = SocketAddr::from(([127, 0, 0, 1], 19088));
+        assert_eq!(
+            host_replacement_command(executable.clone(), router_root.clone(), 19087, mcp_bind),
+            ChildCommandSpec::new(executable).with_arguments([
+                OsString::from("host"),
+                OsString::from("--router-root"),
+                router_root.into_os_string(),
+                OsString::from("--port"),
+                OsString::from("19087"),
+                OsString::from("--mcp-bind"),
+                OsString::from("127.0.0.1:19088"),
+            ])
+        );
+    }
 }

@@ -23,6 +23,7 @@ fn sessions_list_table_renders_human_title_and_metadata() {
             1000,
         )
         .with_search_fields(DERIVED_TITLE, "derived preview", "derived message")
+        .with_reasoning_effort("high")
         .with_name(EXPLICIT_NAME)],
     );
 
@@ -39,6 +40,10 @@ fn sessions_list_table_renders_human_title_and_metadata() {
         output
             .stdout
             .contains("Fix session table display | Derived session title")
+    );
+    assert!(
+        output.stdout.contains("gpt-5.4-mini/high"),
+        "the table row must show the model and effort a resume would restore"
     );
     assert!(output.stdout.contains("main"));
     assert!(output.stdout.contains("thread-…"));
@@ -78,7 +83,8 @@ fn sessions_last_dry_run_prints_codex_resume_command_for_latest_match() {
                 "cli",
                 "main",
                 2000,
-            ),
+            )
+            .with_reasoning_effort("high"),
         ],
     );
 
@@ -102,7 +108,7 @@ fn sessions_last_dry_run_prints_codex_resume_command_for_latest_match() {
     assert_eq!(
         output.stdout,
         format!(
-            "codex --profile codex-router --remote unix://{} --cd {} resume -- thread-new\n",
+            "codex --profile codex-router --remote unix://{} --cd {} -c model=\"gpt-5.4-mini\" -c model_reasoning_effort=\"high\" resume -- thread-new\n",
             test_root
                 .path()
                 .join(".codex-router/agent-communication/codex-native.sock")
@@ -154,7 +160,7 @@ fn sessions_local_last_dry_run_reads_codex_state_without_remote_attachment() {
     assert_eq!(
         output.stdout,
         format!(
-            "codex --profile codex-router --cd {} resume -- thread-local\n",
+            "codex --profile codex-router --cd {} -c model=\"gpt-5.4-mini\" resume -- thread-local\n",
             invoking_cwd.display(),
         )
     );

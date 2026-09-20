@@ -1,8 +1,5 @@
 //! Native message composition with explicit delivery and retained partial effects.
-use crate::{
-    agent_declaration::render_message, message_effect_state::MessageEffects,
-    native_control_dispatch::NativeControlRequest,
-};
+use crate::{message_effect_state::MessageEffects, native_control_dispatch::NativeControlRequest};
 use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
@@ -54,7 +51,8 @@ pub(crate) async fn dispatch_message(request: NativeControlRequest<'_>) -> Value
     {
         return effects.failure("unsupportedCapability", "queue");
     }
-    let Ok(rendered) = render_message(&params.target, &params.message) else {
+    let Ok(rendered) = collaboration_protocol::render_message(&params.target, &params.message)
+    else {
         return effects.failure("overloaded", "inspect");
     };
     let correlation = match &params.client_user_message_id {
@@ -144,13 +142,14 @@ impl MessageSession {
             Ok(value) => Ok(value),
             Err(error) => {
                 let kind = match error {
-                    NativeConnectionError::Rejected { .. } => {
+                    NativeConnectionError::Rejected { code } => {
                         if stage == "resume" {
                             self.effects.resume = "rejected";
                         } else if mutation {
                             self.effects.submission = "rejected";
                         }
-                        "nativeRejected"
+                        let native = self.connection.take_last_rejection();
+                        return Err(self.effects.native_rejection(stage, code, native.as_ref()));
                     }
                     NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable => {
                         if stage == "resume" {
@@ -167,11 +166,11 @@ impl MessageSession {
             }
         }
     }
-    async fn read(&mut self, id: &str, turns: bool) -> Result<Value, Value> {
+    async fn read_thread_metadata(&mut self, id: &str) -> Result<Value, Value> {
         let result = self
             .call(
                 NativeOperation::ReadThread,
-                json!({"threadId":id,"includeTurns":turns}),
+                json!({"threadId":id,"includeTurns":false}),
                 "inspect",
             )
             .await?;
@@ -183,6 +182,29 @@ impl MessageSession {
             .cloned()
             .ok_or_else(|| self.effects.failure("nativeRejected", "inspect"))
     }
+    async fn read_active_turn_id(&mut self, id: &str) -> Result<String, Value> {
+        let result = self
+            .call(
+                NativeOperation::ListTurns,
+                json!({
+                    "threadId":id,
+                    "limit":1,
+                    "sortDirection":"desc",
+                    "itemsView":"notLoaded"
+                }),
+                "inspect",
+            )
+            .await?;
+        result
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|turns| turns.first())
+            .filter(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"))
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| self.effects.failure("unsupportedCapability", "steer"))
+    }
     async fn deliver(
         &mut self,
         id: &str,
@@ -190,7 +212,7 @@ impl MessageSession {
         text: &str,
         correlation: &str,
     ) -> Result<NativeSendAcceptance, Value> {
-        let thread = self.read(id, false).await?;
+        let thread = self.read_thread_metadata(id).await?;
         let status = thread
             .pointer("/status/type")
             .and_then(Value::as_str)
@@ -211,18 +233,7 @@ impl MessageSession {
             return Ok(NativeSendAcceptance::QueueAccepted { submission_id });
         }
         if status == "active" {
-            let observed = self.read(id, true).await?;
-            let turn = observed
-                .get("turns")
-                .and_then(Value::as_array)
-                .and_then(|turns| {
-                    turns.iter().rev().find(|turn| {
-                        turn.get("status").and_then(Value::as_str) == Some("inProgress")
-                    })
-                })
-                .and_then(|turn| turn.get("id"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| self.effects.failure("unsupportedCapability", "steer"))?;
+            let turn = self.read_active_turn_id(id).await?;
             let result = self.call(NativeOperation::SteerTurn, json!({"threadId":id,"expectedTurnId":turn,"input":input,"clientUserMessageId":correlation}), "steer").await?;
             let turn_id = self.receipt_id(&result, "/turnId", "steer")?;
             if String::from(turn_id.clone()) != turn {
@@ -240,7 +251,7 @@ impl MessageSession {
             let resumed = self
                 .call(
                     NativeOperation::ResumeThread,
-                    json!({"threadId":id}),
+                    json!({"threadId":id,"excludeTurns":true}),
                     "resume",
                 )
                 .await?;

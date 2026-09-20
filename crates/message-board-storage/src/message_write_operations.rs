@@ -1,11 +1,15 @@
 //! Atomic immutable message creation and unread publication.
 use crate::BoardStore;
 use crate::board_topic_records::{require_board, require_topic};
-use crate::message_records::{activate_watch, load_message, load_watch_status, require_thread};
+use crate::message_records::{load_message, load_watch_status, require_thread};
+use crate::participant_records::{advance_participant_last_seen, apply_watch_choice};
+use crate::participant_row_decoding::{
+    load_implementer, load_orchestrator, load_participant, require_open_participant, role_name,
+};
 use crate::storage_support::{
     BoardTransaction, allocate_activity_sequence, archived_board, attribute_invalid_record,
-    current_activity_sequence, ensure_acting_for_identity, ensure_identity, invalid_record,
-    recompute_project_unread, resource_already_exists, storage_error,
+    ensure_acting_for_identity, ensure_identity, invalid_record, recompute_project_unread,
+    resource_already_exists, storage_error,
 };
 use message_board::*;
 use sqlx::Connection;
@@ -35,6 +39,13 @@ impl BoardStore {
                 if board.state == BoardState::Archived {
                     return Err(archived_board());
                 }
+                if matches!(request.actor, Identity::Session { .. }) {
+                    return Err(BoardError::session_topic_post(
+                        topic_id.clone(),
+                        request.actor.clone(),
+                        request.text.clone(),
+                    ));
+                }
                 (board.project_id, board.board_id, topic.topic_id, None)
             }
             Placement::Thread { root_message_id } => {
@@ -49,6 +60,10 @@ impl BoardStore {
                 if location.state == ThreadState::Resolved {
                     return Err(BoardError::thread_resolved());
                 }
+                if matches!(request.actor, Identity::Session { .. }) {
+                    require_open_participant(&mut transaction, &request.actor, root_message_id)
+                        .await?;
+                }
                 (
                     location.project_id,
                     location.board_id,
@@ -61,7 +76,6 @@ impl BoardStore {
         let actor_key = ensure_identity(&mut transaction, &request.actor).await?;
         let acting_for_key =
             ensure_acting_for_identity(&mut transaction, request.acting_for.as_ref()).await?;
-        let activity_before_post = current_activity_sequence(&mut transaction).await?;
         if root_id.is_none() {
             enforce_and_record_cooldown(&mut transaction, &actor_key, &board_id).await?;
         }
@@ -134,14 +148,15 @@ impl BoardStore {
         .await
         .map_err(storage_error)?;
         let watched_root = root_id.as_ref().unwrap_or(&request.message_id);
-        activate_watch(
-            &mut transaction,
-            &actor_key,
-            &project_id,
-            watched_root,
-            activity_before_post,
-        )
-        .await?;
+        if let Some(root_message_id) = &root_id {
+            advance_participant_last_seen(
+                &mut transaction,
+                &actor_key,
+                root_message_id,
+                activity_sequence,
+            )
+            .await?;
+        }
         publish_message_unread(&mut transaction, &project_id, root_id.as_ref(), &actor_key).await?;
         recompute_project_unread(&mut transaction, &actor_key, project_id.as_str()).await?;
         let message = load_message(&mut transaction, &request.message_id).await?;
@@ -151,7 +166,153 @@ impl BoardStore {
         Ok(MessagePostResult {
             message,
             watch_status,
-            outcome: "Message posted and its thread is watched.".to_owned(),
+            outcome: "Message posted. Watch state is unchanged.".to_owned(),
+        })
+    }
+
+    pub async fn create_thread(
+        &mut self,
+        request: ThreadCreateRequest,
+    ) -> Result<ThreadCreateResult, BoardError> {
+        if matches!(request.actor, Identity::Session { .. }) && request.role.is_none() {
+            return Err(BoardError::invalid_field(
+                "role",
+                "is required when a session creates a Thread",
+            ));
+        }
+        let mut transaction = self
+            .connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        if message_exists(&mut transaction, &request.message_id).await? {
+            return Err(resource_already_exists(ResourceIdentity::Message {
+                message_id: request.message_id,
+            }));
+        }
+        let topic = require_topic(&mut transaction, &request.topic_id).await?;
+        let board = require_board(&mut transaction, &topic.board_id).await?;
+        if board.state == BoardState::Archived {
+            return Err(archived_board());
+        }
+        validate_reference_targets(&mut transaction, request.references.as_slice()).await?;
+        let actor_key = ensure_identity(&mut transaction, &request.actor).await?;
+        let acting_for_key =
+            ensure_acting_for_identity(&mut transaction, request.acting_for.as_ref()).await?;
+        enforce_and_record_cooldown(&mut transaction, &actor_key, &board.board_id).await?;
+        sqlx::query!(
+            "INSERT INTO board_messages(message_id,topic_id,board_id,root_id,actor_key,acting_for_key,text) \
+             VALUES(?,?,?,NULL,?,?,?)",
+            request.message_id.as_str(),
+            topic.topic_id.as_str(),
+            board.board_id.as_str(),
+            actor_key,
+            acting_for_key,
+            request.text.as_str(),
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        sqlx::query!(
+            "INSERT INTO board_threads(root_id,state) VALUES(?,'unresolved')",
+            request.message_id.as_str(),
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        for (ordinal, reference) in request.references.iter().enumerate() {
+            let ordinal = i64::try_from(ordinal).map_err(|_| invalid_record())?;
+            let (kind, target_message_id, target_root_id) = match reference {
+                ReferenceTarget::Message { message_id } => {
+                    ("message", Some(message_id.as_str()), None)
+                }
+                ReferenceTarget::Thread { root_message_id } => {
+                    ("thread", None, Some(root_message_id.as_str()))
+                }
+            };
+            sqlx::query!(
+                "INSERT INTO message_references(source_id,ordinal,kind,target_message_id,target_root_id) VALUES(?,?,?,?,?)",
+                request.message_id.as_str(), ordinal, kind, target_message_id, target_root_id,
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        }
+        let message_activity = allocate_activity_sequence(&mut transaction).await?;
+        sqlx::query!(
+            "INSERT INTO board_activity(activity_sequence,project_id,board_id,topic_id,root_id,kind,actor_key,message_id) \
+             VALUES(?,?,?,?,NULL,'mainMessageCreated',?,?)",
+            message_activity,
+            board.project_id.as_str(),
+            board.board_id.as_str(),
+            topic.topic_id.as_str(),
+            actor_key,
+            request.message_id.as_str(),
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if let Some(role) = request.role {
+            let join_activity = allocate_activity_sequence(&mut transaction).await?;
+            sqlx::query!(
+                "INSERT INTO board_activity(activity_sequence,project_id,board_id,topic_id,root_id,kind,actor_key,message_id) \
+                 VALUES(?,?,?,?,?,'participantJoined',?,NULL)",
+                join_activity,
+                board.project_id.as_str(),
+                board.board_id.as_str(),
+                topic.topic_id.as_str(),
+                request.message_id.as_str(),
+                actor_key,
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+            let role = role_name(role);
+            sqlx::query!(
+                "INSERT INTO thread_participants(reader_key,root_id,role,note,joined_at_activity,last_seen_activity,closed_at_activity,closed_reason,replaced_by) \
+                 VALUES(?,?,?,NULL,?,?,NULL,NULL,NULL)",
+                actor_key,
+                request.message_id.as_str(),
+                role,
+                join_activity,
+                join_activity,
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        }
+        apply_watch_choice(
+            &mut transaction,
+            &actor_key,
+            &board.project_id,
+            &request.message_id,
+            message_activity,
+            request.watch,
+        )
+        .await?;
+        publish_message_unread(&mut transaction, &board.project_id, None, &actor_key).await?;
+        recompute_project_unread(&mut transaction, &actor_key, board.project_id.as_str()).await?;
+        let message = load_message(&mut transaction, &request.message_id).await?;
+        let creator_participation =
+            match load_participant(&mut transaction, &request.actor, &request.message_id).await? {
+                Some(participant) => ThreadCreatorParticipation::Joined {
+                    participant: Box::new(participant),
+                },
+                None => ThreadCreatorParticipation::NotJoined,
+            };
+        let orchestrator = load_orchestrator(&mut transaction, &request.message_id).await?;
+        let implementer = load_implementer(&mut transaction, &request.message_id).await?;
+        let watch_status =
+            load_watch_status(&mut transaction, &actor_key, &request.message_id).await?;
+        transaction.commit().await.map_err(storage_error)?;
+        self.notify_activity();
+        Ok(ThreadCreateResult {
+            message,
+            creator_participation,
+            orchestrator,
+            implementer,
+            watch_status,
+            outcome: "Thread created with the explicit Participant and Watch choices.".to_owned(),
         })
     }
 }

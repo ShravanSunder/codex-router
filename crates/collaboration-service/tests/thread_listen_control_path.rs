@@ -77,17 +77,18 @@ async fn committed_post_wakes_the_long_poll_control_path_after_debounce()
                 root_message_ids: vec![root.message.message_id.clone()],
             },
             mode: ThreadListenMode::Once {
-                max_wait_seconds: 300,
+                max_wait_seconds: 1,
             },
             from_activity_sequence: None,
             acknowledge: false,
+            delivery: ThreadListenDelivery::Stdout,
         })
         .await?
         .listen;
     let listen_id = listen.listen_id.clone();
     let waiting = tokio::spawn(async move {
         let result = listener
-            .board_thread_wait(ThreadWaitRequest { listen_id }, Duration::from_secs(305))
+            .board_thread_wait(ThreadWaitRequest { listen_id }, Duration::from_secs(5))
             .await;
         (listener, result)
     });

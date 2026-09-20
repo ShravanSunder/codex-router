@@ -178,8 +178,8 @@ pub async fn exercise() -> ProofResult<()> {
         .await?;
 
     verify_sdk_observations(
-        &root.message,
-        &contribution.message,
+        &root.0,
+        &contribution.0,
         &thread_history.page.records,
         &alpha_identity,
         &beta_identity,
@@ -206,8 +206,8 @@ pub async fn exercise() -> ProofResult<()> {
             first_project_id: project_id.as_str(),
             first_board_id: board_id.as_str(),
             first_topic_id: topic_id.as_str(),
-            root_message: &root.message,
-            contribution_message: &contribution.message,
+            root_message: &root.0,
+            contribution_message: &contribution.0,
         },
     )
     .await?;

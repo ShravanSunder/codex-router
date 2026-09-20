@@ -16,6 +16,7 @@ chrono.workspace = true
 lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14" }
 collaboration-service = { path = "../collaboration-service", version = "0.1.14" }
+collaboration-mcp = { path = "../collaboration-mcp", version = "0.1.30" }
 codex-native-integration.workspace = true
 codex-router-core.workspace = true
 httparse.workspace = true
@@ -29,6 +30,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+tempfile = "3.27.0"
 toml = "1.1.2"
 sqlx.workspace = true
 tokio = { workspace = true, features = ["io-std"] }

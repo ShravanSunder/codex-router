@@ -44,6 +44,7 @@ pub struct HostConfig {
     collaboration_codex_home: Option<PathBuf>,
     coordination_paths: HostCoordinationPaths,
     router_endpoint: SocketAddr,
+    mcp_bind: SocketAddr,
     app_server_socket: PathBuf,
     managed_executable: PathBuf,
     deadlines: HostDeadlines,
@@ -55,6 +56,7 @@ pub struct HostConfigInputs {
     pub coordination_paths: HostCoordinationPaths,
     /// Configured loopback router endpoint.
     pub router_endpoint: SocketAddr,
+    pub mcp_bind: SocketAddr,
     /// Conventional socket derived from normal Codex home.
     pub app_server_socket: PathBuf,
     /// Managed Codex executable resolved by the adapter.
@@ -72,6 +74,7 @@ impl HostConfig {
             collaboration_codex_home: None,
             coordination_paths: inputs.coordination_paths,
             router_endpoint: inputs.router_endpoint,
+            mcp_bind: inputs.mcp_bind,
             app_server_socket: inputs.app_server_socket,
             managed_executable: inputs.managed_executable,
             deadlines: inputs.deadlines,
@@ -102,6 +105,10 @@ impl HostConfig {
     #[must_use]
     pub const fn router_endpoint(&self) -> SocketAddr {
         self.router_endpoint
+    }
+    #[must_use]
+    pub const fn mcp_bind(&self) -> SocketAddr {
+        self.mcp_bind
     }
 
     /// Returns the conventional socket derived from normal Codex home.

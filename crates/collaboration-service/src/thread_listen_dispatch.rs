@@ -2,6 +2,7 @@
 use crate::ServiceIdentity;
 use message_board::*;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub(crate) async fn dispatch(
     id: Value,
@@ -56,7 +57,7 @@ pub(crate) async fn dispatch(
                 Err(_) => {
                     return crate::board_request_dispatch::failure(
                         id,
-                        BoardError::invalid_field("listenId", "must identify a Repeating Listen"),
+                        BoardError::invalid_field("listenId", "must identify an active Listen"),
                     );
                 }
             };
@@ -64,7 +65,7 @@ pub(crate) async fn dispatch(
                 .thread_listens
                 .show(&request.listen_id)
                 .await
-                .map(|listen| serde_json::to_value(ThreadListenShowResult { listen }))
+                .map(|listen| serde_json::to_value(ThreadListenShowResult(listen)))
         }
         "board/threadListenCancel" => {
             let request = match serde_json::from_value::<ThreadListenCancelRequest>(params) {
@@ -72,7 +73,7 @@ pub(crate) async fn dispatch(
                 Err(_) => {
                     return crate::board_request_dispatch::failure(
                         id,
-                        BoardError::invalid_field("listenId", "must identify a Repeating Listen"),
+                        BoardError::invalid_field("listenId", "must identify an active Listen"),
                     );
                 }
             };
@@ -80,7 +81,7 @@ pub(crate) async fn dispatch(
                 .thread_listens
                 .cancel(&request.listen_id)
                 .await
-                .map(|listen| serde_json::to_value(ThreadListenCancelResult { listen }))
+                .map(|listen| serde_json::to_value(ThreadListenCancelResult(listen)))
         }
         _ => {
             return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unknown Thread Listen operation"}});
@@ -102,8 +103,62 @@ async fn register_thread_listen(
         .board
         .as_ref()
         .ok_or_else(BoardError::board_unavailable)?;
+    if request.delivery == ThreadListenDelivery::Session {
+        let valid_lifetime = match request.mode {
+            ThreadListenMode::Once { max_wait_seconds } => {
+                max_wait_seconds == ThreadListenLifetime::Short.seconds()
+            }
+            ThreadListenMode::Repeating { lifetime_seconds } => matches!(
+                lifetime_seconds,
+                value if value == ThreadListenLifetime::Short.seconds()
+                    || value == ThreadListenLifetime::Long.seconds()
+            ),
+        };
+        if !valid_lifetime {
+            return Err(BoardError::invalid_field(
+                "mode",
+                "session delivery requires the fixed short or long lifetime",
+            ));
+        }
+    }
+    let session_sink = if request.delivery == ThreadListenDelivery::Session {
+        let Identity::Session { session } = &request.reader else {
+            return Err(BoardError::invalid_field(
+                "reader",
+                "session delivery requires a codex-local session identity",
+            ));
+        };
+        if session.endpoint.endpoint_id.as_str() != "codex-local"
+            || session.endpoint.service_id.as_str() != String::from(identity.service_id.clone())
+        {
+            return Err(BoardError::invalid_field(
+                "reader",
+                "session delivery requires the calling codex-local session identity",
+            ));
+        }
+        let target = serde_json::from_value(
+            serde_json::to_value(session).map_err(|_| BoardError::board_unavailable())?,
+        )
+        .map_err(|_| BoardError::invalid_field("reader", "must be a valid SessionRef"))?;
+        Some(crate::session_delivery_sink::SessionDeliverySink {
+            service_id: identity.service_id.clone(),
+            endpoints: identity.directory.clone(),
+            backend: identity.native_backend.clone(),
+            target,
+        })
+    } else {
+        None
+    };
     let context = store.lock().await.prepare_thread_listen(request).await?;
-    identity.thread_listens.register(request, context).await
+    let listen = identity.thread_listens.register(request, context).await?;
+    if let Some(sink) = session_sink {
+        identity.thread_listens.spawn_session_delivery(
+            listen.listen_id.clone(),
+            Arc::clone(store),
+            Arc::new(sink),
+        );
+    }
+    Ok(listen)
 }
 
 fn maximum_batch_set_bytes(id: &Value, listen_id: &ListenId) -> Result<usize, BoardError> {
@@ -111,6 +166,7 @@ fn maximum_batch_set_bytes(id: &Value, listen_id: &ListenId) -> Result<usize, Bo
         kind: ThreadListenOutputKind::BatchSet,
         listen_id: listen_id.clone(),
         batches: Vec::new(),
+        catch_up: false,
     };
     let encoded_batch_set_bytes = serde_json::to_vec(&empty_batch_set)
         .map_err(|_| BoardError::board_unavailable())?
@@ -160,6 +216,7 @@ mod tests {
             kind: ThreadListenOutputKind::BatchSet,
             listen_id: listen_id.clone(),
             batches: Vec::new(),
+            catch_up: false,
         };
         let encoded_batch_set = serde_json::to_vec(&batch_set).unwrap().len();
         assert!(encoded_batch_set <= maximum);

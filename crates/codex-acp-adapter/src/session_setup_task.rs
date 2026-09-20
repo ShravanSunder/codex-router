@@ -13,6 +13,7 @@ pub(crate) struct SetupTaskInputs {
     pub params: Value,
     pub create_new: bool,
     pub cancellation_barrier: Option<crate::CancellationBarrier>,
+    pub approval_broker: Arc<dyn crate::ApprovalBroker>,
 }
 pub(crate) struct SetupTaskOutput {
     pub binding: Option<AcpSessionBinding>,
@@ -64,6 +65,7 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
             schemas: inputs.schemas,
             generation: inputs.generation,
             params: inputs.params,
+            approval_broker: inputs.approval_broker,
         };
         if inputs.create_new {
             let session = AcpSessionBinding::create(&mut catalog, setup).await?;

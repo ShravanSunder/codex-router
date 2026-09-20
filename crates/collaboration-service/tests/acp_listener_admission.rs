@@ -17,6 +17,7 @@ async fn acp_listener_rejects_unavailable_backend_and_cleans_its_owned_socket() 
         &path,
         NativeGenerationGate::default(),
         Arc::new(NativeStoredSessions::new(root.clone(), "fixture".into())),
+        Arc::new(codex_acp_adapter::RejectingApprovalBroker),
     )
     .unwrap();
     let stop = CancellationToken::new();
@@ -79,6 +80,7 @@ async fn published_acp_carrier_initializes_and_retires_with_native_generation() 
         &path,
         gate.clone(),
         Arc::new(NativeStoredSessions::new(root.clone(), "fixture".into())),
+        Arc::new(codex_acp_adapter::RejectingApprovalBroker),
     )
     .unwrap();
     let stop = CancellationToken::new();

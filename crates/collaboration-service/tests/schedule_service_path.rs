@@ -34,7 +34,7 @@ async fn sdk_creates_disabled_schedule_without_native_backend()
         })
         .await?;
     let request: ScheduleCreateRequest = serde_json::from_value(
-        json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":600},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null}}),
+        json!({"operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,"timing":{"kind":"interval","seconds":600},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null,"model":"gpt-5.6-sol","effort":"medium"}}),
     )?;
     let first = client.create_schedule(request.clone()).await?;
     let replay = client.create_schedule(request).await?;
@@ -99,7 +99,7 @@ async fn sdk_rejects_mode_change_and_thread_preparation_with_actionable_feedback
     let created = client.create_schedule(serde_json::from_value(json!({
         "operationId":OperationId::generate(),"definition":{"instructionId":instruction.instruction_id,
         "timing":{"kind":"interval","seconds":60},"enabled":false,
-        "destination":{"kind":"freshEachRun","endpoint":endpoint,"cwd":"/isolated-test"},"executionTimeoutSeconds":null}
+        "destination":{"kind":"freshEachRun","endpoint":endpoint,"cwd":"/isolated-test"},"executionTimeoutSeconds":null,"model":"gpt-5.6-sol","effort":"medium"}
     }))?).await?;
     client.close().await?;
     service.await??;

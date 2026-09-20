@@ -44,6 +44,8 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
                     cwd: "/isolated-fixture".into(),
                 },
                 execution_timeout_seconds: Some(120),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,
@@ -124,8 +126,8 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
         .with_automation_store(Arc::clone(&store));
     let listener = LocalControlService::bind(&root.join("control.sock"), identity)?;
     let manifest = serde_json::from_value(
-        json!({"version":1,"serviceId":service_id,"serviceEpoch":service_id,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest}),
+        json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,
+        "control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}}),
     )?;
     let publication = ManifestPublication::publish(&root, &manifest)?;
     let stop = CancellationToken::new();
@@ -162,8 +164,8 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
         .into());
     }
     let result: Value = serde_json::from_slice(&output.stdout)?;
-    if result.pointer("/result/runId") != Some(&json!(run_id))
-        || result.pointer("/result/state/kind") != Some(&json!("finished"))
+    if result.pointer("/result/record/runId") != Some(&json!(run_id))
+        || result.pointer("/result/record/state/kind") != Some(&json!("finished"))
     {
         return Err(format!("CLI lost finished Run identity: {result}").into());
     }

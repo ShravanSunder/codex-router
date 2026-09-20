@@ -12,9 +12,33 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::Role},
 };
 
+/// Fixture recency: the thread's last update sits this far in the past.
+const IDLE_FIXTURE_SECONDS: i64 = 90;
+const TEST_SCRATCH: &str =
+    "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
+/// Omits the effort key entirely when the caller requested none.
+fn prompt_metadata(effort: Option<&str>) -> Value {
+    effort.map_or_else(|| json!({}), |effort| json!({"effort": effort}))
+}
+
+fn ensure_test_scratch() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(std::fs::create_dir_all(TEST_SCRATCH).is_ok());
+    assert!(std::fs::set_permissions(TEST_SCRATCH, std::fs::Permissions::from_mode(0o700)).is_ok());
+}
+
 #[tokio::test]
 async fn prompt_buffers_early_output_and_settles_native_completion_once() {
-    for (use_task, malformed_callback) in [(false, false), (true, false), (false, true)] {
+    ensure_test_scratch();
+    // The fourth case omits the effort: the thread's own effort governs. The
+    // fifth resumes a thread that kept "medium" while asking for "high".
+    for (use_task, malformed_callback, requested_effort, resumed) in [
+        (false, false, Some("medium"), false),
+        (true, false, Some("medium"), false),
+        (false, true, Some("medium"), false),
+        (false, false, None, false),
+        (false, false, Some("high"), true),
+    ] {
         let mut catalog =
             AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
         let mut definitions = serde_json::Map::new();
@@ -60,9 +84,21 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
         let connection = NativeProtocolConnection::from_websocket(
             WebSocketStream::from_raw_socket(client, Role::Client, None).await,
         );
+        // A thread that kept "high" proves resume echoes the persisted effort.
+        let thread_effort = requested_effort.unwrap_or("high");
+        // The effort the resumed thread already carried, before this turn.
+        let persisted_effort = if resumed { "medium" } else { thread_effort };
+        // The thread's own recency, not the prompt's, sets idleSeconds.
+        let thread_updated_at = chrono::Utc::now().timestamp() - IDLE_FIXTURE_SECONDS;
+        let thread_created_at = thread_updated_at - 600;
         let fixture = tokio::spawn(async move {
             let mut socket = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-            for method in ["thread/start", "turn/start"] {
+            let setup_method = if resumed {
+                "thread/resume"
+            } else {
+                "thread/start"
+            };
+            for method in [setup_method, "turn/start"] {
                 let frame = socket
                     .next()
                     .await
@@ -75,10 +111,21 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 )
                 .unwrap_or_else(|error| panic!("JSON: {error}"));
                 assert_eq!(request["method"], method);
-                let result = if method == "thread/start" {
-                    json!({"cwd":"/work","thread":{"id":"thread-a","cwd":"/work"}})
+                let result = if method == setup_method {
+                    if resumed {
+                        // A thread created before routes were recorded: the native
+                        // resume reports no settings and the broker holds no route.
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-a","cwd":"/work","reasoningEffort":persisted_effort,"turns":[]}})
+                    } else {
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","reasoningEffort":persisted_effort,"turns":[]}})
+                    }
                 } else {
                     assert_eq!(request["params"]["input"][0]["text"], "hello");
+                    // Without a requested effort the key is absent, not null.
+                    assert_eq!(
+                        request["params"].get("effort").and_then(Value::as_str),
+                        requested_effort
+                    );
                     socket.send(Message::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-a","turnId":"turn-a","itemId":"message-a","delta":"early output"}}).to_string().into())).await.unwrap_or_else(|error| panic!("early output: {error}"));
                     json!({"turn":{"id":"turn-a"}})
                 };
@@ -108,20 +155,41 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             .unwrap_or_else(|error| panic!("reply JSON: {error}"));
             assert_eq!(
                 reply,
-                json!({"id":9007199254740993_i64,"result":{"decision":"decline"}})
+                json!({"id":9007199254740993_i64,"result":{"decision":"cancel"}})
             );
             socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"completed"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("complete: {error}"));
+            let frame = socket
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("thread read"))
+                .unwrap_or_else(|error| panic!("thread read frame: {error}"));
+            let request: Value = serde_json::from_str(
+                frame
+                    .to_text()
+                    .unwrap_or_else(|error| panic!("thread read text: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("thread read JSON: {error}"));
+            assert_eq!(request["method"], "thread/read");
+            socket.send(Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"thread-a","model":"gpt-5.6-sol","reasoningEffort":thread_effort,"createdAt":thread_created_at,"updatedAt":thread_updated_at,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("thread read response: {error}"));
         });
-        let session = AcpSessionBinding::create(
-            &mut catalog,
-            SessionSetupInputs {
-                connection,
-                schemas,
-                generation,
-                params: json!({"cwd":"/work","mcpServers":[]}),
+        let setup_inputs = SessionSetupInputs {
+            connection,
+            schemas,
+            generation,
+            params: if resumed {
+                json!({"sessionId":"thread-a","cwd":"/work","mcpServers":[]})
+            } else {
+                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}})
             },
-        )
-        .await
+            approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+        };
+        let session = if resumed {
+            AcpSessionBinding::load_existing(&mut catalog, setup_inputs)
+                .await
+                .map(|(session, _history)| session)
+        } else {
+            AcpSessionBinding::create(&mut catalog, setup_inputs).await
+        }
         .unwrap_or_else(|error| panic!("session: {error}"));
         if use_task {
             let closed = tokio_util::sync::CancellationToken::new();
@@ -130,7 +198,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             registry
                 .insert(session)
                 .unwrap_or_else(|error| panic!("insert: {error}"));
-            let params = json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"hello"}]});
+            let params = json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"hello"}],"_meta":{"codexRouter":prompt_metadata(requested_effort)}});
             registry
                 .begin_prompt(&mut catalog, json!("acp-prompt"), params.clone())
                 .unwrap_or_else(|error| panic!("begin: {error}"));
@@ -141,8 +209,6 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             let observed=tokio::time::timeout(std::time::Duration::from_secs(3),async {
                 let update=frames.recv().await.unwrap_or_else(||panic!("update"));
                 assert_eq!(update["params"]["update"]["content"]["text"],"early output");
-                let permission=frames.recv().await.unwrap_or_else(||panic!("permission"));
-                registry.permission_response(json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"native-decline"}}})).unwrap_or_else(|error|panic!("response: {error}"));
                 tokio::select! {
                     biased;
                     frame=frames.recv()=>panic!("terminal published before registry completion: {}", frame.is_some()),
@@ -159,7 +225,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 session,
                 &mut catalog,
                 json!("acp-prompt"),
-                &json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"hello"}]}),
+                &json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"hello"}],"_meta":{"codexRouter":prompt_metadata(requested_effort)}}),
             )
             .await
             .unwrap_or_else(|error| panic!("prompt: {error}"));
@@ -179,34 +245,43 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 fixture.await.unwrap();
                 continue;
             }
-            let permission = prompt
+            let decision = prompt
                 .next_event(&mut catalog)
                 .await
-                .unwrap_or_else(|error| panic!("permission: {error}"));
-            let Some(PromptEvent::PermissionRequest(permission)) = permission else {
-                panic!("expected permission request");
-            };
-            let response = json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"native-decline"}}});
+                .unwrap_or_else(|error| panic!("decision: {error}"));
             assert!(
-                prompt
-                    .respond_permission(&mut catalog, &response)
-                    .await
-                    .unwrap_or_else(|error| panic!("permission response: {error}"))
-                    .is_none()
-            );
-            assert!(
-                prompt
-                    .respond_permission(&mut catalog, &response)
-                    .await
-                    .unwrap_or_else(|error| panic!("duplicate response: {error}"))
-                    .is_none()
+                matches!(decision, Some(PromptEvent::NativeNotification(value)) if value["kind"] == "approvalDecisionSubmitted")
             );
             let terminal = prompt
                 .next_event(&mut catalog)
                 .await
                 .unwrap_or_else(|error| panic!("terminal: {error}"));
             assert!(
-                matches!(terminal,Some(PromptEvent::Terminal(value)) if value["id"]=="acp-prompt" && value["result"]["stopReason"]=="end_turn")
+                matches!(&terminal,Some(PromptEvent::Terminal(value)) if value["id"]=="acp-prompt" && value["result"]["stopReason"]=="end_turn")
+            );
+            let expected_access = if resumed {
+                // A resumed thread with no recorded route inherits its access.
+                Value::Null
+            } else {
+                Value::from("workspace-write")
+            };
+            let Some(PromptEvent::Terminal(terminal)) = &terminal else {
+                panic!("terminal receipt")
+            };
+            assert_eq!(
+                terminal["result"]["_meta"]["codexRouter"]["effectiveAccess"],
+                expected_access
+            );
+            assert_eq!(
+                terminal["result"]["_meta"]["codexRouter"]["effectiveEffort"], thread_effort,
+                "the receipt reports the effort the thread actually carries"
+            );
+            let idle_seconds = terminal["result"]["_meta"]["codexRouter"]["idleSeconds"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("idleSeconds"));
+            assert!(
+                (IDLE_FIXTURE_SECONDS..IDLE_FIXTURE_SECONDS + 60).contains(&idle_seconds),
+                "idleSeconds {idle_seconds} must follow the thread's updatedAt"
             );
             assert!(!prompt.blocks_next_prompt());
             assert!(prompt.cancel().await.is_none());

@@ -1,25 +1,20 @@
-//! Repository identity from origins, live worktrees and bounded historical fallbacks.
+//! Repository identity discovered from the invoking checkout and Git metadata.
+//!
+//! Discovery shells out to Git and touches the filesystem, so it belongs beside the
+//! caller. The membership predicate it feeds lives in `codex-native-integration`, next
+//! to the SQL clause it has to agree with, and is re-exported here.
 
-use codex_native_integration::path_sql_values;
 use std::{
     ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
-#[must_use]
-pub fn path_identity_candidates(path: &Path) -> Vec<PathBuf> {
-    let mut candidates = vec![path.to_path_buf(), normalize_path(path)];
-    candidates.sort();
-    candidates.dedup();
-    candidates
-}
-
-#[must_use]
-pub fn normalize_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_error| path.to_path_buf())
-}
+use codex_native_integration::non_empty_trimmed;
+pub use codex_native_integration::{
+    RepositoryIdentity, normalize_path, normalized_paths_resolve_to_same_location,
+    path_identity_candidates, paths_resolve_to_same_location, repository_contains_session,
+};
 
 pub(super) fn find_worktree_root(current_dir: &Path) -> Option<PathBuf> {
     for ancestor in current_dir.ancestors() {
@@ -30,17 +25,8 @@ pub(super) fn find_worktree_root(current_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-pub(super) fn checkout_root(current_dir: &Path) -> PathBuf {
+pub fn checkout_root(current_dir: &Path) -> PathBuf {
     find_worktree_root(current_dir).unwrap_or_else(|| normalize_path(current_dir))
-}
-
-/// Repository evidence used to include live and historical worktree sessions.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepositoryIdentity {
-    pub normalized_origin: Option<String>,
-    pub live_roots: Vec<PathBuf>,
-    pub repository_basename: String,
-    pub fallback_cwd: Option<PathBuf>,
 }
 
 /// Discovers repository identity from the invoking directory and Git metadata.
@@ -93,11 +79,6 @@ pub(super) fn live_roots_with_current_checkout_fallback(
     live_roots
 }
 
-fn non_empty_trimmed(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then_some(trimmed)
-}
-
 fn git_stdout(current_dir: &Path, arguments: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -112,7 +93,7 @@ fn git_stdout(current_dir: &Path, arguments: &[&str]) -> Option<String> {
     non_empty_trimmed(&value).map(str::to_owned)
 }
 
-pub(super) use message_board::normalize_git_origin_url;
+pub(super) use codex_native_integration::normalize_git_origin_url;
 
 pub(super) fn repository_basename_from_evidence(
     normalized_origin: Option<&str>,
@@ -142,51 +123,6 @@ pub(super) fn repository_basename_from_evidence(
         .to_owned()
 }
 
-/// Tests whether a stored session belongs to the supplied repository identity.
-#[must_use]
-pub fn repository_contains_session(
-    identity: &RepositoryIdentity,
-    row_origin: Option<&str>,
-    cwd: &Path,
-) -> bool {
-    if let Some(fallback_cwd) = &identity.fallback_cwd {
-        return normalized_paths_resolve_to_same_location(cwd, fallback_cwd);
-    }
-    let row_origin = row_origin.and_then(non_empty_trimmed);
-    let normalized_row_origin = row_origin.and_then(normalize_git_origin_url);
-    if let (Some(current_origin), Some(_)) = (&identity.normalized_origin, row_origin) {
-        return normalized_row_origin.is_some_and(|row_origin| row_origin == *current_origin);
-    }
-    let is_under_live_root = identity
-        .live_roots
-        .iter()
-        .any(|root| path_is_equal_or_child_for_repo(cwd, root));
-    let matches_historical_basename = !identity.repository_basename.is_empty()
-        && cwd.file_name().and_then(OsStr::to_str).is_some_and(|leaf| {
-            leaf == identity.repository_basename
-                || leaf
-                    .strip_prefix(&identity.repository_basename)
-                    .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with('-'))
-        });
-
-    match (&identity.normalized_origin, row_origin) {
-        (Some(_), Some(_)) => false,
-        (Some(_), None) | (None, None) => is_under_live_root || matches_historical_basename,
-        (None, Some(_)) => is_under_live_root,
-    }
-}
-
-fn path_is_equal_or_child_for_repo(candidate: &Path, parent: &Path) -> bool {
-    path_sql_values(candidate).into_iter().any(|candidate| {
-        path_sql_values(parent).into_iter().any(|parent| {
-            candidate == parent
-                || candidate
-                    .strip_prefix(&parent)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-        })
-    })
-}
-
 fn repo_roots(current_dir: &Path) -> Vec<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
@@ -214,20 +150,6 @@ fn parse_git_worktree_roots(output: &str) -> Vec<PathBuf> {
         .map(PathBuf::from)
         .map(|path| normalize_path(&path))
         .collect()
-}
-
-#[must_use]
-pub fn paths_resolve_to_same_location(left: &Path, right: &Path) -> bool {
-    let left = normalize_path(left);
-    let right = normalize_path(right);
-    normalized_paths_resolve_to_same_location(&left, &right)
-}
-
-#[must_use]
-pub fn normalized_paths_resolve_to_same_location(left: &Path, right: &Path) -> bool {
-    path_sql_values(left)
-        .iter()
-        .any(|left| path_sql_values(right).contains(left))
 }
 
 #[cfg(test)]

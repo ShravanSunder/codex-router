@@ -49,9 +49,10 @@ async fn skipped_one_shot_cli_wait_reports_no_firing() -> Result<(), Box<dyn std
         .with_automation_store(Arc::clone(&store));
     let listener = LocalControlService::bind(&root.join("control.sock"), identity)?;
     let manifest = serde_json::from_value(json!({
-        "version":1,"serviceId":service_id,"serviceEpoch":epoch,
+        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
         "control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest
+        "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))?;
     let publication = ManifestPublication::publish(&root, &manifest)?;
     let stop = CancellationToken::new();
@@ -102,7 +103,7 @@ async fn skipped_one_shot_cli_wait_reports_no_firing() -> Result<(), Box<dyn std
     if records.len() != 2
         || records
             .first()
-            .and_then(|value| value.pointer("/result/definition/wakeupId"))
+            .and_then(|value| value.pointer("/result/record/definition/wakeupId"))
             != Some(&json!(wake.definition.wakeup_id))
     {
         return Err("creation replay did not return the original wake before waiting".into());

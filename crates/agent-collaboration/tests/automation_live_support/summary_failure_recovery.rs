@@ -49,6 +49,8 @@ pub async fn exercise(proof: &mut ProofContext) -> ProofResult<PortableRunProof>
                     cwd: proof.workspace.to_string_lossy().into_owned(),
                 },
                 execution_timeout_seconds: Some(120.try_into()?),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
         })
         .await?;

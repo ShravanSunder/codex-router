@@ -50,12 +50,14 @@ fn inventory() -> Value {
 fn page(id: &str, status: Value, cursor: Value) -> Value {
     json!({
         "endpoint":endpoint(),"generation":generation(),"observedAt":"2026-09-07T00:00:00Z",
-        "sessions":[{"target":{"endpoint":endpoint(),"sessionId":id},"title":id,"workingDirectory":"/repo",
-            "observation":{"kind":"runtime","status":status,"turnId":null}}],"nextCursor":cursor
+        "sessions":[{"target":{"endpoint":endpoint(),"sessionId":id},"name":null,"title":id,"source":"interactive","gitBranch":null,"workingDirectory":"/repo",
+            "observation":{"kind":"runtime","status":status,"turnId":null},"model":"gpt-5.6-sol","reasoningEffort":"medium","idleSeconds":0}],"nextCursor":cursor
     })
 }
 fn inspected(id: &str) -> Value {
     json!({"target":{"endpoint":endpoint(),"sessionId":id},"generation":generation(),
+    "effectiveAccess":null,
+    "settingsObservation":{"kind":"unavailable","reason":"threadReadOmitsSettings"},
     "thread":{"id":id,"name":format!("Live {id}"),"cwd":"/repo","modelProvider":"debug-provider","createdAt":100,"updatedAt":200,
     "gitInfo":{"branch":"feature/live","originUrl":"https://example.invalid/repo.git"}}})
 }

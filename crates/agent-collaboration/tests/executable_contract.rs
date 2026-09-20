@@ -81,11 +81,11 @@ fn help_uses_the_independent_executable_name() {
 #[test]
 fn session_tui_uses_the_singular_executable_name() {
     // Arrange / Act: the session picker has its own executable identity.
-    let version = Command::new(env!("CARGO_BIN_EXE_agent-session"))
+    let version = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
         .arg("--version")
         .output()
         .unwrap_or_else(|error| panic!("session version command should execute: {error}"));
-    let help = Command::new(env!("CARGO_BIN_EXE_agent-session"))
+    let help = Command::new(env!("CARGO_BIN_EXE_agent-sessions"))
         .arg("--help")
         .output()
         .unwrap_or_else(|error| panic!("session help command should execute: {error}"));
@@ -94,12 +94,12 @@ fn session_tui_uses_the_singular_executable_name() {
     assert!(version.status.success());
     assert_eq!(
         version.stdout,
-        format!("agent-session {}\n", env!("CARGO_PKG_VERSION")).as_bytes()
+        format!("agent-sessions {}\n", env!("CARGO_PKG_VERSION")).as_bytes()
     );
     assert!(version.stderr.is_empty());
     assert!(help.status.success());
     let text = String::from_utf8_lossy(&help.stdout);
-    assert!(text.contains("agent-session"));
+    assert!(text.contains("agent-sessions"));
     assert!(text.contains("--dry-run"));
     assert!(text.contains("--local"));
     assert!(!text.contains("board"));

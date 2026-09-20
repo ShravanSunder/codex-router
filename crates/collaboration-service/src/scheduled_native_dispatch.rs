@@ -24,6 +24,7 @@ pub(crate) struct ScheduledDispatch<'a> {
     pub text: String,
     pub effects: NativeEffectEvidence<SessionRef, CodexGeneration>,
     pub configuration: &'a crate::AutomationConfigurationHandle,
+    pub effort: &'a str,
 }
 pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), StorageError> {
     let Some(schemas) = input.admission.schemas() else {
@@ -74,7 +75,7 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
             .request_validated(
                 &schemas,
                 NativeOperation::ResumeThread,
-                json!({"threadId":id}),
+                json!({"threadId":id,"excludeTurns":true}),
             )
             .await;
         match resumed {
@@ -138,7 +139,7 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
         .await?;
     drop(configuration_lease);
     let retired = input.admission.retirement();
-    let response=tokio::time::timeout(std::time::Duration::from_secs(30),async{tokio::select!{biased;result=connection.request_validated(&schemas,NativeOperation::StartTurn,json!({"threadId":id,"input":[{"type":"text","text":input.text}],"clientUserMessageId":input.run_id.as_str()}))=>result,_=retired.cancelled()=>Err(NativeConnectionError::OutcomeUnknown)}}).await.unwrap_or(Err(NativeConnectionError::OutcomeUnknown));
+    let response=tokio::time::timeout(std::time::Duration::from_secs(30),async{tokio::select!{biased;result=connection.request_validated(&schemas,NativeOperation::StartTurn,json!({"threadId":id,"input":[{"type":"text","text":input.text}],"clientUserMessageId":input.run_id.as_str(),"effort":input.effort}))=>result,_=retired.cancelled()=>Err(NativeConnectionError::OutcomeUnknown)}}).await.unwrap_or(Err(NativeConnectionError::OutcomeUnknown));
     let outcome = match response {
         Ok(response) => {
             if let Some(turn_id) = response

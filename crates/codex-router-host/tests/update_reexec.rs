@@ -44,6 +44,7 @@ use update_reexec_fixture::install_updater_fixture;
 use update_reexec_fixture::process_is_running;
 use update_reexec_fixture::required_path;
 use update_reexec_fixture::run_update_case;
+use update_reexec_fixture::run_update_with_blocked_installer_case;
 use update_reexec_fixture::terminal_classification;
 use update_reexec_fixture::wait_for_process_id;
 
@@ -56,84 +57,27 @@ async fn update_matrix_uses_exact_managed_executable_and_preserves_children_befo
     )
     .await?;
     run_update_case(UpdateFixtureMode::Failure, TerminalClassification::Failed).await?;
-    run_update_case(UpdateFixtureMode::Changed, TerminalClassification::Failed).await?;
+    run_update_case(
+        UpdateFixtureMode::Changed,
+        TerminalClassification::Succeeded,
+    )
+    .await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn changed_update_tears_down_children_and_reexecs_with_continuous_lock()
--> Result<(), Box<dyn std::error::Error>> {
-    let directory = TestDirectory::new("changed-reexec")?;
-    let router = PersistentRouterHealthFixture::start().await?;
-    let managed_executable = directory.path().join("managed-codex");
-    install_updater_fixture(&managed_executable, UpdateFixtureMode::Changed)?;
-    let coordination_paths = HostCoordinationPaths::new(
-        directory.path().join("operator.sock"),
-        directory.path().join("instance.lock"),
-    );
-    let app_server_socket = directory.path().join("app.sock");
-    let app_server_log = directory.path().join("app-pids.log");
-    let replacement_marker = directory.path().join("replacement.log");
-    std::fs::write(&app_server_log, b"")?;
-
-    let mut host_process = tokio::process::Command::new(std::env::current_exe()?);
-    host_process
-        .args([
-            "--exact",
-            "changed_update_host_child_entrypoint",
-            "--nocapture",
-        ])
-        .env("CODEX_HOST_UPDATE_CHILD", "1")
-        .env(
-            "CODEX_HOST_UPDATE_OPERATOR_SOCKET",
-            coordination_paths.operator_socket(),
-        )
-        .env(
-            "CODEX_HOST_UPDATE_INSTANCE_LOCK",
-            coordination_paths.instance_lock(),
-        )
-        .env("CODEX_HOST_UPDATE_ROUTER", router.address().to_string())
-        .env("CODEX_HOST_UPDATE_APP_SOCKET", &app_server_socket)
-        .env("CODEX_HOST_UPDATE_APP_LOG", &app_server_log)
-        .env("CODEX_HOST_UPDATE_MANAGED", &managed_executable)
-        .env("CODEX_HOST_UPDATE_REPLACEMENT_MARKER", &replacement_marker)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let host_process = host_process.spawn()?;
-
-    let frames = send_operator_request(
-        coordination_paths.operator_socket(),
-        OperatorRequest::UpdateCodex,
-        Duration::from_secs(20),
+async fn changed_update_restarts_only_the_app_server() -> Result<(), Box<dyn std::error::Error>> {
+    run_update_case(
+        UpdateFixtureMode::Changed,
+        TerminalClassification::Succeeded,
     )
-    .await?;
-    check(
-        matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
-        "changed update must emit replacement-starting before old-host EOF",
-    )?;
-    let output =
-        tokio::time::timeout(Duration::from_secs(20), host_process.wait_with_output()).await??;
-    check(
-        output.status.success(),
-        &format!(
-            "replacement bootstrap fixture failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ),
-    )?;
-    check_equal(
-        std::fs::read_to_string(&replacement_marker)?,
-        "replacement-lock-valid\n".to_owned(),
-        "replacement must validate and consume the continuously held lock",
-    )?;
-    let app_server_pid = wait_for_process_id(&app_server_log).await?;
-    check(
-        !process_is_running(app_server_pid),
-        "changed update must stop the old app-server before exec",
-    )?;
-    let reacquired = HostInstance::acquire(coordination_paths)?;
-    drop(reacquired);
-    router.finish().await?;
-    Ok(())
+    .await
+}
+
+#[tokio::test]
+async fn changed_update_keeps_app_server_ready_until_installer_finishes()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_update_with_blocked_installer_case().await
 }
 
 #[tokio::test]
@@ -190,16 +134,30 @@ async fn explicit_host_restart_executes_the_requesting_cli_and_retains_host_proj
         )
         .await?;
         check(
-            matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
-            "explicit host restart must emit replacement-starting before old-host EOF",
+            frames.iter().any(|frame| matches!(frame, OperatorFrame::Progress(codex_router_host::HostProgress::StoppingAppServer)))
+                && frames.iter().any(|frame| matches!(frame, OperatorFrame::Progress(codex_router_host::HostProgress::ReExecuting))),
+            &format!("explicit host restart must emit typed teardown and re-exec progress before old-host EOF: {frames:?}"),
         )?;
-        let host_wait = tokio::time::timeout(Duration::from_secs(20), host_process.wait()).await;
-        host_reaped = matches!(&host_wait, Ok(Ok(_)));
-        let output = host_wait??;
+        let restart_started_at = tokio::time::Instant::now();
+        let _replacement_pids = wait_for_process_ids(&app_server_log, 2).await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if tokio::net::UnixStream::connect(&app_server_socket).await.is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let restart_gap = restart_started_at.elapsed();
+        eprintln!("whole_host_restart_socket_gap_ms={}", restart_gap.as_millis());
         check(
-            output.success(),
-            "explicit replacement bootstrap fixture failed",
+            restart_gap < Duration::from_secs(5),
+            &format!("whole-Host restart socket gap exceeded target: {restart_gap:?}"),
         )?;
+        host_process.kill().await?;
+        let _output = tokio::time::timeout(Duration::from_secs(5), host_process.wait()).await??;
+        host_reaped = true;
         assert_explicit_restart_receipt(
             &replacement_receipt,
             original_host_process_id,
@@ -266,6 +224,7 @@ async fn invalid_host_restart_executable_fails_before_child_teardown()
         HostConfig::new(HostConfigInputs {
             coordination_paths: coordination_paths.clone(),
             router_endpoint: router.address(),
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable,
             deadlines: fixture_host_deadlines()?,
@@ -376,6 +335,7 @@ async fn host_restart_exec_failure_releases_singleton_after_settling_children()
         HostConfig::new(HostConfigInputs {
             coordination_paths: coordination_paths.clone(),
             router_endpoint: router.address(),
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable: directory.path().join("unused-managed-codex"),
             deadlines: fixture_host_deadlines()?,
@@ -409,7 +369,15 @@ async fn host_restart_exec_failure_releases_singleton_after_settling_children()
         )
         .await?;
         check(
-            matches!(frames.as_slice(), [OperatorFrame::Progress(_)]),
+            frames
+                .iter()
+                .all(|frame| matches!(frame, OperatorFrame::Progress(_)))
+                && frames.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        OperatorFrame::Progress(codex_router_host::HostProgress::ReExecuting)
+                    )
+                }),
             "failed exec must close the old connection after replacement progress",
         )?;
         let runtime_wait = tokio::time::timeout(Duration::from_secs(20), &mut runtime).await;
@@ -474,6 +442,7 @@ async fn explicit_host_restart_child_entrypoint() -> Result<(), Box<dyn std::err
         HostConfig::new(HostConfigInputs {
             coordination_paths: HostCoordinationPaths::new(operator_socket, instance_lock),
             router_endpoint,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable: PathBuf::from("/unused/managed-codex"),
             deadlines: fixture_host_deadlines()?,
@@ -483,6 +452,26 @@ async fn explicit_host_restart_child_entrypoint() -> Result<(), Box<dyn std::err
     )
     .await;
     Err(format!("explicit host restart returned unexpectedly: {result:?}").into())
+}
+
+async fn wait_for_process_ids(
+    process_log: &Path,
+    expected_count: usize,
+) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    Ok(tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let ids = std::fs::read_to_string(process_log)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.parse::<u32>().ok())
+                .collect::<Vec<_>>();
+            if ids.len() >= expected_count {
+                return ids;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
 }
 
 #[tokio::test]
@@ -506,7 +495,14 @@ async fn explicit_host_restart_replacement_child_entrypoint()
         ),
     )?;
     drop(owner);
-    Ok(())
+    let app_server_socket = required_path("CODEX_HOST_RESTART_APP_SOCKET")?;
+    let app_server_log = required_path("CODEX_HOST_RESTART_APP_LOG")?;
+    run_native_app_server_fixture(
+        Path::new(&app_server_socket),
+        "1.2.3",
+        Some(Path::new(&app_server_log)),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -544,6 +540,7 @@ async fn changed_update_host_child_entrypoint() -> Result<(), Box<dyn std::error
         HostConfig::new(HostConfigInputs {
             coordination_paths: HostCoordinationPaths::new(operator_socket, instance_lock),
             router_endpoint,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket,
             managed_executable,
             deadlines: fixture_host_deadlines()?,
@@ -588,4 +585,23 @@ async fn update_matrix_app_server_child_entrypoint() -> Result<(), Box<dyn std::
         Some(Path::new(&process_log)),
     )
     .await
+}
+
+#[tokio::test]
+async fn changed_update_installer_barrier_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(started_path) = std::env::var_os("CODEX_HOST_UPDATE_INSTALLER_STARTED") else {
+        return Ok(());
+    };
+    let release_path = required_path("CODEX_HOST_UPDATE_INSTALLER_RELEASE")?;
+    std::fs::write(started_path, b"started\n")?;
+    while !release_path.exists() {
+        tokio::task::yield_now().await;
+    }
+    let managed_executable = required_path("CODEX_HOST_UPDATE_MANAGED")?;
+    std::fs::copy(
+        required_path("CODEX_HOST_UPDATE_REPLACEMENT")?,
+        &managed_executable,
+    )?;
+    std::fs::set_permissions(managed_executable, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }

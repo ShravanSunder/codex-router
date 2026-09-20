@@ -16,7 +16,9 @@ codex-native-integration.workspace = true
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14" }
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 [dev-dependencies]
 collaboration-service = { path = "../collaboration-service", version = "0.1.14" }

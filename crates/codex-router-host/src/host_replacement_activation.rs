@@ -7,6 +7,8 @@ use crate::AppServerChild;
 use crate::RouterChild;
 use crate::RouterShutdownOutcome;
 use crate::ShutdownOutcome;
+use crate::{HostProgress, OperatorFrame};
+use tokio::sync::mpsc;
 
 pub(crate) type HostReplacementFuture =
     Pin<Box<dyn Future<Output = HostReplacementCompletion> + Send + 'static>>;
@@ -27,14 +29,20 @@ pub(crate) enum HostReplacementFailure {
 pub(crate) fn activate_host_replacement(
     mut app_server: Option<AppServerChild>,
     mut router: Option<RouterChild>,
+    progress: mpsc::Sender<OperatorFrame>,
 ) -> HostReplacementFuture {
     Box::pin(async move {
+        let activation_started_at = std::time::Instant::now();
         let mut app_server_shutdown = None;
         if let Some(child) = app_server.as_mut() {
+            let _ = progress
+                .send(OperatorFrame::Progress(HostProgress::StoppingAppServer))
+                .await;
             match child.shutdown().await {
-                Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Forced)) => {
+                Ok(outcome @ (ShutdownOutcome::Graceful | ShutdownOutcome::Killed)) => {
                     app_server_shutdown = Some(outcome);
                     app_server = None;
+                    crate::record_debug_readiness_timing("appServerStopped", activation_started_at);
                 }
                 Ok(ShutdownOutcome::TimedOutStillRunning) => {
                     return HostReplacementCompletion {
@@ -55,9 +63,13 @@ pub(crate) fn activate_host_replacement(
             }
         }
         if let Some(child) = router.as_mut() {
+            let _ = progress
+                .send(OperatorFrame::Progress(HostProgress::StoppingRouter))
+                .await;
             match child.shutdown().await {
                 Ok(RouterShutdownOutcome::Graceful) => {
                     router = None;
+                    crate::record_debug_readiness_timing("routerStopped", activation_started_at);
                 }
                 Ok(RouterShutdownOutcome::TimedOutStillRunning) | Err(_) => {
                     return HostReplacementCompletion {
@@ -69,6 +81,10 @@ pub(crate) fn activate_host_replacement(
                 }
             }
         }
+        let _ = progress
+            .send(OperatorFrame::Progress(HostProgress::ReExecuting))
+            .await;
+        crate::record_debug_readiness_timing("reExecutingQueued", activation_started_at);
         HostReplacementCompletion {
             app_server,
             router,

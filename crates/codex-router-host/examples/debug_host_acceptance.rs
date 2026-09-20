@@ -185,7 +185,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cleanup = async {
         if host.try_wait()?.is_none() {
             host.send_terminate()?;
-            let budget = codex_router_host::APP_SERVER_SHUTDOWN_TOTAL
+            let budget = codex_router_host::APP_SERVER_SHUTDOWN_TIMEOUT
                 + codex_router_host::ROUTER_SHUTDOWN_TIMEOUT
                 + Duration::from_secs(10);
             tokio::time::timeout(budget, host.wait()).await??;

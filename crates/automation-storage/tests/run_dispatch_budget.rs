@@ -31,6 +31,8 @@ async fn execution_budget_starts_at_dispatch_not_trigger_and_cannot_restart()
                     cwd: "/isolated-fixture".into(),
                 },
                 execution_timeout_seconds: Some(120),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,

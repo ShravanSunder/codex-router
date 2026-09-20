@@ -21,6 +21,12 @@ pub struct PendingPermission {
     acp_id: String,
     options: BTreeMap<String, &'static str>,
     request: Value,
+    response: NativePermissionResponse,
+}
+
+enum NativePermissionResponse {
+    Decision,
+    Permissions { requested: Value },
 }
 pub struct PermissionReply {
     /// Sending this proves only submission; native callback resolution is first-response-wins.
@@ -38,9 +44,28 @@ impl PendingPermission {
             .get("method")
             .and_then(Value::as_str)
             .ok_or(PermissionTranslationError::InvalidRequest)?;
-        let (kind, title) = match method {
-            "item/commandExecution/requestApproval" => ("execute", "Execute command"),
-            "item/fileChange/requestApproval" => ("edit", "Apply file changes"),
+        let (kind, title, response) = match method {
+            "item/commandExecution/requestApproval" => (
+                "execute",
+                "Execute command",
+                NativePermissionResponse::Decision,
+            ),
+            "item/fileChange/requestApproval" => (
+                "edit",
+                "Apply file changes",
+                NativePermissionResponse::Decision,
+            ),
+            "item/permissions/requestApproval" => (
+                "other",
+                "Grant additional permissions",
+                NativePermissionResponse::Permissions {
+                    requested: native
+                        .pointer("/params/permissions")
+                        .filter(|value| value.is_object())
+                        .ok_or(PermissionTranslationError::InvalidRequest)?
+                        .clone(),
+                },
+            ),
             _ => return Err(PermissionTranslationError::InvalidRequest),
         };
         let native_id = native
@@ -109,6 +134,14 @@ impl PendingPermission {
                 context.push(format!("{label}: {value}"));
             }
         }
+        if method == "item/permissions/requestApproval" {
+            let requested = params
+                .get("permissions")
+                .ok_or(PermissionTranslationError::InvalidRequest)?;
+            let readable = serde_json::to_string_pretty(requested)
+                .map_err(|_| PermissionTranslationError::InvalidRequest)?;
+            context.push(format!("Requested permissions:\n{readable}"));
+        }
         let content = if context.is_empty() {
             Vec::new()
         } else {
@@ -128,6 +161,7 @@ impl PendingPermission {
             acp_id,
             options,
             request,
+            response,
         })
     }
     #[must_use]
@@ -168,13 +202,29 @@ impl PendingPermission {
         } else {
             None
         };
+        let native_result = match self.response {
+            NativePermissionResponse::Decision => {
+                json!({"decision":decision.unwrap_or("cancel")})
+            }
+            NativePermissionResponse::Permissions { requested } => match decision {
+                Some("accept") => json!({"permissions":requested,"scope":"turn"}),
+                Some("acceptForSession") => json!({"permissions":requested,"scope":"session"}),
+                _ => json!({"permissions":{},"scope":"turn"}),
+            },
+        };
         Ok(PermissionReply {
-            native_response: json!({"id":self.native_id,"result":{"decision":decision.unwrap_or("cancel")}}),
+            native_response: json!({"id":self.native_id,"result":native_result}),
             invalid_selection: decision.is_none(),
         })
     }
     #[must_use]
     pub fn cancel(self) -> Value {
-        json!({"id":self.native_id,"result":{"decision":"cancel"}})
+        let result = match self.response {
+            NativePermissionResponse::Decision => json!({"decision":"cancel"}),
+            NativePermissionResponse::Permissions { .. } => {
+                json!({"permissions":{},"scope":"turn"})
+            }
+        };
+        json!({"id":self.native_id,"result":result})
     }
 }

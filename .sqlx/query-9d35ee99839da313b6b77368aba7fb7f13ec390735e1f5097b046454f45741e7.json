@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO board_activity(activity_sequence,project_id,board_id,topic_id,root_id,kind,actor_key,message_id) VALUES(?,?,?,?,?,'threadUnresolved',?,NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "9d35ee99839da313b6b77368aba7fb7f13ec390735e1f5097b046454f45741e7"
+}

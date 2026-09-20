@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO board_activity(activity_sequence,project_id,board_id,topic_id,root_id,kind,actor_key,message_id) VALUES(?,?,?,?,?,'participantJoined',?,NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "3f9679cc2e08beeadbd2225805dfb7e1beac4067098c9150c0fc688e9c0dcac6"
+}

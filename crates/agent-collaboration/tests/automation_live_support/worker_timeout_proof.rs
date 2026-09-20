@@ -38,6 +38,8 @@ pub async fn exercise(proof: &mut ProofContext) -> ProofResult<()> {
                 enabled: false,
                 destination: ExecutionDestination::Unprepared,
                 execution_timeout_seconds: Some(2.try_into()?),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
         })
         .await?;

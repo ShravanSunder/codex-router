@@ -175,12 +175,6 @@ impl ProcessGroupChild {
             .map_err(ProcessGroupError::Signal)
     }
 
-    /// Sends SIGKILL to the exact retained child PID.
-    pub fn send_kill(&self) -> Result<(), ProcessGroupError> {
-        rustix::process::kill_process(self.process_id, Signal::KILL)
-            .map_err(ProcessGroupError::Signal)
-    }
-
     /// Sends SIGTERM to the complete isolated child process group.
     pub fn send_group_terminate(&self) -> Result<(), ProcessGroupError> {
         rustix::process::kill_process_group(self.process_group_id, Signal::TERM)

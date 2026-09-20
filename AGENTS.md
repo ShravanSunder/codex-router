@@ -10,7 +10,11 @@
   artifact, update `ShravanSunder/homebrew-taps`, and verify the Homebrew
   installation. A local `cargo install` is not a release and does not satisfy
   this requirement.
-- On development machines, install local builds with Cargo; do not install or upgrade `codex-router` via Homebrew.
+- On development machines, install local builds with Cargo; do not install or
+  upgrade `codex-router` via Homebrew. Install both workspace binaries so their
+  shared protocol and CLI surfaces stay aligned:
+  `cargo install --path crates/codex-router-cli --locked --force` and
+  `cargo install --path crates/agent-collaboration --locked --force`.
 - Keep release publication separate from production process replacement.
   Publishing or installing a new binary never authorizes restarting the
   running production router.

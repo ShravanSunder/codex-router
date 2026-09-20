@@ -224,11 +224,68 @@ impl ControlClient {
         self.board_mutation_call("board/threadUnwatch", request, resource)
             .await
     }
+    pub async fn board_topic_watch(
+        &mut self,
+        request: TopicWatchRequest,
+    ) -> Result<TopicWatchResult, BoardClientError> {
+        let resource = ResourceIdentity::Topic {
+            topic_id: request.topic_id.clone(),
+        };
+        self.board_mutation_call("board/topicWatch", request, resource)
+            .await
+    }
+    pub async fn board_topic_unwatch(
+        &mut self,
+        request: TopicWatchRequest,
+    ) -> Result<TopicWatchResult, BoardClientError> {
+        let resource = ResourceIdentity::Topic {
+            topic_id: request.topic_id.clone(),
+        };
+        self.board_mutation_call("board/topicUnwatch", request, resource)
+            .await
+    }
     pub async fn board_thread_list(
         &mut self,
         request: ThreadListRequest,
     ) -> Result<ThreadListResult, BoardClientError> {
         self.board_call("board/threadList", request).await
+    }
+    pub async fn board_thread_create(
+        &mut self,
+        request: ThreadCreateRequest,
+    ) -> Result<ThreadCreateResult, BoardClientError> {
+        let resource = ResourceIdentity::Message {
+            message_id: request.message_id.clone(),
+        };
+        self.board_mutation_call("board/threadCreate", request, resource)
+            .await
+    }
+    pub async fn board_thread_join(
+        &mut self,
+        request: ThreadJoinRequest,
+    ) -> Result<ThreadJoinResult, BoardClientError> {
+        let resource = ResourceIdentity::Thread {
+            root_message_id: request.root_message_id.clone(),
+        };
+        self.board_mutation_call("board/threadJoin", request, resource)
+            .await
+    }
+    pub async fn board_thread_leave(
+        &mut self,
+        request: ThreadLeaveRequest,
+    ) -> Result<ThreadLeaveResult, BoardClientError> {
+        let resource = ResourceIdentity::Thread {
+            root_message_id: request.root_message_id.clone(),
+        };
+        self.board_mutation_call("board/threadLeave", request, resource)
+            .await
+    }
+    pub async fn board_thread_participant_list(
+        &mut self,
+        request: ThreadParticipantListRequest,
+    ) -> Result<ThreadParticipantListResult, BoardClientError> {
+        self.board_call("board/threadParticipantList", request)
+            .await
     }
     pub async fn board_thread_listen(
         &mut self,

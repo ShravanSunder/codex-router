@@ -80,6 +80,8 @@ async fn exercise(
                     cwd: "/isolated-fixture".into(),
                 },
                 execution_timeout_seconds: Some(120),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,
@@ -132,6 +134,7 @@ async fn exercise(
     let mut definitions = serde_json::Map::new();
     for name in [
         "ThreadRead",
+        "ThreadTurnsList",
         "ThreadResume",
         "ThreadStart",
         "ThreadLoadedList",
@@ -193,13 +196,29 @@ async fn exercise(
             || request
                 .pointer("/params/includeTurns")
                 .and_then(Value::as_bool)
-                != Some(true)
+                != Some(false)
             || request.pointer("/params/threadId").and_then(Value::as_str)
                 != Some("recorded-thread")
         {
             return Err("reconcile mutated native state or selected another target".into());
         }
-        socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":observed_thread,"turns":[{"id":observed_id,"status":status,"items":[]}]}}}).to_string().into())).await?;
+        socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":observed_thread,"model":"gpt-5.6-sol","reasoningEffort":"medium"}}}).to_string().into())).await?;
+        if observed_thread != "recorded-thread" {
+            return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(());
+        }
+        let request: Value =
+            serde_json::from_str(socket.next().await.ok_or("turn page missing")??.to_text()?)?;
+        if request.get("method").and_then(Value::as_str) != Some("thread/turns/list")
+            || request.pointer("/params/threadId").and_then(Value::as_str)
+                != Some("recorded-thread")
+            || request.pointer("/params/cursor") != Some(&Value::Null)
+            || request.pointer("/params/limit") != Some(&json!(1))
+            || request.pointer("/params/sortDirection") != Some(&json!("desc"))
+            || request.pointer("/params/itemsView") != Some(&json!("full"))
+        {
+            return Err("reconcile did not request the bounded full turn page".into());
+        }
+        socket.send(Message::Text(json!({"id":request.get("id"),"result":{"data":[{"id":observed_id,"status":status,"items":[]}],"nextCursor":null}}).to_string().into())).await?;
         if let Some(Ok(message)) =
             tokio::time::timeout(Duration::from_secs(2), socket.next()).await?
             && !message.is_close()

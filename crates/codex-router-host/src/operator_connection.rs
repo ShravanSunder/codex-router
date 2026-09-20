@@ -37,6 +37,10 @@ pub(crate) async fn write_frame_to_stream(
     tokio::time::timeout_at(deadline_at, stream.write_all(&encoded))
         .await
         .map_err(|_elapsed| OperatorConnectionError::Timeout)?
+        .map_err(OperatorConnectionError::Io)?;
+    tokio::time::timeout_at(deadline_at, stream.flush())
+        .await
+        .map_err(|_elapsed| OperatorConnectionError::Timeout)?
         .map_err(OperatorConnectionError::Io)
 }
 

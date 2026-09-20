@@ -15,9 +15,24 @@ pub struct NativeInspectParams {
 pub struct NativeInspectResult {
     pub target: SessionRef,
     pub generation: CodexGeneration,
+    pub effective_access: Option<crate::RouterAccess>,
+    pub settings_observation: crate::SettingsObservation,
     /// Validated against the advertised native Thread definition before publication.
     #[schemars(schema_with = "crate::native_schema_references::thread_schema")]
     pub thread: serde_json::Value,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRenameParams {
+    pub target: SessionRef,
+    pub name: String,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRenameResult {
+    pub target: SessionRef,
+    pub name: String,
+    pub previous_name: Option<String>,
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

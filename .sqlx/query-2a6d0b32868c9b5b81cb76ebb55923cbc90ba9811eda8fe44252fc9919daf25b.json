@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE thread_participants SET role='orchestrator',last_seen_activity=? WHERE reader_key=? AND root_id=? AND closed_at_activity IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2a6d0b32868c9b5b81cb76ebb55923cbc90ba9811eda8fe44252fc9919daf25b"
+}

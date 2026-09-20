@@ -10,6 +10,8 @@ use crate::RouterProbeResult;
 use crate::RouterShutdownOutcome;
 use crate::explicit_app_server_restart::StopIntent;
 use crate::probe_router;
+use crate::{HostProgress, OperatorFrame};
+use tokio::sync::mpsc;
 
 pub(crate) type RouterRestartFuture =
     Pin<Box<dyn Future<Output = RouterRestartCompletion> + Send + 'static>>;
@@ -25,9 +27,13 @@ pub(crate) fn restart_router(
     command: ChildCommandSpec,
     current_child: Option<RouterChild>,
     stop_intent: StopIntent,
+    progress: mpsc::Sender<OperatorFrame>,
 ) -> RouterRestartFuture {
     Box::pin(async move {
         if let Some(mut current_child) = current_child {
+            let _ = progress
+                .send(OperatorFrame::Progress(HostProgress::StoppingRouter))
+                .await;
             match current_child.shutdown().await {
                 Ok(RouterShutdownOutcome::Graceful) => {}
                 Ok(RouterShutdownOutcome::TimedOutStillRunning) | Err(_) => {
@@ -48,6 +54,9 @@ pub(crate) fn restart_router(
             };
         }
 
+        let _ = progress
+            .send(OperatorFrame::Progress(HostProgress::StartingRouter))
+            .await;
         let mut replacement_command = command.command();
         let mut replacement = match RouterChild::spawn(&mut replacement_command) {
             Ok(child) => child,
@@ -124,17 +133,20 @@ mod tests {
                 std::path::PathBuf::from("/unused/instance.lock"),
             ),
             router_endpoint: "127.0.0.1:9".parse()?,
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             app_server_socket: std::path::PathBuf::from("/unused/app.sock"),
             managed_executable: std::path::PathBuf::from("/unused/codex"),
             deadlines: crate::HostDeadlines::production(),
         });
         let stop_intent = StopIntent::default();
         stop_intent.request();
+        let (progress, _received) = tokio::sync::mpsc::channel(4);
         let completion = restart_router(
             config,
             ChildCommandSpec::new(std::path::PathBuf::from("/must-not-spawn")),
             None,
             stop_intent,
+            progress,
         )
         .await;
         if completion.child.is_some() || completion.succeeded {

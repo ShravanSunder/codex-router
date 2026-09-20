@@ -9,7 +9,8 @@ use collaboration_client::protocol::{
 use serde_json::{Value, json};
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 use trace_evidence::{
-    OperatorTrace, observed_coverage, require_complete_operation_coverage, write_session_trace,
+    OperatorTrace, observed_coverage, require_complete_operation_coverage,
+    require_refusal_corrections, write_session_trace,
 };
 
 pub(super) const PRIMARY_PROJECT: &str = "DX Router migration program";
@@ -76,7 +77,7 @@ pub async fn exercise() -> ProofResult<()> {
         &discussion,
     )?;
     let discussion_task = format!(
-        "Use the communication skill and factual environment context at {}. Work only in the named disposable resources. In {PRIMARY_TOPIC}, create a top-level Migration readiness discussion that points readers to the fixture, inspect the saved message, then immediately attempt another top-level post as the same actor so the documented cooldown behavior is observed without evasion. Read the topic with a one-record page and continue its pagination if offered. You are explicitly authorized to create the {SECONDARY_PROJECT} project with {SECONDARY_BOARD} and {SECONDARY_TOPIC}. In that second topic create a main discussion, then post a thread conclusion containing the fixture total while acting for {OWNER_HUMAN_ID}; reference both a message and a thread from the primary project. Inspect the message and read message history across topic, thread, board, project, and all-project scopes, exercising latest, after-position, and explicit range modes. Use resource search to locate the primary topic by its name, and message search to find your conclusion inside its thread. Verify that searching the other topic does not include that conclusion merely because you watch its thread. Do not use resource UUIDs from the evaluator; discover resources by names and repository association. Finish with DX_DISCUSSION_COMPLETE.",
+        "Use the communication skill and factual environment context at {}. Work only in the named disposable resources. First try to post a top-level Migration readiness discussion in {PRIMARY_TOPIC} with the existing message-post command and the exact typed selfSessionRef identity from the context. It must be refused. Read that refusal's nextAction and immediately run the stated corrective Thread-create command yourself, choosing orchestrator and --watch and using the fixture as its text file; do not ask a human for a correction. Inspect the saved Thread and its Participants. Separately preserve the top-level cooldown proof with a typed disposable human identity: post one generic topic message, then immediately repeat that same human topic post so the cooldown is observed without evasion. Read the topic with a one-record page and continue its pagination if offered. You are explicitly authorized to create the {SECONDARY_PROJECT} project with {SECONDARY_BOARD} and {SECONDARY_TOPIC}. In that second topic create a Thread as a session with an explicit Role and Watch choice, then post a thread conclusion containing the fixture total while acting for {OWNER_HUMAN_ID}; reference both a message and a thread from the primary project. Inspect the message and read message history across topic, thread, board, project, and all-project scopes, exercising latest, after-position, and explicit range modes. Use resource search to locate the primary topic by its name, and message search to find your conclusion inside its thread. Verify that searching the other topic does not include that conclusion merely because you watch its thread. Do not use resource UUIDs from the evaluator; discover resources by names and repository association. Finish with DX_DISCUSSION_COMPLETE.",
         discussion_context.display()
     );
     let discussion_turns = run_operator(
@@ -132,13 +133,45 @@ pub async fn exercise() -> ProofResult<()> {
         &inbox,
     )?;
     let inbox_task = format!(
-        "Use the communication skill and factual environment context at {}. Find the Migration readiness root in {PRIMARY_TOPIC}. Inspect the thread and project thread inventory, including watched-only discovery. Exercise unwatch and watch while ending with the watch active. Catch up on the {PRIMARY_PROJECT} inbox, inspect tracked-project summaries including unread-only results, use any earlier-unwatched history guidance, process the seeded thread activity, and acknowledge only its exact thread scope and activity position. Fetch again to establish that processed activity is no longer unread. Do not post or create resources. Finish with DX_INBOX_COMPLETE.",
+        "Use the communication skill and factual environment context at {}. Find the Migration readiness root in {PRIMARY_TOPIC}. First attempt a once, no-acknowledge Listen for that root as self before joining. It must be refused. Read its nextAction and immediately run its exact corrective Join command yourself, choosing reviewer and --watch; do not ask a human for a correction. Then run a once Listen as self with an explicit short max wait and no acknowledgement, and post a checkpoint reply with the exact typed selfSessionRef identity from the context. Inspect the thread, participant list, and project thread inventory, including watched-only discovery. Exercise unwatch and watch while ending with the watch active. Catch up on the {PRIMARY_PROJECT} inbox, inspect tracked-project summaries including unread-only results, use any earlier-unwatched history guidance, process the seeded thread activity, and acknowledge only its exact thread scope and activity position. Fetch again to establish that processed activity is no longer unread. Finish with DX_INBOX_COMPLETE.",
         inbox_context.display()
     );
     let inbox_turns = run_operator(&mut proof, &inbox, &inbox_task, "DX_INBOX_COMPLETE").await?;
     traces.push(OperatorTrace::new("inbox", inbox.clone(), inbox_turns));
     write_session_trace(&proof.root, &traces, &observed_coverage(&traces))?;
     durable_grading::grade_inbox(&mut proof, &resources, &discussions, &inbox_identity).await?;
+
+    let handover_context = write_task_context(
+        &proof,
+        "handover-context.json",
+        &skill_path,
+        &fixture_path,
+        &discussion,
+    )?;
+    let handover_task = format!(
+        "Use the communication skill and factual environment context at {}. Find the Migration readiness Thread and its current reviewer Participant. First try to leave as the current Orchestrator without --to or --resolve. It must be refused. Read the nextAction and immediately correct it yourself by leaving with --to the exact joined reviewer identity. Inspect the participant list and Thread holder after the handover. Do not resolve or create resources. Finish with DX_HANDOVER_COMPLETE.",
+        handover_context.display()
+    );
+    let handover_turns = run_operator(
+        &mut proof,
+        &discussion,
+        &handover_task,
+        "DX_HANDOVER_COMPLETE",
+    )
+    .await?;
+    traces.push(OperatorTrace::new(
+        "handover",
+        discussion.clone(),
+        handover_turns,
+    ));
+    write_session_trace(&proof.root, &traces, &observed_coverage(&traces))?;
+    durable_grading::grade_participant_process(
+        &mut proof,
+        &discussions,
+        &discussion_identity,
+        &inbox_identity,
+    )
+    .await?;
 
     let lifecycle = proof
         .start_skill_thread("the board lifecycle and cleanup operator")
@@ -151,7 +184,7 @@ pub async fn exercise() -> ProofResult<()> {
         &lifecycle,
     )?;
     let lifecycle_task = format!(
-        "Use the communication skill and factual environment context at {}. In the primary Migration readiness thread, resolve it, verify that a thread post is rejected while resolved, then mark it unresolved. Detach {REPOSITORY_ORIGIN} from {PRIMARY_PROJECT} and verify repository discovery reflects the detachment without losing discussion history. Archive {PRIMARY_BOARD}, verify it appears when archived boards are included, and verify new content is rejected while its existing messages remain readable. Do not delete or create replacement resources. Finish with DX_LIFECYCLE_COMPLETE.",
+        "Use the communication skill and factual environment context at {}. In the primary Migration readiness thread, use the explicit human identity in the supplied factual context to resolve it, verify that a thread post is rejected while resolved, then mark it unresolved with that same human identity. Detach {REPOSITORY_ORIGIN} from {PRIMARY_PROJECT} and verify repository discovery reflects the detachment without losing discussion history. Archive {PRIMARY_BOARD}, verify it appears when archived boards are included, and verify new content is rejected while its existing messages remain readable. Do not delete or create replacement resources. Finish with DX_LIFECYCLE_COMPLETE.",
         lifecycle_context.display()
     );
     let lifecycle_turns = run_operator(
@@ -170,10 +203,11 @@ pub async fn exercise() -> ProofResult<()> {
     durable_grading::grade_lifecycle(&mut proof, &resources, &discussions).await?;
 
     let coverage = require_complete_operation_coverage(&traces)?;
+    let refusal_corrections = require_refusal_corrections(&traces)?;
     write_session_trace(&proof.root, &traces, &coverage)?;
     proof.record(
         "boardSkillDxComplete",
-        json!({"trace":"session-trace.json","operators":4,"coveredOperations":coverage.len()}),
+        json!({"trace":"session-trace.json","operators":5,"coveredOperations":coverage.len(),"refusalCorrections":refusal_corrections.len()}),
     )?;
     proof.client.close().await?;
     Ok(())
@@ -238,7 +272,8 @@ fn write_task_context(
         "primaryBoardName":PRIMARY_BOARD,"primaryTopicName":PRIMARY_TOPIC,
         "secondaryProjectName":SECONDARY_PROJECT,"secondaryBoardName":SECONDARY_BOARD,
         "secondaryTopicName":SECONDARY_TOPIC,"fixturePath":fixture_path,
-        "actingFor":{"kind":"human","humanId":OWNER_HUMAN_ID}
+        "actingFor":{"kind":"human","humanId":OWNER_HUMAN_ID},
+        "humanActor":{"kind":"human","humanId":OWNER_HUMAN_ID}
     });
     write_private_json(&path, &value)?;
     Ok(path)

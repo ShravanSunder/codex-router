@@ -11,6 +11,8 @@ const PERMISSION_DIAGNOSTIC_MESSAGE: &str = "Request automated approval review t
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("invalid collaboration request: {0}")]
+    InvalidRequest(&'static str),
     #[error("unsupported protocol capability: {0}")]
     UnsupportedCapability(&'static str),
     #[error("Control discovery failed at {stage}")]
@@ -106,6 +108,7 @@ impl ControlClient {
         if identity.version.major != 1 || identity.version.minor != 0 {
             return Err(ClientError::Protocol("unsupported negotiated version"));
         }
+        crate::record_service_version(&identity.service_version);
         Ok(Self {
             connection,
             notification_state: EndpointNotificationState::new(&identity),
@@ -125,7 +128,7 @@ impl ControlClient {
             params.message,
             collaboration_protocol::MessageContent::Agent { .. }
         ) {
-            return Err(ClientError::Protocol("agent message required"));
+            return Err(ClientError::InvalidRequest("agent message required"));
         }
         self.submit_message(params).await
     }
@@ -138,7 +141,7 @@ impl ControlClient {
             params.message,
             collaboration_protocol::MessageContent::HumanUser { .. }
         ) {
-            return Err(ClientError::Protocol("human input required"));
+            return Err(ClientError::InvalidRequest("human input required"));
         }
         self.submit_message(params).await
     }
@@ -162,7 +165,7 @@ impl ControlClient {
             ));
         };
         let (kind, representation) = match params.message {
-            MessageContent::Agent { .. } => (
+            MessageContent::Agent { .. } | MessageContent::Router { .. } => (
                 MessageInputKind::Agent,
                 MessageRepresentation::DeclaredAgentText,
             ),
@@ -209,7 +212,7 @@ impl ControlClient {
         params: collaboration_protocol::NativeSessionListParams,
     ) -> Result<collaboration_protocol::NativeSessionListResult, ClientError> {
         if !(1..=100).contains(&params.page_size) {
-            return Err(ClientError::Protocol("invalid session page size"));
+            return Err(ClientError::InvalidRequest("invalid session page size"));
         }
         let value = self
             .connection
@@ -252,6 +255,23 @@ impl ControlClient {
         }
         Ok(result)
     }
+    pub async fn rename_session(
+        &mut self,
+        params: collaboration_protocol::NativeRenameParams,
+    ) -> Result<collaboration_protocol::NativeRenameResult, ClientError> {
+        let target = params.target.clone();
+        let result = self
+            .connection
+            .call("codex/sessionRename", json!(params))
+            .await?;
+        let result: collaboration_protocol::NativeRenameResult = serde_json::from_value(result)
+            .map_err(|_| ClientError::Protocol("invalid rename result"))?;
+        if result.target != target {
+            self.connection.failed = true;
+            return Err(ClientError::Protocol("inconsistent rename result"));
+        }
+        Ok(result)
+    }
     pub async fn interrupt_turn(
         &mut self,
         target: &collaboration_protocol::SessionRef,
@@ -259,7 +279,7 @@ impl ControlClient {
         turn_id: &str,
     ) -> Result<collaboration_protocol::NativeInterruptResult, ClientError> {
         let turn_id = collaboration_protocol::NonEmptyText::try_from(turn_id.to_owned())
-            .map_err(|_| ClientError::Protocol("invalid exact turn ID"))?;
+            .map_err(|_| ClientError::InvalidRequest("invalid exact turn ID"))?;
         let params = collaboration_protocol::NativeInterruptParams {
             target: target.clone(),
             generation: generation.clone(),
@@ -276,6 +296,68 @@ impl ControlClient {
         {
             self.connection.failed = true;
             return Err(ClientError::Protocol("inconsistent interruption result"));
+        }
+        Ok(result)
+    }
+    pub async fn list_pending_approvals(
+        &mut self,
+        pending_only: bool,
+    ) -> Result<collaboration_protocol::ApprovalListResult, ClientError> {
+        let value = self
+            .connection
+            .call(
+                "approval/list",
+                json!(collaboration_protocol::ApprovalListParams {
+                    pending: pending_only
+                }),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|_| ClientError::Protocol("invalid approval list"))
+    }
+
+    pub async fn decide_approval(
+        &mut self,
+        params: collaboration_protocol::ApprovalDecideParams,
+    ) -> Result<collaboration_protocol::ApprovalDecideResult, crate::OperationError> {
+        let request_id = params.request_id.clone();
+        let encoded = serde_json::to_value(params).map_err(|_| {
+            crate::OperationError::before_dispatch(
+                "approval-decision",
+                None,
+                ClientError::InvalidRequest("invalid approval decision"),
+            )
+        })?;
+        self.connection
+            .validate_call_before_transmission("approval/decide", &encoded)
+            .map_err(|source| {
+                crate::OperationError::before_dispatch("approval-decision", None, source)
+            })?;
+        let value = self
+            .connection
+            .call("approval/decide", encoded)
+            .await
+            .map_err(|source| {
+                crate::OperationError::after_dispatch("approval-decision", None, None, source)
+            })?;
+        let result: collaboration_protocol::ApprovalDecideResult = serde_json::from_value(value)
+            .map_err(|_| {
+                crate::OperationError::after_dispatch(
+                    "approval-decision",
+                    None,
+                    None,
+                    ClientError::Protocol("invalid approval decision receipt"),
+                )
+            })?;
+        if result.request_id != request_id
+            || result.state != collaboration_protocol::ApprovalState::Decided
+        {
+            self.connection.failed = true;
+            return Err(crate::OperationError::after_dispatch(
+                "approval-decision",
+                None,
+                None,
+                ClientError::Protocol("inconsistent approval decision receipt"),
+            ));
         }
         Ok(result)
     }
@@ -296,7 +378,9 @@ impl ControlClient {
         if !(1..=100).contains(&page_size)
             || cursor.is_some_and(|cursor| cursor.is_empty() || cursor.len() > 1024)
         {
-            return Err(ClientError::Protocol("invalid address snapshot arguments"));
+            return Err(ClientError::InvalidRequest(
+                "invalid address snapshot arguments",
+            ));
         }
         let params = json!(collaboration_protocol::AddressListParams {
             endpoint: endpoint.clone(),
@@ -332,7 +416,9 @@ impl ControlClient {
         wait_milliseconds: u64,
     ) -> Result<collaboration_protocol::JournalPage, ClientError> {
         if !(1..=100).contains(&page_size) || wait_milliseconds > 30000 {
-            return Err(ClientError::Protocol("invalid journal read arguments"));
+            return Err(ClientError::InvalidRequest(
+                "invalid journal read arguments",
+            ));
         }
         let value = self
             .connection

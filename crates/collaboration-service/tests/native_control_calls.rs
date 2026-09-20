@@ -8,6 +8,9 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc};
 use tokio_tungstenite::tungstenite::Message;
 
+/// A fixed instant well in the past, so a computed idle time can only be positive.
+const BUSY_THREAD_UPDATED_AT_SECONDS: i64 = 1_700_000_000;
+
 #[tokio::test]
 async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_guards() {
     // Arrange: isolated Control and backend sockets plus explicitly fixture-only schemas.
@@ -36,6 +39,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         "TurnSteer",
         "TurnInterrupt",
         "ThreadQueueAdd",
+        "ThreadNameSet",
     ] {
         definitions.insert(format!("{name}Params"), json!({"type":"object"}));
         definitions.insert(format!("{name}Response"), json!({"type":"object"}));
@@ -70,6 +74,41 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     let gate = NativeGenerationGate::default();
     gate.activate(generation.clone(), backend_path.clone(), Some(schemas))
         .unwrap_or_else(|error| panic!("activate: {error}"));
+    // A recorded Router route makes inspect report the access Router selected.
+    let routes_path = root.join("approval-routes.json");
+    std::fs::write(
+        &routes_path,
+        serde_json::to_vec(&json!([{
+            "threadId":"proof-thread",
+            "createdBy":target,
+            "approver":target,
+            "access":"workspace-write",
+            "scratchPath":"/tmp/native-control-scratch",
+            "rootMessageId":null
+        }]))
+        .unwrap_or_else(|error| panic!("routes: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("routes file: {error}"));
+    let broker = collaboration_service::ServiceApprovalBroker::load(
+        service_id
+            .to_owned()
+            .try_into()
+            .unwrap_or_else(|error| panic!("service id: {error}")),
+        collaboration_service::EndpointDirectory::new(
+            service_id
+                .to_owned()
+                .try_into()
+                .unwrap_or_else(|error| panic!("service id: {error}")),
+        ),
+        NativeControlBackend {
+            codex_home: root.clone(),
+            endpoint: target.endpoint.clone(),
+            gate: gate.clone(),
+        },
+        routes_path.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("broker: {error}"));
     let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
         .unwrap_or_else(|error| panic!("identity: {error}"))
         .with_endpoints(vec![description.clone()])
@@ -79,16 +118,20 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             endpoint: target.endpoint.clone(),
             gate,
         })
-        .unwrap_or_else(|error| panic!("binding: {error}"));
+        .unwrap_or_else(|error| panic!("binding: {error}"))
+        .with_approval_broker(broker);
     let (client, server) =
         tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("pair: {error}"));
     let service = tokio::spawn(serve_control_connection(server, identity.clone()));
+    // The native Thread schema requires both timestamps as unix seconds.
+    let thread_updated_at = chrono::Utc::now().timestamp() - 45;
+    let thread_created_at = thread_updated_at - 600;
     let backend = tokio::spawn(async move {
         for (method, expected, result) in [
             (
                 "thread/read",
                 json!({"threadId":"proof-thread","includeTurns":false}),
-                json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"}}}),
+                json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"},"createdAt":thread_created_at,"updatedAt":thread_updated_at,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}),
             ),
             (
                 "turn/start",
@@ -104,6 +147,11 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                 "thread/loaded/list",
                 json!({"limit":1,"cursor":null}),
                 json!({"data":["proof-thread"],"nextCursor":null}),
+            ),
+            (
+                "thread/name/set",
+                json!({"threadId":"proof-thread","name":"🔎 Review"}),
+                json!({}),
             ),
             (
                 "turn/interrupt",
@@ -122,9 +170,18 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                 vec!["initialize", "initialized", "thread/read", method]
             } else if method == "thread/loaded/list" {
                 vec!["initialize", "initialized", method, "thread/read"]
+            } else if method == "thread/name/set" {
+                vec![
+                    "initialize",
+                    "initialized",
+                    "thread/read",
+                    method,
+                    "thread/read",
+                ]
             } else {
                 vec!["initialize", "initialized", method]
             };
+            let mut rename_read_count = 0_u8;
             for expected_method in steps {
                 let frame = socket
                     .next()
@@ -157,7 +214,15 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                     let response = if expected_method == method {
                         result.clone()
                     } else if expected_method == "thread/read" {
-                        json!({"thread":{"id":"proof-thread","cwd":"/tmp","status":{"type":"idle"}}})
+                        rename_read_count = rename_read_count.saturating_add(1);
+                        // Only the inventory read models a busy thread; the message paths
+                        // branch on status and must keep their idle fixture.
+                        let status = if method == "thread/loaded/list" {
+                            json!({"type":"active","activeFlags":[]})
+                        } else {
+                            json!({"type":"idle"})
+                        };
+                        json!({"thread":{"id":"proof-thread","name":if method == "thread/name/set" && rename_read_count == 2 {"🔎 Review"} else {"Old name"},"cwd":"/tmp","status":status,"updatedAt":BUSY_THREAD_UPDATED_AT_SECONDS,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
                     } else {
                         json!({})
                     };
@@ -187,6 +252,17 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .inspect_session(&target)
         .await
         .unwrap_or_else(|error| panic!("inspect: {error}"));
+    assert_eq!(
+        inspection.effective_access,
+        Some(collaboration_protocol::RouterAccess::WorkspaceWrite),
+        "inspect reports the access recorded for this thread"
+    );
+    assert!(matches!(
+        inspection.settings_observation,
+        collaboration_protocol::SettingsObservation::Unavailable {
+            reason: collaboration_protocol::SettingsUnavailableReason::ThreadReadOmitsSettings
+        }
+    ));
     let message = client
         .send_agent_message(collaboration_protocol::NativeSendParams {
             target: target.clone(),
@@ -227,6 +303,9 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .list_sessions(collaboration_protocol::NativeSessionListParams {
             endpoint: target.endpoint.clone(),
             view: collaboration_protocol::NativeSessionView::Loaded,
+            scope: collaboration_protocol::NativeSessionScope::Any,
+            source: collaboration_protocol::NativeSessionSource::All,
+            query: None,
             page_size: 1,
             cursor: None,
         })
@@ -235,6 +314,31 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     assert_eq!(inventory.sessions.len(), 1);
     assert_eq!(inventory.sessions[0].target, target);
     assert_eq!(inventory.generation.as_ref(), Some(&generation));
+    // A busy row reports the running status and a real idle time, never a hardcoded zero.
+    let collaboration_protocol::NativeSessionObservation::Runtime { status, turn_id } =
+        &inventory.sessions[0].observation
+    else {
+        panic!("a loaded row must carry a runtime observation");
+    };
+    assert_eq!(
+        serde_json::to_value(status).unwrap_or_else(|error| panic!("status: {error}"))["type"],
+        "active"
+    );
+    // ActiveThreadStatus in codex_app_server_protocol.v2.schemas.json names no turn id.
+    assert_eq!(turn_id.as_deref(), None);
+    assert!(
+        inventory.sessions[0].idle_seconds > 0,
+        "idle seconds must be computed from updatedAt, not hardcoded"
+    );
+    let renamed = client
+        .rename_session(collaboration_protocol::NativeRenameParams {
+            target: target.clone(),
+            name: "🔎 Review".into(),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("rename: {error}"));
+    assert_eq!(renamed.name, "🔎 Review");
+    assert_eq!(renamed.previous_name.as_deref(), Some("Old name"));
     let interruption = client
         .interrupt_turn(&target, &generation, "proof-turn")
         .await
@@ -280,6 +384,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .unwrap_or_else(|error| panic!("second service: {error}"))
         .unwrap_or_else(|error| panic!("second serve: {error}"));
     std::fs::remove_file(backend_path).unwrap_or_else(|error| panic!("socket cleanup: {error}"));
+    std::fs::remove_file(routes_path).unwrap_or_else(|error| panic!("routes cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
     // Assert.
     assert_eq!(inspection.target, target);

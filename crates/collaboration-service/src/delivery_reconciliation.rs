@@ -50,7 +50,7 @@ pub(crate) async fn reconcile(
         .await
         .read_delivery_content::<MessageContent>(&record.delivery_id)
         .await?;
-    let rendered = crate::agent_declaration::render_message(&record.target, &content)
+    let rendered = collaboration_protocol::render_message(&record.target, &content)
         .map_err(|_| StorageError::InvalidRecord)?;
     let retirement = admission.retirement();
     let observed = tokio::select! {

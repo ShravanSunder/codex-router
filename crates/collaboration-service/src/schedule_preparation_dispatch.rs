@@ -66,6 +66,22 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
             );
         }
     };
+    let valid_choice = |value: Option<&String>| {
+        value.is_some_and(|value| {
+            !value.trim().is_empty() && !value.chars().any(char::is_whitespace)
+        })
+    };
+    if !valid_choice(inspected.record.definition.effort.as_ref()) {
+        return reject_choice_field(request.id, &params, "effort", effects);
+    }
+    if matches!(
+        params.destination,
+        collaboration_protocol::DestinationPreparation::Fresh { .. }
+            | collaboration_protocol::DestinationPreparation::Fork { .. }
+    ) && !valid_choice(inspected.record.definition.model.as_ref())
+    {
+        return reject_choice_field(request.id, &params, "model", effects);
+    }
     if inspected.record.definition.destination.execution_mode()
         == agent_automation::ExecutionMode::FreshEachRun
     {
@@ -254,6 +270,13 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
         admission: &admission,
         destination: &params.destination,
         instruction_text: &text,
+        model: inspected.record.definition.model.as_deref(),
+        effort: inspected
+            .record
+            .definition
+            .effort
+            .as_deref()
+            .unwrap_or_default(),
     })
     .await;
     let (target, effects) = match prepared {
@@ -305,6 +328,27 @@ pub(crate) async fn dispatch(request: PreparationRequest<'_>) -> Value {
         ).await,
         Err(_)=>finish_failure(store,request.id,&params,ScheduleFailureKind::OutcomeUnknown,"Native preparation completed but binding commit was not established; inspect retained target and operation before retrying.",effects,true).await,
     }
+}
+fn reject_choice_field(
+    id: Value,
+    params: &SchedulePrepareRequest,
+    field: &str,
+    effects: NativeEffectEvidence,
+) -> Value {
+    let failure = ScheduleFailure {
+        kind: ScheduleFailureKind::InvalidField,
+        stage: ScheduleFailureStage::Preparation,
+        message: format!("Schedule preparation requires {field}."),
+        operation_id: Some(params.operation_id.clone()),
+        schedule_id: Some(params.schedule_id.clone()),
+        current_change_id: None,
+        field: Some(field.into()),
+        constraint: Some("is required and must not contain whitespace".into()),
+        details: collaboration_protocol::ScheduleFailureDetails::None,
+        effects: ScheduleEffects::Native { evidence: effects },
+        next_action: ScheduleNextAction::CorrectRequest,
+    };
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Schedule preparation failed","data":failure}})
 }
 fn error(
     params: &SchedulePrepareRequest,

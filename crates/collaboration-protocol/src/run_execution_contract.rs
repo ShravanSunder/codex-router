@@ -37,6 +37,10 @@ pub struct FrozenExecutionConfiguration {
     pub destination: ExecutionDestination,
     #[serde(deserialize_with = "Option::deserialize")]
     pub execution_timeout_seconds: Option<PositiveSeconds>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

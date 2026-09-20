@@ -220,6 +220,7 @@ fn host_config_preserves_resolved_router_and_codex_boundaries() {
     let debug = HostConfig::new(HostConfigInputs {
         coordination_paths: debug_paths,
         router_endpoint,
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         app_server_socket: app_server_socket.clone(),
         managed_executable: managed_executable.clone(),
         deadlines: HostDeadlines::production(),
@@ -227,6 +228,7 @@ fn host_config_preserves_resolved_router_and_codex_boundaries() {
     let installed = HostConfig::new(HostConfigInputs {
         coordination_paths: installed_paths,
         router_endpoint,
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         app_server_socket: app_server_socket.clone(),
         managed_executable: managed_executable.clone(),
         deadlines: HostDeadlines::production(),
@@ -234,6 +236,7 @@ fn host_config_preserves_resolved_router_and_codex_boundaries() {
     let explicit = HostConfig::new(HostConfigInputs {
         coordination_paths: explicit_paths,
         router_endpoint,
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         app_server_socket,
         managed_executable,
         deadlines: HostDeadlines::production(),

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-automation"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "agent-collaboration"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -33,6 +33,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "iocraft",
+ "jsonschema",
  "lifecycle-observation",
  "message-board-storage",
  "serde",
@@ -180,7 +181,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "automation-storage"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -197,6 +198,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bit-set"
@@ -388,9 +395,9 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codex-acp-adapter"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "chrono",
  "codex-native-integration",
  "collaboration-protocol",
@@ -408,10 +415,11 @@ dependencies = [
 
 [[package]]
 name = "codex-native-integration"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "futures-util",
  "jsonschema",
+ "message-board",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -421,11 +429,12 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "tracing",
 ]
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "codex-router-core",
  "codex-router-secret-store",
@@ -439,10 +448,10 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "agent-collaboration",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "codex-native-integration",
@@ -481,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -493,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "automation-storage",
  "chrono",
@@ -501,6 +510,7 @@ dependencies = [
  "codex-router-core",
  "codex-router-test-support",
  "collaboration-client",
+ "collaboration-mcp",
  "collaboration-protocol",
  "collaboration-service",
  "futures-util",
@@ -513,6 +523,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -523,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "bytes",
  "codex-router-auth",
@@ -555,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -563,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -576,9 +587,9 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "codex-router-core",
  "serde",
  "serde_json",
@@ -587,9 +598,9 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "codex-router-core",
  "codex-router-quota",
  "hmac 0.12.1",
@@ -602,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -615,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "codex-native-integration",
  "codex-router-cli",
@@ -634,20 +645,21 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "iocraft",
 ]
 
 [[package]]
 name = "collaboration-client"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "codex-native-integration",
  "collaboration-protocol",
  "collaboration-service",
  "futures-util",
  "message-board",
+ "schemars",
  "serde",
  "serde_json",
  "sqlx",
@@ -655,11 +667,42 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "collaboration-mcp"
+version = "0.1.33"
+dependencies = [
+ "agent-collaboration",
+ "bytes",
+ "codex-acp-adapter",
+ "codex-native-integration",
+ "collaboration-client",
+ "collaboration-protocol",
+ "collaboration-service",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jsonschema",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tower-service",
 ]
 
 [[package]]
 name = "collaboration-protocol"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -676,11 +719,11 @@ dependencies = [
 
 [[package]]
 name = "collaboration-service"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "agent-automation",
  "automation-storage",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "codex-acp-adapter",
  "codex-native-integration",
@@ -885,8 +928,18 @@ version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
 dependencies = [
- "darling_core",
- "darling_macro",
+ "darling_core 0.20.11",
+ "darling_macro 0.20.11",
+]
+
+[[package]]
+name = "darling"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
+dependencies = [
+ "darling_core 0.24.1",
+ "darling_macro 0.24.1",
 ]
 
 [[package]]
@@ -904,14 +957,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling_core"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff"
+dependencies = [
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 3.0.5",
+]
+
+[[package]]
 name = "darling_macro"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
 dependencies = [
- "darling_core",
+ "darling_core 0.20.11",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
+dependencies = [
+ "darling_core 0.24.1",
+ "quote",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -935,7 +1012,7 @@ version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8"
 dependencies = [
- "darling",
+ "darling 0.20.11",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -1583,7 +1660,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -1741,6 +1818,8 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -1899,9 +1978,9 @@ dependencies = [
 
 [[package]]
 name = "lifecycle-observation"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "chrono",
  "codex-native-integration",
  "collaboration-protocol",
@@ -1982,7 +2061,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "message-board"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
  "schemars",
  "serde",
@@ -1993,9 +2072,9 @@ dependencies = [
 
 [[package]]
 name = "message-board-storage"
-version = "0.1.26"
+version = "0.1.33"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "hmac 0.12.1",
  "message-board",
  "serde",
@@ -2262,6 +2341,12 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "percent-encoding"
@@ -2633,7 +2718,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -2680,6 +2765,51 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rmcp"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b23c62fe489ac1d401ab32688cfacac3737a8978dc3343e5361464c7724fd3cb"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
+ "indexmap",
+ "pastey",
+ "pin-project-lite",
+ "rand 0.10.2",
+ "rmcp-macros",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sse-stream",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower-service",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "rmcp-macros"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd740c45d66ceb87e5579082abc27bd771665e464e9660a17a048c721b2a6025"
+dependencies = [
+ "darling 0.24.1",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -2816,6 +2946,7 @@ version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
 dependencies = [
+ "chrono",
  "dyn-clone",
  "ref-cast",
  "schemars_derive",
@@ -3141,7 +3272,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05b44e85bf579a8eeb4ceaa77a3a523baf2bf0e9bac7e40f405d537b5d2d5ccb"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "cfg-if",
  "crc",
@@ -3239,7 +3370,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87a2bdd6e83f6b3ea525ca9fee568030508b58355a43d0b2c1674d5f79dcd65e"
 dependencies = [
  "atoi",
- "base64",
+ "base64 0.22.1",
  "bitflags 2.13.0",
  "byteorder",
  "crc",
@@ -3289,6 +3420,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "sse-stream"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c25ac7aff0abd1dbc474536e40416e1102c7dd9bfba0b9861c6d357f835dcfb4"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -3638,7 +3782,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "http",
  "http-body",

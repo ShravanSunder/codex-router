@@ -600,3 +600,107 @@ fn sessions_interactive_non_tty_errors_concisely_without_logs() {
     assert!(stdout.is_empty());
     assert!(stderr.is_empty());
 }
+
+#[test]
+fn sessions_picker_resume_and_fork_carry_the_selected_row_model_and_effort() {
+    // Arrange: one row stores both values, one row stores neither.
+    let test_root = TestRoot::new("sessions-picker-model-choice");
+    must_ok(fs::create_dir(test_root.path()));
+    let codex_home = test_root.path().join("codex-home");
+    let project = test_root.path().join("project");
+    must_ok(fs::create_dir(&codex_home));
+    must_ok(fs::create_dir(&project));
+    create_codex_state_db_with_thread_rows(
+        &codex_home.join("state_5.sqlite"),
+        "PICKER_MODEL_CHOICE_CANARY",
+        &[
+            CodexStateThreadFixture::new(
+                "thread-with-choice",
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                2000,
+            )
+            .with_reasoning_effort("high"),
+            CodexStateThreadFixture::new(
+                "thread-without-choice",
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                1000,
+            )
+            .with_model(None),
+        ],
+    );
+    let context = CliContext::new(vec![
+        ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+        ("HOME".to_owned(), test_root.path().display().to_string()),
+    ])
+    .with_current_dir(project);
+
+    // Act: resume the row that stores both values.
+    let mut runner = FakeSessionsCommandRunner::default();
+    let mut picker = FakeSessionsPicker::new("thread-with-choice");
+    must_ok(crate::sessions::run_sessions_command_with_dependencies(
+        &mut Vec::new(),
+        must_ok(parse_session_arguments([])),
+        &context,
+        &mut runner,
+        &mut picker,
+    ));
+
+    // Assert
+    assert_eq!(runner.resumed_session_ids, ["thread-with-choice"]);
+    assert_eq!(
+        runner.resume_model_choices,
+        [
+            codex_native_integration::ResumeModelChoice::from_stored_values(
+                Some("gpt-5.4-mini"),
+                Some("high")
+            )
+        ]
+    );
+
+    // Act: fork the same row.
+    let mut fork_runner = FakeSessionsCommandRunner::default();
+    let mut fork_picker = FakeSessionsPicker::new_fork("thread-with-choice");
+    must_ok(crate::sessions::run_sessions_command_with_dependencies(
+        &mut Vec::new(),
+        must_ok(parse_session_arguments([])),
+        &context,
+        &mut fork_runner,
+        &mut fork_picker,
+    ));
+
+    // Assert
+    assert_eq!(
+        fork_runner.fork_model_choices,
+        [
+            codex_native_integration::ResumeModelChoice::from_stored_values(
+                Some("gpt-5.4-mini"),
+                Some("high")
+            )
+        ]
+    );
+
+    // Act: resume the row that stores neither value.
+    let mut empty_runner = FakeSessionsCommandRunner::default();
+    let mut empty_picker = FakeSessionsPicker::new("thread-without-choice");
+    must_ok(crate::sessions::run_sessions_command_with_dependencies(
+        &mut Vec::new(),
+        must_ok(parse_session_arguments([])),
+        &context,
+        &mut empty_runner,
+        &mut empty_picker,
+    ));
+
+    // Assert
+    assert_eq!(
+        empty_runner.resume_model_choices,
+        [codex_native_integration::ResumeModelChoice::default()]
+    );
+}

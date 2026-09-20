@@ -43,6 +43,8 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
                     cwd: root.to_string_lossy().into(),
                 },
                 execution_timeout_seconds: None,
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some("medium".into()),
             },
             imported_continuity: ContinuityInput::None,
             now_ms: 0,
@@ -104,6 +106,7 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("absent.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
     })
     .await?;
@@ -129,7 +132,9 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         .into());
     }
     let value: Value = serde_json::from_slice(&output.stdout)?;
-    let snapshot = value.get("result").ok_or("missing Run result")?;
+    let snapshot = value
+        .pointer("/result/record")
+        .ok_or("missing Run result")?;
     let _: collaboration_client::protocol::RunSnapshot = serde_json::from_value(snapshot.clone())?;
     for (pointer, replacement) in [
         ("/state/execution/nativeTurnId", json!("another-turn")),
@@ -152,9 +157,12 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
             );
         }
     }
-    if value.pointer("/result/state/kind").and_then(Value::as_str) != Some("finished")
+    if value
+        .pointer("/result/record/state/kind")
+        .and_then(Value::as_str)
+        != Some("finished")
         || value
-            .pointer("/result/executionEvidence/acceptance/acceptance/turnId")
+            .pointer("/result/record/executionEvidence/acceptance/acceptance/turnId")
             .and_then(Value::as_str)
             != Some("fixture-turn")
     {
@@ -177,11 +185,11 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
     }
     let summaries: Value = serde_json::from_slice(&summaries.stdout)?;
     if summaries
-        .pointer("/result/records")
+        .pointer("/result/page/records")
         .and_then(Value::as_array)
         .is_none_or(|records| !records.is_empty())
         || summaries
-            .pointer("/result/coverage/earlierAttempts")
+            .pointer("/result/page/coverage/earlierAttempts")
             .and_then(Value::as_str)
             != Some("mayBeUnavailable")
     {
@@ -203,7 +211,7 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         return Err("run reconcile CLI failed".into());
     }
     let reconciled: Value = serde_json::from_slice(&reconciled.stdout)?;
-    if reconciled.get("result") != value.get("result") {
+    if reconciled.pointer("/result/record") != value.pointer("/result/record") {
         return Err("reconciling finished Run changed its original outcome".into());
     }
     runtime.shutdown().await?;

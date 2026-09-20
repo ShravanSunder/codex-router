@@ -1,0 +1,239 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.root_id,t.state, p.reader_key AS orchestrator_reader_key,p.root_id AS orchestrator_root_id, p.role AS orchestrator_role,p.note AS orchestrator_note, p.joined_at_activity AS orchestrator_joined_at_activity, p.last_seen_activity AS orchestrator_last_seen_activity, p.closed_at_activity AS orchestrator_closed_at_activity, p.closed_reason AS orchestrator_closed_reason,p.replaced_by AS orchestrator_replaced_by, i.identity_key AS orchestrator_identity_key,i.kind AS orchestrator_identity_kind, i.service_id AS orchestrator_identity_service_id,i.endpoint_id AS orchestrator_identity_endpoint_id, i.session_id AS orchestrator_identity_session_id,i.human_id AS orchestrator_identity_human_id, EXISTS(SELECT 1 FROM board_activity joined_activity WHERE joined_activity.activity_sequence=p.joined_at_activity AND joined_activity.root_id=p.root_id) AS orchestrator_joined_activity_on_thread, EXISTS(SELECT 1 FROM board_activity last_seen_activity WHERE last_seen_activity.activity_sequence=p.last_seen_activity AND last_seen_activity.root_id=p.root_id) AS orchestrator_last_seen_activity_on_thread, EXISTS(SELECT 1 FROM board_activity closed_activity WHERE closed_activity.activity_sequence=p.closed_at_activity AND closed_activity.root_id=p.root_id) AS orchestrator_closed_activity_on_thread FROM board_threads t JOIN board_messages m ON m.message_id=t.root_id JOIN project_boards b ON b.board_id=m.board_id LEFT JOIN thread_watches w ON w.root_id=t.root_id AND w.reader_key=? LEFT JOIN thread_participants p ON p.root_id=t.root_id AND p.closed_at_activity IS NULL AND (p.role='orchestrator' OR p.role NOT IN ('implementer','advisor','reviewer','participant')) LEFT JOIN board_identities i ON i.identity_key=p.reader_key WHERE b.project_id=? AND t.root_id>? AND (?=0 OR w.active=1) ORDER BY t.root_id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_threads",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_threads",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_reader_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "reader_key"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_root_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_role",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_note",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "note"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_joined_at_activity",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "joined_at_activity"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_last_seen_activity",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "last_seen_activity"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_closed_at_activity",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "closed_at_activity"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_closed_reason",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "closed_reason"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_replaced_by",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "replaced_by"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_identity_key",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "identity_key"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_identity_kind",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_identity_service_id",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "service_id"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_identity_endpoint_id",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "endpoint_id"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_identity_session_id",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "session_id"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_identity_human_id",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "human_id"
+          }
+        }
+      },
+      {
+        "name": "orchestrator_joined_activity_on_thread",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "orchestrator_last_seen_activity_on_thread",
+        "ordinal": 18,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "orchestrator_closed_activity_on_thread",
+        "ordinal": 19,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a84bbeaa0d5e5ba1f3a5edd4d877e4860a448179d79cf9a38a49fa19022a597c"
+}

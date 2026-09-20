@@ -1,15 +1,31 @@
 //! CLI envelopes; operation payloads retain their Control/native/ACP contracts.
-use crate::{CodexGeneration, NonEmptyText, SessionRef};
+use crate::{
+    AdapterOperationFailure, CodexGeneration, RouterAccess, SessionRef, SettingsObservation,
+};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[derive(JsonSchema, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 #[schemars(rename = "FiniteCommandRecord")]
 pub enum FiniteCommandRecord<TResult, TError> {
-    Result { result: TResult },
-    Error { error: TError },
+    Result {
+        cli_version: String,
+        service_version: String,
+        result: TResult,
+    },
+    Error {
+        /// Known operation target retained when failure follows target resolution.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        target: Option<SessionRef>,
+        error: TError,
+    },
 }
 
 #[derive(JsonSchema, Serialize, Deserialize)]
@@ -37,8 +53,16 @@ pub enum ObservationCloseReason {
 }
 
 #[derive(JsonSchema, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum ConversationRecord {
+    ConversationCreated {
+        target: SessionRef,
+    },
     SessionReady {
         target: SessionRef,
     },
@@ -52,31 +76,43 @@ pub enum ConversationRecord {
     },
     PromptResult {
         target: SessionRef,
+        effective_model: String,
+        effective_effort: String,
+        effective_access: Option<RouterAccess>,
+        settings_observation: Box<SettingsObservation>,
+        /// Present only when a resume asked for an effort the thread did not
+        /// already carry. The turn still runs; the change is reported because
+        /// it invalidates the provider's prompt cache for this session.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        effort_change: Option<EffortChange>,
+        idle_seconds: u64,
+        #[schemars(schema_with = "acp_result_schema")]
+        result: Value,
+    },
+    ConversationSettlement {
+        target: SessionRef,
+        terminal_reason: ConversationTerminalReason,
         #[schemars(schema_with = "acp_result_schema")]
         result: Value,
     },
     ConversationError {
         target: Option<SessionRef>,
-        stage: ConversationStage,
-        effect: ConversationEffect,
-        message: NonEmptyText,
+        error: AdapterOperationFailure,
     },
 }
+
 #[derive(JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ConversationStage {
-    Connect,
-    Initialize,
-    New,
-    Load,
-    Prompt,
-    Cancel,
+pub enum ConversationTerminalReason {
+    Cancelled,
+    TimedOut,
 }
-#[derive(JsonSchema, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ConversationEffect {
-    NotDispatched,
-    Unknown,
+/// One resume's reasoning-effort change, as the caller asked and the thread held.
+#[derive(JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EffortChange {
+    pub previous: String,
+    pub requested: String,
 }
 
 fn acp_update_schema(_: &mut SchemaGenerator) -> Schema {

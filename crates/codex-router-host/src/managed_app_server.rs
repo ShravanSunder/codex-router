@@ -116,6 +116,12 @@ impl AppServerLaunchPlan {
         }
     }
 
+    pub(crate) fn prepared_schema_export(
+        &self,
+    ) -> Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>> {
+        self.schema_export.clone()
+    }
+
     pub(crate) fn spawn(&self) -> Result<AppServerChild, ProcessGroupError> {
         let mut command = self
             .command
@@ -187,6 +193,13 @@ impl AppServerChild {
         &self,
     ) -> Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>> {
         self.schema_export.clone()
+    }
+
+    pub(crate) fn set_schema_export(
+        &mut self,
+        export: Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>>,
+    ) {
+        self.schema_export = export;
     }
 
     /// Awaits bounded native readiness while retaining child ownership on failure.

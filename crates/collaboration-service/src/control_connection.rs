@@ -125,6 +125,23 @@ pub async fn serve_control_connection(
                     }
                 }
                 Ok(request)
+                    if matches!(request.method.as_str(), "approval/list" | "approval/decide") =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = dispatch_approval(
+                            &request.method,
+                            request.params,
+                            json!(id),
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
                     if matches!(
                         request.method.as_str(),
                         "wake/send"
@@ -435,6 +452,7 @@ pub async fn serve_control_connection(
                     if matches!(
                         request.method.as_str(),
                         "codex/sessionInspect"
+                            | "codex/sessionRename"
                             | "codex/turnInterrupt"
                             | "codex/messageSend"
                             | "codex/sessionList"
@@ -458,6 +476,7 @@ pub async fn serve_control_connection(
                                         observer_id: &identity.service_epoch,
                                     }
                                 }),
+                                access_routes: identity.approval_broker.as_deref(),
                             },
                         )
                         .await;
@@ -494,6 +513,40 @@ pub async fn serve_control_connection(
             output.push(b'\n');
             stream.write_all(&output).await?;
         }
+    }
+}
+async fn dispatch_approval(
+    method: &str,
+    params: Value,
+    id: Value,
+    identity: &ServiceIdentity,
+) -> Value {
+    let Some(broker) = identity.approval_broker.as_ref() else {
+        return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Approval service unavailable","data":{"kind":"unavailable","stage":"inspect","message":"Approval service unavailable"}}});
+    };
+    match method {
+        "approval/list" => {
+            let Ok(params) =
+                serde_json::from_value::<collaboration_protocol::ApprovalListParams>(params)
+            else {
+                return error(id, -32602, "Invalid params");
+            };
+            json!({"jsonrpc":"2.0","id":id,"result":broker.list(params.pending).await})
+        }
+        "approval/decide" => {
+            let Ok(params) =
+                serde_json::from_value::<collaboration_protocol::ApprovalDecideParams>(params)
+            else {
+                return error(id, -32602, "Invalid params");
+            };
+            match broker.decide(params).await {
+                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(kind) => {
+                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Approval decision rejected","data":{"kind":kind,"stage":"inspect","message":"Approval decision rejected"}}})
+                }
+            }
+        }
+        _ => error(id, -32601, "Method not found"),
     }
 }
 fn error(id: Value, code: i64, message: &str) -> Value {
@@ -569,6 +622,7 @@ fn initialize(
         version: collaboration_protocol::ProtocolVersion { major: 1, minor: 0 },
         service_id: identity.service_id.clone(), service_epoch: identity.service_epoch.clone(),
         control_schema_digest: identity.schema_digest.clone(),
+        service_version: env!("CARGO_PKG_VERSION").to_owned(),
     }})
 }
 

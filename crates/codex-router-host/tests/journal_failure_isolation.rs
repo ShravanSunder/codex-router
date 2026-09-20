@@ -19,6 +19,7 @@ async fn journal_open_failure_does_not_disable_control_and_native_publication() 
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("backend.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
     })
     .await

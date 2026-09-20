@@ -16,6 +16,7 @@ pub struct CollaborationRuntimeInputs {
     pub directory: PathBuf,
     pub codex_home: PathBuf,
     pub backend_socket: PathBuf,
+    pub mcp_bind: std::net::SocketAddr,
     /// An actual executable-bound export, or metadata-only schema admission.
     pub native_schema: Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>>,
 }
@@ -41,6 +42,7 @@ pub struct CollaborationRuntime {
     current_generation: Option<CodexGeneration>,
     observer_task: Option<tokio::task::JoinHandle<()>>,
     manifest: Option<collaboration_service::ManifestPublication>,
+    mcp: Option<collaboration_mcp::CollaborationMcpListener>,
 }
 impl CollaborationRuntime {
     /// Binds both private listeners before spawning tasks. No native process is started.
@@ -149,13 +151,23 @@ impl CollaborationRuntime {
             service_epoch.clone(),
             inputs.backend_socket,
         )?;
+        let native_backend = collaboration_service::NativeControlBackend {
+            codex_home: inputs.codex_home.clone(),
+            endpoint,
+            gate: publication.admission_gate(),
+        };
+        let approval_broker = collaboration_service::ServiceApprovalBroker::load(
+            service_id.clone(),
+            identity.endpoint_directory(),
+            native_backend.clone(),
+            inputs.directory.join("approval-routes.json"),
+        )
+        .await
+        .map_err(io::Error::other)?;
         let identity = identity
-            .with_native_backend(collaboration_service::NativeControlBackend {
-                codex_home: inputs.codex_home.clone(),
-                endpoint,
-                gate: publication.admission_gate(),
-            })
+            .with_native_backend(native_backend)
             .map_err(io::Error::other)?;
+        let identity = identity.with_approval_broker(std::sync::Arc::clone(&approval_broker));
         let wake_worker = identity.wake_timing_worker();
         let schedule_worker = identity.schedule_timing_worker();
         let retention_worker = identity.automation_retention_worker();
@@ -175,9 +187,21 @@ impl CollaborationRuntime {
             &inputs.directory.join("codex-acp.sock"),
             publication.admission_gate(),
             stored,
+            approval_broker,
         )?
         .with_connection_budget(permits);
         let publication = publication.with_acp_listener()?;
+        let mcp_bind = collaboration_mcp::LoopbackBindAddress::new(inputs.mcp_bind)
+            .map_err(io::Error::other)?;
+        let mcp = collaboration_mcp::CollaborationMcpListener::start(
+            collaboration_mcp::CollaborationMcpListenerConfig {
+                bind_address: mcp_bind,
+                service_directory: inputs.directory.clone(),
+                allowed_origins: Vec::new(),
+            },
+        )
+        .await?;
+        let mcp_url = mcp.local_url();
         if let Some(settings) = settings_backend
             && settings.recover().await.is_err()
         {
@@ -188,7 +212,7 @@ impl CollaborationRuntime {
         let manifest = collaboration_service::ManifestPublication::publish(
             &inputs.directory,
             &collaboration_protocol::ServiceManifest {
-                version: 1,
+                version: 2,
                 service_id: service_id.clone(),
                 service_epoch: service_epoch.clone(),
                 control: collaboration_protocol::ControlSelector {
@@ -196,6 +220,10 @@ impl CollaborationRuntime {
                     path: collaboration_protocol::ControlSocketPath::ControlSocket,
                 },
                 control_schema_digest: control_schema.digest().clone(),
+                mcp: collaboration_protocol::McpSelector {
+                    transport: collaboration_protocol::McpTransport::StreamableHttp,
+                    url: mcp_url,
+                },
             },
         )?;
         let shutdown = CancellationToken::new();
@@ -232,6 +260,7 @@ impl CollaborationRuntime {
             automation_maintenance,
             current_generation: None,
             observer_task: None,
+            mcp: Some(mcp),
         })
     }
     #[must_use]
@@ -441,10 +470,18 @@ impl CollaborationRuntime {
     }
     /// The lifecycle event loop must monitor this future; listener death is not healthy readiness.
     pub async fn listener_failure(&mut self) -> io::Error {
-        let failure = match self.tasks.join_next().await {
-            Some(Ok(Err(error))) => error,
-            Some(Err(_)) => io::Error::other("collaboration listener task failed"),
-            _ => io::Error::other("collaboration listener stopped unexpectedly"),
+        let failure = tokio::select! {
+            task = self.tasks.join_next() => match task {
+                Some(Ok(Err(error))) => error,
+                Some(Err(_)) => io::Error::other("collaboration listener task failed"),
+                _ => io::Error::other("collaboration listener stopped unexpectedly"),
+            },
+            failure = async {
+                match &mut self.mcp {
+                    Some(mcp) => mcp.listener_failure().await,
+                    None => std::future::pending().await,
+                }
+            } => failure,
         };
         self.manifest.take();
         self.shutdown.cancel();
@@ -454,9 +491,16 @@ impl CollaborationRuntime {
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.manifest.take();
         self.shutdown.cancel();
-        self.publication.admission_gate().retire()?;
-        self.drain_native_observer().await;
         let mut failure = None;
+        if let Some(mcp) = self.mcp.take()
+            && let Err(error) = mcp.shutdown().await
+        {
+            failure.get_or_insert(error);
+        }
+        if let Err(error) = self.publication.admission_gate().retire() {
+            failure.get_or_insert(error);
+        }
+        self.drain_native_observer().await;
         while let Some(result) = self.tasks.join_next().await {
             match result {
                 Ok(Ok(())) => {}

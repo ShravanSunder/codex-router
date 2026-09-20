@@ -101,8 +101,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let socket = native_directory.join("app-server.sock");
     let paths = CodexPaths::from_codex_home(codex_home.clone());
-    let spec = AppServerCommandSpec::new(&paths, &CodexRouterProfile::new(options.port), &socket)
-        .with_debug_profile(&profile);
+    let control_socket =
+        codex_native_integration::RouterControlSocketPath::in_collaboration_directory(
+            &options.run_directory.join("agent-communication"),
+        )?;
+    let spec = AppServerCommandSpec::new(
+        &paths,
+        &CodexRouterProfile::new(options.port),
+        &control_socket,
+        &socket,
+    )
+    .with_debug_profile(&profile);
     let executable = codex_native_integration::executable_identity(&spec.executable()).await?;
     let version = codex_native_integration::managed_executable_version(&spec.executable()).await?;
     // Home hooks can inject extra work after a test task ends. Disable them only
@@ -144,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             options.run_directory.join("host.lock"),
         ),
         router_endpoint: endpoint,
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         app_server_socket: socket,
         managed_executable: paths.managed_executable(),
         deadlines: HostDeadlines::production(),
@@ -182,15 +192,44 @@ fn luna_profile(
     let file = std::fs::File::open(codex_home.join("codex-router-debug.config.toml"))?;
     let mut text = String::new();
     file.take(65537).read_to_string(&mut text)?;
-    // Validate before editing in memory: this cannot redirect a production provider to the test.
-    DebugCodexProfile::parse(&text, port)?;
-    let mut profile: toml::Table = toml::from_str(&text)?;
+    luna_profile_from_text(&text, port)
+}
+
+fn luna_profile_from_text(
+    text: &str,
+    selected_port: u16,
+) -> Result<DebugCodexProfile, Box<dyn std::error::Error>> {
+    let mut profile: toml::Table = toml::from_str(text)?;
+    let provider = profile
+        .get_mut("model_providers")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|providers| providers.get_mut("codex-router-debug"))
+        .and_then(toml::Value::as_table_mut)
+        .ok_or("debug profile is missing its sole debug provider")?;
+    let configured_endpoint = provider
+        .get("base_url")
+        .and_then(toml::Value::as_str)
+        .ok_or("debug profile is missing its debug provider endpoint")?;
+    let configured_port = configured_endpoint
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|value| value.strip_suffix("/v1"))
+        .ok_or("debug profile endpoint is not the expected loopback route")?
+        .parse::<u16>()?;
+    // Validate the complete saved profile before changing only its in-memory endpoint.
+    DebugCodexProfile::parse(text, configured_port)?;
+    provider.insert(
+        "base_url".into(),
+        toml::Value::String(format!("http://127.0.0.1:{selected_port}/v1")),
+    );
     profile.insert("model".into(), toml::Value::String("gpt-5.6-luna".into()));
     profile.insert(
         "model_reasoning_effort".into(),
         toml::Value::String("high".into()),
     );
-    Ok(DebugCodexProfile::parse(&toml::to_string(&profile)?, port)?)
+    Ok(DebugCodexProfile::parse(
+        &toml::to_string(&profile)?,
+        selected_port,
+    )?)
 }
 fn parse_options() -> Result<Option<DebugHostOptions>, Box<dyn std::error::Error>> {
     parse_options_from(std::env::args_os().skip(1))
@@ -412,6 +451,38 @@ fn replace_resumed_context(context: &DebugHostContext) -> Result<(), Box<dyn std
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn debug_profile(endpoint: &str) -> String {
+        format!(
+            r#"
+model = "existing-model"
+model_reasoning_effort = "low"
+model_provider = "codex-router-debug"
+[model_providers.codex-router-debug]
+name = "Codex Router Debug"
+base_url = "{endpoint}"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = true
+"#
+        )
+    }
+
+    #[test]
+    fn luna_profile_validates_saved_route_before_in_memory_retargeting() {
+        assert!(luna_profile_from_text(&debug_profile("http://127.0.0.1:18787/v1"), 28787).is_ok());
+        for (saved_endpoint, selected_port) in [
+            ("http://127.0.0.1:8787/v1", 28787),
+            ("http://0.0.0.0:18787/v1", 28787),
+            ("not-a-url", 28787),
+            ("http://127.0.0.1:18787/v1", 8787),
+        ] {
+            assert!(
+                luna_profile_from_text(&debug_profile(saved_endpoint), selected_port).is_err(),
+                "invalid saved/selected route was admitted: {saved_endpoint} -> {selected_port}"
+            );
+        }
+    }
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 

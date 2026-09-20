@@ -22,7 +22,7 @@ async fn catalog_pages_preserve_scope_and_long_directory_without_writing_history
     )
     .await
     .unwrap();
-    connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER NOT NULL)").await.unwrap();
+    connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER NOT NULL)").await.unwrap();
     connection
         .execute("CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC)")
         .await

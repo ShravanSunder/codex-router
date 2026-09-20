@@ -2,6 +2,7 @@
 mod acp_connection_dispatch;
 mod acp_connection_transport;
 mod acp_frame_transport;
+mod approval_broker;
 mod assistant_text_projection;
 mod connection_negotiation;
 mod history_projection;
@@ -21,6 +22,10 @@ pub use acp_connection_transport::{
     AcpRouterChannels, AcpWireChannels, acp_connection_channels, run_acp_transport,
 };
 pub use acp_frame_transport::{read_acp_frame, write_acp_frame};
+pub use approval_broker::{
+    ApprovalBroker, ApprovalBrokerError, ApprovalRoute, BrokeredApprovalOutcome,
+    BrokeredApprovalRequest, RejectingApprovalBroker,
+};
 pub use prompt_connection_task::{
     PromptCommand, PromptTaskCompletion, PromptTaskInputs, run_prompt_task,
 };

@@ -125,6 +125,7 @@ pub async fn load_stored_sessions(
                 cwd: row.get("cwd"),
                 provider: row.get("model_provider"),
                 model: row.get("model"),
+                reasoning_effort: row.get("reasoning_effort"),
                 source: row.get("source"),
                 thread_source: row.get("thread_source"),
                 git_branch: row.get("git_branch"),
@@ -315,6 +316,7 @@ fn native_session_record_query(
             sort_value: cursor.sort_value,
             session_id: cursor.session_id.clone(),
         }),
+        query: None,
     }
 }
 

@@ -14,7 +14,9 @@ const ADDITIVE: &str = "ALTER TABLE board_projects ADD COLUMN migration_note TEX
 const REBUILD: &str = "CREATE TABLE replacement_projects(project_id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL) STRICT; INSERT INTO replacement_projects(project_id,name,description) SELECT project_id,name,description FROM board_projects; DROP TABLE board_projects; ALTER TABLE replacement_projects RENAME TO board_projects; CREATE UNIQUE INDEX board_projects_name_unique ON board_projects(name);";
 
 fn current_schema() -> String {
-    format!("{BASELINE} {THREAD_DELIVERY_POSITIONS}")
+    format!(
+        "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES}"
+    )
 }
 
 fn migrator(version: i64, description: &'static str, extra: &str) -> Migrator {
@@ -35,6 +37,27 @@ fn migrator(version: i64, description: &'static str, extra: &str) -> Migrator {
                 false,
             ),
             Migration::new(
+                202609150001,
+                "thread participants".into(),
+                MigrationType::Simple,
+                THREAD_PARTICIPANTS.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609160001,
+                "thread implementer".into(),
+                MigrationType::Simple,
+                THREAD_IMPLEMENTER.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609160002,
+                "topic watches".into(),
+                MigrationType::Simple,
+                TOPIC_WATCHES.into_sql_str(),
+                false,
+            ),
+            Migration::new(
                 version,
                 description.into(),
                 MigrationType::Simple,
@@ -44,6 +67,129 @@ fn migrator(version: i64, description: &'static str, extra: &str) -> Migrator {
         ]),
         ..Migrator::DEFAULT
     }
+}
+
+fn pre_participants_migrator() -> Migrator {
+    Migrator {
+        migrations: Cow::Owned(vec![
+            Migration::new(
+                202609120001,
+                "project board".into(),
+                MigrationType::Simple,
+                BASELINE.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609140001,
+                "thread delivery positions".into(),
+                MigrationType::Simple,
+                THREAD_DELIVERY_POSITIONS.into_sql_str(),
+                false,
+            ),
+        ]),
+        ..Migrator::DEFAULT
+    }
+}
+
+#[tokio::test]
+async fn participant_migration_preserves_populated_board_and_enforces_one_open_orchestrator() {
+    let path = std::path::PathBuf::from("/tmp").join(format!(
+        "board-participant-migration-{}.sqlite",
+        message_board::MessageId::generate().as_str()
+    ));
+    let mut connection =
+        SqliteConnection::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+    initialize_with(
+        &mut connection,
+        &pre_participants_migrator(),
+        &format!("{BASELINE} {THREAD_DELIVERY_POSITIONS}"),
+    )
+    .await
+    .unwrap();
+    let project_id = message_board::ProjectId::generate();
+    let board_id = message_board::BoardId::generate();
+    let topic_id = message_board::TopicId::generate();
+    let root_id = message_board::MessageId::generate();
+    let first_key = "human:first";
+    let second_key = "human:second";
+    sqlx::query("INSERT INTO board_identities(identity_key,kind,human_id) VALUES(?,'human','first'),(?,'human','second')")
+        .bind(first_key).bind(second_key).execute(&mut connection).await.unwrap();
+    sqlx::query("INSERT INTO board_projects(project_id,name,description) VALUES(?,'Project','')")
+        .bind(project_id.as_str())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO project_boards(board_id,project_id,name,description,state) VALUES(?,?,'Board','','active')")
+        .bind(board_id.as_str()).bind(project_id.as_str()).execute(&mut connection).await.unwrap();
+    sqlx::query(
+        "INSERT INTO board_topics(topic_id,board_id,name,description) VALUES(?,?,'Topic','')",
+    )
+    .bind(topic_id.as_str())
+    .bind(board_id.as_str())
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO board_messages(message_id,topic_id,board_id,root_id,actor_key,text) VALUES(?,?,?,NULL,?,'Root')")
+        .bind(root_id.as_str()).bind(topic_id.as_str()).bind(board_id.as_str()).bind(first_key)
+        .execute(&mut connection).await.unwrap();
+    sqlx::query("INSERT INTO board_threads(root_id,state) VALUES(?,'unresolved')")
+        .bind(root_id.as_str())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE activity_checkpoint SET last_sequence=1 WHERE singleton=1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO board_activity(activity_sequence,project_id,board_id,topic_id,root_id,kind,actor_key,message_id) VALUES(1,?,?,?,NULL,'mainMessageCreated',?,?)")
+        .bind(project_id.as_str()).bind(board_id.as_str()).bind(topic_id.as_str()).bind(first_key).bind(root_id.as_str())
+        .execute(&mut connection).await.unwrap();
+    connection.close().await.unwrap();
+    let mut connection = SqliteConnection::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    initialize_with(&mut connection, &MIGRATOR, &current_schema())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM board_messages")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        migration_versions(&mut connection).await,
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002
+        ]
+    );
+    assert!(index_exists(&mut connection, "thread_single_orchestrator").await);
+    sqlx::query("UPDATE activity_checkpoint SET last_sequence=3 WHERE singleton=1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    for (sequence, key) in [(2_i64, first_key), (3_i64, second_key)] {
+        sqlx::query("INSERT INTO board_activity(activity_sequence,project_id,board_id,topic_id,root_id,kind,actor_key,message_id) VALUES(?,?,?,?,?,'participantJoined',?,NULL)")
+            .bind(sequence).bind(project_id.as_str()).bind(board_id.as_str()).bind(topic_id.as_str()).bind(root_id.as_str()).bind(key)
+            .execute(&mut connection).await.unwrap();
+    }
+    sqlx::query("INSERT INTO thread_participants(reader_key,root_id,role,joined_at_activity,last_seen_activity) VALUES(?,?,'orchestrator',2,2)")
+        .bind(first_key).bind(root_id.as_str()).execute(&mut connection).await.unwrap();
+    assert!(sqlx::query("INSERT INTO thread_participants(reader_key,root_id,role,joined_at_activity,last_seen_activity) VALUES(?,?,'orchestrator',3,3)")
+        .bind(second_key).bind(root_id.as_str()).execute(&mut connection).await.is_err());
+    connection.close().await.unwrap();
+    std::fs::remove_file(path).unwrap();
 }
 
 fn baseline_migrator() -> Migrator {
@@ -143,15 +289,15 @@ async fn delivered_position_migration_preserves_populated_thread_and_watch_state
         .execute(&mut connection)
         .await
         .unwrap();
-    let mut store = store_from_connection(connection).await;
-    let before = store
-        .show_thread(message_board::ThreadShowRequest {
-            root_message_id: root_message_id.clone(),
-            reader: Some(reader.clone()),
-        })
-        .await
-        .unwrap();
-    store.close().await.unwrap();
+    let before: (String, i64, i64) = sqlx::query_as(
+        "SELECT thread.state,watch.active,watch.starts_after_activity FROM board_threads thread JOIN thread_watches watch ON watch.root_id=thread.root_id WHERE thread.root_id=? AND watch.reader_key=?",
+    )
+    .bind(root_message_id.as_str())
+    .bind(&reader_key)
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
 
     let mut connection = SqliteConnection::connect(&format!("sqlite://{}", path.display()))
         .await
@@ -163,30 +309,34 @@ async fn delivered_position_migration_preserves_populated_thread_and_watch_state
     initialize_with(&mut connection, &MIGRATOR, &current_schema())
         .await
         .unwrap();
-    let mut store = store_from_connection(connection).await;
+    let after: (String, i64, i64) = sqlx::query_as(
+        "SELECT thread.state,watch.active,watch.starts_after_activity FROM board_threads thread JOIN thread_watches watch ON watch.root_id=thread.root_id WHERE thread.root_id=? AND watch.reader_key=?",
+    )
+    .bind(root_message_id.as_str())
+    .bind(&reader_key)
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(after, before);
     assert_eq!(
-        store
-            .show_thread(message_board::ThreadShowRequest {
-                root_message_id,
-                reader: Some(reader),
-            })
-            .await
-            .unwrap(),
-        before
-    );
-    assert_eq!(
-        migration_versions(&mut store.connection).await,
-        vec![202609120001, 202609140001]
+        migration_versions(&mut connection).await,
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002
+        ]
     );
     assert!(
         sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_delivery_positions')"
         )
-        .fetch_one(&mut store.connection)
+        .fetch_one(&mut connection)
         .await
         .unwrap()
     );
-    store.close().await.unwrap();
+    connection.close().await.unwrap();
     std::fs::remove_file(path).unwrap();
 }
 
@@ -204,7 +354,7 @@ async fn additive_migration_preserves_semantic_state_and_history() {
     let expected = format!("{} {ADDITIVE}", current_schema());
     initialize_with(
         &mut connection,
-        &migrator(202609150001, "test-only additive", ADDITIVE),
+        &migrator(202609170001, "test-only additive", ADDITIVE),
         &expected,
     )
     .await
@@ -213,7 +363,14 @@ async fn additive_migration_preserves_semantic_state_and_history() {
     assert_eq!(fixture.snapshot_with(&mut store).await, before);
     assert_eq!(
         migration_versions(&mut store.connection).await,
-        vec![202609120001, 202609140001, 202609150001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002,
+            202609170001
+        ]
     );
     assert!(index_exists(&mut store.connection, "board_projects_migration_note").await);
     assert!(
@@ -233,7 +390,7 @@ async fn populated_parent_rebuild_preserves_exact_rows_domain_reads_and_relation
     let expected = format!("{} {REBUILD}", current_schema());
     initialize_with(
         &mut connection,
-        &migrator(202609150001, "test-only rebuild", REBUILD),
+        &migrator(202609170001, "test-only rebuild", REBUILD),
         &expected,
     )
     .await
@@ -243,7 +400,14 @@ async fn populated_parent_rebuild_preserves_exact_rows_domain_reads_and_relation
     assert_eq!(all_domain_rows(&mut store.connection).await, before_rows);
     assert_eq!(
         migration_versions(&mut store.connection).await,
-        vec![202609120001, 202609140001, 202609150001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002,
+            202609170001
+        ]
     );
     for index in [
         "board_projects_name_unique",
@@ -275,7 +439,7 @@ async fn failed_rebuild_reopens_separately_with_original_exact_state_and_history
     assert!(
         initialize_with(
             &mut connection,
-            &migrator(202609150001, "test-only failing rebuild", &failing),
+            &migrator(202609170001, "test-only failing rebuild", &failing),
             &current_schema()
         )
         .await
@@ -291,7 +455,13 @@ async fn failed_rebuild_reopens_separately_with_original_exact_state_and_history
     );
     assert_eq!(
         migration_versions(&mut reopened.connection).await,
-        vec![202609120001, 202609140001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002
+        ]
     );
     fixture.finish(reopened).await;
 }
@@ -309,7 +479,7 @@ async fn broken_relationship_rejects_migration_and_reopens_unchanged() {
     assert!(
         initialize_with(
             &mut connection,
-            &migrator(202609150001, "test-only invalid relationship", &invalid),
+            &migrator(202609170001, "test-only invalid relationship", &invalid),
             &current_schema()
         )
         .await
@@ -320,7 +490,13 @@ async fn broken_relationship_rejects_migration_and_reopens_unchanged() {
     assert_eq!(all_domain_rows(&mut reopened.connection).await, before_rows);
     assert_eq!(
         migration_versions(&mut reopened.connection).await,
-        vec![202609120001, 202609140001]
+        vec![
+            202609120001,
+            202609140001,
+            202609150001,
+            202609160001,
+            202609160002
+        ]
     );
     assert!(
         foreign_key_violations(&mut reopened.connection)

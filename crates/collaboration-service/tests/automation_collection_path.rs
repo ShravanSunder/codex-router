@@ -62,7 +62,7 @@ async fn sdk_lists_local_collections_and_rejects_cross_collection_cursor()
         return Err("revision listing identity incorrect".into());
     }
     let request: ScheduleCreateRequest = serde_json::from_value(
-        json!({"operationId":OperationId::generate(),"definition":{"instructionId":first.instruction_id,"timing":{"kind":"interval","seconds":600},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null}}),
+        json!({"operationId":OperationId::generate(),"definition":{"instructionId":first.instruction_id,"timing":{"kind":"interval","seconds":600},"enabled":false,"destination":{"kind":"unprepared"},"executionTimeoutSeconds":null,"model":"gpt-5.6-sol","effort":"medium"}}),
     )?;
     let schedule = client.create_schedule(request).await?;
     let schedules = client

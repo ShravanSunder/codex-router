@@ -104,10 +104,34 @@ async fn load_message_unattributed(
         placement,
         actor,
         acting_for,
-        text: MessageText::try_from(row.text).map_err(|_| invalid_record())?,
+        text: MessageText::try_from(escape_stored_controls(row.text))
+            .map_err(|_| invalid_record())?,
         references: MessageReferences::try_from(references).map_err(|_| invalid_record())?,
         activity_sequence: activity_sequence(row.activity_sequence)?,
     })
+}
+
+/// Escapes C0 controls in stored text so rows written before the write-boundary
+/// rejection still decode and still read back as valid JSON.
+///
+/// Newline and tab are layout and stay literal; everything else becomes its
+/// `\u00XX` escape rather than a raw byte in the reader's output.
+fn escape_stored_controls(text: String) -> String {
+    if !text
+        .chars()
+        .any(|character| character <= '\u{001f}' && !matches!(character, '\n' | '\t'))
+    {
+        return text;
+    }
+    text.chars()
+        .map(|character| {
+            if character <= '\u{001f}' && !matches!(character, '\n' | '\t') {
+                format!("\\u{:04x}", character as u32)
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
 }
 
 pub(crate) async fn load_message(

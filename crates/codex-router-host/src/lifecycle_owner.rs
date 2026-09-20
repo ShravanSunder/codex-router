@@ -79,6 +79,7 @@ impl ManagedChildLaunchPlans {
 /// Inputs for conditional managed-Codex updates and whole-Host replacement.
 pub struct ManagedUpdateInputs {
     update_deadlines: crate::UpdateDeadlines,
+    updater_command: Option<ChildCommandSpec>,
     replacement_command: Option<ChildCommandSpec>,
     pre_exec_telemetry: Option<Arc<dyn PreExecTelemetry>>,
 }
@@ -89,6 +90,7 @@ impl ManagedUpdateInputs {
     pub fn production() -> Self {
         Self {
             update_deadlines: crate::UpdateDeadlines::production(),
+            updater_command: None,
             replacement_command: None,
             pre_exec_telemetry: None,
         }
@@ -98,6 +100,13 @@ impl ManagedUpdateInputs {
     #[must_use]
     pub const fn with_deadlines(mut self, deadlines: crate::UpdateDeadlines) -> Self {
         self.update_deadlines = deadlines;
+        self
+    }
+
+    /// Supplies a fixture updater command; production uses the official installer pipeline.
+    #[must_use]
+    pub fn with_updater_command(mut self, command: ChildCommandSpec) -> Self {
+        self.updater_command = Some(command);
         self
     }
 
@@ -175,6 +184,8 @@ pub enum HostError {
 /// Foreground host composition and its single lifecycle owner task.
 pub struct HostRuntime;
 
+pub type HostProgressCallback<'a> = &'a mut (dyn FnMut(Option<crate::HostProgress>) + Send);
+
 impl HostRuntime {
     /// Acquires authority, converges startup, then owns all retained handles.
     pub async fn run(
@@ -190,6 +201,7 @@ impl HostRuntime {
             update_inputs,
             instance,
             startup_started_at,
+            None,
         )
         .await
     }
@@ -210,6 +222,7 @@ impl HostRuntime {
             update_inputs,
             instance,
             startup_started_at,
+            None,
         )
         .await
     }
@@ -221,12 +234,24 @@ impl HostRuntime {
         update_inputs: ManagedUpdateInputs,
         instance: HostInstance,
     ) -> Result<HostExit, HostError> {
+        Self::run_acquired_with_progress(config, child_launch_plans, update_inputs, instance, None)
+            .await
+    }
+
+    pub async fn run_acquired_with_progress(
+        config: HostConfig,
+        child_launch_plans: ManagedChildLaunchPlans,
+        update_inputs: ManagedUpdateInputs,
+        instance: HostInstance,
+        progress: Option<HostProgressCallback<'_>>,
+    ) -> Result<HostExit, HostError> {
         Self::run_owned(
             config,
             child_launch_plans,
             update_inputs,
             instance,
             tokio::time::Instant::now(),
+            progress,
         )
         .await
     }
@@ -237,6 +262,7 @@ impl HostRuntime {
         update_inputs: ManagedUpdateInputs,
         instance: HostInstance,
         startup_started_at: tokio::time::Instant,
+        progress: Option<HostProgressCallback<'_>>,
     ) -> Result<HostExit, HostError> {
         let mut interrupt =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -246,25 +272,28 @@ impl HostRuntime {
                 .map_err(HostError::Signal)?;
         let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
             .map_err(HostError::Signal)?;
-        let (router_condition, mut router_child) =
-            startup_convergence::start_router(&config, child_launch_plans.router_command.as_ref())
-                .await?;
         if let Err(endpoint_error) = require_unowned_app_server_endpoint(
             config.app_server_socket(),
             config.deadlines().endpoint_inspection(),
         )
         .await
         {
-            startup_convergence::shutdown_owned_router_after_startup_failure(&mut router_child)
-                .await?;
             return Err(HostError::AppServerEndpoint(endpoint_error));
         }
-        let (mut app_server, readiness) = match startup_convergence::start_app_server(
-            &config,
-            child_launch_plans.app_server.clone(),
-        )
-        .await
-        {
+        let (router_result, app_server_result) = tokio::join!(
+            startup_convergence::start_router(&config, child_launch_plans.router_command.as_ref()),
+            startup_convergence::start_app_server(&config, child_launch_plans.app_server.clone()),
+        );
+        let (router_condition, mut router_child) = match router_result {
+            Ok(started) => started,
+            Err(error) => {
+                if let Ok((mut app_server, _readiness)) = app_server_result {
+                    app_server.shutdown().await?;
+                }
+                return Err(error);
+            }
+        };
+        let (mut app_server, readiness) = match app_server_result {
             Ok(started) => started,
             Err(error) => {
                 startup_convergence::shutdown_owned_router_after_startup_failure(&mut router_child)
@@ -272,6 +301,19 @@ impl HostRuntime {
                 return Err(error);
             }
         };
+        if let Some(emit) = progress {
+            emit(Some(crate::HostProgress::StartingRouter));
+            emit(Some(crate::HostProgress::StartingAppServer));
+            emit(Some(crate::HostProgress::RouterReady));
+            emit(Some(crate::HostProgress::AppServerReady));
+            emit(Some(crate::HostProgress::WaitingForRemoteControl));
+            if matches!(readiness, crate::AppServerReadiness::Ready { .. }) {
+                emit(Some(crate::HostProgress::RemoteControlReady));
+            } else {
+                emit(Some(crate::HostProgress::RemoteControlDegraded));
+            }
+            emit(None);
+        }
         let mut collaboration = match collaboration_lifecycle::CollaborationLifecycle::start(
             &config,
             &app_server,
@@ -376,12 +418,22 @@ impl HostRuntime {
                     };
                     app_server = restart_completion.child;
                     let classification = if restart_completion.succeeded {
+                        if matches!(restart_completion.shutdown_outcome, Some(crate::ShutdownOutcome::Killed)) {
+                            request_admission::send_progress(&active.response, crate::HostProgress::AppServerKilled);
+                        }
                         if let Some(readiness) = restart_completion.readiness {
+                            request_admission::send_progress(&active.response, crate::HostProgress::AppServerReady);
+                            if matches!(readiness, crate::AppServerReadiness::Ready { .. }) {
+                                request_admission::send_progress(&active.response, crate::HostProgress::RemoteControlReady);
+                            }
                             state.apply_readiness(readiness);
                         }
                         state.recovery_budget = RecoveryBudget::Available;
+                        if active.operation == HostOperation::UpdateCodex {
+                            state.executable_relation = ExecutableRelation::Match;
+                        }
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
-                            operation: HostOperation::RestartAppServer,
+                            operation: active.operation,
                             classification: restart_lifecycle_classification(
                                 true,
                                 restart_completion.shutdown_outcome,
@@ -396,7 +448,7 @@ impl HostRuntime {
                         };
                         state.remote_control = RemoteControlCondition::Unavailable;
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
-                            operation: HostOperation::RestartAppServer,
+                            operation: active.operation,
                             classification: restart_lifecycle_classification(
                                 false,
                                 restart_completion.shutdown_outcome,
@@ -412,7 +464,7 @@ impl HostRuntime {
                     );
                     request_admission::send_terminal_response(
                         active.response,
-                        OperatorRequest::RestartAppServer,
+                        active.request,
                         classification,
                         state.snapshot(),
                         restart_completion.message,
@@ -424,6 +476,7 @@ impl HostRuntime {
                     };
                     router_child = router_restart_completion.child;
                     let classification = if router_restart_completion.succeeded {
+                        request_admission::send_progress(&active.response, crate::HostProgress::RouterReady);
                         state.router = RouterCondition::OwnedReachable;
                         state.last_lifecycle_outcome = Some(LifecycleOutcome {
                             operation: HostOperation::RestartRouter,
@@ -464,10 +517,10 @@ impl HostRuntime {
                         preparation: update_preparation,
                         active,
                         state: &mut state,
-                        update_inputs: &update_inputs,
+                        config: &config,
+                        child_launch_plans: &child_launch_plans,
+                        active_app_server_restart: &mut active_restart,
                         app_server: &mut app_server,
-                        router: &mut router_child,
-                        activation: &mut active_host_replacement,
                         pending_identity: &mut pending_identity,
                         retained_updater: &mut retained_updater,
                     });
@@ -511,6 +564,15 @@ impl HostRuntime {
                         crate::HostedReadiness::Unavailable => TerminalClassification::Unavailable,
                     };
                     for (request, response) in active.responses {
+                        if matches!(snapshot.router(), RouterCondition::ExternalReachable | RouterCondition::OwnedReachable) {
+                            request_admission::send_progress(&response, crate::HostProgress::RouterReady);
+                        }
+                        if matches!(snapshot.app_server(), AppServerCondition::NativeReady { .. }) {
+                            request_admission::send_progress(&response, crate::HostProgress::AppServerReady);
+                        }
+                        if matches!(snapshot.remote_control(), crate::RemoteControlCondition::Connected) {
+                            request_admission::send_progress(&response, crate::HostProgress::RemoteControlReady);
+                        }
                         request_admission::send_terminal_response(
                             response,
                             request,

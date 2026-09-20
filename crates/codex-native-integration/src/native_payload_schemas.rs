@@ -16,6 +16,7 @@ pub enum NativeOperation {
     InterruptTurn,
     QueueAdd,
     QueueList,
+    SetThreadName,
 }
 impl NativeOperation {
     pub(crate) fn contract(self) -> (&'static str, &'static str, &'static str) {
@@ -31,6 +32,11 @@ impl NativeOperation {
                 "ThreadQueueAddResponse",
             ),
             Self::ReadThread => ("thread/read", "ThreadReadParams", "ThreadReadResponse"),
+            Self::SetThreadName => (
+                "thread/name/set",
+                "ThreadNameSetParams",
+                "ThreadNameSetResponse",
+            ),
             Self::ResumeThread => (
                 "thread/resume",
                 "ThreadResumeParams",
@@ -107,6 +113,7 @@ impl NativePayloadSchemas {
             NativeOperation::ForkThread,
             NativeOperation::ListTurns,
             NativeOperation::ListItems,
+            NativeOperation::SetThreadName,
         ] {
             let (_, params_name, result_name) = operation.contract();
             if let (Ok(params), Ok(result)) = (

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE topic_watches SET active=0 WHERE reader_key=? AND topic_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2c39b532027485c037d1969609826f700946fead88e83bd55ec7b6d76e459f46"
+}

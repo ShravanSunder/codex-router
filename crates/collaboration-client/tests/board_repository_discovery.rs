@@ -2,6 +2,7 @@ use collaboration_client::{BoardRepositoryError, BoardRepositoryLocation};
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -9,11 +10,14 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 struct RepositoryFixture(PathBuf);
 
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 impl RepositoryFixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "board-sdk-repository-{}-{suffix}",
+            "board-sdk-repository-{}-{suffix}-{sequence}",
             std::process::id()
         ));
         std::fs::create_dir(&root)?;

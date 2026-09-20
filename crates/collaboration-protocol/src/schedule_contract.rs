@@ -23,6 +23,10 @@ pub struct ScheduleDefinition {
     pub destination: ExecutionDestination,
     #[serde(deserialize_with = "Option::deserialize")]
     pub execution_timeout_seconds: Option<PositiveSeconds>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(

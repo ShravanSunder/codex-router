@@ -1,19 +1,74 @@
 //! Transactional Thread listening storage; Delivered and Acknowledged positions remain separate.
 use crate::BoardStore;
+use crate::board_topic_records::{require_board, require_topic};
 use crate::message_records::{activate_watch, activity_sequence, load_message, require_thread};
+use crate::participant_records::advance_participant_last_seen;
+use crate::participant_row_decoding::load_participant;
 use crate::storage_support::{
     current_activity_sequence, ensure_identity, invalid_record, storage_error,
     validate_stored_boundary,
 };
 use message_board::*;
 use sqlx::Connection;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+
+/// How a Thread entered a listen's selection. Only a Thread the Reader watches
+/// directly carries the per-Thread Participant gate; a Topic Watch contributes
+/// Threads on the Topic's own read terms.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootOrigin {
+    ThreadWatch,
+    TopicWatch,
+}
 
 const THREAD_BATCH_MESSAGE_LIMIT: i64 = 100;
 
 struct ThreadListenBoundary {
     stored_delivered_position: Option<i64>,
     effective_delivered_position: i64,
+}
+
+async fn listening_threads(
+    transaction: &mut crate::storage_support::BoardTransaction<'_>,
+    context: &ThreadListenContext,
+    reader_key: &str,
+) -> Result<Vec<ThreadListenThread>, BoardError> {
+    let mut threads = context.threads.clone();
+    if context.topic_ids.is_empty() {
+        return Ok(threads);
+    }
+    for topic_id in &context.topic_ids {
+        let root_ids = sqlx::query_scalar!(
+            "SELECT threads.root_id FROM board_messages roots JOIN board_threads threads ON threads.root_id=roots.message_id WHERE roots.topic_id=? AND roots.root_id IS NULL ORDER BY threads.root_id",
+            topic_id.as_str(),
+        )
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(storage_error)?;
+        for root_id in root_ids {
+            let root_message_id = MessageId::try_from(root_id).map_err(|_| invalid_record())?;
+            if threads
+                .iter()
+                .any(|thread| thread.root_message_id == root_message_id)
+            {
+                continue;
+            }
+            let location = require_thread(transaction, &root_message_id).await?;
+            activate_watch(
+                transaction,
+                reader_key,
+                &location.project_id,
+                &root_message_id,
+                i64::try_from(context.armed_after_sequence.get()).map_err(|_| invalid_record())?,
+            )
+            .await?;
+            threads.push(ThreadListenThread {
+                root_message_id,
+                initial_delivered_position: context.armed_after_sequence,
+            });
+        }
+    }
+    Ok(threads)
 }
 
 async fn load_thread_listen_boundary(
@@ -32,8 +87,8 @@ async fn load_thread_listen_boundary(
            CASE WHEN position.delivered_through IS NULL THEN 1 ELSE EXISTS( \
              SELECT 1 FROM board_activity activity \
              WHERE activity.activity_sequence=position.delivered_through \
-               AND activity.root_id=watch.root_id \
-               AND activity.kind='threadMessageCreated') END AS valid_scope \
+               AND ((activity.root_id=watch.root_id AND activity.kind='threadMessageCreated') \
+                 OR (activity.message_id=watch.root_id AND activity.kind='mainMessageCreated'))) END AS valid_scope \
          FROM thread_watches watch \
          LEFT JOIN thread_delivery_positions position \
            ON position.reader_key=watch.reader_key AND position.root_id=watch.root_id \
@@ -85,17 +140,58 @@ impl BoardStore {
             .map_err(storage_error)?;
         let reader_key = ensure_identity(&mut transaction, &request.reader).await?;
         let latest = current_activity_sequence(&mut transaction).await?;
+        let mut selected_topic_ids = Vec::new();
         let roots = match &request.selection {
-            ThreadListenSelection::Watched => sqlx::query_scalar!(
-                "SELECT root_id FROM thread_watches WHERE reader_key=? AND active=1 ORDER BY root_id",
-                reader_key,
-            )
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(storage_error)?
-            .into_iter()
-            .map(|root| MessageId::try_from(root).map_err(|_| invalid_record()))
-            .collect::<Result<Vec<_>, _>>()?,
+            ThreadListenSelection::Watched => {
+                selected_topic_ids = sqlx::query_scalar!(
+                    "SELECT topic_id FROM topic_watches WHERE reader_key=? AND active=1 ORDER BY topic_id",
+                    reader_key,
+                )
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(storage_error)?
+                .into_iter()
+                .map(|topic| TopicId::try_from(topic).map_err(|_| invalid_record()))
+                .collect::<Result<Vec<_>, _>>()?;
+                // Origin decides the Participant gate, so the two sources stay
+                // separate: a Thread reached through a Topic Watch is readable on
+                // the Topic's terms, exactly as Topic selection treats it.
+                let thread_watched = sqlx::query_scalar!(
+                    "SELECT root_id FROM thread_watches WHERE reader_key=? AND active=1 ORDER BY root_id",
+                    reader_key,
+                )
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                let topic_watched = sqlx::query_scalar!(
+                    "SELECT threads.root_id FROM topic_watches topic_watch \
+                     JOIN board_messages roots ON roots.topic_id=topic_watch.topic_id AND roots.root_id IS NULL \
+                     JOIN board_threads threads ON threads.root_id=roots.message_id \
+                     WHERE topic_watch.reader_key=? AND topic_watch.active=1 ORDER BY threads.root_id",
+                    reader_key,
+                )
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                let mut watched: BTreeMap<MessageId, RootOrigin> = BTreeMap::new();
+                for root in thread_watched {
+                    watched.insert(
+                        MessageId::try_from(root).map_err(|_| invalid_record())?,
+                        RootOrigin::ThreadWatch,
+                    );
+                }
+                // An active Topic Watch wins the overlap. Arming any listen
+                // activates a Thread Watch for each delivered root, so a Thread
+                // Watch row is not evidence that the Reader claimed that Thread
+                // directly; an active Topic Watch is evidence that it may read it.
+                for root in topic_watched {
+                    watched.insert(
+                        MessageId::try_from(root).map_err(|_| invalid_record())?,
+                        RootOrigin::TopicWatch,
+                    );
+                }
+                watched.into_iter().collect::<Vec<_>>()
+            }
             ThreadListenSelection::Roots { root_message_ids } => {
                 if root_message_ids.is_empty() {
                     return Err(BoardError::invalid_field(
@@ -112,14 +208,60 @@ impl BoardStore {
                         ));
                     }
                 }
-                root_message_ids.clone()
+                root_message_ids
+                    .iter()
+                    .map(|root_message_id| (root_message_id.clone(), RootOrigin::ThreadWatch))
+                    .collect::<Vec<_>>()
+            }
+            ThreadListenSelection::Topic { topic_id } => {
+                selected_topic_ids.push(topic_id.clone());
+                let topic = require_topic(&mut transaction, topic_id).await?;
+                let board = require_board(&mut transaction, &topic.board_id).await?;
+                sqlx::query!(
+                    "INSERT INTO topic_watches(reader_key,topic_id,starts_after_activity,active) VALUES(?,?,?,1) \
+                     ON CONFLICT(reader_key,topic_id) DO UPDATE SET starts_after_activity=CASE WHEN topic_watches.active=0 THEN excluded.starts_after_activity ELSE topic_watches.starts_after_activity END,active=1",
+                    reader_key,
+                    topic_id.as_str(),
+                    latest,
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                let _project_id = board.project_id;
+                sqlx::query_scalar!(
+                    "SELECT threads.root_id FROM board_messages roots JOIN board_threads threads ON threads.root_id=roots.message_id WHERE roots.topic_id=? AND roots.root_id IS NULL ORDER BY threads.root_id",
+                    topic_id.as_str(),
+                )
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(storage_error)?
+                .into_iter()
+                .map(|root| {
+                    MessageId::try_from(root)
+                        .map(|root| (root, RootOrigin::TopicWatch))
+                        .map_err(|_| invalid_record())
+                })
+                .collect::<Result<Vec<_>, _>>()?
             }
         };
 
         let mut selected_project: Option<ProjectId> = None;
-        let mut threads = Vec::with_capacity(roots.len());
-        for root_message_id in roots {
+        let mut selected_threads = Vec::with_capacity(roots.len());
+        let mut missing_root_message_ids = Vec::new();
+        for (root_message_id, origin) in roots {
             let location = require_thread(&mut transaction, &root_message_id).await?;
+            if matches!(request.reader, Identity::Session { .. })
+                && origin == RootOrigin::ThreadWatch
+            {
+                let participant =
+                    load_participant(&mut transaction, &request.reader, &root_message_id).await?;
+                if participant
+                    .as_ref()
+                    .is_none_or(|participant| !participant.is_open())
+                {
+                    missing_root_message_ids.push(root_message_id.clone());
+                }
+            }
             if selected_project
                 .as_ref()
                 .is_some_and(|project_id| *project_id != location.project_id)
@@ -130,6 +272,18 @@ impl BoardStore {
                 ));
             }
             selected_project.get_or_insert_with(|| location.project_id.clone());
+            selected_threads.push((root_message_id, location));
+        }
+        if let Some(root_message_id) = missing_root_message_ids.first().cloned() {
+            return Err(BoardError::participants_required(
+                root_message_id,
+                missing_root_message_ids,
+                request.reader.clone(),
+            ));
+        }
+
+        let mut threads = Vec::with_capacity(selected_threads.len());
+        for (root_message_id, location) in selected_threads {
             activate_watch(
                 &mut transaction,
                 &reader_key,
@@ -195,6 +349,8 @@ impl BoardStore {
         Ok(ThreadListenContext {
             reader: request.reader.clone(),
             threads,
+            topic_ids: selected_topic_ids,
+            armed_after_sequence: activity_sequence(latest)?,
         })
     }
 
@@ -210,21 +366,26 @@ impl BoardStore {
         context: &ThreadListenContext,
     ) -> Result<Option<ActivitySequence>, BoardError> {
         let reader_key = crate::storage_support::identity_key(&context.reader);
-        let mut transaction = self.connection.begin().await.map_err(storage_error)?;
+        let mut transaction = self
+            .connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
         let current_latest = current_activity_sequence(&mut transaction).await?;
         let mut latest_activity: Option<i64> = None;
-        for thread in &context.threads {
+        for thread in listening_threads(&mut transaction, context, &reader_key).await? {
             let Some(boundary) =
-                load_thread_listen_boundary(&mut transaction, &reader_key, thread, current_latest)
+                load_thread_listen_boundary(&mut transaction, &reader_key, &thread, current_latest)
                     .await?
             else {
                 continue;
             };
             let latest = sqlx::query_scalar!(
                 "SELECT MAX(activity.activity_sequence) FROM board_activity activity \
-                 WHERE activity.root_id=? AND activity.kind='threadMessageCreated' \
+                 WHERE ((activity.root_id=? AND activity.kind='threadMessageCreated') OR (activity.message_id=? AND activity.kind='mainMessageCreated')) \
                    AND activity.actor_key<>? \
                    AND activity.activity_sequence>?",
+                thread.root_message_id.as_str(),
                 thread.root_message_id.as_str(),
                 reader_key,
                 boundary.effective_delivered_position,
@@ -257,9 +418,17 @@ impl BoardStore {
             kind: ThreadListenOutputKind::BatchSet,
             listen_id,
             batches: Vec::new(),
+            catch_up: context.armed_after_sequence
+                > context
+                    .threads
+                    .iter()
+                    .map(|thread| thread.initial_delivered_position)
+                    .min()
+                    .unwrap_or(context.armed_after_sequence),
         };
         let mut remaining_message_limit = THREAD_BATCH_MESSAGE_LIMIT;
-        'threads: for thread in &context.threads {
+        let selected_threads = listening_threads(&mut transaction, context, &reader_key).await?;
+        'threads: for thread in &selected_threads {
             let Some(boundary) =
                 load_thread_listen_boundary(&mut transaction, &reader_key, thread, latest).await?
             else {
@@ -267,10 +436,11 @@ impl BoardStore {
             };
             let message_ids = sqlx::query_scalar!(
                 "SELECT activity.message_id AS \"message_id!: String\" FROM board_activity activity \
-                 WHERE activity.root_id=? AND activity.kind='threadMessageCreated' \
+                 WHERE ((activity.root_id=? AND activity.kind='threadMessageCreated') OR (activity.message_id=? AND activity.kind='mainMessageCreated')) \
                    AND activity.message_id IS NOT NULL AND activity.actor_key<>? \
                    AND activity.activity_sequence>? \
                  ORDER BY activity.activity_sequence ASC LIMIT ?",
+                thread.root_message_id.as_str(),
                 thread.root_message_id.as_str(),
                 reader_key,
                 boundary.effective_delivered_position,
@@ -363,6 +533,13 @@ impl BoardStore {
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?;
+            advance_participant_last_seen(
+                &mut transaction,
+                &reader_key,
+                &batch.root_message_id,
+                delivered_value,
+            )
+            .await?;
         }
         transaction.commit().await.map_err(storage_error)?;
         Ok(batch_set)

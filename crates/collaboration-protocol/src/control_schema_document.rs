@@ -129,10 +129,34 @@ pub fn control_schema_document(
             "board/threadUnwatch",
             &[],
         )?;
+    assembly.add_method::<message_board::TopicWatchRequest, message_board::TopicWatchResult>(
+        "board/topicWatch",
+        &[],
+    )?;
+    assembly.add_method::<message_board::TopicWatchRequest, message_board::TopicWatchResult>(
+        "board/topicUnwatch",
+        &[],
+    )?;
     assembly.add_method::<message_board::ThreadListRequest, message_board::ThreadListResult>(
         "board/threadList",
         &[],
     )?;
+    assembly.add_method::<message_board::ThreadCreateRequest, message_board::ThreadCreateResult>(
+        "board/threadCreate",
+        &[],
+    )?;
+    assembly.add_method::<message_board::ThreadJoinRequest, message_board::ThreadJoinResult>(
+        "board/threadJoin",
+        &[],
+    )?;
+    assembly.add_method::<message_board::ThreadLeaveRequest, message_board::ThreadLeaveResult>(
+        "board/threadLeave",
+        &[],
+    )?;
+    assembly.add_method::<
+        message_board::ThreadParticipantListRequest,
+        message_board::ThreadParticipantListResult,
+    >("board/threadParticipantList", &[])?;
     assembly.add_method::<message_board::ThreadListenRequest, message_board::ThreadListenResult>(
         "board/threadListen",
         &[],
@@ -265,6 +289,19 @@ pub fn control_schema_document(
             "overloaded",
         ],
     )?;
+    assembly.add_method::<NativeRenameParams, NativeRenameResult>(
+        "codex/sessionRename",
+        &[
+            "wrongService",
+            "endpointNotFound",
+            "unsupportedCapability",
+            "unavailable",
+            "nativeRejected",
+            "outcomeUnknown",
+            "overloaded",
+            "nameMismatch",
+        ],
+    )?;
     assembly.add_method::<NativeSendParams, NativeSendReceipt>(
         "codex/messageSend",
         &[
@@ -290,6 +327,23 @@ pub fn control_schema_document(
             "unavailable",
             "nativeRejected",
             "outcomeUnknown",
+            "overloaded",
+        ],
+    )?;
+    assembly.add_method::<ApprovalListParams, ApprovalListResult>(
+        "approval/list",
+        &["unavailable", "overloaded"],
+    )?;
+    assembly.add_method::<ApprovalDecideParams, ApprovalDecideResult>(
+        "approval/decide",
+        &[
+            "approvalNotPending",
+            "wrongActor",
+            "selfDecision",
+            "decisionNotOffered",
+            "expired",
+            "oldGeneration",
+            "unavailable",
             "overloaded",
         ],
     )?;
@@ -439,9 +493,36 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
                 "pattern":"^[^\\u0000]+$", "x-maxUtf8Bytes":4096
             }),
         );
+        properties.insert(
+            "reason".to_owned(),
+            json!({"enum":["childThread","busy","notResumable","permissionDenied","unsupportedCapability","unknown"]}),
+        );
+        properties.insert(
+            "nextAction".to_owned(),
+            json!({"enum":["inspectTarget","useDeliverySteer","requestApproval","correctRequest","retryLater"]}),
+        );
+        properties.insert("nativeCode".to_owned(), json!({"type":"integer"}));
     }
-    let mut data = vec![json!({"type":"object","required":required,
-        "additionalProperties":false,"properties":properties})];
+    let mut method_data = json!({"type":"object","required":required,
+        "additionalProperties":false,"properties":properties});
+    if method == "codex/messageSend"
+        && let Some(fields) = method_data.as_object_mut()
+    {
+        fields.insert(
+            "allOf".to_owned(),
+            json!([
+                {
+                    "if":{"properties":{"kind":{"const":"nativeRejected"}},"required":["kind"]},
+                    "then":{"required":["reason","nextAction"]}
+                },
+                {
+                    "if":{"properties":{"reason":{"const":"unknown"}},"required":["reason"]},
+                    "then":{"required":["nativeCode"]}
+                }
+            ]),
+        );
+    }
+    let mut data = vec![method_data];
     if method.starts_with("wake/") || method.starts_with("delivery/") {
         data = vec![reference("wake-failure")];
     }
