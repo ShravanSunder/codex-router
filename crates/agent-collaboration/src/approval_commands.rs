@@ -1,7 +1,10 @@
 //! Explicit listing and single-use decisions for client-exposed native approvals.
 use clap::{Args, Parser, Subcommand};
 use collaboration_client::protocol::{ApprovalDecideParams, ApprovalDecision, SessionRef};
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{
+    ClientError, ControlClient, OperationEffect, OperationFailure, OperationFailureKind,
+    operation_failure_from_client_error,
+};
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -39,6 +42,21 @@ enum ApprovalCommand {
         #[command(flatten)]
         output: OutputArguments,
     },
+}
+
+enum ApprovalCommandError {
+    Client(ClientError),
+    Operation(OperationFailure),
+}
+
+fn operation_failure_exit(failure: &OperationFailure) -> i32 {
+    match failure.kind {
+        OperationFailureKind::Rejected => 4,
+        _ if failure.effect == OperationEffect::Unknown => 5,
+        OperationFailureKind::Timeout => 124,
+        OperationFailureKind::UnsupportedCapability | OperationFailureKind::ProtocolViolation => 2,
+        _ => 3,
+    }
 }
 
 #[derive(Args)]
@@ -124,14 +142,27 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
     let result = runtime.block_on(async {
         let mut client =
             ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await?;
+                .await
+                .map_err(ApprovalCommandError::Client)?;
         let value = match request {
-            Some(request) => serde_json::to_value(client.decide_approval(request).await?),
-            None => serde_json::to_value(client.list_pending_approvals(pending_only).await?),
+            Some(request) => serde_json::to_value(
+                client
+                    .decide_approval(request)
+                    .await
+                    .map_err(|error| ApprovalCommandError::Operation(error.into_parts().0))?,
+            ),
+            None => serde_json::to_value(
+                client
+                    .list_pending_approvals(pending_only)
+                    .await
+                    .map_err(ApprovalCommandError::Client)?,
+            ),
         }
-        .map_err(|_| ClientError::Protocol("approval output encoding failed"))?;
+        .map_err(|_| {
+            ApprovalCommandError::Client(ClientError::Protocol("approval output encoding failed"))
+        })?;
         let _ = client.close().await;
-        Ok::<_, ClientError>(value)
+        Ok::<_, ApprovalCommandError>(value)
     });
     match result {
         Ok(value) => {
@@ -146,28 +177,36 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
                 3
             }
         }
-        Err(ClientError::Rejected { data, .. }) => crate::endpoint_commands::report_failure(
-            data.as_ref()
-                .and_then(|v| v.get("kind"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("rejected"),
-            "Approval operation rejected",
-            4,
-            output.json,
-        ),
-        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
-            &error,
-            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
-            output.json,
-        )
-        .unwrap_or_else(|| {
-            crate::endpoint_commands::report_failure(
-                "unavailable",
-                "Approval service unavailable",
-                3,
+        Err(ApprovalCommandError::Operation(failure)) => {
+            let exit = operation_failure_exit(&failure);
+            let message = failure.message.clone();
+            let record = serde_json::json!({"kind":"error","error":failure});
+            let _printed = if output.json {
+                writeln!(io::stdout(), "{record}")
+            } else {
+                writeln!(io::stderr(), "{message}")
+            };
+            exit
+        }
+        Err(ApprovalCommandError::Client(error)) => {
+            crate::permission_diagnostic_reporting::report_permission_error(
+                &error,
+                crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
                 output.json,
             )
-        }),
+            .unwrap_or_else(|| {
+                let failure = operation_failure_from_client_error(error, OperationEffect::None);
+                let exit = operation_failure_exit(&failure);
+                let message = failure.message.clone();
+                let record = serde_json::json!({"kind":"error","error":failure});
+                let _printed = if output.json {
+                    writeln!(io::stdout(), "{record}")
+                } else {
+                    writeln!(io::stderr(), "{message}")
+                };
+                exit
+            })
+        }
     }
 }
 

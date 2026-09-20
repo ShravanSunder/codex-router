@@ -4,6 +4,32 @@ use collaboration_protocol::{EndpointAvailability, ObservationTimestamp};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 #[tokio::test]
+async fn post_bind_manifest_failure_releases_mcp_port() {
+    let root = tempfile::tempdir().expect("temporary runtime root");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private runtime root");
+    std::fs::create_dir(root.path().join("service.json")).expect("blocking manifest destination");
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("port reservation");
+    let mcp_bind = reservation.local_addr().expect("reserved address");
+    drop(reservation);
+
+    let result = CollaborationRuntime::start(CollaborationRuntimeInputs {
+        directory: root.path().to_owned(),
+        codex_home: root.path().to_owned(),
+        backend_socket: root.path().join("backend.sock"),
+        mcp_bind,
+        native_schema: None,
+    })
+    .await;
+    assert!(result.is_err());
+    tokio::task::yield_now().await;
+    let rebound = tokio::net::TcpListener::bind(mcp_bind)
+        .await
+        .expect("MCP port released after later startup failure");
+    drop(rebound);
+}
+
+#[tokio::test]
 async fn host_composes_discovery_and_retires_only_owned_communication_sockets() {
     let root = std::path::PathBuf::from(format!("/tmp/host-collaboration-{}", std::process::id()));
     std::fs::DirBuilder::new()
@@ -14,6 +40,7 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("backend.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
     };
     let mut runtime = CollaborationRuntime::start(inputs())
@@ -24,6 +51,13 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
     )
     .unwrap_or_else(|e| panic!("manifest decode: {e}"));
     assert_eq!(&manifest.service_id, runtime.service_id());
+    assert_eq!(manifest.version, 2);
+    assert_eq!(
+        manifest.mcp.transport,
+        collaboration_protocol::McpTransport::StreamableHttp
+    );
+    assert!(manifest.mcp.url.starts_with("http://127.0.0.1:"));
+    assert!(manifest.mcp.url.ends_with("/mcp"));
     let control_digest = String::from(manifest.control_schema_digest.clone());
     let control_schema_path = root.join(format!(
         "control-schema-{}.json",
@@ -269,4 +303,27 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
     std::fs::remove_file(root.join("automation.sqlite"))
         .unwrap_or_else(|error| panic!("automation database cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|e| panic!("directory cleanup: {e}"));
+}
+
+#[tokio::test]
+async fn occupied_mcp_port_is_a_visible_startup_failure_without_fallback() {
+    let root = tempfile::tempdir().expect("temporary runtime root");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private runtime root");
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupied listener");
+    let mcp_bind = occupied.local_addr().expect("occupied address");
+    let result = CollaborationRuntime::start(CollaborationRuntimeInputs {
+        directory: root.path().to_owned(),
+        codex_home: root.path().to_owned(),
+        backend_socket: root.path().join("backend.sock"),
+        mcp_bind,
+        native_schema: None,
+    })
+    .await;
+    let error = match result {
+        Ok(_) => panic!("occupied MCP port must fail startup"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    drop(occupied);
 }

@@ -32,6 +32,7 @@ tokio = { workspace = true, features = ["io-std"] }
 unicode-width.workspace = true
 
 [dev-dependencies]
+jsonschema.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 chrono.workspace = true

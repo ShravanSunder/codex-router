@@ -13,6 +13,7 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
         directory: root.clone(),
         codex_home: root.clone(),
         backend_socket: root.join("unavailable.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
     })
     .await?;

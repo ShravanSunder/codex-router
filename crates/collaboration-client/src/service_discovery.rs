@@ -68,10 +68,57 @@ fn read_manifest(directory: &Path) -> Result<ServiceManifest, ClientError> {
     if bytes.len() > 65536 {
         return Err(ClientError::Protocol("service manifest too large"));
     }
-    serde_json::from_slice(&bytes).map_err(|_| {
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
         ClientError::Transport(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid service manifest",
         ))
+    })?;
+    if value.get("version").and_then(serde_json::Value::as_u64) != Some(2) {
+        return Err(ClientError::Protocol(
+            "unsupported service manifest version; expected version 2",
+        ));
+    }
+    serde_json::from_value(value).map_err(|error| {
+        ClientError::Transport(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid service manifest: {error}"),
+        ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ControlClient;
+
+    #[tokio::test]
+    async fn client_discovery_reports_manifest_version_skew_before_socket_resolution() {
+        let directory = std::env::temp_dir().join(format!(
+            "collaboration-client-manifest-skew-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("temporary service directory");
+        let manifest = serde_json::json!({
+            "version":1,
+            "serviceId":"00000000-0000-4000-8000-000000000001",
+            "serviceEpoch":"00000000-0000-4000-8000-000000000002",
+            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
+        });
+        std::fs::write(
+            directory.join("service.json"),
+            serde_json::to_vec(&manifest).expect("manifest JSON"),
+        )
+        .expect("manifest fixture");
+        let error = match ControlClient::connect(&directory, "test-client", "1").await {
+            Ok(_) => panic!("version one must fail discovery"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Control protocol violation: unsupported service manifest version; expected version 2"
+        );
+        std::fs::remove_file(directory.join("service.json")).expect("remove manifest fixture");
+        std::fs::remove_dir(directory).expect("remove fixture directory");
+    }
 }

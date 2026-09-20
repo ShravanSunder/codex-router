@@ -39,6 +39,7 @@ impl PreExecTelemetry for HostPreExecTelemetry {
 pub(super) async fn run_foreground_host(
     router_root: PathBuf,
     port: u16,
+    mcp_bind: SocketAddr,
     coordination_paths: HostCoordinationPaths,
     context: &CliContext,
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
@@ -133,16 +134,12 @@ pub(super) async fn run_foreground_host(
         ])
         .with_environment("OTEL_EXPORTER_OTLP_ENDPOINT", otlp_endpoint)
         .with_environment("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
-    let replacement_command = ChildCommandSpec::new(current_executable).with_arguments([
-        OsString::from("host"),
-        OsString::from("--router-root"),
-        router_root.into_os_string(),
-        OsString::from("--port"),
-        OsString::from(port.to_string()),
-    ]);
+    let replacement_command =
+        host_replacement_command(current_executable, router_root.clone(), port, mcp_bind);
     let config = HostConfig::new(HostConfigInputs {
         coordination_paths,
         router_endpoint: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
+        mcp_bind,
         app_server_socket,
         managed_executable: codex_paths.managed_executable(),
         deadlines: HostDeadlines::production(),
@@ -177,6 +174,23 @@ pub(super) async fn run_foreground_host(
     Ok(())
 }
 
+fn host_replacement_command(
+    executable: PathBuf,
+    router_root: PathBuf,
+    port: u16,
+    mcp_bind: SocketAddr,
+) -> ChildCommandSpec {
+    ChildCommandSpec::new(executable).with_arguments([
+        OsString::from("host"),
+        OsString::from("--router-root"),
+        router_root.into_os_string(),
+        OsString::from("--port"),
+        OsString::from(port.to_string()),
+        OsString::from("--mcp-bind"),
+        OsString::from(mcp_bind.to_string()),
+    ])
+}
+
 fn launchctl_executable(context: &CliContext) -> Result<PathBuf, HostCommandError> {
     #[cfg(debug_assertions)]
     if let Some(debug_executable) = context.env_var("CODEX_ROUTER_DEBUG_LAUNCHCTL") {
@@ -198,4 +212,30 @@ fn resolve_codex_home(context: &CliContext) -> Result<PathBuf, HostCommandError>
         .env_var("HOME")
         .map(|home| PathBuf::from(home).join(".codex"))
         .ok_or(HostCommandError::CodexHomeUnavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_replacement_command;
+    use codex_router_host::ChildCommandSpec;
+    use std::{ffi::OsString, net::SocketAddr, path::PathBuf};
+
+    #[test]
+    fn replacement_command_preserves_explicit_mcp_bind() {
+        let executable = PathBuf::from("/tmp/codex-router");
+        let router_root = PathBuf::from("/tmp/router-root");
+        let mcp_bind = SocketAddr::from(([127, 0, 0, 1], 19088));
+        assert_eq!(
+            host_replacement_command(executable.clone(), router_root.clone(), 19087, mcp_bind),
+            ChildCommandSpec::new(executable).with_arguments([
+                OsString::from("host"),
+                OsString::from("--router-root"),
+                router_root.into_os_string(),
+                OsString::from("--port"),
+                OsString::from("19087"),
+                OsString::from("--mcp-bind"),
+                OsString::from("127.0.0.1:19088"),
+            ])
+        );
+    }
 }

@@ -1,9 +1,12 @@
 //! Descriptive message submission through the public Rust client.
 use crate::message_input_arguments::{SendArguments, prepare};
 use clap::{Parser, Subcommand};
-use collaboration_client::protocol::{ChannelDescription, NativeSendParams, NativeSendReceipt};
-use collaboration_client::{ClientError, ControlClient};
-use serde_json::{Value, json};
+use collaboration_client::protocol::NativeSendReceipt;
+use collaboration_client::{
+    ClientError, ControlClient, MessageSendError, MessageSendRequest, OperationEffect,
+    OperationFailure, OperationFailureKind,
+};
+use serde_json::json;
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -52,72 +55,35 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
             );
         }
     };
-    let mut submitted = false;
-    let result = runtime.block_on(async {
+    let outcome = runtime.block_on(async {
         let mut client =
             ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await?;
+                .await
+                .map_err(MessageSendError::Preparation)?;
         let saved = prepared
             .resolve(&client.identity().service_id)
-            .map_err(|_| ClientError::Protocol("invalid session target"))?;
-        let target = saved.target;
-        let content = saved.content;
-        let inventory = client.list_endpoints().await?;
-        let generation = inventory
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.endpoint == target.endpoint)
-            .and_then(|endpoint| {
-                endpoint.channels.iter().find_map(|channel| match channel {
-                    ChannelDescription::NativeCodex {
-                        generation: Some(generation),
-                        ..
-                    } => Some(generation.clone()),
-                    _ => None,
-                })
-            })
-            .ok_or(ClientError::Rejected {
-                code: -32050,
-                data: Some(json!({"kind":"unavailable","stage":"discovery"})),
+            .map_err(|_| {
+                MessageSendError::Preparation(ClientError::InvalidRequest("invalid session target"))
             })?;
-        let generation = if let (Some(epoch), Some(number)) =
-            (&args.expected_service_epoch, args.expected_generation)
-        {
-            let expected =
-                serde_json::from_value(json!({"serviceEpoch":epoch,"generation":number}))
-                    .map_err(|_| ClientError::Protocol("invalid expected generation"))?;
-            if expected != generation {
-                return Err(ClientError::Rejected {
-                    code: -32050,
-                    data: Some(json!({"kind":"staleGeneration","stage":"discovery"})),
-                });
-            }
-            expected
-        } else {
-            generation
-        };
-        let params = NativeSendParams {
-            target,
-            generation,
-            message: content,
+        let request = MessageSendRequest {
+            target: saved.target,
+            message: saved
+                .content
+                .try_into()
+                .map_err(MessageSendError::Preparation)?,
             delivery: saved.delivery,
+            generation_guard: saved.generation_guard,
             client_user_message_id: None,
         };
-        submitted = true;
-        let result = if args.human_user {
-            client.send_human_input(params).await
-        } else {
-            client.send_agent_message(params).await
-        };
+        let result = client.send_message(request).await;
         let _closed = client.close().await;
         result
     });
-    report(result, machine, submitted)
+    report(outcome, machine)
 }
 
-fn report(result: Result<NativeSendReceipt, ClientError>, machine: bool, submitted: bool) -> i32 {
-    if !submitted
-        && let Err(error) = &result
+fn report(result: Result<NativeSendReceipt, MessageSendError>, machine: bool) -> i32 {
+    if let Err(MessageSendError::Preparation(error)) = &result
         && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
             error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
@@ -126,28 +92,26 @@ fn report(result: Result<NativeSendReceipt, ClientError>, machine: bool, submitt
     {
         return code;
     }
-    let (record, code) = match result {
-        Ok(receipt) => (crate::endpoint_commands::result_envelope(json!(receipt)), 0),
-        Err(ClientError::Rejected { code, data }) => {
-            let kind = data
-                .as_ref()
-                .and_then(|d| d.get("kind"))
-                .and_then(Value::as_str);
-            let exit = match kind {
-                Some("outcomeUnknown") => 5,
-                Some("unsupportedCapability") => 2,
-                Some("unavailable") => 3,
-                _ => 4,
+    let (record, code, write_failure_code) = match result {
+        Ok(receipt) => (
+            crate::endpoint_commands::result_envelope(json!(receipt)),
+            0,
+            5,
+        ),
+        Err(error) => {
+            let (failure, target) = error.into_operation_failure_and_target();
+            let exit = operation_failure_exit(&failure);
+            let write_failure = if failure.effect == OperationEffect::Unknown {
+                5
+            } else {
+                3
             };
             (
-                json!({"kind":"error","error":{"code":code,"data":data}}),
+                json!({"kind":"error","target":target,"error":failure}),
                 exit,
+                write_failure,
             )
         }
-        Err(error) => (
-            json!({"kind":"error","error":{"kind":if submitted {"outcomeUnknown"} else {"unavailable"},"message":safe_connection_failure(&error)}}),
-            if submitted { 5 } else { 3 },
-        ),
     };
     let written = if machine {
         writeln!(io::stdout(), "{record}")
@@ -160,26 +124,103 @@ fn report(result: Result<NativeSendReceipt, ClientError>, machine: bool, submitt
         )
     };
     if written.is_err() {
-        if submitted { 5 } else { 3 }
+        write_failure_code
     } else {
         code
     }
 }
 
-fn safe_connection_failure(error: &ClientError) -> String {
-    let category = match error {
-        ClientError::Discovery { stage, source } => format!(
-            "{stage}: IO {:?} (OS code {:?})",
-            source.kind(),
-            source.raw_os_error()
-        ),
-        ClientError::Transport(error) => {
-            format!("IO {:?} (OS code {:?})", error.kind(), error.raw_os_error())
+fn operation_failure_exit(failure: &OperationFailure) -> i32 {
+    match failure.kind {
+        OperationFailureKind::Rejected
+            if failure.service_kind.as_deref() == Some("outcomeUnknown") =>
+        {
+            5
         }
-        ClientError::Timeout => "request deadline".to_owned(),
-        ClientError::Protocol(_) => "protocol validation".to_owned(),
-        ClientError::UnsupportedCapability(_) => "unsupported capability".to_owned(),
-        ClientError::Rejected { .. } => "server rejection".to_owned(),
-    };
-    format!("Connection failed: {category}; no message replayed")
+        OperationFailureKind::Rejected
+            if failure.service_kind.as_deref() == Some("unsupportedCapability") =>
+        {
+            2
+        }
+        OperationFailureKind::Rejected
+            if failure.service_kind.as_deref() == Some("unavailable") =>
+        {
+            3
+        }
+        OperationFailureKind::Rejected => 4,
+        _ if failure.effect == OperationEffect::Unknown => 5,
+        OperationFailureKind::UnsupportedCapability | OperationFailureKind::ProtocolViolation => 2,
+        OperationFailureKind::Unavailable if failure.effect == OperationEffect::None => 3,
+        _ => 4,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::operation_failure_exit;
+    use collaboration_client::{ClientError, MessageSendError, OperationEffect};
+
+    #[test]
+    fn adapter_distinguishes_preparation_loss_from_post_dispatch_loss() {
+        let transport = || {
+            ClientError::Transport(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "fixture",
+            ))
+        };
+        let (preparation, preparation_target) =
+            MessageSendError::Preparation(transport()).into_operation_failure_and_target();
+        assert!(preparation_target.is_none());
+        assert_eq!(preparation.effect, OperationEffect::None);
+        assert_eq!(
+            preparation.kind,
+            collaboration_client::OperationFailureKind::Unavailable
+        );
+
+        let (submission, submission_target) = MessageSendError::Submission {
+            target: serde_json::from_value(serde_json::json!({
+                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+                "sessionId":"target"
+            }))
+            .expect("target"),
+            source: transport(),
+        }
+        .into_operation_failure_and_target();
+        assert!(submission_target.is_some());
+        assert_eq!(submission.effect, OperationEffect::Unknown);
+        assert_eq!(
+            submission.kind,
+            collaboration_client::OperationFailureKind::Unavailable
+        );
+
+        let (malformed_after_dispatch, malformed_target) = MessageSendError::Submission {
+            target: serde_json::from_value(serde_json::json!({
+                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+                "sessionId":"target"
+            }))
+            .expect("target"),
+            source: ClientError::Protocol("malformed result"),
+        }
+        .into_operation_failure_and_target();
+        assert!(malformed_target.is_some());
+        assert_eq!(malformed_after_dispatch.effect, OperationEffect::Unknown);
+        assert_eq!(operation_failure_exit(&malformed_after_dispatch), 5);
+    }
+
+    #[test]
+    fn adapter_preserves_established_service_rejection_exit_codes() {
+        for (service_kind, expected) in [
+            ("outcomeUnknown", 5),
+            ("unsupportedCapability", 2),
+            ("unavailable", 3),
+            ("nativeRejected", 4),
+        ] {
+            let (failure, _) = MessageSendError::Preparation(ClientError::Rejected {
+                code: -32050,
+                data: Some(serde_json::json!({"kind":service_kind})),
+            })
+            .into_operation_failure_and_target();
+            assert_eq!(operation_failure_exit(&failure), expected, "{service_kind}");
+        }
+    }
 }

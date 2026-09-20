@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::io::Write;
+use std::net::{IpAddr, SocketAddr};
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -63,6 +64,7 @@ pub(crate) struct HostCommand {
     action: Option<HostAction>,
     router_root: Option<PathBuf>,
     port: Option<u16>,
+    mcp_bind: Option<SocketAddr>,
     require_debug_isolation: bool,
 }
 
@@ -75,6 +77,7 @@ impl HostCommand {
             action: parsed.action,
             router_root: parsed.router_root,
             port: parsed.port,
+            mcp_bind: parsed.mcp_bind,
             require_debug_isolation: parsed.require_debug_isolation,
         })
     }
@@ -89,6 +92,10 @@ impl HostCommand {
     #[cfg(test)]
     pub(crate) fn router_root(&self) -> Option<&Path> {
         self.router_root.as_deref()
+    }
+    #[cfg(test)]
+    pub(crate) const fn mcp_bind(&self) -> Option<SocketAddr> {
+        self.mcp_bind
     }
 
     pub(crate) const fn runs_foreground(&self) -> bool {
@@ -109,6 +116,8 @@ struct ClapHostCommand {
         help = "Provider port (debug default: 18787; installed default: 8787)"
     )]
     port: Option<u16>,
+    #[arg(long, global = true, value_parser = parse_loopback_mcp_bind)]
+    mcp_bind: Option<SocketAddr>,
     #[arg(long, global = true, hide = true)]
     require_debug_isolation: bool,
 }
@@ -142,6 +151,12 @@ pub(crate) async fn run_host_command<W: Write + Send>(
                 } else {
                     DEFAULT_HOST_PORT
                 }
+            }),
+            command.mcp_bind.unwrap_or_else(|| {
+                default_mcp_bind(
+                    cfg!(all(debug_assertions, not(test)))
+                        && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none(),
+                )
             }),
             coordination_paths,
             context,
@@ -218,6 +233,26 @@ pub(crate) async fn run_host_command<W: Write + Send>(
         crate::presentation::host::render_terminal_frame(stdout, &frames)?;
     }
     Ok(())
+}
+
+pub(crate) const fn default_mcp_bind(isolated_debug: bool) -> SocketAddr {
+    if isolated_debug {
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 18788)
+    } else {
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8788)
+    }
+}
+
+fn parse_loopback_mcp_bind(value: &str) -> Result<SocketAddr, String> {
+    let address: SocketAddr = value
+        .parse()
+        .map_err(|_| "--mcp-bind requires HOST:PORT".to_owned())?;
+    if !matches!(address.ip(), IpAddr::V4(ip) if ip.is_loopback())
+        && !matches!(address.ip(), IpAddr::V6(ip) if ip.is_loopback())
+    {
+        return Err("--mcp-bind requires a loopback address".to_owned());
+    }
+    Ok(address)
 }
 
 const fn operator_request_deadline(action: HostAction) -> Duration {

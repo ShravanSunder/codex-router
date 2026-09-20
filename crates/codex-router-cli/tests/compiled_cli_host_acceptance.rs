@@ -131,6 +131,8 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         router_root.to_str().ok_or("router root is not UTF-8")?,
         "--port",
         &port.to_string(),
+        "--mcp-bind",
+        "127.0.0.1:0",
     ])
     .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
     .env("OTEL_SDK_DISABLED", "true")
