@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+#[cfg(test)]
+use std::sync::mpsc::Sender as TestCompletionSender;
 
 use codex_router_core::routes::RouteBand;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -62,6 +64,26 @@ pub enum MaintenanceHint {
         route_band: RouteBand,
         compact_before_unix_seconds: u64,
     },
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MaintenanceCompletion {
+    maintenance_class: &'static str,
+    route_band: &'static str,
+}
+
+#[cfg(test)]
+impl MaintenanceCompletion {
+    #[must_use]
+    pub(crate) const fn maintenance_class(self) -> &'static str {
+        self.maintenance_class
+    }
+
+    #[must_use]
+    pub(crate) const fn route_band(self) -> &'static str {
+        self.route_band
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +207,8 @@ pub struct MaintenanceActor {
     closed: Arc<AtomicBool>,
     shutdown: CancellationToken,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    #[cfg(test)]
+    completion_sender: Arc<Mutex<Option<TestCompletionSender<MaintenanceCompletion>>>>,
 }
 
 impl MaintenanceActor {
@@ -221,6 +245,10 @@ impl MaintenanceActor {
         let task_pending = Arc::clone(&pending);
         let task_closed = Arc::clone(&closed);
         let task_shutdown = shutdown.clone();
+        #[cfg(test)]
+        let completion_sender = Arc::new(Mutex::new(None));
+        #[cfg(test)]
+        let task_completion_sender = Arc::clone(&completion_sender);
         let task = runtime_handle.spawn(async move {
             run_maintenance_actor(
                 repository,
@@ -228,6 +256,8 @@ impl MaintenanceActor {
                 task_pending,
                 task_shutdown,
                 task_closed,
+                #[cfg(test)]
+                task_completion_sender,
             )
             .await;
         });
@@ -237,6 +267,21 @@ impl MaintenanceActor {
             closed,
             shutdown,
             task: Arc::new(Mutex::new(Some(task))),
+            #[cfg(test)]
+            completion_sender,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_completion_sender(
+        &self,
+        completion_sender: TestCompletionSender<MaintenanceCompletion>,
+    ) {
+        match self.completion_sender.lock() {
+            Ok(mut registered_sender) => {
+                *registered_sender = Some(completion_sender);
+            }
+            Err(error) => panic!("maintenance completion sender lock should be available: {error}"),
         }
     }
 
@@ -411,6 +456,7 @@ async fn run_maintenance_actor(
     pending: Arc<Mutex<HashMap<MaintenanceCoalescingKey, Instant>>>,
     shutdown: CancellationToken,
     closed: Arc<AtomicBool>,
+    #[cfg(test)] completion_sender: Arc<Mutex<Option<TestCompletionSender<MaintenanceCompletion>>>>,
 ) {
     loop {
         tokio::select! {
@@ -472,6 +518,15 @@ async fn run_maintenance_actor(
                             "codex_router.maintenance_pending_cleanup_lock_poisoned"
                         );
                     }
+                }
+                #[cfg(test)]
+                if let Ok(completion_sender) = completion_sender.lock()
+                    && let Some(completion_sender) = completion_sender.as_ref()
+                {
+                    let _send_result = completion_sender.send(MaintenanceCompletion {
+                        maintenance_class: hint_for_cleanup.maintenance_class(),
+                        route_band: hint_for_cleanup.route_band_label(),
+                    });
                 }
             }
         }

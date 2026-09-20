@@ -64,6 +64,7 @@ mod tests {
     use crate::http_sse::UpstreamHttpTransport;
     use crate::http_sse::append_audit_event_with_reporter;
     use crate::local_auth::ProxyLocalAuthGate;
+    use crate::maintenance_actor::MaintenanceCompletion;
     use crate::provider_error::classify_provider_error_envelope;
     use crate::provider_error::record_provider_error_observation;
     use crate::routes::Method;
@@ -5874,6 +5875,15 @@ mod tests {
             2,
             RETENTION_NOW - EVENT_RETENTION,
         );
+        let observation_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("observation runtime should build");
+        let observation_state = observation_runtime.block_on(async {
+            AsyncSqliteStateStore::open_read_only(&database_path)
+                .await
+                .expect("observation state should open")
+        });
 
         let upstream_listener =
             TcpListener::bind("127.0.0.1:0").expect("mock upstream should bind");
@@ -5919,10 +5929,16 @@ mod tests {
             ),
         )
         .with_quota_clock(RETENTION_NOW, 60);
-        let runtime = LoopbackRouterRuntime::start(config).expect("router runtime should start");
-        wait_for_active_session_absent(&database_path, "startup-expired");
+        let (maintenance_completion_sender, maintenance_completion_receiver) = mpsc::channel();
+        let runtime = LoopbackRouterRuntime::start_with_maintenance_completion_sender(
+            config,
+            maintenance_completion_sender,
+        )
+        .expect("router runtime should start");
+        wait_for_responses_history_compaction(&maintenance_completion_receiver);
+        assert_active_session_absent(&observation_runtime, &observation_state, "startup-expired");
         assert!(
-            active_session_reservation_ids(&database_path)
+            observed_active_session_reservation_ids(&observation_runtime, &observation_state)
                 .iter()
                 .any(|reservation_id| reservation_id == "startup-exact-cutoff"),
             "startup maintenance must preserve the exact-cutoff completed session"
@@ -5946,7 +5962,12 @@ mod tests {
         let first_request = upstream_receiver
             .recv()
             .expect("first upstream request should record");
-        wait_for_active_session_absent(&database_path, "first-accepted-expired");
+        wait_for_responses_history_compaction(&maintenance_completion_receiver);
+        assert_active_session_absent(
+            &observation_runtime,
+            &observation_state,
+            "first-accepted-expired",
+        );
         seed_completed_active_session(
             &database_path,
             alpha.account_id(),
@@ -5961,6 +5982,7 @@ mod tests {
                 br#"{"model":"gpt-5","turn":2}"#,
             )
         });
+        wait_for_responses_history_compaction(&maintenance_completion_receiver);
 
         assert_eq!(
             runtime_thread
@@ -5989,13 +6011,13 @@ mod tests {
         }
         assert!(!second_request.contains("http-beta-token"));
         assert!(
-            !active_session_reservation_ids(&database_path)
+            !observed_active_session_reservation_ids(&observation_runtime, &observation_state)
                 .iter()
                 .any(|reservation_id| reservation_id == "accepted-expired"),
             "accepted-connection maintenance must delete newly eligible completed sessions"
         );
         assert!(
-            active_session_reservation_ids(&database_path)
+            observed_active_session_reservation_ids(&observation_runtime, &observation_state)
                 .iter()
                 .any(|reservation_id| reservation_id == "startup-exact-cutoff"),
             "accepted-connection maintenance must preserve exact-cutoff sessions"
@@ -6004,15 +6026,8 @@ mod tests {
         upstream_thread
             .join()
             .expect("upstream thread should not panic");
-        let observation_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("observation runtime should build");
         let persisted = observation_runtime.block_on(async {
-            let state = AsyncSqliteStateStore::open(&database_path)
-                .await
-                .expect("async state should open");
-            state
+            observation_state
                 .load_session_account_affinity("assembled-http-session")
                 .await
                 .expect("session affinity should load")
@@ -8617,42 +8632,53 @@ mod tests {
         });
     }
 
-    fn active_session_reservation_ids(database_path: &Path) -> Vec<String> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("active-session observation runtime should build");
+    fn wait_for_responses_history_compaction(
+        completion_receiver: &mpsc::Receiver<MaintenanceCompletion>,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let completion = completion_receiver
+                .recv_timeout(remaining)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "responses history compaction should complete within one second: {error}"
+                    )
+                });
+            if completion.maintenance_class() == "active_session_history_compaction"
+                && completion.route_band() == "responses"
+            {
+                return;
+            }
+        }
+    }
+
+    fn observed_active_session_reservation_ids(
+        runtime: &tokio::runtime::Runtime,
+        state: &AsyncSqliteStateStore,
+    ) -> Vec<String> {
         runtime.block_on(async {
-            let state = AsyncSqliteStateStore::open(database_path)
-                .await
-                .expect("active-session observation state should open");
-            let reservation_ids = state
+            state
                 .active_session_events_for_route_band("responses")
                 .await
                 .expect("active-session events should load")
                 .into_iter()
                 .map(|event| event.reservation_id().as_str().to_owned())
-                .collect();
-            state.close().await.expect("observation state should close");
-            reservation_ids
+                .collect()
         })
     }
 
-    fn wait_for_active_session_absent(database_path: &Path, reservation_id: &str) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        loop {
-            if !active_session_reservation_ids(database_path)
+    fn assert_active_session_absent(
+        runtime: &tokio::runtime::Runtime,
+        state: &AsyncSqliteStateStore,
+        reservation_id: &str,
+    ) {
+        assert!(
+            !observed_active_session_reservation_ids(runtime, state)
                 .iter()
-                .any(|candidate| candidate == reservation_id)
-            {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "maintenance should delete completed session {reservation_id}"
-            );
-            thread::yield_now();
-        }
+                .any(|candidate| candidate == reservation_id),
+            "maintenance should delete completed session {reservation_id}"
+        );
     }
 
     fn send_loopback_request_with_read_timeout(

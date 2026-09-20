@@ -492,6 +492,24 @@ pub struct LoopbackRouterRuntime {
 impl LoopbackRouterRuntime {
     /// Opens router-owned state/secrets and binds the loopback listener.
     pub fn start(config: LoopbackRouterRuntimeConfig) -> Result<Self, LoopbackRouterRuntimeError> {
+        Self::start_with_test_maintenance_completion_sender(config, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_maintenance_completion_sender(
+        config: LoopbackRouterRuntimeConfig,
+        completion_sender: std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
+        Self::start_with_test_maintenance_completion_sender(config, Some(completion_sender))
+    }
+
+    fn start_with_test_maintenance_completion_sender(
+        config: LoopbackRouterRuntimeConfig,
+        #[cfg(test)] completion_sender: Option<
+            std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
+        >,
+        #[cfg(not(test))] _completion_sender: Option<()>,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -540,6 +558,10 @@ impl LoopbackRouterRuntime {
             Arc::new(writable_state_stores.maintenance_state_store.clone()),
             MAINTENANCE_QUEUE_CAPACITY,
         );
+        #[cfg(test)]
+        if let Some(completion_sender) = completion_sender {
+            maintenance_actor.register_completion_sender(completion_sender);
+        }
 
         let loopback_runtime = Self {
             runtime,
