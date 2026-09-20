@@ -194,7 +194,7 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
 }
 
 #[tokio::test]
-async fn acp_initialize_response_loss_reports_unknown_before_conversation_creation() {
+async fn acp_initialize_response_loss_reports_no_effect_before_conversation_creation() {
     let root = std::path::PathBuf::from(format!("/tmp/cil-{}", uuid::Uuid::now_v7()));
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -267,13 +267,13 @@ async fn acp_initialize_response_loss_reports_unknown_before_conversation_creati
     drop(publication);
     std::fs::remove_file(root.join("acp.sock")).expect("ACP cleanup");
     std::fs::remove_dir(&root).expect("fixture cleanup");
-    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(output.status.code(), Some(2));
     let record: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
     let _: collaboration_client::protocol::ConversationRecord =
         serde_json::from_value(record.clone()).expect("published ConversationRecord");
     assert_eq!(record["kind"], "conversationError");
     assert_eq!(record["error"]["stage"], "initialize");
-    assert_eq!(record["error"]["effect"], "unknown");
+    assert_eq!(record["error"]["effect"], "none");
 }
 
 #[tokio::test]
@@ -464,7 +464,13 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
     let deadline_records = validate_conversation_records(&deadline.stdout, "deadline");
     assert!(matches!(
         deadline_records.last(),
-        Some(collaboration_client::protocol::ConversationRecord::ConversationSettlement { .. })
+        Some(
+            collaboration_client::protocol::ConversationRecord::ConversationSettlement {
+                terminal_reason:
+                    collaboration_client::protocol::ConversationTerminalReason::TimedOut,
+                ..
+            }
+        )
     ));
 
     let mut interrupted = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
@@ -518,7 +524,13 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
     let interrupted_records = validate_conversation_records(&interrupted.stdout, "interrupt");
     assert!(matches!(
         interrupted_records.last(),
-        Some(collaboration_client::protocol::ConversationRecord::ConversationSettlement { .. })
+        Some(
+            collaboration_client::protocol::ConversationRecord::ConversationSettlement {
+                terminal_reason:
+                    collaboration_client::protocol::ConversationTerminalReason::Cancelled,
+                ..
+            }
+        )
     ));
 
     tokio::time::timeout(Duration::from_secs(5), peer)

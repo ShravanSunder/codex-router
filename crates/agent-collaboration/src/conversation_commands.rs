@@ -559,10 +559,20 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
         ConversationEvent::PermissionRequired(target) => {
             ConversationRecord::PermissionRequired { target }
         }
-        ConversationEvent::PromptResult { target, result } => {
+        ConversationEvent::PromptResult {
+            target,
+            end,
+            result,
+        } => {
             let stop_reason = result.get("stopReason").and_then(serde_json::Value::as_str);
-            if matches!(stop_reason, Some("cancelled")) {
-                let record = cancelled_settlement_record(target, result);
+            if end != ConversationEnd::Completed || matches!(stop_reason, Some("cancelled")) {
+                let terminal_reason = match end {
+                    ConversationEnd::TimedOut => ConversationTerminalReason::TimedOut,
+                    ConversationEnd::Cancelled | ConversationEnd::Completed => {
+                        ConversationTerminalReason::Cancelled
+                    }
+                };
+                let record = settlement_record(target, terminal_reason, result);
                 if machine {
                     writeln!(
                         io::stdout(),
@@ -658,13 +668,14 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
     Ok(())
 }
 
-fn cancelled_settlement_record(
+fn settlement_record(
     target: collaboration_client::protocol::SessionRef,
+    terminal_reason: ConversationTerminalReason,
     result: serde_json::Value,
 ) -> ConversationRecord {
     ConversationRecord::ConversationSettlement {
         target,
-        terminal_reason: ConversationTerminalReason::Cancelled,
+        terminal_reason,
         result,
     }
 }
@@ -672,8 +683,8 @@ fn cancelled_settlement_record(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConversationArguments, ConversationCommand, cancelled_settlement_record,
-        conversation_end_exit, operation_failure_exit,
+        ConversationArguments, ConversationCommand, conversation_end_exit, operation_failure_exit,
+        settlement_record,
     };
     use clap::Parser;
     use collaboration_client::{
@@ -733,7 +744,11 @@ mod tests {
             "stopReason":"cancelled",
             "_meta":{"codexRouter":{"interruption":{"requested":true}}}
         });
-        let record = cancelled_settlement_record(target.clone(), receipt.clone());
+        let record = settlement_record(
+            target.clone(),
+            collaboration_client::protocol::ConversationTerminalReason::Cancelled,
+            receipt.clone(),
+        );
         let record = serde_json::to_value(record).expect("settlement JSON");
         assert_eq!(
             record["target"],

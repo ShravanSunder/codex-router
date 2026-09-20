@@ -522,7 +522,7 @@ async fn dispatch_approval(
     identity: &ServiceIdentity,
 ) -> Value {
     let Some(broker) = identity.approval_broker.as_ref() else {
-        return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Approval service unavailable","data":{"kind":"unavailable"}}});
+        return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Approval service unavailable","data":{"kind":"unavailable","stage":"inspect","message":"Approval service unavailable"}}});
     };
     match method {
         "approval/list" => {

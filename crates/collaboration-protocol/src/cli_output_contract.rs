@@ -105,6 +105,7 @@ pub enum ConversationRecord {
 #[serde(rename_all = "camelCase")]
 pub enum ConversationTerminalReason {
     Cancelled,
+    TimedOut,
 }
 /// One resume's reasoning-effort change, as the caller asked and the thread held.
 #[derive(JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

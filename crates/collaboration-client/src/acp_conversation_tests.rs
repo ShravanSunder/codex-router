@@ -53,6 +53,121 @@ fn resumed_session_rejects_creation_settings_before_connection() {
 }
 
 #[test]
+fn new_and_forked_conversations_require_local_creator_and_approver_before_setup() {
+    let local_endpoint = endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f");
+    let foreign_endpoint = endpoint("018f47d2-24d5-7a68-b9ec-6f759c394590");
+    let local_identity = SessionRef {
+        endpoint: local_endpoint.clone(),
+        session_id: SessionId::try_from("caller".to_owned()).expect("session ID"),
+    };
+    let foreign_identity = SessionRef {
+        endpoint: foreign_endpoint,
+        session_id: SessionId::try_from("foreign".to_owned()).expect("session ID"),
+    };
+    let request = |created_by, approver| ConversationCreateRequest {
+        endpoint: local_endpoint.clone(),
+        cwd: std::path::PathBuf::from("/tmp/project"),
+        session: None,
+        fork: None,
+        model: Some("gpt-5.6-luna".to_owned()),
+        effort: Some("low".to_owned()),
+        access: Some("workspace-write".to_owned()),
+        created_by,
+        approver,
+        root_message_id: None,
+    };
+    assert!(matches!(
+        validate_conversation_create_request(&request(None, Some(local_identity.clone()))),
+        Err(ClientError::InvalidRequest(
+            "new or forked conversation requires createdBy"
+        ))
+    ));
+    assert!(matches!(
+        validate_conversation_create_request(&request(Some(local_identity.clone()), None)),
+        Err(ClientError::InvalidRequest(
+            "new or forked conversation requires approver"
+        ))
+    ));
+    assert!(matches!(
+        validate_conversation_create_request(&request(
+            Some(foreign_identity),
+            Some(local_identity.clone())
+        )),
+        Err(ClientError::InvalidRequest(
+            "conversation identities belong to another endpoint"
+        ))
+    ));
+    assert!(
+        validate_conversation_create_request(&request(
+            Some(local_identity.clone()),
+            Some(local_identity)
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn existing_session_without_creation_identities_remains_valid() {
+    let request = ConversationCreateRequest {
+        endpoint: endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f"),
+        cwd: std::path::PathBuf::from("/tmp/project"),
+        session: Some(SessionId::try_from("existing".to_owned()).expect("session ID")),
+        fork: None,
+        model: None,
+        effort: Some("medium".to_owned()),
+        access: None,
+        created_by: None,
+        approver: None,
+        root_message_id: None,
+    };
+    assert!(validate_conversation_create_request(&request).is_ok());
+}
+
+#[tokio::test]
+async fn sdk_identity_preflight_fails_before_acp_discovery_or_mutation() {
+    let local_endpoint = endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f");
+    let foreign_endpoint = endpoint("018f47d2-24d5-7a68-b9ec-6f759c394590");
+    let local_identity = SessionRef {
+        endpoint: local_endpoint.clone(),
+        session_id: SessionId::try_from("local".to_owned()).expect("session ID"),
+    };
+    let foreign_identity = SessionRef {
+        endpoint: foreign_endpoint,
+        session_id: SessionId::try_from("foreign".to_owned()).expect("session ID"),
+    };
+    for (created_by, approver) in [
+        (None, Some(local_identity.clone())),
+        (Some(foreign_identity), Some(local_identity.clone())),
+    ] {
+        let result = AcpConversation::create(
+            std::path::Path::new("/path-that-must-not-be-read"),
+            ConversationCreateRequest {
+                endpoint: local_endpoint.clone(),
+                cwd: std::path::PathBuf::from("/tmp/project"),
+                session: None,
+                fork: None,
+                model: Some("gpt-5.6-luna".to_owned()),
+                effort: Some("low".to_owned()),
+                access: Some("workspace-write".to_owned()),
+                created_by,
+                approver,
+                root_message_id: None,
+            },
+            &mut |_| Ok(()),
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("identity preflight must precede discovery");
+        };
+        let (failure, target, turn_id) = error.into_parts();
+        assert_eq!(failure.stage, "validation");
+        assert_eq!(failure.effect, crate::OperationEffect::None);
+        assert!(target.is_none());
+        assert!(turn_id.is_none());
+    }
+}
+
+#[test]
 fn prompt_update_buffer_has_count_and_byte_limits() {
     let mut updates = BoundedPromptUpdates::new();
     updates.bytes = MAX_PROMPT_RESULT_BYTES;

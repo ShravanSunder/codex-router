@@ -46,6 +46,12 @@ fn cli_catalog_covers_closed_envelopes_and_pinned_acp_variants() {
         "result":{"stopReason":"cancelled"},
     })));
     assert!(conversation.is_valid(&serde_json::json!({
+        "kind":"conversationSettlement",
+        "target":target,
+        "terminalReason":"timedOut",
+        "result":{"stopReason":"cancelled"},
+    })));
+    assert!(conversation.is_valid(&serde_json::json!({
         "kind":"conversationError",
         "target":null,
         "error":{

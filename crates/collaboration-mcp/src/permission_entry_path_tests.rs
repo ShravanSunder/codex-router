@@ -848,23 +848,50 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
         .expect("initialized notification");
     assert!(initialized.status().is_success());
 
+    let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"codex-local"});
+    let local_identity = json!({"endpoint":endpoint,"sessionId":"mcp-caller"});
+    let foreign_identity = json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000099","endpointId":"codex-local"},
+        "sessionId":"foreign-caller"
+    });
+    for (id, created_by, approver) in [
+        (2, Value::Null, local_identity.clone()),
+        (3, foreign_identity, local_identity.clone()),
+    ] {
+        let response = mcp_call(
+            &client,
+            &listener.local_url(),
+            &session_id,
+            id,
+            "conversation_create",
+            json!({
+                "endpoint":endpoint,"cwd":"/tmp", "session":null, "fork":null,
+                "model":"gpt-5.6-sol", "effort":"low", "access":"workspace-write",
+                "createdBy":created_by, "approver":approver, "rootMessageId":null
+            }),
+        )
+        .await;
+        let failure = &response["result"]["structuredContent"];
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(failure["target"], Value::Null);
+        assert_eq!(failure["effect"], "none");
+        assert_eq!(failure["stage"], "validation");
+    }
+
     let response = mcp_call(
         &client,
         &listener.local_url(),
         &session_id,
-        2,
+        4,
         "conversation_create",
         json!({
-            "endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},
-            "cwd":"/tmp", "session":null, "fork":null,
+            "endpoint":endpoint,"cwd":"/tmp", "session":null, "fork":null,
             "model":"gpt-5.6-sol", "effort":"low", "access":"workspace-write",
-            "createdBy":null, "approver":null, "rootMessageId":null
+            "createdBy":local_identity, "approver":local_identity, "rootMessageId":null
         }),
     )
     .await;
     let failure = &response["result"]["structuredContent"];
-    assert_eq!(response["result"]["isError"], true);
-    assert_eq!(failure["target"], Value::Null);
     assert_eq!(failure["effect"], "none");
     assert_eq!(failure["stage"], "connect");
 
@@ -872,7 +899,7 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
         &client,
         &listener.local_url(),
         &session_id,
-        3,
+        5,
         "wake_wait_until_first_fire",
         json!({"wakeupId":"01985b1e-8d90-7fff-8000-000000000099"}),
     )

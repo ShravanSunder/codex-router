@@ -49,6 +49,16 @@ enum ApprovalCommandError {
     Operation(OperationFailure),
 }
 
+fn operation_failure_exit(failure: &OperationFailure) -> i32 {
+    match failure.kind {
+        OperationFailureKind::Rejected => 4,
+        _ if failure.effect == OperationEffect::Unknown => 5,
+        OperationFailureKind::Timeout => 124,
+        OperationFailureKind::UnsupportedCapability | OperationFailureKind::ProtocolViolation => 2,
+        _ => 3,
+    }
+}
+
 #[derive(Args)]
 struct OutputArguments {
     #[arg(long)]
@@ -168,14 +178,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
             }
         }
         Err(ApprovalCommandError::Operation(failure)) => {
-            let exit = match failure.kind {
-                OperationFailureKind::Rejected => 4,
-                _ if failure.effect == OperationEffect::Unknown => 5,
-                OperationFailureKind::Timeout => 124,
-                OperationFailureKind::UnsupportedCapability
-                | OperationFailureKind::ProtocolViolation => 2,
-                _ => 3,
-            };
+            let exit = operation_failure_exit(&failure);
             let message = failure.message.clone();
             let record = serde_json::json!({"kind":"error","error":failure});
             let _printed = if output.json {
@@ -193,6 +196,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
             )
             .unwrap_or_else(|| {
                 let failure = operation_failure_from_client_error(error, OperationEffect::None);
+                let exit = operation_failure_exit(&failure);
                 let message = failure.message.clone();
                 let record = serde_json::json!({"kind":"error","error":failure});
                 let _printed = if output.json {
@@ -200,7 +204,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
                 } else {
                     writeln!(io::stderr(), "{message}")
                 };
-                3
+                exit
             })
         }
     }

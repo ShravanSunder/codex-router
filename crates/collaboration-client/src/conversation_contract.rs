@@ -9,9 +9,16 @@ use std::time::Duration;
 
 pub enum ConversationEvent {
     SessionReady(SessionRef),
-    SessionUpdate { target: SessionRef, update: Value },
+    SessionUpdate {
+        target: SessionRef,
+        update: Value,
+    },
     PermissionRequired(SessionRef),
-    PromptResult { target: SessionRef, result: Value },
+    PromptResult {
+        target: SessionRef,
+        end: ConversationEnd,
+        result: Value,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

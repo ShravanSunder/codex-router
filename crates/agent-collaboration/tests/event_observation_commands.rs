@@ -19,6 +19,7 @@ mod tests {
         GenerationChanged,
         ByteSaturation,
         LateEvent,
+        MalformedFrame,
     }
 
     #[tokio::test]
@@ -104,6 +105,28 @@ mod tests {
         assert_eq!(result["endReason"], "backendDisconnected");
         assert_eq!(result["continuationGap"], true);
         assert_eq!(result["events"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[tokio::test]
+    async fn bounded_cli_observe_distinguishes_malformed_frame_from_clean_eof() {
+        let malformed =
+            run_observation_case(AttachmentCase::MalformedFrame, "malformed", true).await;
+        assert_eq!(malformed.status.code(), Some(5));
+        let records = output_records(&malformed);
+        let [failure] = records.as_slice() else {
+            panic!("expected one malformed-frame failure: {records:?}");
+        };
+        assert_eq!(failure["error"]["kind"], "protocolViolation");
+        assert_eq!(failure["error"]["stage"], "observation-collect");
+        assert_eq!(failure["error"]["effect"], "unknown");
+
+        let clean = run_observation_case(AttachmentCase::BufferedEvents, "clean-eof", true).await;
+        assert!(clean.status.success());
+        let records = output_records(&clean);
+        let [result] = records.as_slice() else {
+            panic!("expected one clean-EOF result: {records:?}");
+        };
+        assert_eq!(result["endReason"], "backendDisconnected");
     }
 
     #[tokio::test]
@@ -238,6 +261,17 @@ mod tests {
                     json!({"id":resume["id"],"result":{"thread":{"id":"observed-thread"}}}),
                 )
                 .await;
+                if matches!(case, AttachmentCase::MalformedFrame) {
+                    socket
+                        .send(Message::Text("{".into()))
+                        .await
+                        .unwrap_or_else(|error| panic!("observation fixture: {error}"));
+                    socket
+                        .close(None)
+                        .await
+                        .unwrap_or_else(|error| panic!("observation fixture: {error}"));
+                    return;
+                }
             }
             if matches!(
                 case,

@@ -1,6 +1,6 @@
 //! Explicit native attachment and buffered observation, independent of terminal UI.
 use crate::{ClientError, ControlClient};
-use codex_native_integration::NativeProtocolConnection;
+use codex_native_integration::{NativeConnectionError, NativeProtocolConnection};
 use collaboration_protocol::{
     ChannelDescription, CodexGeneration, EndpointAvailability, EndpointId, EndpointRef, SessionId,
     SessionRef,
@@ -51,6 +51,12 @@ pub struct NativeObservation {
     target: SessionRef,
     generation: CodexGeneration,
 }
+
+enum ObservationReadError {
+    Disconnected,
+    Protocol(ClientError),
+}
+
 impl NativeObservation {
     pub async fn observe_bounded(
         directory: &Path,
@@ -275,10 +281,30 @@ impl NativeObservation {
     /// Returns native messages already buffered during attachment before reading new frames.
     /// Dropping observation never interrupts the native turn or answers an approval callback.
     pub async fn next_message(&mut self) -> Result<Value, ClientError> {
+        self.next_message_classified()
+            .await
+            .map_err(|error| match error {
+                ObservationReadError::Disconnected => {
+                    ClientError::Protocol("native observation closed")
+                }
+                ObservationReadError::Protocol(error) => error,
+            })
+    }
+
+    async fn next_message_classified(&mut self) -> Result<Value, ObservationReadError> {
         self.connection
             .next_message()
             .await
-            .map_err(|_| ClientError::Protocol("native observation closed"))
+            .map_err(|error| match error {
+                NativeConnectionError::Protocol | NativeConnectionError::InvalidInput => {
+                    ObservationReadError::Protocol(ClientError::Protocol(
+                        "invalid native observation frame",
+                    ))
+                }
+                NativeConnectionError::Unavailable
+                | NativeConnectionError::OutcomeUnknown
+                | NativeConnectionError::Rejected { .. } => ObservationReadError::Disconnected,
+            })
     }
 
     /// Collects a bounded call-local observation. A later call is a fresh attachment,
@@ -320,11 +346,14 @@ impl NativeObservation {
             let message = tokio::select! {
                 _ = cancel.cancelled() => break ObservationEndReason::CallerCancelled,
                 _ = tokio::time::sleep_until(deadline) => break ObservationEndReason::DeadlineReached,
-                message = self.next_message() => message,
+                message = self.next_message_classified() => message,
             };
             let message = match message {
                 Ok(message) => message,
-                Err(_) => break ObservationEndReason::BackendDisconnected,
+                Err(ObservationReadError::Disconnected) => {
+                    break ObservationEndReason::BackendDisconnected;
+                }
+                Err(ObservationReadError::Protocol(error)) => return Err(error),
             };
             let encoded_bytes = serde_json::to_vec(&message)
                 .map_err(|_| ClientError::Protocol("observation event encoding failed"))?

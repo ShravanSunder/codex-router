@@ -616,7 +616,8 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
             "jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"conversation_create","arguments":{
                 "endpoint":endpoint,"cwd":temporary.path(),"session":null,"fork":null,
                 "model":"gpt-5.6-luna","effort":"low","access":"workspace-write",
-                "createdBy":null,"approver":null,"rootMessageId":null
+                "createdBy":{"endpoint":endpoint,"sessionId":"mcp-creator"},
+                "approver":{"endpoint":endpoint,"sessionId":"mcp-approver"},"rootMessageId":null
             }}
         })).send().await.expect("conversation create response");
     let create_body = protocol_response_json(create).await;
@@ -1060,7 +1061,7 @@ async fn initialized_http_message_response_loss_retains_known_target() {
 
 #[tokio::test]
 async fn initialized_http_acp_initialize_response_loss_is_not_replayed() {
-    let body = run_initialized_mcp_create_response_loss(true, false).await;
+    let body = run_initialized_mcp_create_response_loss(InitializeOutcome::Lost, false).await;
 
     assert_eq!(body.pointer("/result/isError"), Some(&json!(true)));
     assert_eq!(
@@ -1069,7 +1070,27 @@ async fn initialized_http_acp_initialize_response_loss_is_not_replayed() {
     );
     assert_eq!(
         body.pointer("/result/structuredContent/effect"),
-        Some(&json!("unknown"))
+        Some(&json!("none"))
+    );
+    assert_eq!(
+        body.pointer("/result/structuredContent/target"),
+        Some(&Value::Null)
+    );
+}
+
+#[tokio::test]
+async fn initialized_http_acp_version_mismatch_has_no_effect_or_creation() {
+    let body =
+        run_initialized_mcp_create_response_loss(InitializeOutcome::VersionMismatch, false).await;
+
+    assert_eq!(body.pointer("/result/isError"), Some(&json!(true)));
+    assert_eq!(
+        body.pointer("/result/structuredContent/stage"),
+        Some(&json!("initialize"))
+    );
+    assert_eq!(
+        body.pointer("/result/structuredContent/effect"),
+        Some(&json!("none"))
     );
     assert_eq!(
         body.pointer("/result/structuredContent/target"),
@@ -1079,7 +1100,7 @@ async fn initialized_http_acp_initialize_response_loss_is_not_replayed() {
 
 #[tokio::test]
 async fn initialized_http_fork_response_loss_is_not_replayed() {
-    let body = run_initialized_mcp_create_response_loss(false, true).await;
+    let body = run_initialized_mcp_create_response_loss(InitializeOutcome::Success, true).await;
 
     assert_eq!(body.pointer("/result/isError"), Some(&json!(true)));
     assert_eq!(
@@ -1277,7 +1298,17 @@ async fn initialized_http_observation_resume_response_loss_retains_target_and_un
     drop(publication);
 }
 
-async fn run_initialized_mcp_create_response_loss(lose_initialize: bool, fork: bool) -> Value {
+#[derive(Clone, Copy)]
+enum InitializeOutcome {
+    Success,
+    Lost,
+    VersionMismatch,
+}
+
+async fn run_initialized_mcp_create_response_loss(
+    initialize_outcome: InitializeOutcome,
+    fork: bool,
+) -> Value {
     let temporary = tempfile::tempdir().expect("temporary service directory");
     #[cfg(unix)]
     {
@@ -1330,11 +1361,27 @@ async fn run_initialized_mcp_create_response_loss(lose_initialize: bool, fork: b
         )
         .expect("ACP initialize JSON");
         assert_eq!(initialize["method"], "initialize");
-        if lose_initialize {
+        if matches!(initialize_outcome, InitializeOutcome::Lost) {
             drop(writer);
             drop(lines);
         } else {
-            writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}})).as_bytes()).await.expect("ACP initialize response");
+            let protocol_version =
+                if matches!(initialize_outcome, InitializeOutcome::VersionMismatch) {
+                    2
+                } else {
+                    1
+                };
+            writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":protocol_version,"agentCapabilities":{"loadSession":true},"authMethods":[]}})).as_bytes()).await.expect("ACP initialize response");
+            if matches!(initialize_outcome, InitializeOutcome::VersionMismatch) {
+                let next =
+                    tokio::time::timeout(std::time::Duration::from_millis(250), lines.next_line())
+                        .await;
+                assert!(
+                    !matches!(next, Ok(Ok(Some(_)))),
+                    "version mismatch must not dispatch an ACP conversation operation"
+                );
+                return;
+            }
             let create: Value = serde_json::from_str(
                 &lines
                     .next_line()
@@ -1370,7 +1417,9 @@ async fn run_initialized_mcp_create_response_loss(lose_initialize: bool, fork: b
     let response = client.post(listener.local_url()).header(CONTENT_TYPE, "application/json").header(ACCEPT, "application/json, text/event-stream").header("mcp-session-id", session_id).header("mcp-protocol-version", "2025-11-25").json(&json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"conversation_create","arguments":{
             "endpoint":endpoint,"cwd":temporary.path(),"session":null,"fork":if fork { json!("fork-source") } else { Value::Null },
-            "model":"gpt-5.6-luna","effort":if fork { Value::Null } else { json!("low") },"access":"workspace-write","createdBy":null,"approver":null,"rootMessageId":null
+            "model":"gpt-5.6-luna","effort":if fork { Value::Null } else { json!("low") },"access":"workspace-write",
+            "createdBy":{"endpoint":endpoint,"sessionId":"mcp-creator"},
+            "approver":{"endpoint":endpoint,"sessionId":"mcp-approver"},"rootMessageId":null
         }}
     })).send().await.expect("conversation create response");
     let body = protocol_response_json(response).await;

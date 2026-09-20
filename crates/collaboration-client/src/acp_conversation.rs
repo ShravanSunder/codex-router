@@ -262,13 +262,10 @@ impl AcpConversation {
                 "InitializeResponse",
             )
             .await
-            .map_err(|source| {
-                crate::OperationError::after_dispatch("initialize", None, None, source)
-            })?;
+            .map_err(|source| crate::OperationError::before_dispatch("initialize", None, source))?;
         if result.get("protocolVersion") != Some(&json!(1)) {
-            return Err(crate::OperationError::after_dispatch(
+            return Err(crate::OperationError::before_dispatch(
                 "initialize",
-                None,
                 None,
                 ClientError::Protocol("unsupported ACP version"),
             ));
@@ -518,7 +515,11 @@ impl AcpConversation {
                 continue;
             }
             let result = self.response(frame, &id, "PromptResponse")?;
-            emit(ConversationEvent::PromptResult { target, result })?;
+            emit(ConversationEvent::PromptResult {
+                target,
+                end,
+                result,
+            })?;
             return Ok(end);
         }
     }
@@ -763,6 +764,25 @@ fn validate_conversation_create_request(
         return Err(ClientError::InvalidRequest(
             "new conversation requires model, effort, and access",
         ));
+    }
+    if request.session.is_none() {
+        let created_by = request
+            .created_by
+            .as_ref()
+            .ok_or(ClientError::InvalidRequest(
+                "new or forked conversation requires createdBy",
+            ))?;
+        let approver = request
+            .approver
+            .as_ref()
+            .ok_or(ClientError::InvalidRequest(
+                "new or forked conversation requires approver",
+            ))?;
+        if created_by.endpoint != request.endpoint || approver.endpoint != request.endpoint {
+            return Err(ClientError::InvalidRequest(
+                "conversation identities belong to another endpoint",
+            ));
+        }
     }
     Ok(())
 }

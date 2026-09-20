@@ -269,3 +269,7 @@ async fn retire_sessions(
 #[cfg(test)]
 #[path = "mcp_http_listener_tests.rs"]
 mod mcp_http_listener_tests;
+
+#[cfg(test)]
+#[path = "mcp_remediation_tests.rs"]
+mod mcp_remediation_tests;
