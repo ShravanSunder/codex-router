@@ -8,6 +8,33 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
+#[allow(clippy::panic)]
+fn validate_conversation_records(
+    stdout: &[u8],
+    label: &str,
+) -> Vec<collaboration_client::protocol::ConversationRecord> {
+    let schemas = collaboration_client::protocol::protocol_type_schemas()
+        .unwrap_or_else(|error| panic!("{label} schema export: {error}"));
+    let schema = schemas
+        .get("ConversationRecord")
+        .unwrap_or_else(|| panic!("{label} ConversationRecord schema"));
+    let validator = jsonschema::validator_for(schema)
+        .unwrap_or_else(|error| panic!("{label} validator: {error}"));
+    String::from_utf8(stdout.to_vec())
+        .unwrap_or_else(|error| panic!("{label} UTF-8: {error}"))
+        .lines()
+        .map(|line| {
+            let value: Value =
+                serde_json::from_str(line).unwrap_or_else(|error| panic!("{label} JSON: {error}"));
+            if let Err(error) = validator.validate(&value) {
+                panic!("{label} exported schema rejected actual stdout: {error}; {value}");
+            }
+            serde_json::from_value(value)
+                .unwrap_or_else(|error| panic!("{label} record contract: {error}"))
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn standalone_create_manifest_preflight_reports_no_effect_without_acp_dispatch() {
     // Arrange: no manifest or control peer exists, so the compiled command cannot
@@ -383,12 +410,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .await
         .expect("create output");
     assert!(create.status.success());
-    let created_records: Vec<collaboration_client::protocol::ConversationRecord> =
-        String::from_utf8(create.stdout)
-            .expect("created UTF-8")
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("created record contract"))
-            .collect();
+    let created_records = validate_conversation_records(&create.stdout, "created");
     assert!(created_records.iter().any(|record| matches!(
         record,
         collaboration_client::protocol::ConversationRecord::ConversationCreated { .. }
@@ -423,12 +445,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
     }
     let success = prompt(&root, 5).await;
     assert!(success.status.success());
-    let success_records: Vec<collaboration_client::protocol::ConversationRecord> =
-        String::from_utf8(success.stdout)
-            .expect("success UTF-8")
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("success record contract"))
-            .collect();
+    let success_records = validate_conversation_records(&success.stdout, "success");
     assert!(success_records.iter().any(|record| matches!(
         record,
         collaboration_client::protocol::ConversationRecord::PromptResult { .. }
@@ -436,12 +453,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
 
     let rejected = prompt(&root, 5).await;
     assert_eq!(rejected.status.code(), Some(4));
-    let rejected_records: Vec<collaboration_client::protocol::ConversationRecord> =
-        String::from_utf8(rejected.stdout)
-            .expect("rejection UTF-8")
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("rejection record contract"))
-            .collect();
+    let rejected_records = validate_conversation_records(&rejected.stdout, "rejection");
     assert!(matches!(
         rejected_records.last(),
         Some(collaboration_client::protocol::ConversationRecord::ConversationError { .. })
@@ -449,12 +461,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
 
     let deadline = prompt(&root, 1).await;
     assert_eq!(deadline.status.code(), Some(124));
-    let deadline_records: Vec<collaboration_client::protocol::ConversationRecord> =
-        String::from_utf8(deadline.stdout)
-            .expect("deadline UTF-8")
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("deadline record contract"))
-            .collect();
+    let deadline_records = validate_conversation_records(&deadline.stdout, "deadline");
     assert!(matches!(
         deadline_records.last(),
         Some(collaboration_client::protocol::ConversationRecord::ConversationSettlement { .. })
@@ -508,12 +515,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .expect("interrupt deadline")
         .expect("interrupt output");
     assert_eq!(interrupted.status.code(), Some(130));
-    let interrupted_records: Vec<collaboration_client::protocol::ConversationRecord> =
-        String::from_utf8(interrupted.stdout)
-            .expect("interrupt UTF-8")
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("interrupt record contract"))
-            .collect();
+    let interrupted_records = validate_conversation_records(&interrupted.stdout, "interrupt");
     assert!(matches!(
         interrupted_records.last(),
         Some(collaboration_client::protocol::ConversationRecord::ConversationSettlement { .. })

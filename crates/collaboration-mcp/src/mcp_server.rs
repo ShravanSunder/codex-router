@@ -342,13 +342,24 @@ impl CollaborationMcpServer {
         Parameters(request): Parameters<collaboration_protocol::WakeShowRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
-        let client = match self.connect().await {
+        let wakeup_id = request.wakeup_id.clone();
+        let client = match tokio::select! {
+            _ = context.ct.cancelled() => {
+                return wake_wait_failure(collaboration_client::WakeWaitError::CallerCancelled { wakeup_id: wakeup_id.clone() });
+            }
+            result = self.connect() => result,
+        } {
             Ok(value) => value,
             Err(error) => {
                 return wake_wait_failure(collaboration_client::WakeWaitError::Connection(error));
             }
         };
-        let wait = match client.subscribe_wakeup(request).await {
+        let wait = match tokio::select! {
+            _ = context.ct.cancelled() => {
+                return wake_wait_failure(collaboration_client::WakeWaitError::CallerCancelled { wakeup_id });
+            }
+            result = client.subscribe_wakeup(request) => result,
+        } {
             Ok(value) => value,
             Err(error) => return wake_wait_failure(error),
         };

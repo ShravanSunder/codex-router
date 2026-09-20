@@ -204,6 +204,15 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
 
         assert_eq!(output.status.code(), Some(expected_exit), "{label}");
         let result: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
+        let schemas = collaboration_client::protocol::protocol_type_schemas()
+            .expect("protocol schema export");
+        let schema = schemas
+            .get("FiniteCommandRecord")
+            .expect("FiniteCommandRecord schema");
+        let validator = jsonschema::validator_for(schema).expect("finite record validator");
+        if let Err(error) = validator.validate(&result) {
+            panic!("{label} exported schema rejected actual stdout: {error}; {result}");
+        }
         let _: collaboration_client::protocol::FiniteCommandRecord<
             Value,
             collaboration_client::protocol::AdapterOperationFailure,

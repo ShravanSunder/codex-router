@@ -33,6 +33,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "iocraft",
+ "jsonschema",
  "lifecycle-observation",
  "message-board-storage",
  "serde",
