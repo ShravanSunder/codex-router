@@ -2,9 +2,44 @@
 
 Use `agent-collaboration` to discover, message and observe independently addressed
 Codex threads on this machine. Resolve your complete session reference from supplied
-context or verified native thread identity using the [session messaging guide](../../agent-skills/agent-collaboration/references/session-messaging.md).
+context or verified native thread identity using the skill's [Identity guidance](../../agent-skills/agent-collaboration/SKILL.md#identity).
 The caller must authorize the operation and service access. Do not infer your
 identity from a PID, working directory, display name or recently updated thread.
+
+## Register the Router MCP endpoint with Codex
+
+This setup section is for intentionally configuring Codex locally; it is not
+part of the agent-collaboration skill’s runtime workflow.
+
+Use matching Router Host and Router client builds; Codex must support Streamable
+HTTP MCP. Select the current owner-local Router service directory explicitly,
+then read its published Streamable HTTP endpoint from `service.json`; do not
+scan ports, guess from a default, or inspect provider session files or transcripts.
+
+```sh
+ROUTER_SERVICE_DIRECTORY="/absolute/path/to/selected/service-directory"
+ROUTER_MCP_URL="$(jq -er '.mcp.url' "$ROUTER_SERVICE_DIRECTORY/service.json")"
+codex mcp add codex-router --url "$ROUTER_MCP_URL"
+codex mcp get codex-router --json
+codex mcp list
+```
+
+`codex mcp add` writes the Codex MCP registration. `get` and `list` verify that
+registration; they do not prove a live server call or agent behavior. If the
+selected current manifest is absent or has no `mcp.url`, report missing setup.
+Do not restart or replace the production Router to manufacture a manifest.
+
+Normal and debug Host defaults are `http://127.0.0.1:8788/mcp` and
+`http://127.0.0.1:18788/mcp`, respectively, but they are documentation fallbacks
+only: an explicit bind and the current manifest win. The current release accepts
+only loopback, unauthenticated plain HTTP and does not support remote exposure,
+authentication, or TLS. The running server's tool descriptions and input/output
+schemas are authoritative; do not copy a static tool catalog. Tool approval is
+a policy decision, not proof of OS or filesystem confinement. Use supported
+typed operations and never read, tail, parse, copy, or store provider session
+files or transcripts.
+
+## CLI discovery
 
 ```sh
 agent-collaboration endpoints list --json
@@ -172,7 +207,7 @@ local `endpoint` and absolute `cwd`, then enable it. This configures local
 bindings without allocating a thread or changing mode. Same-ID overwrite
 preserves mode; choosing another mode requires a new schedule.
 
-Completion wake-ups and remote federation are later work. Project boards use `agent-collaboration board`; see [message board guidance](../../agent-skills/agent-collaboration/references/message-board.md).
+Completion wake-ups and remote federation are later work. Project boards use `agent-collaboration board`; see [message board guidance](../../agent-skills/agent-collaboration/references/message-board.md), including its [assigned-role guidance](../../agent-skills/agent-collaboration/references/message-board.md#participate-in-the-assigned-role). Board seats are discussion-local participation; they do not grant session ancestry, filesystem rights, design authority or native-child direct input.
 B still sends its own reply explicitly.
 
 ## Human input, interruption and other protocols
@@ -205,6 +240,6 @@ automation cannot grant access, ask the human for the required access. Retry
 only after a grant; repeated denial is not a Router outage. Receiving a message
 does not prove outgoing socket access. The [debug testing guide](../testing/automation-debug-testing.md)
 shows a scoped native permission profile and its positive/negative proof. These
-instructions do not grant permissions or install tools. The interfaces are local
-Rust SDK and CLI today; remote transport and other language SDK implementations
-follow separately.
+instructions do not grant permissions or install tools. The supported interfaces
+are the local Rust SDK, CLI, and the Host's loopback Streamable HTTP MCP endpoint.
+Remote MCP exposure and other language SDK implementations follow separately.

@@ -108,6 +108,9 @@ replacement proof.
 
 For discovery, agent-declared messages, queue/steer, timed wake-ups and scheduled
 work, see the [agent CLI guide](docs/agent-guidance/agent-collaboration.md).
+That guide also documents registering the running Router Host's manifest-advertised
+Streamable HTTP MCP endpoint with Codex. Use the selected current `service.json`;
+do not guess a port or expose the unauthenticated endpoint beyond loopback.
 Automation uses a separate `automation.sqlite` database and the same Rust SDK
 and CLI. [Debug testing instructions](docs/testing/automation-debug-testing.md)
 cover the opt-in Luna acceptance runner and its isolated Host. Shared message boards use the same client and service; see the
