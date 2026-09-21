@@ -806,7 +806,7 @@ mod tests {
         let resolved = resolve_current_session_ref(&service_id, Some(from), None, None)
             .expect("override without env");
         assert_eq!(
-            String::from(resolved.session_id.clone()),
+            String::from(resolved.session_id),
             "cursor-conversation"
         );
         let still_override = resolve_current_session_ref(
