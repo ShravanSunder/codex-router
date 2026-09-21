@@ -111,7 +111,7 @@ pub(crate) fn prepare(args: &SendArguments) -> Result<(PathBuf, PreparedMessage)
     ))
 }
 
-fn session_ref_guidance(field: &str) -> String {
+pub(crate) fn session_ref_guidance(field: &str) -> String {
     format!(
         "{field} must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId. nativeThreadId is a lifecycle address, not a SessionRef. Copy .target from sessions list --json."
     )

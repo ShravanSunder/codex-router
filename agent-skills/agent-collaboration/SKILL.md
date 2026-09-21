@@ -34,7 +34,13 @@ IF taking one of these actions, read the named help or advertised schema and ret
 
 Use the complete target returned by discovery or supplied by the caller; do not reconstruct it from a title, working directory, or board root. Preserve that identity across continuation and recovery.
 
-For your sender, prefer the supplied self SessionRef. Otherwise verify the current harness's session identity against Router discovery. In Codex, `CODEX_THREAD_ID` identifies the current thread; a shared `CODEX_SESSION_ID` must not substitute for it. For Claude, use the current `CLAUDE_CODE_SESSION_ID` when supplied by that harness. Missing or conflicting identity is a gap to resolve, not permission to invent a sender or impersonate a human.
+Caller identity has two layers. Do not collapse them.
+
+- **Router** accepts any opaque session ID on the same endpoint as the conversation. It does not look up stored Codex threads and does not require `CODEX_THREAD_ID`.
+- **CLI implicit self** reads exactly one of `CODEX_THREAD_ID` (`codex-local`) or `CLAUDE_CODE_SESSION_ID` (`claude-local`). `--actor self` uses that same pair. `CURSOR_CONVERSATION_ID` and other host IDs are not implicit self.
+- **`--from`** is the override when `conversation create --help` or `conversation prompt --help` lists it: exact SessionRef JSON, the same shape as `message send --from`. It supplies `createdBy` and the prompt sender. `--approver` is separate and defaults to that creating identity. If help does not list `--from`, the installed CLI still has no override.
+
+`current session identity unavailable` means implicit self was missing and `--from` was omitted or unavailable. That is not "Router rejects non-Codex sessions." Do not mint a `codex exec` thread, invent a session ID, create a duplicate conversation, or use `--human-user` to manufacture a caller. When implicit env is missing, pass `--from` if help exposes it, wrapping a real host session as SessionRef on the selected endpoint, or ask the owner for that SessionRef.
 
 ## Act on evidence
 
