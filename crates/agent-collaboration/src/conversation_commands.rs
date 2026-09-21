@@ -805,10 +805,7 @@ mod tests {
         let from = r#"{"endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},"sessionId":"cursor-conversation"}"#;
         let resolved = resolve_current_session_ref(&service_id, Some(from), None, None)
             .expect("override without env");
-        assert_eq!(
-            String::from(resolved.session_id),
-            "cursor-conversation"
-        );
+        assert_eq!(String::from(resolved.session_id), "cursor-conversation");
         let still_override = resolve_current_session_ref(
             &service_id,
             Some(from),
