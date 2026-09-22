@@ -95,6 +95,7 @@ use crate::provider_error::AsyncProviderErrorObserver;
 use crate::provider_error::ProviderErrorClassification;
 use crate::provider_error::ProviderErrorObservationError;
 use crate::provider_error::classify_responses_websocket_error_envelope;
+use crate::session_account_affinity_cache::SessionAffinityActivityHandle;
 
 use crate::routes::Method;
 
@@ -215,6 +216,7 @@ pub struct WebSocketAffinityOwnerContext {
     account_id: AccountId,
     credential_generation: u64,
     active_reservation_guard: Option<ActiveReservationGuard>,
+    session_affinity_activity_handle: Option<SessionAffinityActivityHandle>,
 }
 
 impl WebSocketAffinityOwnerContext {
@@ -228,6 +230,7 @@ impl WebSocketAffinityOwnerContext {
             account_id,
             credential_generation,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         }
     }
 
@@ -236,6 +239,14 @@ impl WebSocketAffinityOwnerContext {
         active_reservation_guard: Option<ActiveReservationGuard>,
     ) -> Self {
         self.active_reservation_guard = active_reservation_guard;
+        self
+    }
+
+    fn with_session_affinity_activity_handle(
+        mut self,
+        session_affinity_activity_handle: Option<SessionAffinityActivityHandle>,
+    ) -> Self {
+        self.session_affinity_activity_handle = session_affinity_activity_handle;
         self
     }
 }
@@ -520,8 +531,9 @@ where
                             selected.account_id().clone(),
                             resolved.credential_generation(),
                         )
-                        .with_active_reservation_guard(
-                            selected.active_reservation_guard().cloned(),
+                        .with_active_reservation_guard(selected.active_reservation_guard().cloned())
+                        .with_session_affinity_activity_handle(
+                            selected.session_affinity_activity_handle().cloned(),
                         ),
                     ),
                 },
@@ -731,8 +743,9 @@ where
                             selected.account_id().clone(),
                             resolved.credential_generation(),
                         )
-                        .with_active_reservation_guard(
-                            selected.active_reservation_guard().cloned(),
+                        .with_active_reservation_guard(selected.active_reservation_guard().cloned())
+                        .with_session_affinity_activity_handle(
+                            selected.session_affinity_activity_handle().cloned(),
                         ),
                     ),
                 },
@@ -1364,11 +1377,13 @@ mod async_forwarding_tests {
     use super::WebSocketQuotaFloorNotifier;
     use super::WebSocketRevocationRegistry;
     use super::capacity_retry_thread_id;
+    use super::current_unix_seconds;
     use super::forward_duplex_until_complete;
     use super::is_response_completed;
     use super::is_response_create;
     use super::maybe_replace_account_quota_exhaustion_with_reconnect_signal;
     use super::provider_error_classification_from_message;
+    use super::pump_local_to_upstream;
     use super::record_forwarded_websocket_metadata;
     use super::websocket_affinity_owner_record;
     use bytes::Bytes;
@@ -1409,8 +1424,313 @@ mod async_forwarding_tests {
     use crate::provider_error::AsyncProviderErrorObserver;
     use crate::provider_error::ProviderErrorClassification;
     use crate::provider_error::ProviderErrorObservationError;
+    use crate::session_account_affinity_cache::SessionAccountAffinityCache;
+    use crate::session_account_affinity_cache::lookup_session_account_affinity;
+    use crate::session_account_affinity_cache::publish_session_account_affinity;
     use codex_router_selection::reservation::ReservationBook;
     use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+
+    #[tokio::test]
+    async fn exact_forwarded_response_create_renews_session_affinity() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let cache = SessionAccountAffinityCache::shared();
+        let account_id = AccountId::new("acct-affinity-activity")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let published = publish_session_account_affinity(
+            &cache,
+            "session-activity",
+            &account_id,
+            codex_router_core::routes::RouteBand::Responses,
+            None,
+            0,
+        )
+        .unwrap_or_else(|_| panic!("test affinity publication should succeed"));
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let affinity_owner_context =
+            WebSocketAffinityOwnerContext::new(affinity_secret, account_id, 1)
+                .with_session_affinity_activity_handle(Some(published.activity_handle().clone()));
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: None,
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let peer_task = async {
+            client_websocket
+                .send(Message::text(r#"{"type":"conversation.item.create"}"#))
+                .await
+                .unwrap_or_else(|error| panic!("unrelated frame should send: {error}"));
+            let unrelated = upstream_websocket
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("upstream should receive unrelated frame"))
+                .unwrap_or_else(|error| panic!("unrelated frame should forward: {error}"));
+            assert_eq!(
+                unrelated,
+                Message::text(r#"{"type":"conversation.item.create"}"#)
+            );
+            assert!(
+                lookup_session_account_affinity(
+                    &cache,
+                    "session-activity",
+                    codex_router_core::routes::RouteBand::Responses,
+                    None,
+                    current_unix_seconds(),
+                )
+                .unwrap_or_else(|_| panic!("lookup should succeed"))
+                .is_none(),
+                "unrelated forwarded traffic must not renew an expired entry"
+            );
+
+            let response_create = Message::text(r#"{"type":"response.create","turn":1}"#);
+            client_websocket
+                .send(response_create.clone())
+                .await
+                .unwrap_or_else(|error| panic!("response.create should send: {error}"));
+            let forwarded = upstream_websocket
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("upstream should receive response.create"))
+                .unwrap_or_else(|error| panic!("response.create should forward: {error}"));
+            assert_eq!(
+                forwarded, response_create,
+                "forwarded bytes must remain unchanged"
+            );
+            assert!(
+                lookup_session_account_affinity(
+                    &cache,
+                    "session-activity",
+                    codex_router_core::routes::RouteBand::Responses,
+                    None,
+                    current_unix_seconds(),
+                )
+                .unwrap_or_else(|_| panic!("lookup should succeed"))
+                .is_some(),
+                "successful exact response.create forwarding should renew affinity"
+            );
+            client_websocket
+                .close(None)
+                .await
+                .unwrap_or_else(|error| panic!("client should close cleanly: {error}"));
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "forwarding should succeed: {router_result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn large_and_malformed_suffix_response_create_frames_renew_session_affinity() {
+        let valid_large = Message::text(format!(
+            r#"{{"type":"response.create","input":"{}"}}"#,
+            "x".repeat(70 * 1024)
+        ));
+        assert_forwarded_recognized_frame_renews(
+            valid_large,
+            "session-large-response-create",
+            "acct-large-response-create",
+        )
+        .await;
+
+        let malformed_suffix = Message::text(format!(
+            r#"{{"type":"response.create","input":"{}" malformed"#,
+            "x".repeat(70 * 1024)
+        ));
+        assert_forwarded_recognized_frame_renews(
+            malformed_suffix,
+            "session-malformed-response-create",
+            "acct-malformed-response-create",
+        )
+        .await;
+    }
+
+    async fn assert_forwarded_recognized_frame_renews(
+        frame: Message,
+        session_id: &str,
+        account_id: &str,
+    ) {
+        let (router_local_stream, client_stream) = duplex(160 * 1024);
+        let (router_upstream_stream, upstream_stream) = duplex(160 * 1024);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let mut upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let cache = SessionAccountAffinityCache::shared();
+        let account_id = AccountId::new(account_id)
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let published = publish_session_account_affinity(
+            &cache,
+            session_id,
+            &account_id,
+            codex_router_core::routes::RouteBand::Responses,
+            None,
+            0,
+        )
+        .unwrap_or_else(|_| panic!("test affinity publication should succeed"));
+        let affinity_secret = RouterAffinityHashSecret::new(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_or_else(|error| panic!("test affinity secret should parse: {error}"));
+        let affinity_owner_context =
+            WebSocketAffinityOwnerContext::new(affinity_secret, account_id, 1)
+                .with_session_affinity_activity_handle(Some(published.activity_handle().clone()));
+        let registry = WebSocketRevocationRegistry::new();
+        let session = registry.register_cancellation(TokenGeneration::new(1));
+        let revocation = session.cancellation().clone();
+        let session_shutdown = CancellationToken::new();
+
+        let router_task = async {
+            forward_duplex_until_complete(
+                router_local_websocket,
+                router_upstream_websocket,
+                WebSocketForwardingContext {
+                    session_registration: session,
+                    affinity_owner_recorder: None,
+                    async_affinity_owner_recorder: None,
+                    affinity_record_tasks: TaskTracker::new(),
+                    affinity_owner_context: Some(&affinity_owner_context),
+                    provider_error_observer: None,
+                    revocation: &revocation,
+                    session_shutdown: &session_shutdown,
+                },
+            )
+            .await
+        };
+        let expected_frame = frame.clone();
+        let peer_task = async {
+            client_websocket
+                .send(frame)
+                .await
+                .unwrap_or_else(|error| panic!("recognized frame should send: {error}"));
+            let forwarded = upstream_websocket
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("upstream should receive recognized frame"))
+                .unwrap_or_else(|error| panic!("recognized frame should forward: {error}"));
+            assert_eq!(
+                forwarded, expected_frame,
+                "forwarded bytes must remain unchanged"
+            );
+            assert!(
+                lookup_session_account_affinity(
+                    &cache,
+                    session_id,
+                    codex_router_core::routes::RouteBand::Responses,
+                    None,
+                    current_unix_seconds(),
+                )
+                .unwrap_or_else(|_| panic!("lookup should succeed"))
+                .is_some(),
+                "successfully forwarded recognized activity should renew affinity"
+            );
+            client_websocket
+                .close(None)
+                .await
+                .unwrap_or_else(|error| panic!("client should close cleanly: {error}"));
+        };
+
+        let (router_result, ()) = tokio::join!(router_task, peer_task);
+        assert!(
+            router_result.is_ok(),
+            "forwarding should succeed: {router_result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_response_create_forward_does_not_renew_session_affinity() {
+        let (router_local_stream, client_stream) = duplex(4096);
+        let (router_upstream_stream, upstream_stream) = duplex(4096);
+        let router_local_websocket =
+            WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+        let router_upstream_websocket =
+            WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+        let mut client_websocket =
+            WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+        let upstream_websocket =
+            WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+        let (upstream_write, _upstream_read) = router_upstream_websocket.split();
+        let (_local_write, local_read) = router_local_websocket.split();
+        drop(upstream_websocket);
+
+        let cache = SessionAccountAffinityCache::shared();
+        let account_id = AccountId::new("acct-failed-forward")
+            .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
+        let published = publish_session_account_affinity(
+            &cache,
+            "session-failed-forward",
+            &account_id,
+            codex_router_core::routes::RouteBand::Responses,
+            None,
+            0,
+        )
+        .unwrap_or_else(|_| panic!("test affinity publication should succeed"));
+        client_websocket
+            .send(Message::text(r#"{"type":"response.create"}"#))
+            .await
+            .unwrap_or_else(|error| panic!("client frame should enter local socket: {error}"));
+
+        let result = pump_local_to_upstream(
+            local_read,
+            upstream_write,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+            ActiveTurnReservationState::new(None),
+            Some(published.activity_handle().clone()),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "closed upstream must fail the forwarding send"
+        );
+        assert!(
+            lookup_session_account_affinity(
+                &cache,
+                "session-failed-forward",
+                codex_router_core::routes::RouteBand::Responses,
+                None,
+                current_unix_seconds(),
+            )
+            .unwrap_or_else(|_| panic!("lookup should succeed"))
+            .is_none(),
+            "failed forwarding must not renew the expired affinity"
+        );
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RecordedProviderError {
@@ -1815,6 +2135,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let recorder_entered = Arc::new(Notify::new());
         let recorder_release = Arc::new(Notify::new());
@@ -2214,6 +2535,7 @@ mod async_forwarding_tests {
             account_id,
             credential_generation: 7,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let oversized_padding = "a".repeat(65 * 1024);
         let message = Message::text(format!(
@@ -2594,6 +2916,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
+            session_affinity_activity_handle: None,
         };
 
         let active_sessions = || {
@@ -2718,6 +3041,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
+            session_affinity_activity_handle: None,
         };
         let active_sessions = || {
             let reservations = active_reservations
@@ -2858,6 +3182,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
+            session_affinity_activity_handle: None,
         };
         let active_sessions = || {
             let reservations = active_reservations
@@ -2978,6 +3303,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
+            session_affinity_activity_handle: None,
         };
         let active_sessions = || {
             let reservations = active_reservations
@@ -3094,6 +3420,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let padding = "x".repeat(128 * 1024);
         let usage_limit_frame = format!(
@@ -3199,6 +3526,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let padding = "x".repeat(128 * 1024);
         let usage_limit_frame = format!(
@@ -3312,6 +3640,7 @@ mod async_forwarding_tests {
             account_id: selected_account,
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let padding = "x".repeat(128 * 1024);
         let model_text_frame = format!(
@@ -3413,6 +3742,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -3529,6 +3859,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -3637,6 +3968,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -3772,6 +4104,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: Some(active_reservation_guard),
+            session_affinity_activity_handle: None,
         };
         let active_sessions = || {
             let reservations = active_reservations
@@ -3880,6 +4213,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -3975,6 +4309,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -4076,6 +4411,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -4193,6 +4529,7 @@ mod async_forwarding_tests {
             account_id: selected_account,
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -4277,6 +4614,7 @@ mod async_forwarding_tests {
                 .unwrap_or_else(|error| panic!("test account id should parse: {error}")),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
 
         let router_task = forward_duplex_until_complete(
@@ -4432,6 +4770,7 @@ mod async_forwarding_tests {
             account_id: selected_account,
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -4516,6 +4855,7 @@ mod async_forwarding_tests {
             account_id: selected_account,
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -4607,6 +4947,7 @@ mod async_forwarding_tests {
             account_id: selected_account,
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let usage_limit_frame = r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#;
 
@@ -4700,6 +5041,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let connection_limit_frame = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached"}}"#;
 
@@ -4853,6 +5195,7 @@ mod async_forwarding_tests {
             account_id: selected_account.clone(),
             credential_generation: 1,
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         };
         let notifier = WebSocketQuotaFloorNotifier::new(registry.clone());
 
@@ -5483,6 +5826,9 @@ where
             .and_then(|context| context.active_reservation_guard.clone()),
     );
     let local_active_turn_reservation = active_turn_reservation.clone();
+    let session_affinity_activity_handle = affinity_owner_context
+        .as_ref()
+        .and_then(|context| context.session_affinity_activity_handle.clone());
     let mut local_to_upstream = tokio::spawn(async move {
         pump_local_to_upstream(
             local_read,
@@ -5491,6 +5837,7 @@ where
             local_to_upstream_shutdown,
             local_to_upstream_tunnel_shutdown,
             local_active_turn_reservation,
+            session_affinity_activity_handle,
         )
         .await
     });
@@ -5553,6 +5900,7 @@ async fn pump_local_to_upstream<LocalStream, UpstreamStream>(
     session_shutdown: CancellationToken,
     tunnel_shutdown: CancellationToken,
     active_turn_reservation: ActiveTurnReservationState,
+    session_affinity_activity_handle: Option<SessionAffinityActivityHandle>,
 ) -> Result<(), WebSocketTunnelError>
 where
     LocalStream: AsyncRead + AsyncWrite + Unpin,
@@ -5587,7 +5935,8 @@ where
                     Err(error) => return Err(WebSocketTunnelError::Transport(error)),
                 };
                 let is_close = matches!(local_message, Message::Close(_));
-                if is_response_create(&local_message) {
+                let is_response_create = is_response_create(&local_message);
+                if is_response_create {
                     active_turn_reservation.reserve_if_idle(current_unix_seconds());
                 }
                 if is_close {
@@ -5595,6 +5944,16 @@ where
                     return Ok(());
                 }
                 upstream_write.send(local_message).await?;
+                if is_response_create
+                    && let Some(activity_handle) = &session_affinity_activity_handle
+                    && activity_handle.touch_if_current(current_unix_seconds()).is_err()
+                {
+                    tracing::warn!(
+                        component = "session_account_affinity",
+                        error.class = "cache_unavailable",
+                        "codex_router.session_affinity_activity_degraded"
+                    );
+                }
             }
         }
     }

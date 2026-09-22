@@ -306,8 +306,8 @@ fn quota_status_marks_active_client_mirror_unavailable_when_rows_are_corrupt() {
         18_000,
         SelectorQuotaWindowStatus::Eligible,
     )
-    .with_remaining_headroom(80)
-    .with_reset_unix_seconds(20_000)
+    .with_remaining_headroom(100)
+    .with_reset_unix_seconds(25_400)
     .with_effective(true)
     .with_observed_unix_seconds(10_000);
     let weekly_window = PersistedSelectorQuotaWindow::new(
@@ -316,8 +316,8 @@ fn quota_status_marks_active_client_mirror_unavailable_when_rows_are_corrupt() {
         604_800,
         SelectorQuotaWindowStatus::Eligible,
     )
-    .with_remaining_headroom(80)
-    .with_reset_unix_seconds(614_800)
+    .with_remaining_headroom(20)
+    .with_reset_unix_seconds(97_400)
     .with_observed_unix_seconds(10_000);
     must_ok(
         SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
@@ -411,26 +411,32 @@ fn quota_status_marks_active_client_mirror_unavailable_when_rows_are_corrupt() {
     );
     assert_eq!(
         parsed["accounts"][0]["window_slots"]["5h"]["remaining_headroom"],
-        80
+        100
     );
     assert_eq!(
         parsed["accounts"][0]["window_slots"]["weekly"]["remaining_headroom"],
-        80
+        20
     );
     assert_eq!(parsed["accounts"][0]["preferred_next"], false);
+    assert_eq!(parsed["accounts"][0]["freshness"], "fresh");
+    assert_eq!(
+        parsed["accounts"][0]["window_slots"]["weekly"]["evidence_state"],
+        "known"
+    );
+    assert_eq!(
+        parsed["accounts"][0]["window_slots"]["weekly"]["run_rate"]["confidence"],
+        "insufficient"
+    );
     assert_eq!(
         parsed["accounts"][0]["weekly_quota_floor_basis_points"],
         500
     );
     assert_eq!(parsed["accounts"][0]["weekly_quota_floor_percent"], 5);
     assert_eq!(must_ok(fs::read(&state_path)), state_bytes_before_status);
-    assert_ne!(parsed["accounts"][0]["next_use"], "preferred by quota");
-    assert!(
-        !parsed["accounts"][0]["routing_reason"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("preferred_"),
-        "degraded status must not expose preferred-routing semantics: {parsed}"
+    assert_eq!(parsed["accounts"][0]["next_use"], "fallback by quota");
+    assert_eq!(
+        parsed["accounts"][0]["routing_reason"],
+        "unknown_fallback_available"
     );
     assert!(output.stderr.is_empty());
 }

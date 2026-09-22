@@ -193,6 +193,36 @@ async fn quota_async_entry_owns_help_and_reset_migration_guidance() {
 #[tokio::test]
 async fn production_quota_refresh_composition_runs_inside_the_process_runtime() {
     let router_root = IsolatedAsyncRefreshRoot::new();
+    let state_path = router_root.path().join("state.sqlite");
+    let state = AsyncSqliteStateStore::open(&state_path)
+        .await
+        .expect("quota history state should open");
+    let fixture_account_id = account_id("acct_refresh_retention_fixture");
+    let retained_observation = PersistedQuotaHistoryObservation::new(
+        fixture_account_id.clone(),
+        "refresh-retention",
+        USER_QUOTA_ROUTE_BAND,
+        V1_WEEKLY_WINDOW_SECONDS,
+        4_000_000_000,
+        50,
+    );
+    for observation in [
+        PersistedQuotaHistoryObservation::new(
+            fixture_account_id.clone(),
+            "refresh-retention",
+            USER_QUOTA_ROUTE_BAND,
+            V1_WEEKLY_WINDOW_SECONDS,
+            1,
+            49,
+        ),
+        retained_observation.clone(),
+    ] {
+        state
+            .append_quota_history_observation(&observation)
+            .await
+            .expect("quota history fixture should persist");
+    }
+    state.close().await.expect("fixture state should close");
     let mut stdout = Vec::new();
 
     refresh_quota(
@@ -204,6 +234,23 @@ async fn production_quota_refresh_composition_runs_inside_the_process_runtime() 
     .expect("empty isolated refresh should complete without provider egress");
 
     assert_eq!(stdout, b"refreshed: 0\n");
+    let state = AsyncSqliteStateStore::open(&state_path)
+        .await
+        .expect("quota history state should reopen");
+    assert_eq!(
+        state
+            .quota_history_observations_for_window(
+                &fixture_account_id,
+                USER_QUOTA_ROUTE_BAND,
+                V1_WEEKLY_WINDOW_SECONDS,
+                0,
+                4_000_000_001,
+            )
+            .await,
+        Ok(vec![retained_observation]),
+        "refresh completion must purge eligible history and retain protected current history"
+    );
+    state.close().await.expect("observation state should close");
 }
 
 #[test]

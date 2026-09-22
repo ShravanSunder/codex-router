@@ -1653,12 +1653,28 @@ mod tests {
             Err(error) => panic!("async state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_history");
-        let old_observation = quota_history_observation(
+        let before_cutoff_observation = quota_history_observation(
             account_id.clone(),
             "responses",
             18_000,
-            100,
+            999,
             91,
+            Some(18_100),
+        );
+        let exact_cutoff_observation = quota_history_observation(
+            account_id.clone(),
+            "responses",
+            18_000,
+            1_000,
+            90,
+            Some(18_100),
+        );
+        let after_cutoff_observation = quota_history_observation(
+            account_id.clone(),
+            "responses",
+            18_000,
+            1_001,
+            89,
             Some(18_100),
         );
         let first_observation = quota_history_observation(
@@ -1692,10 +1708,12 @@ mod tests {
         );
 
         for observation in [
-            old_observation,
+            before_cutoff_observation,
+            exact_cutoff_observation.clone(),
+            after_cutoff_observation.clone(),
             first_observation.clone(),
             second_observation.clone(),
-            other_window,
+            other_window.clone(),
         ] {
             if let Err(error) =
                 AsyncQuotaHistoryRepository::append_quota_history_observation(&store, &observation)
@@ -1715,7 +1733,7 @@ mod tests {
             &account_id,
             "responses",
             18_000,
-            1_000,
+            0,
             11_000,
         )
         .await
@@ -1724,7 +1742,27 @@ mod tests {
             Err(error) => panic!("quota history observations should load: {error}"),
         };
 
-        assert_eq!(observations, vec![first_observation, second_observation]);
+        assert_eq!(
+            observations,
+            vec![
+                exact_cutoff_observation,
+                after_cutoff_observation,
+                first_observation,
+                second_observation,
+            ]
+        );
+        assert_eq!(
+            AsyncQuotaHistoryRepository::quota_history_observations_for_window(
+                &store,
+                &account_id,
+                "responses",
+                604_800,
+                0,
+                11_000,
+            )
+            .await,
+            Ok(vec![other_window])
+        );
     }
 
     #[tokio::test]
@@ -1976,8 +2014,9 @@ mod tests {
         };
         let account = account_id("acct_event_compaction");
         let old_completed = ReservationId::new("reservation-old-completed");
+        let exact_cutoff_completed = ReservationId::new("reservation-exact-cutoff-completed");
         let old_open = ReservationId::new("reservation-old-open");
-        let recent_completed = ReservationId::new("reservation-recent-completed");
+        let after_cutoff_completed = ReservationId::new("reservation-after-cutoff-completed");
         let other_route = ReservationId::new("reservation-other-route");
 
         for (
@@ -1991,10 +2030,17 @@ mod tests {
             ("responses", "process-open", &old_open, 100, None),
             (
                 "responses",
-                "process-recent",
-                &recent_completed,
-                900,
-                Some(1_000),
+                "process-exact-cutoff",
+                &exact_cutoff_completed,
+                300,
+                Some(500),
+            ),
+            (
+                "responses",
+                "process-after-cutoff",
+                &after_cutoff_completed,
+                400,
+                Some(501),
             ),
             (
                 "models",
@@ -2051,20 +2097,37 @@ mod tests {
                 crate::sqlite::ActiveSessionEvent::new(
                     account.clone(),
                     "responses",
-                    "process-recent",
-                    recent_completed.clone(),
+                    "process-exact-cutoff",
+                    exact_cutoff_completed.clone(),
                     crate::sqlite::ActiveSessionEventKind::Acquired,
-                    900,
+                    300,
                 ),
+                crate::sqlite::ActiveSessionEvent::new(
+                    account.clone(),
+                    "responses",
+                    "process-after-cutoff",
+                    after_cutoff_completed.clone(),
+                    crate::sqlite::ActiveSessionEventKind::Acquired,
+                    400,
+                ),
+                crate::sqlite::ActiveSessionEvent::new(
+                    account.clone(),
+                    "responses",
+                    "process-exact-cutoff",
+                    exact_cutoff_completed,
+                    crate::sqlite::ActiveSessionEventKind::Released,
+                    500,
+                )
+                .with_session_interval(300, Some(500), "unknown"),
                 crate::sqlite::ActiveSessionEvent::new(
                     account,
                     "responses",
-                    "process-recent",
-                    recent_completed,
+                    "process-after-cutoff",
+                    after_cutoff_completed,
                     crate::sqlite::ActiveSessionEventKind::Released,
-                    1_000,
+                    501,
                 )
-                .with_session_interval(900, Some(1_000), "unknown"),
+                .with_session_interval(400, Some(501), "unknown"),
             ]
         );
 

@@ -492,6 +492,9 @@ pub struct BurnDownAccountAssessment {
     required_active_connections_to_drain: Option<u32>,
     projected_drain_gap_after_selection: Option<i64>,
     projected_weekly_runway_seconds: Option<u64>,
+    weekly_remaining_headroom: Option<u32>,
+    weekly_projected_candidate_burn_basis_points_per_hour: Option<u32>,
+    initial_admission_priority: bool,
     salvage_sort_key: Option<SalvageSortKey>,
 }
 
@@ -633,6 +636,12 @@ impl BurnDownAccountAssessment {
     pub const fn projected_weekly_runway_seconds(&self) -> Option<u64> {
         self.projected_weekly_runway_seconds
     }
+
+    /// Returns whether this account has the one-client initial-admission priority.
+    #[must_use]
+    pub const fn has_initial_admission_priority(&self) -> bool {
+        self.initial_admission_priority
+    }
 }
 
 /// Account availability class.
@@ -721,6 +730,8 @@ pub enum QuotaEvidenceReason {
 /// Public routing reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoutingReason {
+    /// Preferred for one initial real client because fresh near-reset quota has no runway estimate.
+    PreferredNearResetInitialAdmission,
     /// Preferred because near-reset weekly quota needs more active sessions to drain.
     PreferredNearResetDrainable,
     /// Preferred because near-reset weekly quota is safe to keep draining.
@@ -768,6 +779,7 @@ impl RoutingReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::PreferredNearResetInitialAdmission => "preferred_near_reset_initial_admission",
             Self::PreferredNearResetDrainable => "preferred_near_reset_drainable",
             Self::PreferredNearResetControlledDrain => "preferred_near_reset_controlled_drain",
             Self::PreferredWeeklyHealthier => "preferred_weekly_healthier",
@@ -795,6 +807,9 @@ impl RoutingReason {
     #[must_use]
     pub const fn human_phrase(self) -> &'static str {
         match self {
+            Self::PreferredNearResetInitialAdmission => {
+                "preferred next: near-reset initial admission"
+            }
             Self::PreferredNearResetDrainable => "preferred next: near-reset drainable",
             Self::PreferredNearResetControlledDrain => {
                 "preferred next: near-reset controlled drain"
@@ -899,6 +914,8 @@ struct AccountDisplayMetrics {
     required_active_connections_to_drain: Option<u32>,
     projected_drain_gap_after_selection: Option<i64>,
     projected_weekly_runway_seconds: Option<u64>,
+    weekly_remaining_headroom: Option<u32>,
+    weekly_projected_candidate_burn_basis_points_per_hour: Option<u32>,
     salvage_sort_key: Option<SalvageSortKey>,
 }
 
@@ -913,7 +930,16 @@ pub fn assess_route_band(
         .map(|account| assess_account(account, input.now_unix_seconds, input.policy))
         .collect::<Vec<_>>();
     accounts.sort_by(|left, right| left.account_id.cmp(&right.account_id));
+    let ordinary_routing_weights = accounts
+        .iter()
+        .map(|account| (account.account_id.clone(), account.routing_weight))
+        .collect::<Vec<_>>();
     apply_near_zero_retirement(&mut accounts);
+    apply_initial_admission(
+        &mut accounts,
+        &ordinary_routing_weights,
+        input.now_unix_seconds,
+    );
 
     let selected_pool = if accounts
         .iter()
@@ -1033,6 +1059,9 @@ fn assess_account(
         required_active_connections_to_drain: None,
         projected_drain_gap_after_selection: None,
         projected_weekly_runway_seconds: None,
+        weekly_remaining_headroom: None,
+        weekly_projected_candidate_burn_basis_points_per_hour: None,
+        initial_admission_priority: false,
         salvage_sort_key: None,
     };
 
@@ -1330,6 +1359,9 @@ fn account_display_metrics(
         required_active_connections_to_drain,
         projected_drain_gap_after_selection,
         projected_weekly_runway_seconds: weekly_window.and_then(projected_runway_seconds),
+        weekly_remaining_headroom: weekly_window.map(|window| window.remaining_headroom),
+        weekly_projected_candidate_burn_basis_points_per_hour: weekly_window
+            .and_then(|window| window.projected_candidate_burn_basis_points_per_hour),
         salvage_sort_key: salvage_sort_key(windows, short_salvage, long_salvage, policy),
     }
 }
@@ -1355,6 +1387,9 @@ fn with_display_metrics(
     assessment.required_active_connections_to_drain = metrics.required_active_connections_to_drain;
     assessment.projected_drain_gap_after_selection = metrics.projected_drain_gap_after_selection;
     assessment.projected_weekly_runway_seconds = metrics.projected_weekly_runway_seconds;
+    assessment.weekly_remaining_headroom = metrics.weekly_remaining_headroom;
+    assessment.weekly_projected_candidate_burn_basis_points_per_hour =
+        metrics.weekly_projected_candidate_burn_basis_points_per_hour;
     assessment.salvage_sort_key = metrics.salvage_sort_key;
     assessment
 }
@@ -1379,6 +1414,60 @@ fn apply_near_zero_retirement(accounts: &mut [BurnDownAccountAssessment]) {
             account.routing_weight = None;
             account.routing_reason = RoutingReason::RetiringNearZero;
         }
+    }
+}
+
+fn apply_initial_admission(
+    accounts: &mut [BurnDownAccountAssessment],
+    ordinary_routing_weights: &[(AccountId, Option<u32>)],
+    now_unix_seconds: u64,
+) {
+    for account in accounts {
+        let reset_qualifies = account.weekly_reset_unix_seconds.is_some_and(|reset| {
+            reset > now_unix_seconds
+                && reset.saturating_sub(now_unix_seconds) <= DRAIN_POOL_RESET_HORIZON_SECONDS
+        });
+        let burn_evidence_qualifies =
+            matches!(
+                account.weekly_burn_rate_confidence,
+                QuotaRunRateConfidence::Unknown
+                    | QuotaRunRateConfidence::Insufficient
+                    | QuotaRunRateConfidence::Stale
+            ) || account.weekly_projected_candidate_burn_basis_points_per_hour == Some(0);
+        let evidence_qualifies = account.quota_evidence_reason == QuotaEvidenceReason::Ok
+            && account.freshness == QuotaEvidenceFreshness::Fresh
+            && account
+                .weekly_remaining_headroom
+                .is_some_and(|remaining| remaining > 0)
+            && account.projected_weekly_runway_seconds.is_none();
+        let evidence_qualifies = evidence_qualifies && burn_evidence_qualifies;
+        let metadata_qualifies = account.routing_exclusion == RoutingExclusion::None
+            && matches!(
+                account.availability,
+                AccountAvailability::Usable
+                    | AccountAvailability::Reserve
+                    | AccountAvailability::Retiring
+            );
+
+        if account.current_active_sessions != 0
+            || !reset_qualifies
+            || !evidence_qualifies
+            || !metadata_qualifies
+        {
+            continue;
+        }
+
+        let ordinary_weight = ordinary_routing_weights
+            .iter()
+            .find(|(account_id, _)| account_id == &account.account_id)
+            .and_then(|(_, weight)| *weight);
+        let Some(ordinary_weight) = ordinary_weight else {
+            continue;
+        };
+
+        account.availability = AccountAvailability::Usable;
+        account.routing_weight = Some(ordinary_weight);
+        account.initial_admission_priority = true;
     }
 }
 
@@ -1797,6 +1886,10 @@ fn routing_reason_for_account(
         AccountAvailability::Excluded => return RoutingReason::ExcludedDisabled,
     }
 
+    if account.initial_admission_priority {
+        return RoutingReason::PreferredNearResetInitialAdmission;
+    }
+
     if account.weekly_in_drain_pool {
         if account
             .projected_drain_gap_after_selection
@@ -1870,7 +1963,8 @@ fn candidate_priority_cmp(
     right: &BurnDownAccountAssessment,
     right_weight: u32,
 ) -> std::cmp::Ordering {
-    compare_weekly_drain_pool(left, right)
+    compare_initial_admission(left, right)
+        .then_with(|| compare_weekly_drain_pool(left, right))
         .then_with(|| compare_drain_pool_confidence(left, right))
         .then_with(|| compare_projected_drain_gap(left, right))
         .then_with(|| compare_weekly_survival(left, right))
@@ -1878,6 +1972,30 @@ fn candidate_priority_cmp(
         .then_with(|| left.long_pressure.cmp(&right.long_pressure))
         .then_with(|| left.short_pressure.cmp(&right.short_pressure))
         .then_with(|| compare_salvage_key(left, right))
+        .then_with(|| left.account_id.cmp(&right.account_id))
+}
+
+fn compare_initial_admission(
+    left: &BurnDownAccountAssessment,
+    right: &BurnDownAccountAssessment,
+) -> std::cmp::Ordering {
+    match (
+        left.initial_admission_priority,
+        right.initial_admission_priority,
+    ) {
+        (true, false) => return std::cmp::Ordering::Less,
+        (false, true) => return std::cmp::Ordering::Greater,
+        (false, false) => return std::cmp::Ordering::Equal,
+        (true, true) => {}
+    }
+
+    left.weekly_reset_unix_seconds
+        .cmp(&right.weekly_reset_unix_seconds)
+        .then_with(|| {
+            right
+                .weekly_remaining_headroom
+                .cmp(&left.weekly_remaining_headroom)
+        })
         .then_with(|| left.account_id.cmp(&right.account_id))
 }
 
@@ -2243,6 +2361,7 @@ mod tests {
     #[derive(Debug)]
     struct ScenarioRunResult {
         selected_accounts: Vec<String>,
+        selected_routing_reasons: Vec<RoutingReason>,
         selected_weekly_runouts: Vec<(String, Option<u64>)>,
         final_active_sessions: Vec<(String, u32)>,
         final_assessment: BurnDownRouteBandAssessmentResult,
@@ -2255,6 +2374,7 @@ mod tests {
             .map(|account| (account.account_id, account.initial_active_sessions))
             .collect::<Vec<_>>();
         let mut selected_accounts = Vec::new();
+        let mut selected_routing_reasons = Vec::new();
         let mut selected_weekly_runouts = Vec::new();
 
         for _session_start in 0..scenario.starts_to_simulate {
@@ -2270,6 +2390,8 @@ mod tests {
                 .map(|projected_exhaustion_unix_seconds| {
                     projected_exhaustion_unix_seconds.saturating_sub(NOW)
                 });
+            selected_routing_reasons
+                .push(account_assessment(&assessment, &selected_account).routing_reason());
             let (_, selected_active_sessions) = active_sessions_by_account
                 .iter_mut()
                 .find(|(account_id, _)| *account_id == selected_account)
@@ -2293,6 +2415,7 @@ mod tests {
 
         ScenarioRunResult {
             selected_accounts,
+            selected_routing_reasons,
             selected_weekly_runouts,
             final_active_sessions,
             final_assessment,
@@ -2334,8 +2457,10 @@ mod tests {
                 .iter()
                 .map(|account_id| (*account_id).to_owned())
                 .collect::<Vec<_>>(),
-            "{} selected sequence",
-            scenario.id
+            "{} selected sequence; selected reasons={:?}; projected runouts={:?}",
+            scenario.id,
+            result.selected_routing_reasons,
+            result.selected_weekly_runouts,
         );
         assert_eq!(
             result.final_active_sessions,
@@ -2528,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn known_weekly_survivor_beats_unknown_burn_account_w4() {
+    fn fresh_idle_unknown_burn_account_gets_initial_admission_w4() {
         let assessment = assess_route_band(input(vec![
             account(
                 "acct_a",
@@ -2565,8 +2690,289 @@ mod tests {
 
         assert_eq!(
             assessment.preferred_next().map(AccountId::as_str),
-            Some("acct_b"),
-            "W4: known survivor confidence beats unknown-burn soon reset"
+            Some("acct_a"),
+            "W4 supersession: fresh idle near-reset quota receives one initial client"
+        );
+    }
+
+    #[test]
+    fn fresh_idle_unknown_burn_beats_loaded_known_account_w8() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_a",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window(WEEKLY, 21, 24 * 3_600),
+                ],
+            ),
+            account(
+                "acct_b",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        36,
+                        72 * 3_600,
+                        30,
+                    ),
+                ],
+            )
+            .with_current_active_sessions(3),
+            account(
+                "acct_c",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        80,
+                        7 * 86_400,
+                        30,
+                    ),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_a")
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_a").routing_reason(),
+            RoutingReason::PreferredNearResetInitialAdmission
+        );
+    }
+
+    #[test]
+    fn fresh_quota_stale_burn_gets_one_initial_client_then_loses_exception() {
+        let mut active_a = 2;
+        let mut active_b = 0;
+        let mut active_c = 0;
+        let mut selected = Vec::new();
+        for _ in 0..5 {
+            let assessment = assess_route_band(input(vec![
+                account(
+                    "acct_a",
+                    vec![
+                        window(FIVE_HOURS, 100, 4 * 3_600),
+                        projected_window(WEEKLY, 40, 24 * 3_600, 60 * 3_600)
+                            .with_burn_rate_confidence(QuotaRunRateConfidence::Normal),
+                    ],
+                )
+                .with_current_active_sessions(active_a),
+                account(
+                    "acct_b",
+                    vec![
+                        window(FIVE_HOURS, 100, 4 * 3_600),
+                        window(WEEKLY, 42, 25 * 3_600)
+                            .with_burn_rate_confidence(QuotaRunRateConfidence::Stale),
+                    ],
+                )
+                .with_current_active_sessions(active_b),
+                account(
+                    "acct_c",
+                    vec![
+                        window(FIVE_HOURS, 100, 4 * 3_600),
+                        projected_window(WEEKLY, 65, 5 * 86_400, 10 * 86_400),
+                    ],
+                )
+                .with_current_active_sessions(active_c),
+            ]));
+            let account = assessment
+                .preferred_next()
+                .unwrap_or_else(|| panic!("scenario should select an account"))
+                .as_str();
+            selected.push(account.to_owned());
+            match account {
+                "acct_a" => active_a += 1,
+                "acct_b" => active_b += 1,
+                "acct_c" => active_c += 1,
+                other => panic!("unexpected account {other}"),
+            }
+        }
+
+        assert_eq!(selected, ["acct_b", "acct_a", "acct_a", "acct_a", "acct_a"]);
+    }
+
+    #[test]
+    fn initial_admission_is_one_client_then_ordinary_policy_resumes() {
+        let build_assessment = |near_reset_active_sessions| {
+            assess_route_band(input(vec![
+                account(
+                    "acct_near_reset",
+                    vec![
+                        window(FIVE_HOURS, 100, 4 * 3_600),
+                        window(WEEKLY, 20, 24 * 3_600),
+                    ],
+                )
+                .with_current_active_sessions(near_reset_active_sessions),
+                account(
+                    "acct_known_reserve",
+                    vec![
+                        window(FIVE_HOURS, 100, 4 * 3_600),
+                        window_with_per_connection_burn_basis_points_per_hour(
+                            WEEKLY,
+                            34,
+                            96 * 3_600,
+                            20,
+                        ),
+                    ],
+                ),
+            ]))
+        };
+
+        assert_eq!(
+            build_assessment(0).preferred_next().map(AccountId::as_str),
+            Some("acct_near_reset")
+        );
+        assert_eq!(
+            build_assessment(1).preferred_next().map(AccountId::as_str),
+            Some("acct_known_reserve")
+        );
+    }
+
+    #[test]
+    fn initial_admission_restores_zero_weight_below_builtin_retirement_threshold() {
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_four_percent",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_per_connection_burn_basis_points_per_hour(WEEKLY, 4, 20 * 3_600, 0),
+                ],
+            ),
+            account(
+                "acct_healthy_peer",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        80,
+                        5 * 86_400,
+                        20,
+                    ),
+                ],
+            ),
+        ]));
+        let admitted = account_assessment(&assessment, "acct_four_percent");
+
+        assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+        assert_eq!(admitted.availability(), AccountAvailability::Usable);
+        assert_eq!(admitted.routing_weight(), Some(0));
+        assert!(admitted.has_initial_admission_priority());
+        assert_eq!(
+            admitted.routing_reason(),
+            RoutingReason::PreferredNearResetInitialAdmission
+        );
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_four_percent")
+        );
+    }
+
+    #[test]
+    fn initial_admission_keeps_floor_failed_guard_and_known_short_runway_binding() {
+        let short_guard_failure = window(FIVE_HOURS, 20, 4 * 3_600)
+            .with_projected_candidate_burn_basis_points_per_hour(600)
+            .with_burn_rate_confidence(QuotaRunRateConfidence::Normal);
+        let known_low_weekly_runway = window(WEEKLY, 20, 24 * 3_600)
+            .with_per_connection_burn_basis_points_per_hour(100)
+            .with_projected_exhaustion_unix_seconds(NOW + 899);
+        let assessment = assess_route_band(input(vec![
+            account(
+                "acct_floor",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window(WEEKLY, 4, 20 * 3_600),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(400),
+            account(
+                "acct_failed_short_guard",
+                vec![short_guard_failure, window(WEEKLY, 20, 24 * 3_600)],
+            ),
+            account(
+                "acct_known_899_second_runway",
+                vec![window(FIVE_HOURS, 100, 4 * 3_600), known_low_weekly_runway],
+            ),
+            account(
+                "acct_disabled",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window(WEEKLY, 20, 24 * 3_600),
+                ],
+            )
+            .with_account_enabled(false),
+            account(
+                "acct_exhausted",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    QuotaWindowFact::new(WEEKLY, QuotaWindowStatus::Ineligible)
+                        .with_remaining_headroom(0)
+                        .with_reset_unix_seconds(NOW + 24 * 3_600)
+                        .with_observed_unix_seconds(NOW),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            account_assessment(&assessment, "acct_floor").routing_exclusion(),
+            RoutingExclusion::WeeklyQuotaFloor
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_failed_short_guard").quota_evidence_reason(),
+            QuotaEvidenceReason::ShortWindowGuard
+        );
+        assert!(
+            !account_assessment(&assessment, "acct_known_899_second_runway")
+                .has_initial_admission_priority()
+        );
+        assert!(
+            assessment
+                .accounts()
+                .iter()
+                .all(|account| !account.has_initial_admission_priority())
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_disabled").routing_exclusion(),
+            RoutingExclusion::Disabled
+        );
+        assert_eq!(
+            account_assessment(&assessment, "acct_exhausted").quota_evidence_reason(),
+            QuotaEvidenceReason::WindowIneligible
+        );
+    }
+
+    #[test]
+    fn initial_admission_horizon_is_inclusive_and_orders_reset_remaining_then_identity() {
+        let candidate = |account_id_value, remaining, reset_in_seconds| {
+            account(
+                account_id_value,
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window(WEEKLY, remaining, reset_in_seconds),
+                ],
+            )
+        };
+        let assessment = assess_route_band(input(vec![
+            candidate("acct_later", 90, DRAIN_POOL_RESET_HORIZON_SECONDS),
+            candidate("acct_same_reset_lower", 20, 24 * 3_600),
+            candidate("acct_same_reset_z", 30, 24 * 3_600),
+            candidate("acct_same_reset_a", 30, 24 * 3_600),
+            candidate(
+                "acct_outside_horizon",
+                100,
+                DRAIN_POOL_RESET_HORIZON_SECONDS + 1,
+            ),
+        ]));
+
+        assert_eq!(
+            assessment.preferred_next().map(AccountId::as_str),
+            Some("acct_same_reset_a")
+        );
+        assert!(account_assessment(&assessment, "acct_later").has_initial_admission_priority());
+        assert!(
+            !account_assessment(&assessment, "acct_outside_horizon")
+                .has_initial_admission_priority()
         );
     }
 
@@ -3212,7 +3618,13 @@ mod tests {
                             "acct_reset_soon",
                             vec![
                                 window(FIVE_HOURS, 100, hours_minutes(2, 0)),
-                                projected_window(WEEKLY, 30, hours_minutes(2, 0), 20 * 3_600),
+                                window_with_projected_burn_for_proposed_connection(
+                                    WEEKLY,
+                                    30,
+                                    hours_minutes(2, 0),
+                                    480,
+                                    active_sessions,
+                                ),
                             ],
                         )
                         .with_current_active_sessions(active_sessions)
@@ -3226,7 +3638,13 @@ mod tests {
                             "acct_next_day",
                             vec![
                                 window(FIVE_HOURS, 100, hours_minutes(4, 0)),
-                                projected_window(WEEKLY, 32, hours_minutes(26, 0), 72 * 3_600),
+                                window_with_projected_burn_for_proposed_connection(
+                                    WEEKLY,
+                                    32,
+                                    hours_minutes(26, 0),
+                                    100,
+                                    active_sessions,
+                                ),
                             ],
                         )
                         .with_current_active_sessions(active_sessions)
@@ -3240,7 +3658,13 @@ mod tests {
                             "acct_far_reset",
                             vec![
                                 window(FIVE_HOURS, 100, hours_minutes(4, 0)),
-                                projected_window(WEEKLY, 75, 5 * 86_400, 10 * 86_400),
+                                window_with_projected_burn_for_proposed_connection(
+                                    WEEKLY,
+                                    75,
+                                    5 * 86_400,
+                                    20,
+                                    active_sessions,
+                                ),
                             ],
                         )
                         .with_current_active_sessions(active_sessions)
@@ -3250,25 +3674,25 @@ mod tests {
             expected_sequence: vec![
                 "acct_reset_soon",
                 "acct_reset_soon",
+                "acct_next_day",
                 "acct_reset_soon",
-                "acct_reset_soon",
-                "acct_reset_soon",
+                "acct_next_day",
             ],
             expected_final_active_sessions: vec![
-                ("acct_reset_soon", 5),
-                ("acct_next_day", 0),
+                ("acct_reset_soon", 3),
+                ("acct_next_day", 2),
                 ("acct_far_reset", 0),
             ],
             expected_final_account_states: vec![
                 ExpectedAccountState {
                     account_id: "acct_reset_soon",
                     availability: AccountAvailability::Usable,
-                    routing_reason: RoutingReason::PreferredWeeklyResetSoon,
+                    routing_reason: RoutingReason::AvailableSamePool,
                 },
                 ExpectedAccountState {
                     account_id: "acct_next_day",
                     availability: AccountAvailability::Usable,
-                    routing_reason: RoutingReason::AvailableSamePool,
+                    routing_reason: RoutingReason::PreferredNearResetControlledDrain,
                 },
                 ExpectedAccountState {
                     account_id: "acct_far_reset",
@@ -3276,12 +3700,18 @@ mod tests {
                     routing_reason: RoutingReason::AvailableSamePool,
                 },
             ],
-            expected_selected_weekly_runouts: None,
+            expected_selected_weekly_runouts: Some(vec![
+                ("acct_reset_soon", Some(22_500)),
+                ("acct_reset_soon", Some(11_250)),
+                ("acct_next_day", Some(115_200)),
+                ("acct_reset_soon", Some(7_500)),
+                ("acct_next_day", Some(57_600)),
+            ]),
         });
 
         assert_eq!(
-            account_assessment(&result.final_assessment, "acct_reset_soon").routing_reason(),
-            RoutingReason::PreferredWeeklyResetSoon
+            account_assessment(&result.final_assessment, "acct_next_day").routing_reason(),
+            RoutingReason::PreferredNearResetControlledDrain
         );
     }
 
@@ -3332,11 +3762,12 @@ mod tests {
                             "acct_fast_burn_idle",
                             vec![
                                 window(FIVE_HOURS, 100, hours_minutes(4, 0)),
-                                window_with_per_connection_burn_basis_points_per_hour(
+                                window_with_projected_burn_for_proposed_connection(
                                     WEEKLY,
                                     18,
                                     24 * 3_600,
                                     80,
+                                    active_sessions,
                                 ),
                             ],
                         )
@@ -3351,11 +3782,12 @@ mod tests {
                             "acct_slower_burn_busy",
                             vec![
                                 window(FIVE_HOURS, 100, hours_minutes(4, 0)),
-                                window_with_per_connection_burn_basis_points_per_hour(
+                                window_with_projected_burn_for_proposed_connection(
                                     WEEKLY,
                                     18,
                                     24 * 3_600,
                                     40,
+                                    active_sessions,
                                 ),
                             ],
                         )
@@ -3370,11 +3802,12 @@ mod tests {
                             "acct_far_reset_low_burn",
                             vec![
                                 window(FIVE_HOURS, 100, hours_minutes(4, 0)),
-                                window_with_per_connection_burn_basis_points_per_hour(
+                                window_with_projected_burn_for_proposed_connection(
                                     WEEKLY,
                                     50,
                                     5 * 86_400,
                                     20,
+                                    active_sessions,
                                 ),
                             ],
                         )
@@ -3383,27 +3816,27 @@ mod tests {
                 },
             ],
             expected_sequence: vec![
+                "acct_fast_burn_idle",
                 "acct_slower_burn_busy",
                 "acct_slower_burn_busy",
-                "acct_slower_burn_busy",
-                "acct_slower_burn_busy",
+                "acct_fast_burn_idle",
                 "acct_slower_burn_busy",
             ],
             expected_final_active_sessions: vec![
-                ("acct_fast_burn_idle", 0),
-                ("acct_slower_burn_busy", 6),
+                ("acct_fast_burn_idle", 2),
+                ("acct_slower_burn_busy", 4),
                 ("acct_far_reset_low_burn", 0),
             ],
             expected_final_account_states: vec![
                 ExpectedAccountState {
                     account_id: "acct_fast_burn_idle",
                     availability: AccountAvailability::Usable,
-                    routing_reason: RoutingReason::AvailableSamePool,
+                    routing_reason: RoutingReason::PreferredNearResetControlledDrain,
                 },
                 ExpectedAccountState {
                     account_id: "acct_slower_burn_busy",
                     availability: AccountAvailability::Usable,
-                    routing_reason: RoutingReason::PreferredNearResetControlledDrain,
+                    routing_reason: RoutingReason::AvailableSamePool,
                 },
                 ExpectedAccountState {
                     account_id: "acct_far_reset_low_burn",
@@ -3411,13 +3844,19 @@ mod tests {
                     routing_reason: RoutingReason::AvailableSamePool,
                 },
             ],
-            expected_selected_weekly_runouts: None,
+            expected_selected_weekly_runouts: Some(vec![
+                ("acct_fast_burn_idle", Some(hours_minutes(22, 30))),
+                ("acct_slower_burn_busy", Some(hours_minutes(22, 30))),
+                ("acct_slower_burn_busy", Some(hours_minutes(15, 0))),
+                ("acct_fast_burn_idle", Some(hours_minutes(11, 15))),
+                ("acct_slower_burn_busy", Some(hours_minutes(11, 15))),
+            ]),
         });
 
-        assert_ne!(
+        assert_eq!(
             result.selected_accounts.first().map(String::as_str),
             Some("acct_fast_burn_idle"),
-            "S3m: lower current active count must not beat materially safer projected runway"
+            "S3m: equal initial runway preserves the lower-active tie-break"
         );
     }
 
@@ -3454,7 +3893,7 @@ mod tests {
         assert_account(&assessment, "acct_b", AccountAvailability::Usable, Some(39));
         assert_eq!(
             account_assessment(&assessment, "acct_b").routing_reason(),
-            RoutingReason::PreferredWeeklyResetSoon
+            RoutingReason::PreferredNearResetInitialAdmission
         );
     }
 
@@ -4875,6 +5314,33 @@ mod tests {
             runout_seconds,
         )
         .with_per_connection_burn_basis_points_per_hour(burn_rate_basis_points_per_hour)
+    }
+
+    fn window_with_projected_burn_for_proposed_connection(
+        window_seconds: u64,
+        remaining_headroom: u32,
+        resets_in_seconds: u64,
+        burn_rate_basis_points_per_hour: u32,
+        current_active_sessions: u32,
+    ) -> QuotaWindowFact {
+        let projected_connections = u64::from(current_active_sessions).saturating_add(1);
+        let aggregate_burn_basis_points_per_hour =
+            u64::from(burn_rate_basis_points_per_hour).saturating_mul(projected_connections);
+        let remaining_basis_points = u64::from(remaining_headroom).saturating_mul(100);
+        let runout_seconds = remaining_basis_points
+            .saturating_mul(3_600)
+            .checked_div(aggregate_burn_basis_points_per_hour)
+            .unwrap_or(u64::MAX);
+        projected_window(
+            window_seconds,
+            remaining_headroom,
+            resets_in_seconds,
+            runout_seconds,
+        )
+        .with_per_connection_burn_basis_points_per_hour(burn_rate_basis_points_per_hour)
+        .with_projected_candidate_burn_basis_points_per_hour(
+            u32::try_from(aggregate_burn_basis_points_per_hour).unwrap_or(u32::MAX),
+        )
     }
 
     const fn hours_minutes(hours: u64, minutes: u64) -> u64 {

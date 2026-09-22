@@ -46,7 +46,6 @@ use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::selection_projection::AsyncSelectionProjectionRepository;
 use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts_read_only;
-use codex_router_state::session_account_affinity::SessionAccountAffinity;
 use codex_router_state::sqlite::AsyncAffinityRepository;
 use codex_router_state::sqlite::AsyncSessionAccountAffinityRepository;
 use codex_router_state::sqlite::StateStoreError;
@@ -62,6 +61,12 @@ use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
+use crate::session_account_affinity_cache::SessionAccountAffinityCache;
+use crate::session_account_affinity_cache::SessionAffinityActivityHandle;
+use crate::session_account_affinity_cache::SharedSessionAccountAffinityCache;
+use crate::session_account_affinity_cache::lookup_session_account_affinity;
+use crate::session_account_affinity_cache::publish_session_account_affinity;
+use crate::session_account_affinity_cache::reconcile_persisted_session_account_affinity;
 
 /// Process-lifetime weighted state partitioned by route band.
 pub type RouteBandWeightedSelectors = Arc<Mutex<HashMap<String, WeightedDeficitSelector>>>;
@@ -85,6 +90,7 @@ pub struct AsyncAccountSelectorRuntimeState {
     runtime_exhaustions: RouteBandRuntimeExhaustions,
     route_band_queue_health: RouteBandQueueHealth,
     selection_reservation_lock: SelectionReservationLock,
+    session_affinity_cache: SharedSessionAccountAffinityCache,
 }
 
 impl AsyncAccountSelectorRuntimeState {
@@ -124,6 +130,29 @@ impl AsyncAccountSelectorRuntimeState {
             runtime_exhaustions,
             route_band_queue_health,
             selection_reservation_lock,
+            session_affinity_cache: SessionAccountAffinityCache::shared(),
+        }
+    }
+
+    /// Creates runtime dependencies with a caller-owned shared affinity cache.
+    #[must_use]
+    pub(crate) fn new_with_selection_lock_and_affinity_cache(
+        weighted_selectors: RouteBandWeightedSelectors,
+        account_holds: RouteBandAccountHolds,
+        active_reservations: RouteBandReservationBooks,
+        runtime_exhaustions: RouteBandRuntimeExhaustions,
+        route_band_queue_health: RouteBandQueueHealth,
+        selection_reservation_lock: SelectionReservationLock,
+        session_affinity_cache: SharedSessionAccountAffinityCache,
+    ) -> Self {
+        Self {
+            weighted_selectors,
+            account_holds,
+            active_reservations,
+            runtime_exhaustions,
+            route_band_queue_health,
+            selection_reservation_lock,
+            session_affinity_cache,
         }
     }
 }
@@ -134,7 +163,7 @@ const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 /// Default v1 minimum account reuse period for adjacent normal requests.
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 /// Idle time after which a Codex session may move to another account.
-pub const PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS: u64 = 65 * 60;
+pub const PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS: u64 = 7_200;
 const ACTIVE_SESSION_RESERVATION_UNITS: u32 = 1;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 const RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS: u64 = 300;
@@ -488,6 +517,7 @@ pub struct SelectedAccountDecision {
     account_id: AccountId,
     selection_reason: String,
     active_reservation_guard: Option<ActiveReservationGuard>,
+    session_affinity_activity_handle: Option<SessionAffinityActivityHandle>,
 }
 
 impl SelectedAccountDecision {
@@ -498,6 +528,7 @@ impl SelectedAccountDecision {
             account_id,
             selection_reason: selection_reason.into(),
             active_reservation_guard: None,
+            session_affinity_activity_handle: None,
         }
     }
 
@@ -536,6 +567,22 @@ impl SelectedAccountDecision {
     #[must_use]
     pub const fn active_reservation_guard(&self) -> Option<&ActiveReservationGuard> {
         self.active_reservation_guard.as_ref()
+    }
+
+    /// Attaches the token-bound handle for successful established request activity.
+    #[must_use]
+    pub fn with_session_affinity_activity_handle(
+        mut self,
+        session_affinity_activity_handle: SessionAffinityActivityHandle,
+    ) -> Self {
+        self.session_affinity_activity_handle = Some(session_affinity_activity_handle);
+        self
+    }
+
+    /// Returns the token-bound session-affinity activity handle.
+    #[must_use]
+    pub const fn session_affinity_activity_handle(&self) -> Option<&SessionAffinityActivityHandle> {
+        self.session_affinity_activity_handle.as_ref()
     }
 }
 
@@ -690,6 +737,7 @@ where
     route_band_queue_health: RouteBandQueueHealth,
     active_client_leases: Option<Arc<dyn ActiveClientLeaseReporter>>,
     session_affinity_writer: Option<DbWriteActor>,
+    session_affinity_cache: SharedSessionAccountAffinityCache,
     selection_reservation_lock: SelectionReservationLock,
     minimum_account_hold_cooldown_seconds: u64,
     clock: UnixClock,
@@ -766,6 +814,7 @@ where
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             session_affinity_writer: None,
+            session_affinity_cache: SessionAccountAffinityCache::shared(),
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
@@ -788,6 +837,7 @@ where
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             session_affinity_writer: None,
+            session_affinity_cache: SessionAccountAffinityCache::shared(),
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
@@ -812,6 +862,7 @@ where
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             session_affinity_writer: None,
+            session_affinity_cache: SessionAccountAffinityCache::shared(),
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
@@ -837,6 +888,7 @@ where
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             session_affinity_writer: None,
+            session_affinity_cache: SessionAccountAffinityCache::shared(),
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
@@ -885,6 +937,7 @@ where
             route_band_queue_health: runtime_state.route_band_queue_health,
             active_client_leases: None,
             session_affinity_writer: None,
+            session_affinity_cache: runtime_state.session_affinity_cache,
             selection_reservation_lock: runtime_state.selection_reservation_lock,
             minimum_account_hold_cooldown_seconds,
             clock,
@@ -1127,18 +1180,41 @@ where
                 affinity_owner_account_id.is_some(),
             ) {
                 Some(session_id) => {
-                    AsyncSessionAccountAffinityRepository::load_session_account_affinity(
-                        self.state_repository,
+                    if let Some(cached) = lookup_session_account_affinity(
+                        &self.session_affinity_cache,
                         session_id,
+                        route_band,
+                        self.session_affinity_writer.as_ref(),
+                        now_unix_seconds,
                     )
-                    .await
                     .map_err(|_error| HttpProxyError::Selection {
                         reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                    })?
-                    .filter(|affinity| {
-                        now_unix_seconds.saturating_sub(affinity.last_seen_unix_seconds())
-                            < PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS
-                    })
+                    })? {
+                        Some(cached)
+                    } else {
+                        let persisted =
+                            AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+                                self.state_repository,
+                                session_id,
+                            )
+                            .await
+                            .map_err(|_error| {
+                                HttpProxyError::Selection {
+                                    reason: QuotaAwareAccountSelectorError::StateUnavailable,
+                                }
+                            })?;
+                        reconcile_persisted_session_account_affinity(
+                            &self.session_affinity_cache,
+                            session_id,
+                            persisted.as_ref(),
+                            route_band,
+                            self.session_affinity_writer.as_ref(),
+                            (self.clock)(),
+                        )
+                        .map_err(|_error| HttpProxyError::Selection {
+                            reason: QuotaAwareAccountSelectorError::StateUnavailable,
+                        })?
+                    }
                 }
                 None => None,
             };
@@ -1177,19 +1253,20 @@ where
                     now_unix_seconds,
                     "previous_response_affinity",
                 )?;
-                persist_session_account_affinity(
-                    self.session_affinity_writer.as_ref(),
-                    session_id,
-                    selected.account_id(),
-                    route_band,
-                    now_unix_seconds,
-                );
-                return reserve_selected_account(
+                let selected = reserve_selected_account(
                     selected,
                     &self.active_reservations,
                     self.active_client_leases.as_ref(),
                     route_band.as_str(),
                     transport_label_for_request(request),
+                    now_unix_seconds,
+                )?;
+                return publish_selected_session_affinity(
+                    selected,
+                    &self.session_affinity_cache,
+                    self.session_affinity_writer.as_ref(),
+                    session_id,
+                    route_band,
                     now_unix_seconds,
                 );
             }
@@ -1205,19 +1282,20 @@ where
                     now_unix_seconds,
                     "prompt_cache_account_affinity",
                 )?;
-                persist_session_account_affinity(
-                    self.session_affinity_writer.as_ref(),
-                    session_id,
-                    selected.account_id(),
-                    route_band,
-                    now_unix_seconds,
-                );
-                return reserve_selected_account(
+                let selected = reserve_selected_account(
                     selected,
                     &self.active_reservations,
                     self.active_client_leases.as_ref(),
                     route_band.as_str(),
                     transport_label_for_request(request),
+                    now_unix_seconds,
+                )?;
+                return publish_selected_session_affinity(
+                    selected,
+                    &self.session_affinity_cache,
+                    self.session_affinity_writer.as_ref(),
+                    session_id,
+                    route_band,
                     now_unix_seconds,
                 );
             }
@@ -1230,19 +1308,20 @@ where
                 self.minimum_account_hold_cooldown_seconds,
                 now_unix_seconds,
             )?;
-            persist_session_account_affinity(
-                self.session_affinity_writer.as_ref(),
-                session_id,
-                selected.account_id(),
-                route_band,
-                now_unix_seconds,
-            );
-            reserve_selected_account(
+            let selected = reserve_selected_account(
                 selected,
                 &self.active_reservations,
                 self.active_client_leases.as_ref(),
                 route_band.as_str(),
                 transport_label_for_request(request),
+                now_unix_seconds,
+            )?;
+            publish_selected_session_affinity(
+                selected,
+                &self.session_affinity_cache,
+                self.session_affinity_writer.as_ref(),
+                session_id,
+                route_band,
                 now_unix_seconds,
             )
         })
@@ -1313,20 +1392,30 @@ fn assessment_account_is_available(
     })
 }
 
-fn persist_session_account_affinity(
+fn publish_selected_session_affinity(
+    selected: SelectedAccountDecision,
+    cache: &SharedSessionAccountAffinityCache,
     writer: Option<&DbWriteActor>,
     session_id: Option<&str>,
-    account_id: &AccountId,
     route_band: RouteBand,
     now_unix_seconds: u64,
-) {
-    let (Some(writer), Some(session_id)) = (writer, session_id) else {
-        return;
+) -> Result<SelectedAccountDecision, HttpProxyError> {
+    let Some(session_id) = session_id else {
+        return Ok(selected);
     };
-    let _enqueue_result = writer.try_enqueue(DbWriteCommand::session_account_affinity(
+
+    let published = publish_session_account_affinity(
+        cache,
+        session_id,
+        selected.account_id(),
         route_band,
-        SessionAccountAffinity::new(session_id, account_id.clone(), now_unix_seconds),
-    ));
+        writer,
+        now_unix_seconds,
+    )
+    .map_err(|_error| HttpProxyError::Selection {
+        reason: QuotaAwareAccountSelectorError::StateUnavailable,
+    })?;
+    Ok(selected.with_session_affinity_activity_handle(published.activity_handle().clone()))
 }
 
 fn select_from_account_states(
@@ -2412,6 +2501,7 @@ mod tests {
     use super::SqliteActiveClientLeaseReporter;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::TokenGeneration;
+    use codex_router_core::routes::RouteBand;
     use codex_router_quota::snapshot::SnapshotFreshness;
     use codex_router_selection::reservation::ReservationBook;
     use codex_router_selection::reservation::ReservationHandle;
@@ -2421,11 +2511,15 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
     use crate::db_write_actor::DbWriteActor;
+    use crate::db_write_actor::DbWriteRepository;
+    use crate::db_write_actor::DbWriteRepositoryError;
     use crate::db_write_actor::SqliteDbWriteRepository;
+    use crate::provider_error::ProviderErrorClassification;
     use crate::test_log_capture::capture_log_output;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -3045,6 +3139,290 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn concurrent_first_session_selections_share_live_owner_before_durable_write() {
+        let repository = SlowSelectionProjectionRepository::new_with_accounts(vec![
+            account_id("acct_a"),
+            account_id("acct_b"),
+        ]);
+        let weighted_selectors = super::RouteBandWeightedSelectors::default();
+        let account_holds = super::RouteBandAccountHolds::default();
+        let active_reservations = super::RouteBandReservationBooks::default();
+        let runtime_exhaustions = super::RouteBandRuntimeExhaustions::default();
+        let route_band_queue_health = super::RouteBandQueueHealth::default();
+        let selection_reservation_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let session_affinity_cache =
+            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared();
+        let write_repository = Arc::new(ControlledFailingAffinityWriteRepository::default());
+        let writer = DbWriteActor::start(write_repository.clone(), 4);
+        let request =
+            crate::http_sse::HttpProxyRequest::new(crate::routes::Method::Post, "/v1/responses")
+                .with_header(crate::headers::Header::new("session-id", "shared-session"));
+        let build_selector = || {
+            super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+                &repository,
+                super::AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
+                    Arc::clone(&weighted_selectors),
+                    Arc::clone(&account_holds),
+                    Arc::clone(&active_reservations),
+                    Arc::clone(&runtime_exhaustions),
+                    Arc::clone(&route_band_queue_health),
+                    Arc::clone(&selection_reservation_lock),
+                    Arc::clone(&session_affinity_cache),
+                ),
+                super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+                Arc::new(|| 1_000),
+            )
+            .with_session_affinity_writer(writer.clone())
+        };
+        let first_selector = build_selector();
+        let second_selector = build_selector();
+
+        let (first_result, second_result) = tokio::join!(
+            first_selector.select_upstream_account(&request, TokenGeneration::new(1), None),
+            second_selector.select_upstream_account(&request, TokenGeneration::new(1), None),
+        );
+        let first =
+            first_result.unwrap_or_else(|error| panic!("first selection should succeed: {error}"));
+        let second = second_result
+            .unwrap_or_else(|error| panic!("second selection should succeed: {error}"));
+
+        assert_eq!(first.account_id(), second.account_id());
+        assert_eq!(first.account_id().as_str(), "acct_a");
+        assert_eq!(second.selection_reason(), "prompt_cache_account_affinity");
+        assert!(first.session_affinity_activity_handle().is_some());
+        assert!(second.session_affinity_activity_handle().is_some());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            write_repository.entered.notified(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| panic!("durable affinity write should reach controlled seam"));
+        assert_eq!(
+            write_repository.calls.load(Ordering::Acquire),
+            1,
+            "both real selectors must converge while the immediate durable write is blocked"
+        );
+        write_repository.release.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            write_repository.completed.notified(),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| panic!("controlled failing write should complete"));
+        assert!(write_repository.failed.load(Ordering::Acquire));
+
+        let third = build_selector()
+            .select_upstream_account(&request, TokenGeneration::new(1), None)
+            .await
+            .unwrap_or_else(|error| panic!("live owner should survive failed durability: {error}"));
+        assert_eq!(third.account_id(), first.account_id());
+        assert_eq!(third.selection_reason(), "prompt_cache_account_affinity");
+
+        writer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_late_reservation_does_not_publish_selected_session_affinity() {
+        let persisted_owner = account_id("acct_a");
+        let repository = SlowSelectionProjectionRepository::new_with_blocking_affinity(
+            vec![persisted_owner.clone(), account_id("acct_b")],
+            codex_router_state::session_account_affinity::SessionAccountAffinity::new(
+                "session-failed-reservation",
+                persisted_owner.clone(),
+                900,
+            ),
+        );
+        let active_reservations = super::RouteBandReservationBooks::default();
+        let session_affinity_cache =
+            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared();
+        let write_repository = Arc::new(ControlledFailingAffinityWriteRepository::default());
+        let writer = DbWriteActor::start(write_repository.clone(), 4);
+        writer.shutdown().await;
+        let selector = super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &repository,
+            super::AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
+                super::RouteBandWeightedSelectors::default(),
+                super::RouteBandAccountHolds::default(),
+                Arc::clone(&active_reservations),
+                super::RouteBandRuntimeExhaustions::default(),
+                super::RouteBandQueueHealth::default(),
+                Arc::new(tokio::sync::Mutex::new(())),
+                Arc::clone(&session_affinity_cache),
+            ),
+            super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            Arc::new(|| 1_000),
+        )
+        .with_session_affinity_writer(writer.clone());
+        let request =
+            crate::http_sse::HttpProxyRequest::new(crate::routes::Method::Post, "/v1/responses")
+                .with_header(crate::headers::Header::new(
+                    "session-id",
+                    "session-failed-reservation",
+                ));
+
+        let select = selector.select_upstream_account(&request, TokenGeneration::new(1), None);
+        let poison_reservations = async {
+            repository.wait_for_affinity_read().await;
+            let reservations_to_poison = Arc::clone(&active_reservations);
+            let poison_result = std::thread::spawn(move || {
+                let _guard = reservations_to_poison
+                    .lock()
+                    .unwrap_or_else(|_| panic!("reservation book should initially lock"));
+                panic!("poison reservation book after the initial snapshot");
+            })
+            .join();
+            assert!(poison_result.is_err());
+            repository.release_affinity_read();
+        };
+        let (selection_result, ()) = tokio::join!(select, poison_reservations);
+
+        assert!(matches!(
+            selection_result,
+            Err(crate::http_sse::HttpProxyError::Selection {
+                reason: super::QuotaAwareAccountSelectorError::SelectorStateUnavailable,
+            })
+        ));
+        let seeded = crate::session_account_affinity_cache::lookup_session_account_affinity(
+            &session_affinity_cache,
+            "session-failed-reservation",
+            RouteBand::Responses,
+            Some(&writer),
+            1_000,
+        )
+        .unwrap_or_else(|_| panic!("lookup-only persisted seed should remain readable"))
+        .unwrap_or_else(|| panic!("persisted affinity should remain seeded"));
+        assert_eq!(seeded.account_id(), &persisted_owner);
+        assert_eq!(write_repository.calls.load(Ordering::Acquire), 0);
+        assert_eq!(
+            writer.last_degraded_event(),
+            None,
+            "failed reservation must not attempt selected-request durability"
+        );
+    }
+
+    #[tokio::test]
+    async fn different_unowned_sessions_observe_the_first_initial_admission_reservation() {
+        let repository = SlowSelectionProjectionRepository::new_with_accounts(vec![
+            account_id("acct_a"),
+            account_id("acct_b"),
+        ]);
+        let weighted_selectors = super::RouteBandWeightedSelectors::default();
+        let account_holds = super::RouteBandAccountHolds::default();
+        let active_reservations = super::RouteBandReservationBooks::default();
+        let runtime_exhaustions = super::RouteBandRuntimeExhaustions::default();
+        let route_band_queue_health = super::RouteBandQueueHealth::default();
+        let selection_reservation_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let session_affinity_cache =
+            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared();
+        let build_selector = || {
+            super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+                &repository,
+                super::AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
+                    Arc::clone(&weighted_selectors),
+                    Arc::clone(&account_holds),
+                    Arc::clone(&active_reservations),
+                    Arc::clone(&runtime_exhaustions),
+                    Arc::clone(&route_band_queue_health),
+                    Arc::clone(&selection_reservation_lock),
+                    Arc::clone(&session_affinity_cache),
+                ),
+                super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+                Arc::new(|| 1_000),
+            )
+        };
+        let first_request =
+            crate::http_sse::HttpProxyRequest::new(crate::routes::Method::Post, "/v1/responses")
+                .with_header(crate::headers::Header::new("session-id", "session-one"));
+        let second_request =
+            crate::http_sse::HttpProxyRequest::new(crate::routes::Method::Post, "/v1/responses")
+                .with_header(crate::headers::Header::new("session-id", "session-two"));
+
+        let first = build_selector()
+            .select_upstream_account(&first_request, TokenGeneration::new(1), None)
+            .await
+            .unwrap_or_else(|error| panic!("first initial admission should select: {error}"));
+        let second = build_selector()
+            .select_upstream_account(&second_request, TokenGeneration::new(1), None)
+            .await
+            .unwrap_or_else(|error| panic!("second initial admission should select: {error}"));
+
+        assert_eq!(first.account_id().as_str(), "acct_a");
+        assert_eq!(
+            first.selection_reason(),
+            "preferred_near_reset_initial_admission"
+        );
+        assert_eq!(second.account_id().as_str(), "acct_b");
+        assert_eq!(
+            second.selection_reason(),
+            "preferred_near_reset_initial_admission"
+        );
+        assert_ne!(second.selection_reason(), "prompt_cache_account_affinity");
+    }
+
+    #[tokio::test]
+    async fn live_activity_during_persisted_affinity_await_wins_reconciliation() {
+        let persisted_owner = account_id("acct_b");
+        let repository = SlowSelectionProjectionRepository::new_with_blocking_affinity(
+            vec![account_id("acct_a"), persisted_owner.clone()],
+            codex_router_state::session_account_affinity::SessionAccountAffinity::new(
+                "session-post-await",
+                persisted_owner,
+                7_900,
+            ),
+        );
+        let session_affinity_cache =
+            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared();
+        let original_live_owner =
+            crate::session_account_affinity_cache::publish_session_account_affinity(
+                &session_affinity_cache,
+                "session-post-await",
+                &account_id("acct_a"),
+                RouteBand::Responses,
+                None,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("expired live owner fixture should publish"));
+        let selector = super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &repository,
+            super::AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
+                super::RouteBandWeightedSelectors::default(),
+                super::RouteBandAccountHolds::default(),
+                super::RouteBandReservationBooks::default(),
+                super::RouteBandRuntimeExhaustions::default(),
+                super::RouteBandQueueHealth::default(),
+                Arc::new(tokio::sync::Mutex::new(())),
+                Arc::clone(&session_affinity_cache),
+            ),
+            super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            Arc::new(|| 8_000),
+        );
+        let request =
+            crate::http_sse::HttpProxyRequest::new(crate::routes::Method::Post, "/v1/responses")
+                .with_header(crate::headers::Header::new(
+                    "session-id",
+                    "session-post-await",
+                ));
+
+        let select = selector.select_upstream_account(&request, TokenGeneration::new(1), None);
+        let renew_while_awaiting = async {
+            repository.wait_for_affinity_read().await;
+            assert!(
+                original_live_owner
+                    .activity_handle()
+                    .touch_if_current(8_000)
+                    .unwrap_or_else(|_| panic!("live activity touch should succeed"))
+            );
+            repository.release_affinity_read();
+        };
+        let (selected, ()) = tokio::join!(select, renew_while_awaiting);
+        let selected = selected
+            .unwrap_or_else(|error| panic!("post-await reconciliation should select: {error}"));
+
+        assert_eq!(selected.account_id().as_str(), "acct_a");
+        assert_eq!(selected.selection_reason(), "prompt_cache_account_affinity");
+    }
+
     #[test]
     fn account_hold_cooldown_does_not_keep_materially_weaker_account() {
         let weak_account_id = account_id("acct_weekly_low");
@@ -3572,18 +3950,103 @@ mod tests {
 
     #[derive(Clone)]
     struct SlowSelectionProjectionRepository {
-        account_id: AccountId,
+        account_ids: Vec<AccountId>,
         in_flight_selector_reads: Arc<std::sync::atomic::AtomicUsize>,
         max_concurrent_selector_reads: Arc<std::sync::atomic::AtomicUsize>,
+        affinity_read: Option<Arc<BlockingAffinityRead>>,
+    }
+
+    struct BlockingAffinityRead {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        persisted: codex_router_state::session_account_affinity::SessionAccountAffinity,
+    }
+
+    #[derive(Default)]
+    struct ControlledFailingAffinityWriteRepository {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        completed: tokio::sync::Notify,
+        calls: AtomicUsize,
+        failed: AtomicBool,
+    }
+
+    impl DbWriteRepository for ControlledFailingAffinityWriteRepository {
+        fn record_provider_quota_exhausted<'a>(
+            &'a self,
+            _account_id: AccountId,
+            _route_band: RouteBand,
+            _classification: ProviderErrorClassification,
+            _observed_unix_seconds: u64,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn record_session_account_affinity<'a>(
+            &'a self,
+            _affinity: codex_router_state::session_account_affinity::SessionAccountAffinity,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::AcqRel);
+                self.entered.notify_one();
+                self.release.notified().await;
+                self.failed.store(true, Ordering::Release);
+                self.completed.notify_one();
+                Err(DbWriteRepositoryError::State(
+                    codex_router_state::sqlite::StateStoreError::Sqlite {
+                        message: "controlled session-affinity write failure".to_owned(),
+                    },
+                ))
+            })
+        }
     }
 
     impl SlowSelectionProjectionRepository {
         fn new(account_id: AccountId) -> Self {
+            Self::new_with_accounts(vec![account_id])
+        }
+
+        fn new_with_accounts(account_ids: Vec<AccountId>) -> Self {
             Self {
-                account_id,
+                account_ids,
                 in_flight_selector_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 max_concurrent_selector_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                affinity_read: None,
             }
+        }
+
+        fn new_with_blocking_affinity(
+            account_ids: Vec<AccountId>,
+            persisted: codex_router_state::session_account_affinity::SessionAccountAffinity,
+        ) -> Self {
+            let mut repository = Self::new_with_accounts(account_ids);
+            repository.affinity_read = Some(Arc::new(BlockingAffinityRead {
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                persisted,
+            }));
+            repository
+        }
+
+        async fn wait_for_affinity_read(&self) {
+            let affinity_read = self
+                .affinity_read
+                .as_ref()
+                .unwrap_or_else(|| panic!("blocking affinity read should be configured"));
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                affinity_read.entered.notified(),
+            )
+            .await
+            .unwrap_or_else(|_elapsed| panic!("selector should await persisted affinity"));
+        }
+
+        fn release_affinity_read(&self) {
+            self.affinity_read
+                .as_ref()
+                .unwrap_or_else(|| panic!("blocking affinity read should be configured"))
+                .release
+                .notify_one();
         }
 
         fn max_concurrent_selector_reads(&self) -> usize {
@@ -3628,16 +4091,19 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 self.in_flight_selector_reads
                     .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(vec![
-                    codex_router_state::quota_snapshot::SelectorQuotaInput::new(
-                        self.account_id.clone(),
-                        "shared-lock",
-                        codex_router_state::account::AccountStatus::Enabled,
-                        Some(1),
-                        route_band,
-                        vec![
+                Ok(self
+                    .account_ids
+                    .iter()
+                    .map(|account_id| {
+                        codex_router_state::quota_snapshot::SelectorQuotaInput::new(
+                            account_id.clone(),
+                            account_id.as_str(),
+                            codex_router_state::account::AccountStatus::Enabled,
+                            Some(1),
+                            route_band,
+                            vec![
                         codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow::new(
-                            self.account_id.clone(),
+                            account_id.clone(),
                             route_band,
                             codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
                             codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Eligible,
@@ -3647,18 +4113,19 @@ mod tests {
                         .with_effective(true)
                         .with_observed_unix_seconds(900),
                         codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow::new(
-                            self.account_id.clone(),
+                            account_id.clone(),
                             route_band,
                             codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS,
                             codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Eligible,
                         )
                         .with_remaining_headroom(90)
-                        .with_reset_unix_seconds(604_800)
+                        .with_reset_unix_seconds(1_000 + 24 * 3_600)
                         .with_effective(true)
                         .with_observed_unix_seconds(900),
-                    ],
-                    ),
-                ])
+                        ],
+                        )
+                    })
+                    .collect())
             })
         }
 
@@ -3789,7 +4256,14 @@ mod tests {
                 codex_router_state::sqlite::StateStoreError,
             >,
         > {
-            Box::pin(async { Ok(None) })
+            Box::pin(async move {
+                let Some(affinity_read) = &self.affinity_read else {
+                    return Ok(None);
+                };
+                affinity_read.entered.notify_one();
+                affinity_read.release.notified().await;
+                Ok(Some(affinity_read.persisted.clone()))
+            })
         }
     }
 

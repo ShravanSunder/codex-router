@@ -400,7 +400,8 @@ pub(in crate::quota) fn format_routing_cell(assessment: &BurnDownAccountAssessme
 pub(in crate::quota) const fn routing_reason_is_preferred(reason: RoutingReason) -> bool {
     matches!(
         reason,
-        RoutingReason::PreferredNearResetDrainable
+        RoutingReason::PreferredNearResetInitialAdmission
+            | RoutingReason::PreferredNearResetDrainable
             | RoutingReason::PreferredNearResetControlledDrain
             | RoutingReason::PreferredWeeklyHealthier
             | RoutingReason::PreferredWeeklyResetSoon
@@ -413,6 +414,9 @@ pub(in crate::quota) const fn routing_reason_is_preferred(reason: RoutingReason)
 
 pub(in crate::quota) fn format_routing_reason(reason: RoutingReason) -> &'static str {
     match reason {
+        RoutingReason::PreferredNearResetInitialAdmission => {
+            "preferred by quota: near-reset initial admission"
+        }
         RoutingReason::PreferredNearResetDrainable => "preferred by quota: near-reset drainable",
         RoutingReason::PreferredNearResetControlledDrain => {
             "preferred by quota: near-reset controlled drain"
@@ -446,7 +450,8 @@ pub(in crate::quota) fn format_next_use(assessment: &BurnDownAccountAssessment) 
 
 pub(in crate::quota) fn format_next_use_from_routing_reason(reason: RoutingReason) -> &'static str {
     match reason {
-        RoutingReason::PreferredWeeklyHealthier
+        RoutingReason::PreferredNearResetInitialAdmission
+        | RoutingReason::PreferredWeeklyHealthier
         | RoutingReason::PreferredNearResetDrainable
         | RoutingReason::PreferredNearResetControlledDrain
         | RoutingReason::PreferredWeeklyResetSoon
