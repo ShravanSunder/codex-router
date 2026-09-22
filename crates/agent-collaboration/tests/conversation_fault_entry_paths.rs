@@ -711,3 +711,245 @@ async fn run_resumed_prompt_after_load(load_error: Option<Value>) -> std::proces
     std::fs::remove_dir(&root).expect("fixture cleanup");
     output
 }
+
+#[tokio::test]
+async fn conversation_create_without_identity_or_from_reports_unavailable() {
+    let root = std::path::PathBuf::from(format!("/tmp/cfl-identity-{}", uuid::Uuid::now_v7()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("private fixture directory");
+    let service_id = "00000000-0000-4000-8000-0000000000aa";
+    let epoch = "00000000-0000-4000-8000-0000000000ab";
+    let digest = format!("sha256:{}", "e".repeat(64));
+    let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
+    let description = serde_json::from_value(json!({
+        "endpoint":endpoint,"label":"identity gap fixture",
+        "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
+        "channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock",
+            "schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
+    }))
+    .expect("endpoint description");
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+        .expect("identity")
+        .with_endpoints(vec![description])
+        .expect("endpoint");
+    let control =
+        collaboration_service::LocalControlService::bind(&root.join("control.sock"), identity)
+            .expect("control bind");
+    let manifest = serde_json::from_value(json!({
+        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
+        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+    }))
+    .expect("manifest");
+    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
+        .expect("publish manifest");
+    let stop = CancellationToken::new();
+    let service = tokio::spawn(control.run(stop.clone()));
+    let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).expect("ACP bind");
+    let peer = tokio::spawn(async move {
+        let (stream, _) = acp.accept().await.expect("ACP accept");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        let initialize: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("init read")
+                .expect("init frame"),
+        )
+        .expect("init JSON");
+        assert_eq!(initialize["method"], "initialize");
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}})
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("init response");
+    });
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args([
+                "conversation",
+                "create",
+                "--endpoint",
+                "codex-local",
+                "--model",
+                "gpt-5.6-sol",
+                "--effort",
+                "low",
+                "--access",
+                "workspace-write",
+                "--cwd",
+            ])
+            .arg(&root)
+            .args(["--service-directory"])
+            .arg(&root)
+            .arg("--json")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .output(),
+    )
+    .await
+    .expect("CLI deadline")
+    .expect("CLI output");
+    let _ = peer.await;
+    stop.cancel();
+    let _ = service.await;
+    drop(publication);
+    let _ = std::fs::remove_file(root.join("acp.sock"));
+    std::fs::remove_dir(&root).expect("fixture cleanup");
+    assert_eq!(output.status.code(), Some(2));
+    let record: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
+    assert_eq!(record["kind"], "conversationError");
+    assert_eq!(
+        record["error"]["message"],
+        "Control protocol violation: current session identity unavailable"
+    );
+}
+
+#[tokio::test]
+async fn conversation_create_from_supplies_created_by_without_env() {
+    let root = std::path::PathBuf::from(format!("/tmp/cfl-from-{}", uuid::Uuid::now_v7()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("private fixture directory");
+    let service_id = "00000000-0000-4000-8000-0000000000ac";
+    let epoch = "00000000-0000-4000-8000-0000000000ad";
+    let digest = format!("sha256:{}", "f".repeat(64));
+    let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
+    let description = serde_json::from_value(json!({
+        "endpoint":endpoint,"label":"from override fixture",
+        "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
+        "channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock",
+            "schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
+    }))
+    .expect("endpoint description");
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+        .expect("identity")
+        .with_endpoints(vec![description])
+        .expect("endpoint");
+    let control =
+        collaboration_service::LocalControlService::bind(&root.join("control.sock"), identity)
+            .expect("control bind");
+    let manifest = serde_json::from_value(json!({
+        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
+        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+    }))
+    .expect("manifest");
+    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
+        .expect("publish manifest");
+    let stop = CancellationToken::new();
+    let service = tokio::spawn(control.run(stop.clone()));
+    let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).expect("ACP bind");
+    let peer = tokio::spawn(async move {
+        for outcome in ["create-probe", "create"] {
+            let (stream, _) = acp.accept().await.expect("ACP accept");
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            let initialize: Value = serde_json::from_str(
+                &lines
+                    .next_line()
+                    .await
+                    .expect("init read")
+                    .expect("init frame"),
+            )
+            .expect("init JSON");
+            assert_eq!(initialize["method"], "initialize");
+            writer
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}})
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("init response");
+            if outcome == "create-probe" {
+                continue;
+            }
+            let creation: Value = serde_json::from_str(
+                &lines
+                    .next_line()
+                    .await
+                    .expect("new read")
+                    .expect("new frame"),
+            )
+            .expect("new JSON");
+            assert_eq!(creation["method"], "session/new");
+            assert_eq!(
+                creation["params"]["_meta"]["codexRouter"]["createdBy"]["sessionId"],
+                "cursor-conversation"
+            );
+            assert_eq!(
+                creation["params"]["_meta"]["codexRouter"]["approver"]["sessionId"],
+                "cursor-conversation"
+            );
+            writer
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({"jsonrpc":"2.0","id":creation["id"],"result":{"sessionId":"created-from-override"}})
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("new response");
+        }
+    });
+    let from = format!(
+        r#"{{"endpoint":{{"serviceId":"{service_id}","endpointId":"codex-local"}},"sessionId":"cursor-conversation"}}"#
+    );
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args([
+                "conversation",
+                "create",
+                "--endpoint",
+                "codex-local",
+                "--model",
+                "gpt-5.6-sol",
+                "--effort",
+                "low",
+                "--access",
+                "workspace-write",
+                "--cwd",
+            ])
+            .arg(&root)
+            .args(["--from", &from, "--service-directory"])
+            .arg(&root)
+            .arg("--json")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .output(),
+    )
+    .await
+    .expect("CLI deadline")
+    .expect("CLI output");
+    peer.await.expect("peer join");
+    stop.cancel();
+    service.await.expect("service join").expect("service stop");
+    drop(publication);
+    let _ = std::fs::remove_file(root.join("acp.sock"));
+    std::fs::remove_dir(&root).expect("fixture cleanup");
+    assert!(
+        output.status.success(),
+        "stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let created_records = validate_conversation_records(&output.stdout, "from override");
+    assert!(created_records.iter().any(|record| matches!(
+        record,
+        collaboration_client::protocol::ConversationRecord::ConversationCreated { .. }
+    )));
+}

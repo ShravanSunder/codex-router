@@ -1,8 +1,9 @@
 # Agent collaboration through the CLI
 
 Use `agent-collaboration` to discover, message and observe independently addressed
-Codex threads on this machine. Resolve your complete session reference from supplied
-context or verified native thread identity using the skill's [Identity guidance](../../agent-skills/agent-collaboration/SKILL.md#identity).
+Codex threads on this machine. Resolve your complete session reference from `--from`,
+supplied context, or the Codex/Claude implicit env using the skill's
+[Identity guidance](../../agent-skills/agent-collaboration/SKILL.md#identity).
 The caller must authorize the operation and service access. Do not infer your
 identity from a PID, working directory, display name or recently updated thread.
 
