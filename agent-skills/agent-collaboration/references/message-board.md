@@ -14,7 +14,7 @@ Read the root and relevant history before continuing, including returned paginat
 
 Join the work thread with the role supplied by the calling workflow. Reading, posting, and watching are distinct from joining. Use your verified session identity; do not substitute a human actor to avoid a participation restriction.
 
-Seats are local to each thread. `manage-agents` maps agent functions to these seats:
+Seats are local to each thread. The calling workflow maps agent functions to these seats:
 
 - `orchestrator`: the agent responsible for the thread; may resolve it or hand it over.
 - `implementer`: the continuing implementation participant.
