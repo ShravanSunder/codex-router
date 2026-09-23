@@ -218,7 +218,7 @@ pub(crate) fn render_update_result<W: Write>(
             message,
             recovery_action,
         } => {
-            writeln!(stdout, "update_result: updated but replacement host failed")?;
+            writeln!(stdout, "update_result: updated but replacement failed")?;
             writeln!(stdout, "message: {message}")?;
             writeln!(stdout, "recovery_action: {recovery_action}")
         }
@@ -437,12 +437,16 @@ mod tests {
             &mut output,
             &UpdateResult::UpdatedButReplacementFailed {
                 message: "replacement unavailable".to_owned(),
-                recovery_action: "codex-router host".to_owned(),
+                recovery_action:
+                    "start codex-router host with the same --router-root and --port after the old Host exits"
+                        .to_owned(),
             },
         )?;
         let rendered = String::from_utf8(output).map_err(std::io::Error::other)?;
-        assert!(rendered.contains("updated but replacement host failed"));
-        assert!(rendered.contains("recovery_action: codex-router host"));
+        assert!(rendered.contains("updated but replacement failed"));
+        assert!(rendered.contains(
+            "recovery_action: start codex-router host with the same --router-root and --port"
+        ));
         Ok(())
     }
 

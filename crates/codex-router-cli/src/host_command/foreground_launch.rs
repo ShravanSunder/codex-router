@@ -49,7 +49,6 @@ pub(super) async fn run_foreground_host(
     inputs: ForegroundHostInputs,
     context: &CliContext,
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
-    stdout: &mut (impl std::io::Write + Send),
 ) -> Result<(), HostCommandError> {
     let ForegroundHostInputs {
         router_root,
@@ -147,7 +146,8 @@ pub(super) async fn run_foreground_host(
             router_root.join("secrets").into_os_string(),
         ])
         .with_environment("OTEL_EXPORTER_OTLP_ENDPOINT", otlp_endpoint)
-        .with_environment("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
+        .with_environment("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+        .with_output(ChildOutput::Telemetry);
     let replacement_command = host_replacement_command(
         current_executable,
         router_root.clone(),
@@ -176,23 +176,12 @@ pub(super) async fn run_foreground_host(
         update_inputs =
             update_inputs.with_pre_exec_telemetry(Arc::new(HostPreExecTelemetry(telemetry)));
     }
-    let mut presenter =
-        crate::presentation::host::HostProgressPresenter::new(context.stdout_is_terminal());
-    let mut emit = |progress| {
-        let _ = match progress {
-            Some(progress) => presenter.accept(
-                stdout,
-                &codex_router_host::OperatorFrame::Progress(progress),
-            ),
-            None => presenter.finish_success(stdout),
-        };
-    };
     HostRuntime::run_acquired_with_progress(
         config,
         child_launch_plans,
         update_inputs,
         instance,
-        Some(&mut emit),
+        None,
     )
     .await?;
     Ok(())

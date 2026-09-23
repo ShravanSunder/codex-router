@@ -10,6 +10,8 @@ use tokio::process::ChildStderr;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChildDiagnosticClass {
+    LoopbackConnectionFailure,
+    AuditAppendFailure,
     OauthRefreshRejected,
     ModelCatalogSchemaMismatch,
     RemoteControlFailure,
@@ -19,6 +21,8 @@ pub(crate) enum ChildDiagnosticClass {
 impl ChildDiagnosticClass {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::LoopbackConnectionFailure => "loopback_connection_failure",
+            Self::AuditAppendFailure => "audit_append_failure",
             Self::OauthRefreshRejected => "oauth_refresh_rejected",
             Self::ModelCatalogSchemaMismatch => "model_catalog_schema_mismatch",
             Self::RemoteControlFailure => "remote_control_failure",
@@ -29,7 +33,11 @@ impl ChildDiagnosticClass {
 
 pub(crate) fn classify_child_stderr(line: &str) -> ChildDiagnosticClass {
     let normalized = line.to_ascii_lowercase();
-    if normalized.contains("invalid_grant")
+    if normalized.starts_with("codex-router loopback connection failed:") {
+        ChildDiagnosticClass::LoopbackConnectionFailure
+    } else if normalized.starts_with("audit append failed:") {
+        ChildDiagnosticClass::AuditAppendFailure
+    } else if normalized.contains("invalid_grant")
         && (normalized.contains("oauth") || normalized.contains("refresh token"))
     {
         ChildDiagnosticClass::OauthRefreshRejected
@@ -82,6 +90,16 @@ mod tests {
 
     #[test]
     fn app_server_diagnostics_classify_known_failures_without_retaining_raw_lines() {
+        assert_eq!(
+            classify_child_stderr(
+                "codex-router loopback connection failed: severity=debug class=client_disconnect reason=hyper_closed"
+            ),
+            ChildDiagnosticClass::LoopbackConnectionFailure
+        );
+        assert_eq!(
+            classify_child_stderr("audit append failed: private cause"),
+            ChildDiagnosticClass::AuditAppendFailure
+        );
         assert_eq!(
             classify_child_stderr(
                 "OAuth refresh token was rejected: invalid_grant: Grant not found"

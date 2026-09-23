@@ -30,20 +30,33 @@ pub fn validate_debug_endpoint(socket: &Path, normal_socket: &Path) -> Result<()
     }
     std::os::unix::net::SocketAddr::from_pathname(socket)
         .map_err(|_| "debug socket path exceeds native Unix socket limits")?;
-    let socket = resolved_endpoint_path(socket)?;
-    let normal_socket = resolved_endpoint_path(normal_socket)?;
+    // Codex rendezvous symlinks can point to distinct sockets in one private directory.
+    // Keep directory isolation tied to the owner-selected rendezvous paths.
     let parent = socket
         .parent()
         .ok_or("debug socket needs a dedicated directory")?;
-    let temporary_root = resolved_endpoint_path(&std::env::temp_dir())?;
-    let slash_tmp = resolved_endpoint_path(Path::new("/tmp"))?;
-    if parent == Path::new("/") || parent == temporary_root || parent == slash_tmp {
-        return Err("debug socket needs a dedicated directory");
-    }
     let normal_parent = normal_socket
         .parent()
         .ok_or("normal endpoint has no directory")?;
+    let resolved_parent = resolved_endpoint_path(parent)?;
+    let temporary_root = resolved_endpoint_path(&std::env::temp_dir())?;
+    let slash_tmp = resolved_endpoint_path(Path::new("/tmp"))?;
+    if resolved_parent == Path::new("/")
+        || resolved_parent == temporary_root
+        || resolved_parent == slash_tmp
+    {
+        return Err("debug socket needs a dedicated directory");
+    }
     validate_debug_directory(parent, normal_parent)?;
+    let resolved_socket = resolved_endpoint_path(socket)?;
+    let resolved_normal_socket = resolved_endpoint_path(normal_socket)?;
+    let resolved_normal_parent = resolved_endpoint_path(normal_parent)?;
+    if resolved_socket == resolved_normal_socket
+        || resolved_socket.starts_with(&resolved_normal_parent)
+        || resolved_normal_socket.starts_with(&resolved_parent)
+    {
+        return Err("debug runtime directory must be dedicated and separate from normal state");
+    }
     Ok(())
 }
 
