@@ -122,7 +122,7 @@ fn unsafe_or_unrepresentable_profiles_fail_without_exposing_contents() {
 #[test]
 fn local_only_profile_settings_are_accepted_but_not_projected() {
     let profile = format!(
-        "approval_policy = \"never\"\napprovals_reviewer = \"local\"\nauto_review = \"enabled\"\napps = []\n{PROFILE}"
+        "approval_policy = \"never\"\napprovals_reviewer = \"local\"\nauto_review = \"enabled\"\napps = []\n{PROFILE}\n[notice.model_migrations]\n\"gpt-5.4-mini\" = \"gpt-6-luna\"\n[tui]\nscreen_reader_detection_done = true\n"
     );
     let parsed = DebugCodexProfile::parse(&profile, 18787).unwrap();
     let paths = CodexPaths::from_codex_home("/unused-native-home".into());
@@ -142,6 +142,8 @@ fn local_only_profile_settings_are_accepted_but_not_projected() {
         "approvals_reviewer",
         "auto_review",
         "apps",
+        "notice",
+        "tui",
     ] {
         assert!(
             !args

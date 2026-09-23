@@ -2,11 +2,14 @@
 use std::{collections::BTreeSet, io::Read, path::Path};
 
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
-const LOCAL_ONLY_KEYS: [&str; 4] = [
+const LOCAL_ONLY_KEYS: [&str; 6] = [
     "approval_policy",
     "approvals_reviewer",
     "auto_review",
     "apps",
+    // The TUI can persist these into the selected profile; neither belongs in backend argv.
+    "notice",
+    "tui",
 ];
 
 pub struct DebugCodexProfile {
