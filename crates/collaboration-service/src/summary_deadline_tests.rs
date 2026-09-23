@@ -132,6 +132,7 @@ async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
     let mut definitions = serde_json::Map::new();
     for name in [
         "ThreadRead",
+        "ThreadTurnsList",
         "ThreadResume",
         "ThreadStart",
         "ThreadLoadedList",
@@ -161,9 +162,9 @@ async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
     let witness = directory.join("interrupt-request.json");
     let server = tokio::spawn(async move {
         let methods: &[&str] = if fail_connection {
-            &["thread/read"]
+            &["thread/turns/list"]
         } else {
-            &["thread/read", "turn/interrupt"]
+            &["thread/turns/list", "turn/interrupt"]
         };
         for &method in methods {
             let (socket, _) = listener.accept().await?;
@@ -186,7 +187,15 @@ async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
             if request["method"] != method {
                 return Err("unexpected native operation".into());
             }
-            let response = if method == "thread/read" {
+            let response = if method == "thread/turns/list" {
+                if request.pointer("/params/threadId") != Some(&json!("summary-thread"))
+                    || request.pointer("/params/cursor") != Some(&Value::Null)
+                    || request.pointer("/params/limit") != Some(&json!(1))
+                    || request.pointer("/params/sortDirection") != Some(&json!("desc"))
+                    || request.pointer("/params/itemsView") != Some(&json!("full"))
+                {
+                    return Err("summary did not request the bounded full turn page".into());
+                }
                 json!({"id":request["id"],"error":{"code":-32602,"message":"history unavailable"}})
             } else {
                 if request.pointer("/params/threadId") != Some(&json!("summary-thread"))

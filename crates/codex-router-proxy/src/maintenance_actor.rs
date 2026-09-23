@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+#[cfg(test)]
+use std::sync::mpsc::Sender as TestCompletionSender;
 
 use codex_router_core::routes::RouteBand;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -62,6 +64,26 @@ pub enum MaintenanceHint {
         route_band: RouteBand,
         compact_before_unix_seconds: u64,
     },
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MaintenanceCompletion {
+    maintenance_class: &'static str,
+    route_band: &'static str,
+}
+
+#[cfg(test)]
+impl MaintenanceCompletion {
+    #[must_use]
+    pub(crate) const fn maintenance_class(self) -> &'static str {
+        self.maintenance_class
+    }
+
+    #[must_use]
+    pub(crate) const fn route_band(self) -> &'static str {
+        self.route_band
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +207,8 @@ pub struct MaintenanceActor {
     closed: Arc<AtomicBool>,
     shutdown: CancellationToken,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    #[cfg(test)]
+    completion_sender: Arc<Mutex<Option<TestCompletionSender<MaintenanceCompletion>>>>,
 }
 
 impl MaintenanceActor {
@@ -221,6 +245,10 @@ impl MaintenanceActor {
         let task_pending = Arc::clone(&pending);
         let task_closed = Arc::clone(&closed);
         let task_shutdown = shutdown.clone();
+        #[cfg(test)]
+        let completion_sender = Arc::new(Mutex::new(None));
+        #[cfg(test)]
+        let task_completion_sender = Arc::clone(&completion_sender);
         let task = runtime_handle.spawn(async move {
             run_maintenance_actor(
                 repository,
@@ -228,6 +256,8 @@ impl MaintenanceActor {
                 task_pending,
                 task_shutdown,
                 task_closed,
+                #[cfg(test)]
+                task_completion_sender,
             )
             .await;
         });
@@ -237,6 +267,21 @@ impl MaintenanceActor {
             closed,
             shutdown,
             task: Arc::new(Mutex::new(Some(task))),
+            #[cfg(test)]
+            completion_sender,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_completion_sender(
+        &self,
+        completion_sender: TestCompletionSender<MaintenanceCompletion>,
+    ) {
+        match self.completion_sender.lock() {
+            Ok(mut registered_sender) => {
+                *registered_sender = Some(completion_sender);
+            }
+            Err(error) => panic!("maintenance completion sender lock should be available: {error}"),
         }
     }
 
@@ -411,6 +456,7 @@ async fn run_maintenance_actor(
     pending: Arc<Mutex<HashMap<MaintenanceCoalescingKey, Instant>>>,
     shutdown: CancellationToken,
     closed: Arc<AtomicBool>,
+    #[cfg(test)] completion_sender: Arc<Mutex<Option<TestCompletionSender<MaintenanceCompletion>>>>,
 ) {
     loop {
         tokio::select! {
@@ -449,7 +495,16 @@ async fn run_maintenance_actor(
                         receiver.close();
                         break;
                     }
-                    _result = repository.run_maintenance_hint(hint.clone()) => {}
+                    result = repository.run_maintenance_hint(hint.clone()) => {
+                        if result.is_err() {
+                            record_maintenance_lag_observed(
+                                hint.maintenance_class(),
+                                hint.route_band_label(),
+                                "degraded",
+                                lag_millis_since(enqueued_at),
+                            );
+                        }
+                    }
                 }
                 match pending.lock() {
                     Ok(mut pending) => {
@@ -463,6 +518,15 @@ async fn run_maintenance_actor(
                             "codex_router.maintenance_pending_cleanup_lock_poisoned"
                         );
                     }
+                }
+                #[cfg(test)]
+                if let Ok(completion_sender) = completion_sender.lock()
+                    && let Some(completion_sender) = completion_sender.as_ref()
+                {
+                    let _send_result = completion_sender.send(MaintenanceCompletion {
+                        maintenance_class: hint_for_cleanup.maintenance_class(),
+                        route_band: hint_for_cleanup.route_band_label(),
+                    });
                 }
             }
         }
@@ -498,6 +562,7 @@ mod tests {
     use super::MaintenanceRepository;
     use super::MaintenanceRepositoryError;
     use crate::test_log_capture::capture_log_output;
+    use crate::test_log_capture::capture_log_output_async;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -861,6 +926,37 @@ mod tests {
         actor.shutdown().await;
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_maintenance_hint_is_degraded_then_allows_a_later_normal_hint() {
+        let (rendered_log, ()) = capture_log_output_async(async {
+            let repository = Arc::new(FailingOnceMaintenanceRepository::default());
+            let actor = MaintenanceActor::start(repository.clone(), 8);
+            let hint = refresh_rollups_hint();
+
+            assert_eq!(
+                actor.try_enqueue(hint.clone()),
+                MaintenanceEnqueueResult::Enqueued
+            );
+            wait_for_maintenance_call(&repository, 1).await;
+            assert_eq!(
+                actor.try_enqueue(hint),
+                MaintenanceEnqueueResult::Enqueued,
+                "a failed hint must remove its pending key before the next normal hint"
+            );
+            wait_for_maintenance_call(&repository, 2).await;
+            assert_eq!(repository.calls.load(Ordering::Acquire), 2);
+
+            actor.shutdown().await;
+        })
+        .await;
+
+        assert!(rendered_log.contains("codex_router.maintenance_degraded"));
+        assert!(rendered_log.contains("active_session_rollup_refresh"));
+        assert!(rendered_log.contains("responses"));
+        assert!(rendered_log.contains("degraded"));
+        assert!(!rendered_log.contains("raw-maintenance-error-canary"));
+    }
+
     #[test]
     fn maintenance_actor_exposes_stale_cleanup_retention_and_compaction_hints() {
         let actor_source = include_str!("maintenance_actor.rs");
@@ -892,6 +988,45 @@ mod tests {
     struct BlockingMaintenanceRepository {
         entered: Notify,
         release: Notify,
+    }
+
+    #[derive(Default)]
+    struct FailingOnceMaintenanceRepository {
+        calls: AtomicUsize,
+    }
+
+    impl MaintenanceRepository for FailingOnceMaintenanceRepository {
+        fn run_maintenance_hint<'a>(
+            &'a self,
+            _hint: MaintenanceHint,
+        ) -> BoxFuture<'a, Result<(), MaintenanceRepositoryError>> {
+            Box::pin(async move {
+                let call_number = self.calls.fetch_add(1, Ordering::AcqRel);
+                if call_number == 0 {
+                    return Err(MaintenanceRepositoryError::State(
+                        codex_router_state::sqlite::StateStoreError::Sqlite {
+                            message: "raw-maintenance-error-canary".to_owned(),
+                        },
+                    ));
+                }
+                Ok(())
+            })
+        }
+    }
+
+    async fn wait_for_maintenance_call(
+        repository: &FailingOnceMaintenanceRepository,
+        expected_calls: usize,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while repository.calls.load(Ordering::Acquire) < expected_calls {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| {
+            panic!("maintenance actor should process hint {expected_calls}")
+        });
     }
 
     impl MaintenanceRepository for BlockingMaintenanceRepository {

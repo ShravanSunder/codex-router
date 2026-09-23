@@ -46,6 +46,10 @@ struct CreateArguments {
     effort: String,
     #[arg(long)]
     access: ConversationAccess,
+    /// Exact SessionRef JSON for this caller. Overrides CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID.
+    #[arg(long)]
+    from: Option<String>,
+    /// Exact SessionRef JSON for the client approval authority. Defaults to this caller.
     #[arg(long)]
     approver: Option<String>,
     #[arg(long)]
@@ -75,7 +79,10 @@ struct PromptArguments {
     effort: Option<String>,
     #[arg(long)]
     access: Option<ConversationAccess>,
-    /// Exact SessionRef JSON for the client approval authority. Defaults to this session.
+    /// Exact SessionRef JSON for this caller. Overrides CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID.
+    #[arg(long)]
+    from: Option<String>,
+    /// Exact SessionRef JSON for the client approval authority. Defaults to this caller.
     #[arg(long)]
     approver: Option<String>,
     /// Board root message ID used to share owner-private scratch across sessions.
@@ -168,13 +175,21 @@ fn run_create(args: CreateArguments) -> i32 {
             Ok(value) => value,
             Err(error) => return report_create_failure(error, args.json),
         };
-        let creator = match current_session_ref(&client.endpoint().service_id) {
+        let creator = match current_session_ref(&client.endpoint().service_id, args.from.as_deref())
+        {
             Ok(value) => value,
             Err(_) => {
-                return crate::endpoint_commands::report_failure(
-                    "invalidField",
-                    "current session identity unavailable",
-                    2,
+                let message = if args.from.is_some() {
+                    "invalid --from SessionRef"
+                } else {
+                    "current session identity unavailable"
+                };
+                return report_conversation_failure(
+                    operation_failure_from_client_error(
+                        ClientError::Protocol(message),
+                        OperationEffect::None,
+                    ),
+                    None,
                     args.json,
                 );
             }
@@ -297,7 +312,7 @@ fn run_prompt(args: PromptArguments) -> i32 {
                 }
             };
             let creator = if args.new_session || args.fork.is_some() {
-                Some(current_session_ref(&client.endpoint().service_id).map_err(|_| ClientError::Protocol("current session identity unavailable"))?)
+                Some(current_session_ref(&client.endpoint().service_id, args.from.as_deref()).map_err(|_| ClientError::Protocol("current session identity unavailable"))?)
             } else { None };
             let approver = if let Some(value) = args.approver.as_deref() {
                 Some(serde_json::from_str::<collaboration_client::protocol::SessionRef>(value).map_err(|_| ClientError::Protocol("invalid --approver SessionRef"))?)
@@ -335,7 +350,7 @@ fn run_prompt(args: PromptArguments) -> i32 {
                     .transpose()
                     .map_err(|_| ClientError::Protocol("invalid root message ID"))?,
             };
-            let sender = current_session_ref(&client.endpoint().service_id)
+            let sender = current_session_ref(&client.endpoint().service_id, args.from.as_deref())
                 .map_err(|_| ClientError::Protocol("current sender identity unavailable"))?;
             let message = PublicPromptContent::Agent {
                 sender,
@@ -509,13 +524,30 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
 
 fn current_session_ref(
     service_id: &collaboration_client::protocol::UuidIdentity,
+    from: Option<&str>,
 ) -> Result<collaboration_client::protocol::SessionRef, String> {
-    let codex = std::env::var("CODEX_THREAD_ID")
-        .ok()
-        .filter(|value| !value.is_empty());
-    let claude = std::env::var("CLAUDE_CODE_SESSION_ID")
-        .ok()
-        .filter(|value| !value.is_empty());
+    resolve_current_session_ref(
+        service_id,
+        from,
+        std::env::var("CODEX_THREAD_ID")
+            .ok()
+            .filter(|value| !value.is_empty()),
+        std::env::var("CLAUDE_CODE_SESSION_ID")
+            .ok()
+            .filter(|value| !value.is_empty()),
+    )
+}
+
+fn resolve_current_session_ref(
+    service_id: &collaboration_client::protocol::UuidIdentity,
+    from: Option<&str>,
+    codex: Option<String>,
+    claude: Option<String>,
+) -> Result<collaboration_client::protocol::SessionRef, String> {
+    if let Some(value) = from {
+        return serde_json::from_str(value)
+            .map_err(|_| crate::message_input_arguments::session_ref_guidance("--from"));
+    }
     let (endpoint_id, session_id) = match (codex, claude) {
         (Some(session_id), None) => ("codex-local", session_id),
         (None, Some(session_id)) => ("claude-local", session_id),
@@ -692,7 +724,7 @@ fn settlement_record(
 mod tests {
     use super::{
         ConversationArguments, ConversationCommand, conversation_end_exit, operation_failure_exit,
-        settlement_record,
+        resolve_current_session_ref, settlement_record,
     };
     use clap::Parser;
     use collaboration_client::{
@@ -737,6 +769,69 @@ mod tests {
         ])
         .expect("standalone create arguments");
         assert!(matches!(parsed.command, ConversationCommand::Create(_)));
+    }
+
+    #[test]
+    fn create_accepts_from_session_ref_override() {
+        let parsed = ConversationArguments::try_parse_from([
+            "agent-collaboration conversation",
+            "create",
+            "--endpoint",
+            "codex-local",
+            "--cwd",
+            "/tmp/project",
+            "--model",
+            "gpt-5.6-sol",
+            "--effort",
+            "low",
+            "--access",
+            "workspace-write",
+            "--from",
+            r#"{"endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},"sessionId":"cursor-conversation"}"#,
+            "--json",
+        ])
+        .expect("create with --from");
+        match parsed.command {
+            ConversationCommand::Create(args) => {
+                assert_eq!(
+                    args.from.as_deref(),
+                    Some(
+                        r#"{"endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},"sessionId":"cursor-conversation"}"#
+                    )
+                );
+            }
+            ConversationCommand::Prompt(_) | ConversationCommand::Provider { .. } => {
+                panic!("create parse selected another command")
+            }
+        }
+    }
+
+    #[test]
+    fn from_overrides_missing_and_present_env_identities() {
+        let service_id = "018f47d2-24d5-7a68-b9ec-6f759c39458f"
+            .to_owned()
+            .try_into()
+            .expect("service id");
+        let from = r#"{"endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},"sessionId":"cursor-conversation"}"#;
+        let resolved = resolve_current_session_ref(&service_id, Some(from), None, None)
+            .expect("override without env");
+        assert_eq!(String::from(resolved.session_id), "cursor-conversation");
+        let still_override = resolve_current_session_ref(
+            &service_id,
+            Some(from),
+            Some("codex-thread".to_owned()),
+            None,
+        )
+        .expect("override wins over env");
+        assert_eq!(
+            String::from(still_override.session_id),
+            "cursor-conversation"
+        );
+        assert!(resolve_current_session_ref(&service_id, None, None, None).is_err());
+        let implicit =
+            resolve_current_session_ref(&service_id, None, Some("codex-thread".to_owned()), None)
+                .expect("implicit Codex env");
+        assert_eq!(String::from(implicit.session_id), "codex-thread");
     }
 
     #[test]

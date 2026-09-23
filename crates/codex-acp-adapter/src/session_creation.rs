@@ -318,6 +318,7 @@ impl AcpSessionBinding {
         };
         if let Some(fork_thread_id) = choice.fork_thread_id {
             fields.insert("threadId".into(), json!(fork_thread_id));
+            fields.insert("excludeTurns".into(), json!(true));
         }
         let result = connection
             .request_validated(&inputs.schemas, operation, native)

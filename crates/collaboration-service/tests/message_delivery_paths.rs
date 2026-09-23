@@ -86,6 +86,7 @@ async fn auto_resume_preserves_effect_when_submission_rejected() {
         error["clientUserMessageId"],
         requests[2]["params"]["clientUserMessageId"]
     );
+    assert_eq!(requests[1]["params"]["excludeTurns"], true);
 }
 #[tokio::test]
 async fn lost_resume_receipt_never_submits_input() {
@@ -107,17 +108,28 @@ async fn lost_resume_receipt_never_submits_input() {
         json!({"resume":"unknown","submission":"notDispatched"})
     );
     assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["params"]["excludeTurns"], true);
 }
 #[tokio::test]
-async fn auto_active_steers_exact_observed_turn() {
+async fn auto_active_steers_exact_turn_without_loading_history() {
     let (result, requests) = exercise(MessageScenario { delivery:MessageDelivery::Auto, steps:vec![read("active"),
-        NativeStep { method:"thread/read", reply:NativeReply::Result(json!({"thread":{"id":"target","status":{"type":"active"},"turns":[{"id":"active-turn","status":"inProgress"}]}})) },
+        NativeStep { method:"thread/turns/list", reply:NativeReply::Result(json!({"data":[{"id":"active-turn","status":"inProgress"}],"nextCursor":null,"backwardsCursor":null})) },
         NativeStep { method:"turn/steer", reply:NativeReply::Result(json!({"turnId":"active-turn"})) },
     ] }).await.unwrap();
     assert!(matches!(
         result.unwrap().acceptance,
         NativeSendAcceptance::SteerAccepted { .. }
     ));
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[1]["params"],
+        json!({
+            "threadId": "target",
+            "limit": 1,
+            "sortDirection": "desc",
+            "itemsView": "notLoaded"
+        })
+    );
     assert_eq!(requests[2]["params"]["expectedTurnId"], "active-turn");
 }
 #[tokio::test]

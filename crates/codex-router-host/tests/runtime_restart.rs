@@ -354,8 +354,10 @@ async fn wait_for_process_ids(
 fn terminate_process(process_id: u32) -> Result<(), Box<dyn std::error::Error>> {
     let process_id = rustix::process::Pid::from_raw(i32::try_from(process_id)?)
         .ok_or("fixture process ID must be nonzero")?;
-    rustix::process::kill_process(process_id, rustix::process::Signal::TERM)?;
-    Ok(())
+    match rustix::process::kill_process(process_id, rustix::process::Signal::TERM) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn check_equal<TValue>(

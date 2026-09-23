@@ -122,6 +122,8 @@ use crate::provider_error::record_provider_error_observation;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
+use crate::session_account_affinity_cache::SessionAccountAffinityCache;
+use crate::session_account_affinity_cache::SharedSessionAccountAffinityCache;
 use crate::upstream::HyperHttpUpstreamTransport;
 use crate::upstream::UpstreamEndpoint;
 use crate::websocket::AsyncWebSocketTunnel;
@@ -477,6 +479,7 @@ pub struct LoopbackRouterRuntime {
     account_holds: RouteBandAccountHolds,
     active_reservations: RouteBandReservationBooks,
     selection_reservation_lock: SelectionReservationLock,
+    session_affinity_cache: SharedSessionAccountAffinityCache,
     runtime_exhaustions: RouteBandRuntimeExhaustions,
     route_band_queue_health: RouteBandQueueHealth,
     db_write_actor: DbWriteActor,
@@ -489,6 +492,24 @@ pub struct LoopbackRouterRuntime {
 impl LoopbackRouterRuntime {
     /// Opens router-owned state/secrets and binds the loopback listener.
     pub fn start(config: LoopbackRouterRuntimeConfig) -> Result<Self, LoopbackRouterRuntimeError> {
+        Self::start_with_test_maintenance_completion_sender(config, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_maintenance_completion_sender(
+        config: LoopbackRouterRuntimeConfig,
+        completion_sender: std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
+        Self::start_with_test_maintenance_completion_sender(config, Some(completion_sender))
+    }
+
+    fn start_with_test_maintenance_completion_sender(
+        config: LoopbackRouterRuntimeConfig,
+        #[cfg(test)] completion_sender: Option<
+            std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
+        >,
+        #[cfg(not(test))] _completion_sender: Option<()>,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -521,6 +542,7 @@ impl LoopbackRouterRuntime {
         let websocket_revocations = WebSocketRevocationRegistry::new();
         let route_band_queue_health = RouteBandQueueHealth::default();
         let selection_reservation_lock = SelectionReservationLock::default();
+        let session_affinity_cache = SessionAccountAffinityCache::shared();
         let db_write_actor = DbWriteActor::start_on_handle(
             runtime.handle(),
             Arc::new(SqliteDbWriteRepository::new(
@@ -536,6 +558,10 @@ impl LoopbackRouterRuntime {
             Arc::new(writable_state_stores.maintenance_state_store.clone()),
             MAINTENANCE_QUEUE_CAPACITY,
         );
+        #[cfg(test)]
+        if let Some(completion_sender) = completion_sender {
+            maintenance_actor.register_completion_sender(completion_sender);
+        }
 
         let loopback_runtime = Self {
             runtime,
@@ -555,6 +581,7 @@ impl LoopbackRouterRuntime {
             account_holds: Default::default(),
             active_reservations: Default::default(),
             selection_reservation_lock,
+            session_affinity_cache,
             runtime_exhaustions: Default::default(),
             route_band_queue_health,
             db_write_actor,
@@ -777,6 +804,7 @@ impl LoopbackRouterRuntime {
             account_holds: Arc::clone(&self.account_holds),
             active_reservations: Arc::clone(&self.active_reservations),
             selection_reservation_lock: Arc::clone(&self.selection_reservation_lock),
+            session_affinity_cache: Arc::clone(&self.session_affinity_cache),
             runtime_exhaustions: Arc::clone(&self.runtime_exhaustions),
             route_band_queue_health: Arc::clone(&self.route_band_queue_health),
             db_write_actor: self.db_write_actor.clone(),
@@ -1054,6 +1082,7 @@ struct LoopbackProtocolConnectionHandler {
     account_holds: RouteBandAccountHolds,
     active_reservations: RouteBandReservationBooks,
     selection_reservation_lock: SelectionReservationLock,
+    session_affinity_cache: SharedSessionAccountAffinityCache,
     runtime_exhaustions: RouteBandRuntimeExhaustions,
     route_band_queue_health: RouteBandQueueHealth,
     db_write_actor: DbWriteActor,
@@ -1175,13 +1204,14 @@ impl LoopbackProtocolConnectionHandler {
     ) -> Result<(), LoopbackRouterRuntimeError> {
         let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
             &self.selection_state_store,
-            AsyncAccountSelectorRuntimeState::new_with_selection_lock(
+            AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
                 Arc::clone(&self.weighted_selectors),
                 Arc::clone(&self.account_holds),
                 Arc::clone(&self.active_reservations),
                 Arc::clone(&self.runtime_exhaustions),
                 Arc::clone(&self.route_band_queue_health),
                 Arc::clone(&self.selection_reservation_lock),
+                Arc::clone(&self.session_affinity_cache),
             ),
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
@@ -1409,13 +1439,14 @@ impl LoopbackProtocolConnectionHandler {
             .resolver_for_state(self.credential_state_store.clone());
         let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
             &self.selection_state_store,
-            AsyncAccountSelectorRuntimeState::new_with_selection_lock(
+            AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
                 Arc::clone(&self.weighted_selectors),
                 Arc::clone(&self.account_holds),
                 Arc::clone(&self.active_reservations),
                 Arc::clone(&self.runtime_exhaustions),
                 Arc::clone(&self.route_band_queue_health),
                 Arc::clone(&self.selection_reservation_lock),
+                Arc::clone(&self.session_affinity_cache),
             ),
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),

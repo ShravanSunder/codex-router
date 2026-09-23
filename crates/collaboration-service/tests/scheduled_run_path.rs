@@ -103,6 +103,7 @@ async fn exercise_scheduled_run(
     let mut definitions = serde_json::Map::new();
     for name in [
         "ThreadRead",
+        "ThreadTurnsList",
         "ThreadResume",
         "ThreadStart",
         "ThreadLoadedList",
@@ -175,20 +176,31 @@ async fn exercise_scheduled_run(
                 serde_json::from_str(socket.next().await.ok_or("missing request")??.to_text()?)?;
             let expected = match logical_stage {
                 0 | 3 => "thread/start",
-                1 => "thread/read",
+                1 | 2 => "thread/read",
                 5 => "turn/start",
-                _ => "thread/read",
+                4 | 6 => "thread/turns/list",
+                _ => return Err("unexpected logical stage".into()),
             };
             if request.get("method").and_then(Value::as_str) != Some(expected) {
                 return Err(format!("expected {expected}").into());
             }
-            if matches!(logical_stage, 2 | 4 | 6)
+            if matches!(logical_stage, 4 | 6)
+                && (request.pointer("/params/cursor") != Some(&Value::Null)
+                    || request.pointer("/params/limit") != Some(&json!(1))
+                    || request.pointer("/params/sortDirection") != Some(&json!("desc"))
+                    || request.pointer("/params/itemsView") != Some(&json!("full")))
+            {
+                return Err(
+                    "history observation did not request one bounded full turn page".into(),
+                );
+            }
+            if logical_stage == 2
                 && request
                     .pointer("/params/includeTurns")
                     .and_then(Value::as_bool)
-                    != Some(true)
+                    != Some(false)
             {
-                return Err("history observation did not request native turn contents".into());
+                return Err("worker observation metadata read requested history".into());
             }
             if logical_stage == 0 && !matches!(preparation, PreparationOutcome::Accepted) {
                 if matches!(preparation, PreparationOutcome::Rejected) {
@@ -240,19 +252,23 @@ async fn exercise_scheduled_run(
                     json!({"thread":{"id":"scheduled-new-thread","cwd":"/fresh-fixture"},"cwd":"/fresh-fixture","model":"gpt-5.6-sol"})
                 }
                 1 => json!({"thread":{"id":"scheduled-new-thread","status":{"type":"idle"}}}),
+                2 => {
+                    json!({"thread":{"id":"scheduled-new-thread","model":"gpt-5.6-sol","reasoningEffort":"medium"}})
+                }
                 3 => {
                     json!({"thread":{"id":"summary-new-thread","cwd":"/fresh-fixture"},"cwd":"/fresh-fixture","model":"gpt-5.6-luna","sandbox":{"type":"readOnly"}})
                 }
+                4 => {
+                    json!({"data":[{"id":"scheduled-turn","status":"completed","items":[{"type":"agentMessage","id":"worker-output","text":"Build checked successfully."}]}],"nextCursor":null})
+                }
                 5 => json!({"turn":{"id":"summary-turn"}}),
                 6 if skip_failed_summary => {
-                    json!({"thread":{"id":"summary-new-thread","model":"gpt-5.6-luna","reasoningEffort":"low","turns":[{"id":"summary-turn","status":"failed","items":[]}]}})
+                    json!({"data":[{"id":"summary-turn","status":"failed","items":[]}],"nextCursor":null})
                 }
                 6 => {
-                    json!({"thread":{"id":"summary-new-thread","model":"gpt-5.6-luna","reasoningEffort":"low","turns":[{"id":"summary-turn","status":"completed","items":[{"type":"agentMessage","id":"summary-output","text":"Build checks passed. Monitor the next scheduled run."}]}]}})
+                    json!({"data":[{"id":"summary-turn","status":"completed","items":[{"type":"agentMessage","id":"summary-output","text":"Build checks passed. Monitor the next scheduled run."}]}],"nextCursor":null})
                 }
-                _ => {
-                    json!({"thread":{"id":"scheduled-new-thread","model":"gpt-5.6-sol","reasoningEffort":"medium","turns":[{"id":"scheduled-turn","status":"completed","items":[{"type":"agentMessage","id":"worker-output","text":"Build checked successfully."}]}]}})
-                }
+                _ => return Err("unexpected result stage".into()),
             };
             let result = if resume_rejected && stage == 1 {
                 json!({"thread":{"id":"scheduled-new-thread","status":{"type":"notLoaded"}}})
@@ -268,6 +284,24 @@ async fn exercise_scheduled_run(
                         .into(),
                 ))
                 .await?;
+            if logical_stage == 2 {
+                let turn_page: Value = serde_json::from_str(
+                    socket
+                        .next()
+                        .await
+                        .ok_or("worker turn page missing")??
+                        .to_text()?,
+                )?;
+                if turn_page.get("method").and_then(Value::as_str) != Some("thread/turns/list")
+                    || turn_page.pointer("/params/cursor") != Some(&Value::Null)
+                    || turn_page.pointer("/params/limit") != Some(&json!(1))
+                    || turn_page.pointer("/params/sortDirection") != Some(&json!("desc"))
+                    || turn_page.pointer("/params/itemsView") != Some(&json!("full"))
+                {
+                    return Err("worker observation did not request its bounded turn page".into());
+                }
+                socket.send(Message::Text(json!({"id":turn_page.get("id"),"result":{"data":[{"id":"scheduled-turn","status":"completed","items":[{"type":"agentMessage","id":"worker-output","text":"Build checked successfully."}]}],"nextCursor":null}}).to_string().into())).await?;
+            }
             if resume_rejected && stage == 1 {
                 let resume: Value = serde_json::from_str(
                     socket
@@ -278,6 +312,13 @@ async fn exercise_scheduled_run(
                 )?;
                 if resume.get("method").and_then(Value::as_str) != Some("thread/resume") {
                     return Err("unloaded worker did not request resume".into());
+                }
+                if resume
+                    .pointer("/params/excludeTurns")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+                {
+                    return Err("unloaded worker resume requested full history".into());
                 }
                 // Make the durable in-flight state observable before returning the known rejection.
                 tokio::time::timeout(

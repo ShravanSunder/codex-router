@@ -164,6 +164,32 @@ fn quota_status_view_model_reports_serving_clients_from_active_mirror() {
 }
 
 #[test]
+fn degraded_projection_clears_initial_admission_preference_labels() {
+    let mut report = quota_capture_report();
+    let row = report
+        .rows
+        .get_mut(0)
+        .unwrap_or_else(|| panic!("capture report should include a selected row"));
+    row.preferred_next = true;
+    row.routing_reason = RoutingReason::PreferredNearResetInitialAdmission;
+    row.routing = format_routing_reason(row.routing_reason).to_owned();
+    row.next_use = format_next_use_from_routing_reason(row.routing_reason).to_owned();
+
+    assert_eq!(
+        row.routing,
+        "preferred by quota: near-reset initial admission"
+    );
+    assert_eq!(row.next_use, "preferred by quota");
+
+    row.normalize_degraded_projection_authority();
+
+    assert!(!row.preferred_next);
+    assert_eq!(row.routing_reason, RoutingReason::UnknownFallbackAvailable);
+    assert_eq!(row.routing, "fallback by quota: same unknown pool");
+    assert_eq!(row.next_use, "fallback by quota");
+}
+
+#[test]
 fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
     let mut report = quota_capture_report();
     let row = report

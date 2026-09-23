@@ -26,6 +26,10 @@ pub enum RouteKind {
     MemoriesTraceSummarize,
     /// `POST /v1/responses/compact`.
     ResponsesCompact,
+    /// `POST /v1/images/generations`.
+    ImageGenerations,
+    /// `POST /v1/images/edits`.
+    ImageEdits,
 }
 
 impl RouteKind {
@@ -33,7 +37,10 @@ impl RouteKind {
     #[must_use]
     pub const fn route_band(self) -> RouteBand {
         match self {
-            Self::Responses | Self::ResponsesWebSocket => RouteBand::Responses,
+            Self::Responses
+            | Self::ResponsesWebSocket
+            | Self::ImageGenerations
+            | Self::ImageEdits => RouteBand::Responses,
             Self::Models => RouteBand::Models,
             Self::MemoriesTraceSummarize => RouteBand::MemoriesTraceSummarize,
             Self::ResponsesCompact => RouteBand::ResponsesCompact,
@@ -74,6 +81,10 @@ pub fn classify_route(method: Method, path: &str, websocket_upgrade: bool) -> Ro
         (Method::Post, "/v1/responses/compact", false) => {
             RouteClass::Supported(RouteKind::ResponsesCompact)
         }
+        (Method::Post, "/v1/images/generations", false) => {
+            RouteClass::Supported(RouteKind::ImageGenerations)
+        }
+        (Method::Post, "/v1/images/edits", false) => RouteClass::Supported(RouteKind::ImageEdits),
         _ => RouteClass::Rejected {
             reason: "unsupported_path",
         },

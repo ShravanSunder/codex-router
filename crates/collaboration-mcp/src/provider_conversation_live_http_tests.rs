@@ -283,11 +283,24 @@ fn assert_tool_success(response: &Value, label: &str) {
 
 async fn initialize_mcp(client: &reqwest::Client, mcp_url: &str) -> reqwest::header::HeaderValue {
     let response = client.post(mcp_url).header(CONTENT_TYPE, "application/json").header(ACCEPT, "application/json, text/event-stream").json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"provider-live-http-test","version":"1"}}})).send().await.expect("MCP initialize");
-    response
+    assert!(response.status().is_success(), "MCP initialize status");
+    let session = response
         .headers()
         .get("mcp-session-id")
         .expect("MCP session header")
-        .clone()
+        .clone();
+    let initialized = client
+        .post(mcp_url)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-11-25")
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
+        .send()
+        .await
+        .expect("MCP initialized notification");
+    assert!(initialized.status().is_success(), "MCP initialized status");
+    session
 }
 
 async fn call_tool(
@@ -298,15 +311,21 @@ async fn call_tool(
     tool_name: &str,
     arguments: Value,
 ) -> Value {
-    let response = client.post(mcp_url).header(CONTENT_TYPE, "application/json").header(ACCEPT, "application/json, text/event-stream").header("mcp-session-id", session).json(&json!({"jsonrpc":"2.0","id":request_id,"method":"tools/call","params":{"name":tool_name,"arguments":arguments}})).send().await.expect("MCP tools/call");
+    let response = client.post(mcp_url).header(CONTENT_TYPE, "application/json").header(ACCEPT, "application/json, text/event-stream").header("mcp-session-id", session).header("mcp-protocol-version", "2025-11-25").json(&json!({"jsonrpc":"2.0","id":request_id,"method":"tools/call","params":{"name":tool_name,"arguments":arguments}})).send().await.expect("MCP tools/call");
     protocol_response_json(response).await
 }
 
 async fn protocol_response_json(response: reqwest::Response) -> Value {
+    let status = response.status();
     let body = response.text().await.expect("protocol body");
+    assert!(
+        !body.is_empty(),
+        "empty protocol response with status {status}"
+    );
     let payload = body
         .lines()
-        .find_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| line.strip_prefix("data: "))
+        .find(|data| !data.is_empty())
         .unwrap_or(body.as_str());
     serde_json::from_str(payload).expect("protocol JSON")
 }

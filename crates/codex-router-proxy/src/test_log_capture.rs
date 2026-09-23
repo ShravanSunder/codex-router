@@ -1,10 +1,12 @@
 //! Test-only tracing capture serialized across proxy modules.
 
+use std::future::Future;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 static LOG_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+static ASYNC_LOG_CAPTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(crate) fn capture_log_output(emit: impl FnOnce()) -> String {
     let _guard = LOG_CAPTURE_LOCK
@@ -18,6 +20,20 @@ pub(crate) fn capture_log_output(emit: impl FnOnce()) -> String {
 
     tracing::subscriber::with_default(subscriber, emit);
     captured.rendered()
+}
+
+pub(crate) async fn capture_log_output_async<TOutput>(
+    emit: impl Future<Output = TOutput>,
+) -> (String, TOutput) {
+    let _guard = ASYNC_LOG_CAPTURE_LOCK.lock().await;
+    let captured = CapturedLogWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(captured.clone())
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+    let output = emit.await;
+    (captured.rendered(), output)
 }
 
 #[derive(Clone, Default)]

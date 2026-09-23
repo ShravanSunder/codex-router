@@ -441,6 +441,17 @@ impl CollaborationRuntime {
         )?
         .with_connection_budget(permits);
         let publication = publication.with_acp_listener()?;
+        let mcp_bind = collaboration_mcp::LoopbackBindAddress::new(inputs.mcp_bind)
+            .map_err(io::Error::other)?;
+        let mcp = collaboration_mcp::CollaborationMcpListener::start(
+            collaboration_mcp::CollaborationMcpListenerConfig {
+                bind_address: mcp_bind,
+                service_directory: inputs.directory.clone(),
+                allowed_origins: Vec::new(),
+            },
+        )
+        .await?;
+        let mcp_url = mcp.local_url();
         if let Some(settings) = settings_backend
             && settings.recover().await.is_err()
         {

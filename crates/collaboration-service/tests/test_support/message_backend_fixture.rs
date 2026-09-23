@@ -49,6 +49,7 @@ pub async fn exercise(
         "ThreadRead",
         "ThreadResume",
         "ThreadStart",
+        "ThreadTurnsList",
         "ThreadLoadedList",
         "TurnStart",
         "TurnSteer",

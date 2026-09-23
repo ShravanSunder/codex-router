@@ -114,13 +114,35 @@ async fn recover_and_observe(root: &Path) -> TestResult<()> {
             let _initialized = socket.next().await.ok_or("missing initialized")??;
             let request: Value =
                 serde_json::from_str(socket.next().await.ok_or("missing read")??.to_text()?)?;
-            if request.get("method").and_then(Value::as_str) != Some("thread/read")
+            if request.get("method").and_then(Value::as_str) != Some("thread/turns/list")
                 || request.pointer("/params/threadId").and_then(Value::as_str)
                     != Some("summary-thread")
+                || request.pointer("/params/cursor") != Some(&Value::Null)
+                || request.pointer("/params/limit") != Some(&json!(1))
+                || request.pointer("/params/sortDirection") != Some(&json!("desc"))
+                || request.pointer("/params/itemsView") != Some(&json!("full"))
             {
                 return Err("recovery resent interrupt or observed wrong thread".into());
             }
-            socket.send(Message::Text(json!({"id":request.get("id"),"result":{"thread":{"id":"summary-thread","turns":[{"id":"unrelated-turn","status":"completed","items":[]},{"id":"summary-turn","status":status,"items":[]}]}}}).to_string().into())).await?;
+            socket.send(Message::Text(json!({"id":request.get("id"),"result":{"data":[{"id":"unrelated-turn","status":"completed","items":[]}],"nextCursor":"older"}}).to_string().into())).await?;
+            let request: Value = serde_json::from_str(
+                socket
+                    .next()
+                    .await
+                    .ok_or("second turn page missing")??
+                    .to_text()?,
+            )?;
+            if request.get("method").and_then(Value::as_str) != Some("thread/turns/list")
+                || request.pointer("/params/threadId").and_then(Value::as_str)
+                    != Some("summary-thread")
+                || request.pointer("/params/cursor") != Some(&json!("older"))
+                || request.pointer("/params/limit") != Some(&json!(1))
+                || request.pointer("/params/sortDirection") != Some(&json!("desc"))
+                || request.pointer("/params/itemsView") != Some(&json!("full"))
+            {
+                return Err("recovery did not follow the next turn cursor".into());
+            }
+            socket.send(Message::Text(json!({"id":request.get("id"),"result":{"data":[{"id":"summary-turn","status":status,"items":[]}],"nextCursor":null}}).to_string().into())).await?;
         }
         if tokio::time::timeout(Duration::from_millis(100), listener.accept())
             .await

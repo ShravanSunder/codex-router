@@ -309,7 +309,8 @@ pub(super) fn assert_quota_capture_width_contract(width: usize, text: &str) {
 
 pub(super) fn format_next_use_for_capture(reason: RoutingReason) -> &'static str {
     match reason {
-        RoutingReason::PreferredNearResetDrainable
+        RoutingReason::PreferredNearResetInitialAdmission
+        | RoutingReason::PreferredNearResetDrainable
         | RoutingReason::PreferredNearResetControlledDrain
         | RoutingReason::PreferredWeeklyHealthier
         | RoutingReason::PreferredWeeklyResetSoon

@@ -34,7 +34,7 @@ fn expected_router_root_overrides() -> Vec<String> {
         "model_providers.codex-router.name=\"codex-router\"".to_owned(),
         "model_providers.codex-router.base_url=\"http://127.0.0.1:8787/v1\"".to_owned(),
         "model_providers.codex-router.wire_api=\"responses\"".to_owned(),
-        "model_providers.codex-router.requires_openai_auth=false".to_owned(),
+        "model_providers.codex-router.requires_openai_auth=true".to_owned(),
         "model_providers.codex-router.supports_websockets=true".to_owned(),
         "features.network_proxy.enabled=true".to_owned(),
         "features.network_proxy.mode=\"full\"".to_owned(),
@@ -79,7 +79,7 @@ fn router_profile_has_one_rendering_and_root_override_projection() {
             "name = \"codex-router\"\n",
             "base_url = \"http://127.0.0.1:8787/v1\"\n",
             "wire_api = \"responses\"\n",
-            "requires_openai_auth = false\n",
+            "requires_openai_auth = true\n",
             "supports_websockets = true\n",
         )
     );

@@ -28,12 +28,25 @@ pub(super) struct TestRoot {
 }
 impl TestRoot {
     pub(super) fn new(name: &str) -> Self {
-        let counter = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!(
-            "agent-collaboration-{name}-{}-{counter}",
-            std::process::id()
-        ));
-        Self { path }
+        loop {
+            let counter = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let reservation_path = std::env::temp_dir().join(format!(
+                "agent-collaboration-{name}-{}-{counter}",
+                std::process::id()
+            ));
+            match fs::create_dir(&reservation_path) {
+                Ok(()) => {
+                    return Self {
+                        path: reservation_path.join("root"),
+                    };
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!(
+                    "reserve isolated session-contract fixture root {}: {error}",
+                    reservation_path.display()
+                ),
+            }
+        }
     }
     pub(super) fn path(&self) -> &Path {
         &self.path

@@ -89,7 +89,7 @@ pub(super) async fn run_update_case(
             managed_executable: managed_executable.clone(),
             deadlines: HostDeadlines::new(HostDeadlineInputs {
                 router_start: Duration::from_secs(1),
-                app_server_start: Duration::from_secs(2),
+                app_server_start: Duration::from_secs(5),
                 remote_control: Duration::from_secs(1),
                 endpoint_inspection: Duration::from_millis(200),
                 operator_request: Duration::from_secs(15),
@@ -179,10 +179,155 @@ pub(super) async fn run_update_case(
     Ok(())
 }
 
+pub(super) async fn run_update_with_blocked_installer_case()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new("blocked-installer")?;
+    let router = PersistentRouterHealthFixture::start().await?;
+    let managed_executable = directory.path().join("managed-codex");
+    install_updater_fixture(&managed_executable, UpdateFixtureMode::Changed)?;
+    let replacement_executable = managed_executable.with_extension("replacement");
+    let installer_started = directory.path().join("installer-started");
+    let installer_release = directory.path().join("installer-release");
+    let app_server_socket = directory.path().join("app.sock");
+    let app_server_log = directory.path().join("app-pids.log");
+    std::fs::write(&app_server_log, b"")?;
+    let current_executable = std::env::current_exe()?;
+    let identity = codex_native_integration::executable_identity(&managed_executable).await?;
+    let app_server = AppServerLaunchPlan::new(
+        ChildCommandSpec::new(managed_executable.clone())
+            .with_environment("CODEX_HOST_UPDATE_TEST_BINARY", &current_executable)
+            .with_environment("CODEX_HOST_UPDATE_APP_SOCKET", &app_server_socket)
+            .with_environment("CODEX_HOST_UPDATE_APP_LOG", &app_server_log)
+            .with_output(ChildOutput::Null),
+        identity,
+        "1.2.3".to_owned(),
+    );
+    let coordination_paths = HostCoordinationPaths::new(
+        directory.path().join("operator.sock"),
+        directory.path().join("instance.lock"),
+    );
+    let updater_command = ChildCommandSpec::new(current_executable)
+        .with_arguments([
+            "--exact",
+            "changed_update_installer_barrier_entrypoint",
+            "--nocapture",
+        ])
+        .with_environment("CODEX_HOST_UPDATE_INSTALLER_STARTED", &installer_started)
+        .with_environment("CODEX_HOST_UPDATE_INSTALLER_RELEASE", &installer_release)
+        .with_environment("CODEX_HOST_UPDATE_MANAGED", &managed_executable)
+        .with_environment("CODEX_HOST_UPDATE_REPLACEMENT", &replacement_executable);
+    let runtime = tokio::spawn(HostRuntime::run(
+        HostConfig::new(HostConfigInputs {
+            coordination_paths: coordination_paths.clone(),
+            router_endpoint: router.address(),
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            app_server_socket: app_server_socket.clone(),
+            managed_executable,
+            deadlines: fixture_host_deadlines()?,
+        }),
+        ManagedChildLaunchPlans::new(None, app_server),
+        ManagedUpdateInputs::production()
+            .with_updater_command(updater_command)
+            .with_deadlines(fixture_update_deadlines()?),
+    ));
+
+    let proof_result: Result<(), Box<dyn std::error::Error>> = async {
+        let startup = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::AwaitHostStart,
+            Duration::from_secs(20),
+        )
+        .await?;
+        check_equal(
+            terminal_classification(&startup)?,
+            TerminalClassification::Ready,
+            "blocked-installer fixture Host must start ready",
+        )?;
+        let original_app_server_pid = wait_for_process_id(&app_server_log).await?;
+        let update_socket = coordination_paths.operator_socket().to_path_buf();
+        let update_task = tokio::spawn(async move {
+            send_operator_request(
+                &update_socket,
+                OperatorRequest::UpdateCodex,
+                Duration::from_secs(20),
+            )
+            .await
+            .map_err(|error| error.to_string())
+        });
+        wait_for_path(&installer_started).await?;
+
+        let status = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::Status,
+            Duration::from_secs(5),
+        )
+        .await?;
+        check_equal(
+            terminal_classification(&status)?,
+            TerminalClassification::Ready,
+            "operator socket must remain ready while the installer is blocked",
+        )?;
+        check(
+            process_is_running(original_app_server_pid),
+            "original app-server must remain running while the installer is blocked",
+        )?;
+        let _serving_connection = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::net::UnixStream::connect(&app_server_socket),
+        )
+        .await??;
+
+        std::fs::write(&installer_release, b"release\n")?;
+        let update = update_task.await??;
+        check_equal(
+            terminal_classification(&update)?,
+            TerminalClassification::Succeeded,
+            "released changed update must succeed",
+        )?;
+        let app_server_pids = wait_for_process_ids(&app_server_log, 2).await?;
+        check(
+            !process_is_running(original_app_server_pid),
+            "changed update must stop the original app-server after installation",
+        )?;
+        check(
+            process_is_running(
+                *app_server_pids
+                    .last()
+                    .ok_or("replacement app-server PID is missing")?,
+            ),
+            "changed update must leave the replacement app-server running",
+        )?;
+        let final_status = send_operator_request(
+            coordination_paths.operator_socket(),
+            OperatorRequest::Status,
+            Duration::from_secs(5),
+        )
+        .await?;
+        check_equal(
+            terminal_classification(&final_status)?,
+            TerminalClassification::Ready,
+            "Host, router, and operator socket must remain ready after app-server update",
+        )
+    }
+    .await;
+
+    let _release_result = std::fs::write(&installer_release, b"release\n");
+    runtime.abort();
+    let _runtime_result = runtime.await;
+    for process_id in read_process_ids(&app_server_log) {
+        if process_is_running(process_id) {
+            kill_process(process_id)?;
+        }
+    }
+    let router_cleanup_result = router.finish().await;
+    proof_result?;
+    router_cleanup_result
+}
+
 pub(super) fn fixture_host_deadlines() -> Result<HostDeadlines, Box<dyn std::error::Error>> {
     Ok(HostDeadlines::new(HostDeadlineInputs {
         router_start: Duration::from_secs(1),
-        app_server_start: Duration::from_secs(2),
+        app_server_start: Duration::from_secs(5),
         remote_control: Duration::from_secs(1),
         endpoint_inspection: Duration::from_millis(200),
         operator_request: Duration::from_secs(15),
@@ -273,6 +418,39 @@ pub(super) async fn wait_for_process_id(
         }
     })
     .await?)
+}
+
+async fn wait_for_process_ids(
+    process_log: &Path,
+    expected_count: usize,
+) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    Ok(tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let process_ids = read_process_ids(process_log);
+            if process_ids.len() >= expected_count {
+                return process_ids;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
+}
+
+async fn wait_for_path(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(tokio::time::timeout(Duration::from_secs(15), async {
+        while !path.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
+}
+
+fn read_process_ids(process_log: &Path) -> Vec<u32> {
+    std::fs::read_to_string(process_log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.parse::<u32>().ok())
+        .collect()
 }
 
 pub(super) fn process_is_running(process_id: u32) -> bool {
