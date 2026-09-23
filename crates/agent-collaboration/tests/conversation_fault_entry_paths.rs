@@ -173,6 +173,8 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
             .arg(&root)
             .args(["--json"])
             .env("CODEX_THREAD_ID", "fork-requester")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CURSOR_CONVERSATION_ID")
             .output(),
     )
     .await
@@ -256,6 +258,8 @@ async fn acp_initialize_response_loss_reports_no_effect_before_conversation_crea
             .arg(&root)
             .arg("--json")
             .env("CODEX_THREAD_ID", "initialize-requester")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CURSOR_CONVERSATION_ID")
             .output(),
     )
     .await
@@ -406,6 +410,8 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .arg(&root)
         .arg("--json")
         .env("CODEX_THREAD_ID", "record-creator")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
         .output()
         .await
         .expect("create output");
@@ -439,6 +445,8 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
             .arg(root)
             .arg("--json")
             .env("CODEX_THREAD_ID", "record-prompter")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CURSOR_CONVERSATION_ID")
             .output()
             .await
             .expect("prompt output")
@@ -501,7 +509,9 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .arg("--json")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("CODEX_THREAD_ID", "record-interrupter");
+        .env("CODEX_THREAD_ID", "record-interrupter")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID");
     let child = interrupted.spawn().expect("interrupt command");
     interrupt_prompt_ready
         .await
@@ -698,6 +708,8 @@ async fn run_resumed_prompt_after_load(load_error: Option<Value>) -> std::proces
             .arg(&root)
             .arg("--json")
             .env("CODEX_THREAD_ID", "resumed-requester")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CURSOR_CONVERSATION_ID")
             .output(),
     )
     .await
@@ -794,6 +806,7 @@ async fn conversation_create_without_identity_or_from_reports_unavailable() {
             .arg("--json")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CURSOR_CONVERSATION_ID")
             .output(),
     )
     .await
@@ -931,6 +944,7 @@ async fn conversation_create_from_supplies_created_by_without_env() {
             .arg("--json")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CURSOR_CONVERSATION_ID")
             .output(),
     )
     .await

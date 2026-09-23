@@ -87,6 +87,9 @@ fn main() {
     if arguments.first().is_some_and(|arg| arg == "acp") {
         std::process::exit(agent_collaboration::run_acp_command(arguments));
     }
+    if arguments.first().is_some_and(|arg| arg == "whoami") {
+        std::process::exit(agent_collaboration::run_whoami_command(arguments));
+    }
     if arguments.first().is_some_and(|arg| arg == "endpoints") {
         std::process::exit(agent_collaboration::run_endpoint_command(arguments));
     }

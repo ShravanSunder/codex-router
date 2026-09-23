@@ -112,25 +112,18 @@ pub(super) fn finalize_actor(
 }
 
 fn self_identity(client: &ControlClient) -> Result<Identity, String> {
-    let nonempty = |name| std::env::var_os(name).filter(|value| !value.is_empty());
-    let codex = nonempty("CODEX_THREAD_ID");
-    let claude = nonempty("CLAUDE_CODE_SESSION_ID");
-    let (session_id, endpoint_id) = match (codex, claude) {
-        (Some(_), Some(_)) => return Err("--actor self is ambiguous: set exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID".into()),
-        (None, None) => return Err("--actor self requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID".into()),
-        (Some(value), None) => (value, "codex-local"),
-        (None, Some(value)) => (value, "claude-local"),
-    };
+    let harness = crate::current_session_identity::read_harness_session_identity()
+        .map_err(|error| format!("--actor self: {error}"))?;
     let service_id: ServiceId = String::from(client.identity().service_id.clone())
         .try_into()
         .map_err(|_| "--actor self could not use the verified service identity".to_owned())?;
-    let session_id = session_id.into_string().map_err(|_| {
-        "--actor self requires CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID to contain a non-empty session ID without NUL".to_owned()
+    let session_id = SessionId::try_from(harness.session_id).map_err(|_| {
+        format!(
+            "--actor self requires {} to contain a non-empty session ID without NUL",
+            harness.harness.environment_variable
+        )
     })?;
-    let session_id = SessionId::try_from(session_id).map_err(|_| {
-        "--actor self requires CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID to contain a non-empty session ID without NUL".to_owned()
-    })?;
-    let endpoint_id = EndpointId::try_from(endpoint_id.to_owned())
+    let endpoint_id = EndpointId::try_from(harness.harness.endpoint_id.to_owned())
         .map_err(|_| "--actor self could not construct the local session endpoint".to_owned())?;
     Ok(Identity::Session {
         session: SessionRef {

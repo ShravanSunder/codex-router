@@ -88,12 +88,12 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
     for (environment, expected) in [
         (
             "missing",
-            "requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID",
+            "set exactly one of CODEX_THREAD_ID, CLAUDE_CODE_SESSION_ID, CURSOR_CONVERSATION_ID",
         ),
         ("both", "is ambiguous"),
         (
             "invalid",
-            "requires exactly one of CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID",
+            "set exactly one of CODEX_THREAD_ID, CLAUDE_CODE_SESSION_ID, CURSOR_CONVERSATION_ID",
         ),
     ] {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
@@ -107,6 +107,7 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
             .arg("--json")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CURSOR_CONVERSATION_ID")
             .kill_on_drop(true);
         match environment {
             "both" => {
@@ -174,6 +175,7 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
             .arg("--json")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CURSOR_CONVERSATION_ID")
             .kill_on_drop(true);
         if let Some(value) = codex_thread_id {
             command.env("CODEX_THREAD_ID", value);
@@ -217,6 +219,7 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         .arg("--json")
         .env("CODEX_THREAD_ID", "thread-listen-self")
         .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
         .kill_on_drop(true);
     let listen_task = tokio::spawn(async move { listen.output().await });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -313,6 +316,7 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         .arg("--json")
         .env("CODEX_THREAD_ID", "thread-listen-self")
         .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
         .kill_on_drop(true)
         .output()
         .await?;
@@ -346,6 +350,7 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         .arg(&root)
         .env("CODEX_THREAD_ID", "thread-listen-self")
         .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
         .kill_on_drop(true)
         .output()
         .await?;
