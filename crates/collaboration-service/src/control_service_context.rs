@@ -19,6 +19,10 @@ pub struct ServiceIdentity {
     pub(crate) approval_broker: Option<std::sync::Arc<crate::ServiceApprovalBroker>>,
     pub(crate) automation:
         Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
+    pub(crate) provider_operations:
+        Option<std::sync::Arc<tokio::sync::Mutex<crate::ProviderOperationStore>>>,
+    pub(crate) provider_conversations:
+        Option<std::sync::Arc<dyn crate::ProviderConversationBackend>>,
 }
 impl ServiceIdentity {
     pub fn with_board_store(
@@ -72,6 +76,22 @@ impl ServiceIdentity {
         store: std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>,
     ) -> Self {
         self.automation = Some(store);
+        self
+    }
+
+    pub fn with_provider_operation_store(
+        mut self,
+        store: std::sync::Arc<tokio::sync::Mutex<crate::ProviderOperationStore>>,
+    ) -> Self {
+        self.provider_operations = Some(store);
+        self
+    }
+
+    pub fn with_provider_conversation_backend(
+        mut self,
+        backend: std::sync::Arc<dyn crate::ProviderConversationBackend>,
+    ) -> Self {
+        self.provider_conversations = Some(backend);
         self
     }
 
@@ -147,6 +167,8 @@ impl ServiceIdentity {
             approval_broker: None,
             wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,
+            provider_operations: None,
+            provider_conversations: None,
             board: None,
             thread_listens: crate::thread_listen_registry::ThreadListenRegistry::new(),
             directory: EndpointDirectory::new(

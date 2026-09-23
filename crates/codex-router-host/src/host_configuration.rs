@@ -1,9 +1,13 @@
 //! Validated immutable host paths, endpoints, and deadline inputs.
 
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
+
+const DEFAULT_PROVIDER_OPERATION_RETENTION_DAYS: NonZeroU32 =
+    NonZeroU32::new(60).expect("positive retention default");
 
 use thiserror::Error;
 
@@ -47,6 +51,8 @@ pub struct HostConfig {
     mcp_bind: SocketAddr,
     app_server_socket: PathBuf,
     managed_executable: PathBuf,
+    external_provider_launches: Vec<crate::ExternalProviderLaunchBinding>,
+    provider_operation_retention_days: NonZeroU32,
     deadlines: HostDeadlines,
 }
 
@@ -77,8 +83,31 @@ impl HostConfig {
             mcp_bind: inputs.mcp_bind,
             app_server_socket: inputs.app_server_socket,
             managed_executable: inputs.managed_executable,
+            external_provider_launches: Vec::new(),
+            provider_operation_retention_days: DEFAULT_PROVIDER_OPERATION_RETENTION_DAYS,
             deadlines: inputs.deadlines,
         }
+    }
+    #[must_use]
+    pub fn with_external_provider_launch(
+        mut self,
+        binding: crate::ExternalProviderLaunchBinding,
+    ) -> Self {
+        self.external_provider_launches.push(binding);
+        self
+    }
+    #[must_use]
+    pub fn external_provider_launches(&self) -> &[crate::ExternalProviderLaunchBinding] {
+        &self.external_provider_launches
+    }
+    #[must_use]
+    pub const fn provider_operation_retention_days(&self) -> NonZeroU32 {
+        self.provider_operation_retention_days
+    }
+    #[must_use]
+    pub const fn with_provider_operation_retention_days(mut self, days: NonZeroU32) -> Self {
+        self.provider_operation_retention_days = days;
+        self
     }
     #[must_use]
     pub fn with_collaboration_directory(mut self, directory: PathBuf, codex_home: PathBuf) -> Self {

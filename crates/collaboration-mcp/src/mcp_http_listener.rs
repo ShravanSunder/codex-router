@@ -273,3 +273,11 @@ mod mcp_http_listener_tests;
 #[cfg(test)]
 #[path = "mcp_remediation_tests.rs"]
 mod mcp_remediation_tests;
+
+#[cfg(test)]
+#[path = "provider_conversation_http_tests.rs"]
+mod provider_conversation_http_tests;
+
+#[cfg(test)]
+#[path = "provider_conversation_live_http_tests.rs"]
+mod provider_conversation_live_http_tests;

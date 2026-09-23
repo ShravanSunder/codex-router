@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO provider_operations (\n                operation_id,operation_kind,binding_json,\n                stage,effect,reconciliation_state,admitted_at_ms,updated_at_ms\n             ) VALUES (?,?,?,?,?,?,?,?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "bc72692f64349a2810578850f4b0f8c7fddd92956224296ee3d8e88b0dccd27e"
+}

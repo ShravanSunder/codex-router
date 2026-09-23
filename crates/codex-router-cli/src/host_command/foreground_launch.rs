@@ -36,15 +36,29 @@ impl PreExecTelemetry for HostPreExecTelemetry {
     }
 }
 
+pub(super) struct ForegroundHostInputs {
+    pub router_root: PathBuf,
+    pub port: u16,
+    pub mcp_bind: SocketAddr,
+    pub provider_operation_retention_days: std::num::NonZeroU32,
+    pub coordination_paths: HostCoordinationPaths,
+    pub external_provider_launches: Vec<codex_router_host::ExternalProviderLaunchBinding>,
+}
+
 pub(super) async fn run_foreground_host(
-    router_root: PathBuf,
-    port: u16,
-    mcp_bind: SocketAddr,
-    coordination_paths: HostCoordinationPaths,
+    inputs: ForegroundHostInputs,
     context: &CliContext,
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
     stdout: &mut (impl std::io::Write + Send),
 ) -> Result<(), HostCommandError> {
+    let ForegroundHostInputs {
+        router_root,
+        port,
+        mcp_bind,
+        provider_operation_retention_days,
+        coordination_paths,
+        external_provider_launches,
+    } = inputs;
     let launch_started_at = std::time::Instant::now();
     let isolated_debug = cfg!(all(debug_assertions, not(test)))
         && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none();
@@ -134,9 +148,15 @@ pub(super) async fn run_foreground_host(
         ])
         .with_environment("OTEL_EXPORTER_OTLP_ENDPOINT", otlp_endpoint)
         .with_environment("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
-    let replacement_command =
-        host_replacement_command(current_executable, router_root.clone(), port, mcp_bind);
-    let config = HostConfig::new(HostConfigInputs {
+    let replacement_command = host_replacement_command(
+        current_executable,
+        router_root.clone(),
+        port,
+        mcp_bind,
+        provider_operation_retention_days,
+        &external_provider_launches,
+    );
+    let mut config = HostConfig::new(HostConfigInputs {
         coordination_paths,
         router_endpoint: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
         mcp_bind,
@@ -144,7 +164,11 @@ pub(super) async fn run_foreground_host(
         managed_executable: codex_paths.managed_executable(),
         deadlines: HostDeadlines::production(),
     })
+    .with_provider_operation_retention_days(provider_operation_retention_days)
     .with_collaboration_directory(collaboration_directory, codex_home);
+    for provider_launch in external_provider_launches {
+        config = config.with_external_provider_launch(provider_launch);
+    }
     let child_launch_plans = ManagedChildLaunchPlans::new(Some(router_command), app_server);
     let mut update_inputs =
         ManagedUpdateInputs::production().with_replacement_command(replacement_command);
@@ -179,8 +203,10 @@ fn host_replacement_command(
     router_root: PathBuf,
     port: u16,
     mcp_bind: SocketAddr,
+    provider_operation_retention_days: std::num::NonZeroU32,
+    external_provider_launches: &[codex_router_host::ExternalProviderLaunchBinding],
 ) -> ChildCommandSpec {
-    ChildCommandSpec::new(executable).with_arguments([
+    let mut arguments = vec![
         OsString::from("host"),
         OsString::from("--router-root"),
         router_root.into_os_string(),
@@ -188,10 +214,25 @@ fn host_replacement_command(
         OsString::from(port.to_string()),
         OsString::from("--mcp-bind"),
         OsString::from(mcp_bind.to_string()),
-    ])
+        OsString::from("--provider-operation-retention-days"),
+        OsString::from(provider_operation_retention_days.to_string()),
+    ];
+    for binding in external_provider_launches {
+        let (executable_flag, argument_flag) = binding.command_flags();
+        arguments.push(OsString::from(executable_flag));
+        arguments.push(binding.launch.executable.clone().into_os_string());
+        for argument in &binding.launch.arguments {
+            arguments.push(OsString::from(argument_flag));
+            arguments.push(OsString::from(argument));
+        }
+    }
+    ChildCommandSpec::new(executable).with_arguments(arguments)
 }
 
 fn launchctl_executable(context: &CliContext) -> Result<PathBuf, HostCommandError> {
+    #[cfg(not(debug_assertions))]
+    let _ = context;
+
     #[cfg(debug_assertions)]
     if let Some(debug_executable) = context.env_var("CODEX_ROUTER_DEBUG_LAUNCHCTL") {
         let debug_executable = PathBuf::from(debug_executable);
@@ -226,7 +267,14 @@ mod tests {
         let router_root = PathBuf::from("/tmp/router-root");
         let mcp_bind = SocketAddr::from(([127, 0, 0, 1], 19088));
         assert_eq!(
-            host_replacement_command(executable.clone(), router_root.clone(), 19087, mcp_bind),
+            host_replacement_command(
+                executable.clone(),
+                router_root.clone(),
+                19087,
+                mcp_bind,
+                std::num::NonZeroU32::new(60).expect("positive"),
+                &[],
+            ),
             ChildCommandSpec::new(executable).with_arguments([
                 OsString::from("host"),
                 OsString::from("--router-root"),
@@ -235,6 +283,46 @@ mod tests {
                 OsString::from("19087"),
                 OsString::from("--mcp-bind"),
                 OsString::from("127.0.0.1:19088"),
+                OsString::from("--provider-operation-retention-days"),
+                OsString::from("60"),
+            ])
+        );
+    }
+
+    #[test]
+    fn replacement_command_preserves_external_provider_launches() {
+        let executable = PathBuf::from("/tmp/codex-router");
+        let router_root = PathBuf::from("/tmp/router-root");
+        let mcp_bind = SocketAddr::from(([127, 0, 0, 1], 19088));
+        let provider = codex_router_host::ExternalProviderLaunchBinding::cursor(
+            PathBuf::from("/tmp/agent"),
+            vec!["acp".to_owned()],
+        )
+        .expect("cursor binding");
+        let command = host_replacement_command(
+            executable.clone(),
+            router_root.clone(),
+            19087,
+            mcp_bind,
+            std::num::NonZeroU32::new(60).expect("positive"),
+            &[provider],
+        );
+        assert_eq!(
+            command,
+            ChildCommandSpec::new(executable).with_arguments([
+                OsString::from("host"),
+                OsString::from("--router-root"),
+                router_root.into_os_string(),
+                OsString::from("--port"),
+                OsString::from("19087"),
+                OsString::from("--mcp-bind"),
+                OsString::from("127.0.0.1:19088"),
+                OsString::from("--provider-operation-retention-days"),
+                OsString::from("60"),
+                OsString::from("--cursor-acp-executable"),
+                OsString::from("/tmp/agent"),
+                OsString::from("--cursor-acp-arguments"),
+                OsString::from("acp"),
             ])
         );
     }

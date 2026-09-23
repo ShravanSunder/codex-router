@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE provider_operations\n             SET target_service_id=?,target_endpoint_id=?,target_session_id=?,updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)\n             WHERE operation_id=? AND (\n                target_session_id IS NULL OR (\n                    target_service_id=? AND target_endpoint_id=? AND target_session_id=?\n                )\n             )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "fdac3f6d605aeb55d76b6a32d8b6425feb07ec030ecfeb3f8d84e2280e20be55"
+}

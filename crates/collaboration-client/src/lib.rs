@@ -48,6 +48,7 @@ pub use observation_session::{
 mod acp_conversation;
 pub use acp_conversation::AcpConversation;
 mod conversation_contract;
+mod provider_conversation_operations;
 pub use conversation_contract::{
     ConversationCreatePromptError, ConversationCreatePromptRequest, ConversationCreatePromptResult,
     ConversationCreateRequest, ConversationCreateResult, ConversationEnd, ConversationEvent,

@@ -1,0 +1,614 @@
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+//! Compiled-CLI fixture assertions deliberately fail fast at the exact wire boundary.
+
+use serde_json::{Value, json};
+use std::os::unix::fs::DirBuilderExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
+const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
+const ENDPOINT_ID: &str = "claude-fixture";
+const CREATE_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75101";
+const PROMPT_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75102";
+const WRONG_GENERATION_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75103";
+const LOST_RESPONSE_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75104";
+
+#[tokio::test]
+async fn external_provider_create_then_prompt_preserves_target_and_supplied_operations() {
+    let root = fixture_directory("create-prompt");
+    let listener = publish_fixture(&root);
+    let fixture = tokio::spawn(async move {
+        let create = serve_one(&listener, "conversation/create", |request| {
+            assert_eq!(request["params"]["operationId"], CREATE_OPERATION);
+            assert_eq!(request["params"]["generation"]["generation"], 7);
+            json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", None, "admitted", "none")})
+        })
+        .await;
+        let expected_target = target();
+        serve_one(&listener, "conversation/prompt", move |request| {
+            assert_eq!(request["params"]["operationId"], PROMPT_OPERATION);
+            assert_eq!(request["params"]["target"], expected_target);
+            json!({"admission":"admitted","operation":operation_snapshot(PROMPT_OPERATION, "conversationPrompt", Some(target()), "admitted", "none")})
+        })
+        .await;
+        create
+    });
+
+    let create = run_cli(&root, create_arguments(CREATE_OPERATION)).await;
+    assert_eq!(
+        create.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let create_json: Value = serde_json::from_slice(&create.stdout).expect("create JSON");
+    assert_eq!(
+        create_json["result"]["record"]["operation"]["operationId"],
+        CREATE_OPERATION
+    );
+
+    let prompt = run_cli(&root, prompt_arguments(PROMPT_OPERATION)).await;
+    assert_eq!(
+        prompt.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&prompt.stderr)
+    );
+    let prompt_json: Value = serde_json::from_slice(&prompt.stdout).expect("prompt JSON");
+    assert_eq!(
+        prompt_json["result"]["record"]["operation"]["target"],
+        target()
+    );
+
+    fixture.await.expect("fixture");
+    cleanup_fixture(&root);
+}
+
+#[tokio::test]
+async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read_only() {
+    let wrong_root = fixture_directory("wrong-generation");
+    let wrong_listener = publish_fixture(&wrong_root);
+    let wrong_fixture = tokio::spawn(async move {
+        serve_one_error(
+            &wrong_listener,
+            "conversation/prompt",
+            json!({
+                "kind":"staleGeneration","stage":"binding","effect":"none",
+                "message":"provider binding generation changed",
+                "operationId":WRONG_GENERATION_OPERATION,"target":target()
+            }),
+        )
+        .await;
+    });
+    let wrong = run_cli(&wrong_root, prompt_arguments(WRONG_GENERATION_OPERATION)).await;
+    assert_eq!(
+        wrong.status.code(),
+        Some(4),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&wrong.stdout),
+        String::from_utf8_lossy(&wrong.stderr)
+    );
+    let wrong_json: Value = serde_json::from_slice(&wrong.stdout).expect("wrong-generation JSON");
+    assert_eq!(wrong_json["error"]["kind"], "staleGeneration");
+    assert_eq!(wrong_json["error"]["effect"], "none");
+    assert_eq!(
+        wrong_json["error"]["operationId"],
+        WRONG_GENERATION_OPERATION
+    );
+    wrong_fixture.await.expect("wrong-generation fixture");
+    cleanup_fixture(&wrong_root);
+
+    let lost_root = fixture_directory("lost-response");
+    let lost_listener = publish_fixture(&lost_root);
+    let lost_fixture = tokio::spawn(async move {
+        serve_one_without_response(&lost_listener, "conversation/prompt").await;
+    });
+    let lost = run_cli(&lost_root, prompt_arguments(LOST_RESPONSE_OPERATION)).await;
+    assert_eq!(lost.status.code(), Some(5));
+    let lost_json: Value = serde_json::from_slice(&lost.stdout).expect("lost-response JSON");
+    assert_eq!(lost_json["error"]["kind"], "outcomeUnknown");
+    assert_eq!(lost_json["error"]["effect"], "unknown");
+    assert_eq!(lost_json["error"]["operationId"], LOST_RESPONSE_OPERATION);
+    lost_fixture.await.expect("lost-response fixture");
+    cleanup_fixture(&lost_root);
+
+    let show_root = fixture_directory("operation-show");
+    let show_listener = publish_fixture(&show_root);
+    let show_fixture = tokio::spawn(async move {
+        serve_one(&show_listener, "conversation/operationShow", |request| {
+            assert_eq!(request["params"]["operationId"], CREATE_OPERATION);
+            operation_snapshot(
+                CREATE_OPERATION,
+                "conversationCreate",
+                Some(target()),
+                "terminal",
+                "applied",
+            )
+        })
+        .await;
+    });
+    let show = run_cli(
+        &show_root,
+        vec![
+            "conversation",
+            "provider",
+            "operation-show",
+            "--operation-id",
+            CREATE_OPERATION,
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(show.status.code(), Some(0));
+    let show_json: Value = serde_json::from_slice(&show.stdout).expect("show JSON");
+    assert_eq!(
+        show_json["result"]["record"]["operationId"],
+        CREATE_OPERATION
+    );
+    assert_eq!(show_json["result"]["record"]["effect"], "applied");
+    show_fixture.await.expect("show fixture");
+    cleanup_fixture(&show_root);
+
+    for (fixture_name, method, command) in [
+        (
+            "show-response-loss",
+            "conversation/operationShow",
+            "operation-show",
+        ),
+        ("wait-response-loss", "conversation/operationWait", "wait"),
+        (
+            "reconcile-response-loss",
+            "conversation/operationReconcile",
+            "reconcile",
+        ),
+    ] {
+        let read_root = fixture_directory(fixture_name);
+        let read_listener = publish_fixture(&read_root);
+        let read_fixture = tokio::spawn(async move {
+            serve_one_without_response(&read_listener, method).await;
+        });
+        let mut arguments = vec![
+            "conversation".to_owned(),
+            "provider".to_owned(),
+            command.to_owned(),
+            "--operation-id".to_owned(),
+            CREATE_OPERATION.to_owned(),
+            "--json".to_owned(),
+        ];
+        if command == "wait" {
+            arguments.extend(["--timeout-seconds".to_owned(), "1".to_owned()]);
+        }
+        let read = run_cli(&read_root, arguments).await;
+        assert_eq!(read.status.code(), Some(3), "{command} exit");
+        let read_json: Value = serde_json::from_slice(&read.stdout).expect("read failure JSON");
+        assert_eq!(read_json["error"]["kind"], "unavailable", "{command}");
+        assert_eq!(read_json["error"]["effect"], "none", "{command}");
+        assert_eq!(
+            read_json["error"]["operationId"], CREATE_OPERATION,
+            "{command}"
+        );
+        read_fixture.await.expect("read failure fixture");
+        cleanup_fixture(&read_root);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly selected authenticated Cursor ACP runtime"]
+async fn live_cursor_create_wait_prompt_wait_through_compiled_cli() {
+    use codex_router_host::{
+        CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
+    };
+    use collaboration_client::ControlClient;
+    use collaboration_client::protocol::{
+        ChannelDescription, CodexGeneration, EndpointId, EndpointRef, OperationId, SessionId,
+        SessionRef,
+    };
+
+    let executable = std::env::var_os("CODEX_ROUTER_TEST_EXTERNAL_ACP_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .expect("external ACP executable");
+    let arguments = std::env::var("CODEX_ROUTER_TEST_EXTERNAL_ACP_ARGUMENTS")
+        .ok()
+        .map(|encoded| serde_json::from_str::<Vec<String>>(&encoded).expect("JSON argument array"))
+        .unwrap_or_default();
+    let cwd = std::env::var_os("CODEX_ROUTER_TEST_EXTERNAL_ACP_CWD")
+        .map(std::path::PathBuf::from)
+        .expect("external ACP cwd");
+    let service_directory = std::env::var_os("CODEX_ROUTER_TEST_EXTERNAL_ACP_SERVICE_DIRECTORY")
+        .map(std::path::PathBuf::from)
+        .expect("owned service directory");
+    std::fs::create_dir_all(&service_directory).expect("service directory");
+
+    let runtime = CollaborationRuntime::start_with_external_providers(
+        CollaborationRuntimeInputs {
+            directory: service_directory.clone(),
+            codex_home: std::env::var_os("CODEX_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| cwd.clone()),
+            backend_socket: service_directory.join("unused-backend.sock"),
+            mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            native_schema: None,
+        },
+        vec![
+            ExternalProviderLaunchBinding::cursor(executable, arguments)
+                .expect("Cursor provider binding"),
+        ],
+    )
+    .await
+    .expect("collaboration runtime");
+
+    let mut control = ControlClient::connect(&service_directory, "live-cli-setup", "1")
+        .await
+        .expect("Control setup client");
+    let inventory = control.list_endpoints().await.expect("endpoint inventory");
+    let provider = inventory
+        .endpoints
+        .iter()
+        .find(|record| String::from(record.endpoint.endpoint_id.clone()) == "cursor-local")
+        .expect("Cursor endpoint");
+    let generation_number = provider
+        .channels
+        .iter()
+        .find_map(|channel| match channel {
+            ChannelDescription::ExternalProvider {
+                binding_generation, ..
+            } => Some(*binding_generation),
+            _ => None,
+        })
+        .expect("Cursor generation");
+    let generation = CodexGeneration {
+        service_epoch: inventory.service_epoch,
+        generation: generation_number,
+    };
+    let actor = SessionRef {
+        endpoint: EndpointRef {
+            service_id: provider.endpoint.service_id.clone(),
+            endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("actor endpoint"),
+        },
+        session_id: SessionId::try_from("live-cli-caller".to_owned()).expect("actor session"),
+    };
+    let _closed = control.close().await;
+
+    let create_operation = OperationId::generate();
+    let create = run_cli(
+        &service_directory,
+        vec![
+            "conversation".to_owned(),
+            "provider".to_owned(),
+            "create".to_owned(),
+            "--operation-id".to_owned(),
+            create_operation.as_str().to_owned(),
+            "--endpoint".to_owned(),
+            serde_json::to_string(&provider.endpoint).expect("endpoint JSON"),
+            "--generation".to_owned(),
+            serde_json::to_string(&generation).expect("generation JSON"),
+            "--created-by".to_owned(),
+            serde_json::to_string(&actor).expect("creator JSON"),
+            "--approver".to_owned(),
+            serde_json::to_string(&actor).expect("approver JSON"),
+            "--cwd".to_owned(),
+            cwd.display().to_string(),
+            "--access".to_owned(),
+            "write-restricted".to_owned(),
+            "--json".to_owned(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        create.status.code(),
+        Some(0),
+        "create stdout={} stderr={}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let create_wait = run_wait(&service_directory, create_operation.as_str()).await;
+    let create_wait_json: Value =
+        serde_json::from_slice(&create_wait.stdout).expect("create wait JSON");
+    assert_eq!(create_wait.status.code(), Some(0), "{create_wait_json}");
+    let target = create_wait_json
+        .pointer("/result/record/output/settlement/target")
+        .cloned()
+        .expect("created provider target");
+
+    let prompt_operation = OperationId::generate();
+    let prompt = run_cli(
+        &service_directory,
+        vec![
+            "conversation".to_owned(),
+            "provider".to_owned(),
+            "prompt".to_owned(),
+            "--operation-id".to_owned(),
+            prompt_operation.as_str().to_owned(),
+            "--target".to_owned(),
+            target.to_string(),
+            "--generation".to_owned(),
+            serde_json::to_string(&generation).expect("generation JSON"),
+            "--requested-by".to_owned(),
+            serde_json::to_string(&actor).expect("requester JSON"),
+            "--approver".to_owned(),
+            serde_json::to_string(&actor).expect("approver JSON"),
+            "--text".to_owned(),
+            "Reply with exactly PR2_CLI_LIVE_OK and no other text.".to_owned(),
+            "--json".to_owned(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        prompt.status.code(),
+        Some(0),
+        "prompt stdout={} stderr={}",
+        String::from_utf8_lossy(&prompt.stdout),
+        String::from_utf8_lossy(&prompt.stderr)
+    );
+    let prompt_wait = run_wait(&service_directory, prompt_operation.as_str()).await;
+    let prompt_wait_json: Value =
+        serde_json::from_slice(&prompt_wait.stdout).expect("prompt wait JSON");
+    assert_eq!(prompt_wait.status.code(), Some(0), "{prompt_wait_json}");
+    assert_eq!(
+        prompt_wait_json.pointer("/result/record/operation/target"),
+        Some(&target)
+    );
+    assert_eq!(
+        prompt_wait_json.pointer("/result/record/output/settlement/response"),
+        Some(&json!("PR2_CLI_LIVE_OK"))
+    );
+    eprintln!(
+        "live Cursor CLI target={} createOperation={} promptOperation={} settlement={}",
+        target,
+        create_operation.as_str(),
+        prompt_operation.as_str(),
+        prompt_wait_json
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+async fn run_wait(root: &std::path::Path, operation_id: &str) -> std::process::Output {
+    run_cli(
+        root,
+        vec![
+            "conversation",
+            "provider",
+            "wait",
+            "--operation-id",
+            operation_id,
+            "--timeout-seconds",
+            "60",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await
+}
+
+fn fixture_directory(label: &str) -> std::path::PathBuf {
+    let root = std::path::PathBuf::from("/tmp").join(format!(
+        "pc-{label}-{}",
+        collaboration_client::board::ProjectId::generate().as_str()
+    ));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("fixture directory");
+    root
+}
+
+fn publish_fixture(root: &std::path::Path) -> tokio::net::UnixListener {
+    let listener = tokio::net::UnixListener::bind(root.join("control.sock")).expect("listener");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let manifest = serde_json::from_value(json!({
+        "version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
+        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+    }))
+    .expect("manifest");
+    let publication =
+        collaboration_service::ManifestPublication::publish(root, &manifest).expect("publish");
+    Box::leak(Box::new(publication));
+    listener
+}
+
+async fn serve_one(
+    listener: &tokio::net::UnixListener,
+    method: &str,
+    result: impl FnOnce(&Value) -> Value,
+) {
+    let (stream, _) = listener.accept().await.expect("accept");
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    let initialize: Value =
+        serde_json::from_str(&lines.next_line().await.expect("read").expect("initialize"))
+            .expect("initialize JSON");
+    write_response(
+        &mut write,
+        &initialize,
+        json!({"version":{"major":1,"minor":0},"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,"controlSchemaDigest":format!("sha256:{}", "a".repeat(64))}),
+    )
+    .await;
+    let request: Value =
+        serde_json::from_str(&lines.next_line().await.expect("read").expect("request"))
+            .expect("request JSON");
+    assert_eq!(request["method"], method);
+    write_response(&mut write, &request, result(&request)).await;
+}
+
+async fn serve_one_error(listener: &tokio::net::UnixListener, method: &str, data: Value) {
+    let (stream, _) = listener.accept().await.expect("accept");
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    initialize_fixture(&mut lines, &mut write).await;
+    let request: Value =
+        serde_json::from_str(&lines.next_line().await.expect("read").expect("request"))
+            .expect("request JSON");
+    assert_eq!(request["method"], method);
+    write
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32050,"message":"fixture rejection","data":data}})
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("error response");
+}
+
+async fn serve_one_without_response(listener: &tokio::net::UnixListener, method: &str) {
+    let (stream, _) = listener.accept().await.expect("accept");
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    initialize_fixture(&mut lines, &mut write).await;
+    let request: Value =
+        serde_json::from_str(&lines.next_line().await.expect("read").expect("request"))
+            .expect("request JSON");
+    assert_eq!(request["method"], method);
+}
+
+async fn initialize_fixture(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+) {
+    let initialize: Value =
+        serde_json::from_str(&lines.next_line().await.expect("read").expect("initialize"))
+            .expect("initialize JSON");
+    write_response(
+        write,
+        &initialize,
+        json!({"version":{"major":1,"minor":0},"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,"controlSchemaDigest":format!("sha256:{}", "a".repeat(64))}),
+    )
+    .await;
+}
+
+async fn write_response(
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+    request: &Value,
+    result: Value,
+) {
+    write
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"jsonrpc":"2.0","id":request["id"],"result":result})
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("response");
+}
+
+fn operation_snapshot(
+    operation_id: &str,
+    operation: &str,
+    target_value: Option<Value>,
+    stage: &str,
+    effect: &str,
+) -> Value {
+    let mut value = json!({
+        "operationId":operation_id,"operation":operation,
+        "binding":{
+            "endpoint":endpoint(),"bindingId":"fixture-binding",
+            "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
+            "transport":"stdioAcp","generation":generation(),
+            "capabilities":[
+                {"name":"create","status":"supported","evidence":"advertised"},
+                {"name":"prompt","status":"supported","evidence":"advertised"},
+                {"name":"callerDetach","status":"supported","evidence":"routerQualified"}
+            ]
+        },
+        "stage":stage,"effect":effect,"reconciliation":"unresolved",
+        "admittedAt":"2026-09-20T00:00:00Z"
+    });
+    if let Some(target_value) = target_value {
+        value["target"] = target_value;
+    }
+    value
+}
+
+fn endpoint() -> Value {
+    json!({"serviceId":SERVICE_ID,"endpointId":ENDPOINT_ID})
+}
+
+fn generation() -> Value {
+    json!({"serviceEpoch":SERVICE_EPOCH,"generation":7})
+}
+
+fn target() -> Value {
+    json!({"endpoint":endpoint(),"sessionId":"provider-thread"})
+}
+
+fn actor() -> String {
+    json!({"endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},"sessionId":"caller"})
+        .to_string()
+}
+
+fn create_arguments(operation_id: &str) -> Vec<String> {
+    vec![
+        "conversation",
+        "provider",
+        "create",
+        "--operation-id",
+        operation_id,
+        "--endpoint",
+        &endpoint().to_string(),
+        "--generation",
+        &generation().to_string(),
+        "--created-by",
+        &actor(),
+        "--approver",
+        &actor(),
+        "--cwd",
+        "/tmp/project",
+        "--access",
+        "workspace-write",
+        "--json",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn prompt_arguments(operation_id: &str) -> Vec<String> {
+    vec![
+        "conversation",
+        "provider",
+        "prompt",
+        "--operation-id",
+        operation_id,
+        "--target",
+        &target().to_string(),
+        "--generation",
+        &generation().to_string(),
+        "--requested-by",
+        &actor(),
+        "--approver",
+        &actor(),
+        "--text",
+        "hello",
+        "--json",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+async fn run_cli(root: &std::path::Path, arguments: Vec<String>) -> std::process::Output {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(arguments)
+        .arg("--service-directory")
+        .arg(root)
+        .output()
+        .await
+        .expect("CLI")
+}
+
+fn cleanup_fixture(root: &std::path::Path) {
+    std::fs::remove_file(root.join("control.sock")).expect("socket cleanup");
+    std::fs::remove_file(root.join("service.json")).expect("manifest cleanup");
+    std::fs::remove_dir(root).expect("directory cleanup");
+}

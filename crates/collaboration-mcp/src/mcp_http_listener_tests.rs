@@ -553,6 +553,11 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
         .expect("tools response");
     assert!(tools.status().is_success());
     let tools_body = protocol_response_json(tools).await;
+    assert_eq!(tools_body.pointer("/result/ttlMs"), Some(&json!(0)));
+    assert_eq!(
+        tools_body.pointer("/result/cacheScope"),
+        Some(&json!("private"))
+    );
     let tool_names = tools_body
         .pointer("/result/tools")
         .and_then(Value::as_array)
@@ -561,7 +566,7 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
     assert!(tool_names.contains(&"endpoints_list"));
-    assert_eq!(tool_names.len(), 90);
+    assert_eq!(tool_names.len(), 97);
     let tools = tools_body
         .pointer("/result/tools")
         .and_then(Value::as_array)

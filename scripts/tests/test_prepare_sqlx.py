@@ -82,7 +82,7 @@ class PrepareSqlxTests(unittest.TestCase):
         )
         return result, calls
 
-    def test_prepares_each_package_against_only_its_migrations(self) -> None:
+    def test_prepares_each_package_against_its_required_schema_set(self) -> None:
         result, calls = self.run_workflow(check_metadata=False)
 
         self.assertEqual(result, 0)
@@ -97,26 +97,32 @@ class PrepareSqlxTests(unittest.TestCase):
             if command[:4] == ["cargo", "sqlx", "prepare", "--workspace"]
         ]
         self.assertEqual(
-            [command[3] for command, _ in migration_calls],
-            ["--source", "--source"],
+            ["--ignore-missing" in command for command, _ in migration_calls],
+            [False, False, False, True],
         )
         self.assertEqual(
-            [command[4] for command, _ in migration_calls],
+            [command[command.index("--source") + 1] for command, _ in migration_calls],
             [
                 "crates/codex-router-state/migrations",
                 "crates/message-board-storage/migrations",
+                "crates/message-board-storage/migrations",
+                "crates/collaboration-service/migrations",
             ],
         )
         self.assertEqual(
             [command[command.index("--package") + 1] for command, _ in prepare_calls],
-            ["codex-router-state", "message-board-storage"],
+            ["codex-router-state", "message-board-storage", "collaboration-service"],
         )
         self.assertEqual(
             [
                 Path(environment["DATABASE_URL"].removeprefix("sqlite://")).name
                 for _, environment in prepare_calls
             ],
-            ["account-schema.sqlite", "message-board-schema.sqlite"],
+            [
+                "account-schema.sqlite",
+                "message-board-schema.sqlite",
+                "provider-operation-schema.sqlite",
+            ],
         )
 
     def test_successful_prepare_publishes_combined_metadata(self) -> None:
@@ -130,6 +136,7 @@ class PrepareSqlxTests(unittest.TestCase):
             sorted(path.name for path in self.metadata_directory.glob("query-*.json")),
             [
                 "query-codex-router-state.json",
+                "query-collaboration-service.json",
                 "query-message-board-storage.json",
             ],
         )
@@ -171,7 +178,7 @@ class PrepareSqlxTests(unittest.TestCase):
             ["query-original.json"],
         )
 
-    def test_check_validates_both_packages_without_mutating_metadata(self) -> None:
+    def test_check_validates_all_packages_without_mutating_metadata(self) -> None:
         existing_metadata = self.metadata_directory / "query-existing.json"
         existing_metadata.write_text("existing")
 
@@ -183,7 +190,7 @@ class PrepareSqlxTests(unittest.TestCase):
             for command, _ in calls
             if command[:4] == ["cargo", "sqlx", "prepare", "--workspace"]
         ]
-        self.assertEqual(len(prepare_calls), 2)
+        self.assertEqual(len(prepare_calls), 3)
         self.assertTrue(all("--check" in command for command in prepare_calls))
         self.assertEqual(existing_metadata.read_text(), "existing")
 

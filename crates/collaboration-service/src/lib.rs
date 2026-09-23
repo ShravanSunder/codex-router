@@ -21,6 +21,14 @@ pub use native_generation_gate::{NativeAdmission, NativeGenerationGate};
 mod native_relay_listener;
 mod private_socket_listener;
 pub use native_relay_listener::NativeRelayListener;
+mod provider_operation_store;
+pub use provider_operation_store::{
+    ProviderOperationAdmission, ProviderOperationAdmissionResult, ProviderOperationRecord,
+    ProviderOperationStore, ProviderOperationStoreError,
+};
+mod provider_conversation_backend;
+pub use provider_conversation_backend::{ProviderConversationBackend, ProviderConversationFuture};
+mod provider_conversation_dispatch;
 mod service_identity_storage;
 pub use service_identity_storage::{load_service_identity, new_service_uuid};
 mod manifest_publication;
@@ -35,7 +43,11 @@ mod approval_broker;
 mod message_effect_state;
 mod native_message_dispatch;
 mod session_delivery_sink;
-pub use approval_broker::ServiceApprovalBroker;
+pub use approval_broker::{
+    ExternalApprovalOperationMetadata, ExternalApprovalOption, ExternalApprovalOptionScope,
+    ExternalApprovalRequest, ServiceApprovalBroker,
+};
+pub use codex_acp_adapter::BrokeredApprovalOutcome;
 
 mod acp_channel_listener;
 pub use acp_channel_listener::AcpChannelListener;

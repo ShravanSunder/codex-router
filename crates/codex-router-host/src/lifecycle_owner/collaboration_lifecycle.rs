@@ -10,6 +10,8 @@ pub(super) struct CollaborationLifecycle {
     codex_home: PathBuf,
     backend_socket: PathBuf,
     mcp_bind: std::net::SocketAddr,
+    external_provider_launches: Vec<crate::ExternalProviderLaunchBinding>,
+    provider_operation_retention_days: std::num::NonZeroU32,
     runtime: Option<CollaborationRuntime>,
     published_child: Option<u32>,
     schema_digest: Option<[u8; 32]>,
@@ -30,6 +32,8 @@ impl CollaborationLifecycle {
                 .to_owned(),
             backend_socket: config.app_server_socket().to_owned(),
             mcp_bind: config.mcp_bind(),
+            external_provider_launches: config.external_provider_launches().to_vec(),
+            provider_operation_retention_days: config.provider_operation_retention_days(),
             runtime: None,
             published_child: None,
             schema_digest: None,
@@ -73,16 +77,21 @@ impl CollaborationLifecycle {
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
             }
-            self.runtime = Some(
-                CollaborationRuntime::start(CollaborationRuntimeInputs {
+            let mut runtime = CollaborationRuntime::start_with_external_providers(
+                CollaborationRuntimeInputs {
                     directory: self.directory.clone(),
                     codex_home: self.codex_home.clone(),
                     backend_socket: self.backend_socket.clone(),
                     mcp_bind: self.mcp_bind,
                     native_schema: export.clone(),
-                })
-                .await?,
-            );
+                },
+                self.external_provider_launches.clone(),
+            )
+            .await?;
+            runtime
+                .configure_provider_operation_retention(self.provider_operation_retention_days)
+                .await?;
+            self.runtime = Some(runtime);
             self.schema_digest = digest;
         }
         let runtime = self

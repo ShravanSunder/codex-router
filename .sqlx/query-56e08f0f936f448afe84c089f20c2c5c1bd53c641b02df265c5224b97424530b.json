@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT binding_json,target_service_id,target_endpoint_id,target_session_id\n             FROM provider_operations WHERE effect=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "binding_json",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "binding_json"
+          }
+        }
+      },
+      {
+        "name": "target_service_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "target_service_id"
+          }
+        }
+      },
+      {
+        "name": "target_endpoint_id",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "target_endpoint_id"
+          }
+        }
+      },
+      {
+        "name": "target_session_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "target_session_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "56e08f0f936f448afe84c089f20c2c5c1bd53c641b02df265c5224b97424530b"
+}

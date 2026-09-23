@@ -1,5 +1,8 @@
 //! Endpoint metadata keeps destination identity separate from protocol channels.
-use crate::{CodexGeneration, EndpointRef};
+use crate::{
+    CodexGeneration, EndpointRef, GenerationNumber, ProviderBindingId, ProviderCapabilities,
+    ProviderRuntimeIdentity, ProviderTransport,
+};
 use serde::{Deserialize, Serialize};
 
 /// Bounded public text, distinct from any native session identity.
@@ -104,6 +107,14 @@ pub enum ChannelDescription {
         transport: AcpCarrier,
         path: NonEmptyText,
         schema_digest: SchemaDigest,
+    },
+    #[serde(rename_all = "camelCase")]
+    ExternalProvider {
+        transport: ProviderTransport,
+        binding_id: ProviderBindingId,
+        binding_generation: GenerationNumber,
+        runtime: ProviderRuntimeIdentity,
+        capabilities: ProviderCapabilities,
     },
 }
 

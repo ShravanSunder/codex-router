@@ -25,12 +25,12 @@ pub struct MessageSendRequest {
 #[derive(Debug, thiserror::Error)]
 pub enum MessageSendError {
     #[error(transparent)]
-    Preparation(ClientError),
+    Preparation(Box<ClientError>),
     #[error("{source}")]
     Submission {
         target: SessionRef,
         #[source]
-        source: ClientError,
+        source: Box<ClientError>,
     },
 }
 
@@ -39,11 +39,11 @@ impl MessageSendError {
     pub fn into_operation_failure_and_target(self) -> (OperationFailure, Option<SessionRef>) {
         match self {
             Self::Preparation(error) => (
-                operation_failure_from_client_error(error, OperationEffect::None),
+                operation_failure_from_client_error(*error, OperationEffect::None),
                 None,
             ),
             Self::Submission { target, source } => (
-                operation_failure_from_client_error(source, OperationEffect::Unknown),
+                operation_failure_from_client_error(*source, OperationEffect::Unknown),
                 Some(target),
             ),
         }
@@ -90,14 +90,14 @@ impl ControlClient {
         request: MessageSendRequest,
     ) -> Result<NativeSendReceipt, MessageSendError> {
         if request.target.endpoint.service_id != self.identity().service_id {
-            return Err(MessageSendError::Preparation(ClientError::InvalidRequest(
-                "message target belongs to another service",
+            return Err(MessageSendError::Preparation(Box::new(
+                ClientError::InvalidRequest("message target belongs to another service"),
             )));
         }
         let inventory = self
             .list_endpoints()
             .await
-            .map_err(MessageSendError::Preparation)?;
+            .map_err(|error| MessageSendError::Preparation(Box::new(error)))?;
         let generation = inventory
             .endpoints
             .iter()
@@ -111,19 +111,23 @@ impl ControlClient {
                     _ => None,
                 })
             })
-            .ok_or(MessageSendError::Preparation(ClientError::Rejected {
-                code: -32050,
-                data: Some(json!({"kind":"unavailable","stage":"discovery"})),
-            }))?;
+            .ok_or(MessageSendError::Preparation(Box::new(
+                ClientError::Rejected {
+                    code: -32050,
+                    data: Some(json!({"kind":"unavailable","stage":"discovery"})),
+                },
+            )))?;
         if request
             .generation_guard
             .as_ref()
             .is_some_and(|expected| expected != &generation)
         {
-            return Err(MessageSendError::Preparation(ClientError::Rejected {
-                code: -32050,
-                data: Some(json!({"kind":"staleGeneration","stage":"discovery"})),
-            }));
+            return Err(MessageSendError::Preparation(Box::new(
+                ClientError::Rejected {
+                    code: -32050,
+                    data: Some(json!({"kind":"staleGeneration","stage":"discovery"})),
+                },
+            )));
         }
         let is_agent = matches!(request.message, PublicMessageContent::Agent { .. });
         let target = request.target.clone();
@@ -139,12 +143,15 @@ impl ControlClient {
                 .await
                 .map_err(|source| MessageSendError::Submission {
                     target: target.clone(),
-                    source,
+                    source: Box::new(source),
                 })
         } else {
             self.send_human_input(params)
                 .await
-                .map_err(|source| MessageSendError::Submission { target, source })
+                .map_err(|source| MessageSendError::Submission {
+                    target,
+                    source: Box::new(source),
+                })
         }
     }
 }
@@ -207,11 +214,16 @@ mod tests {
             generation_guard: None,
             client_user_message_id: None,
         };
+        let error = client
+            .send_message(request)
+            .await
+            .expect_err("foreign service");
         assert!(matches!(
-            client.send_message(request).await,
-            Err(MessageSendError::Preparation(ClientError::InvalidRequest(
-                "message target belongs to another service"
-            )))
+            error,
+            MessageSendError::Preparation(source)
+                if matches!(source.as_ref(), ClientError::InvalidRequest(
+                    "message target belongs to another service"
+                ))
         ));
         client.close().await.expect("close client");
         peer.await.expect("join peer");
@@ -271,10 +283,17 @@ mod tests {
             "clientUserMessageId":null
         }))
         .expect("message request");
+        let error = client
+            .send_message(request)
+            .await
+            .expect_err("stale generation");
         assert!(matches!(
-            client.send_message(request).await,
-            Err(MessageSendError::Preparation(ClientError::Rejected { code: -32050, data: Some(data) }))
-                if data["kind"] == "staleGeneration"
+            error,
+            MessageSendError::Preparation(source)
+                if matches!(source.as_ref(), ClientError::Rejected {
+                    code: -32050,
+                    data: Some(data),
+                } if data["kind"] == "staleGeneration")
         ));
         client.close().await.expect("close client");
         peer.await.expect("join peer");

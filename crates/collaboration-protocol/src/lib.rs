@@ -8,6 +8,23 @@ mod operation_failure_contract;
 pub use operation_failure_contract::{
     AdapterOperationFailure, OperationEffect, OperationFailureKind,
 };
+mod provider_conversation_contract;
+pub use provider_conversation_contract::{
+    ConversationAdmissionState, ConversationCancelRequest, ConversationCreateRequest,
+    ConversationLoadRequest, ConversationOperationFailure, ConversationOperationFailureKind,
+    ConversationOperationFailureStage, ConversationOperationReconcileRequest,
+    ConversationOperationSettlement, ConversationOperationShowRequest,
+    ConversationOperationSnapshot, ConversationOperationSubmission,
+    ConversationOperationWaitOutput, ConversationOperationWaitRequest,
+    ConversationOperationWaitResult, ConversationOutputUnavailableReason,
+    ConversationPromptRequest, EffectiveProviderSettings, ProviderAuthenticationState,
+    ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities, ProviderCapability,
+    ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
+    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
+    ProviderPermissionOutcome, ProviderPromptStopReason, ProviderReconciliationState,
+    ProviderRequestedPolicy, ProviderRuntimeIdentity, ProviderSettingsMappingStatus,
+    ProviderTransport, ProviderWorkingDirectory,
+};
 mod access_contract;
 mod approval_contract;
 mod permission_diagnostic;

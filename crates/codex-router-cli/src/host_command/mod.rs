@@ -65,6 +65,11 @@ pub(crate) struct HostCommand {
     router_root: Option<PathBuf>,
     port: Option<u16>,
     mcp_bind: Option<SocketAddr>,
+    provider_operation_retention_days: std::num::NonZeroU32,
+    claude_acp_executable: Option<PathBuf>,
+    claude_acp_arguments: Vec<String>,
+    cursor_acp_executable: Option<PathBuf>,
+    cursor_acp_arguments: Vec<String>,
     require_debug_isolation: bool,
 }
 
@@ -78,6 +83,11 @@ impl HostCommand {
             router_root: parsed.router_root,
             port: parsed.port,
             mcp_bind: parsed.mcp_bind,
+            provider_operation_retention_days: parsed.provider_operation_retention_days,
+            claude_acp_executable: parsed.claude_acp_executable,
+            claude_acp_arguments: parsed.claude_acp_arguments,
+            cursor_acp_executable: parsed.cursor_acp_executable,
+            cursor_acp_arguments: parsed.cursor_acp_arguments,
             require_debug_isolation: parsed.require_debug_isolation,
         })
     }
@@ -96,6 +106,10 @@ impl HostCommand {
     #[cfg(test)]
     pub(crate) const fn mcp_bind(&self) -> Option<SocketAddr> {
         self.mcp_bind
+    }
+    #[cfg(test)]
+    pub(crate) const fn provider_operation_retention_days(&self) -> std::num::NonZeroU32 {
+        self.provider_operation_retention_days
     }
 
     pub(crate) const fn runs_foreground(&self) -> bool {
@@ -118,6 +132,26 @@ struct ClapHostCommand {
     port: Option<u16>,
     #[arg(long, global = true, value_parser = parse_loopback_mcp_bind)]
     mcp_bind: Option<SocketAddr>,
+    #[arg(long, global = true, default_value = "60")]
+    provider_operation_retention_days: std::num::NonZeroU32,
+    #[arg(long, global = true)]
+    claude_acp_executable: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        allow_hyphen_values = true,
+        requires = "claude_acp_executable"
+    )]
+    claude_acp_arguments: Vec<String>,
+    #[arg(long, global = true)]
+    cursor_acp_executable: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        allow_hyphen_values = true,
+        requires = "cursor_acp_executable"
+    )]
+    cursor_acp_arguments: Vec<String>,
     #[arg(long, global = true, hide = true)]
     require_debug_isolation: bool,
 }
@@ -141,24 +175,29 @@ pub(crate) async fn run_host_command<W: Write + Send>(
     let coordination_paths =
         HostCoordinationPaths::new(router_root.join("host.sock"), router_root.join("host.lock"));
     if command.runs_foreground() {
+        let provider_launches = external_provider_launches(&command)?;
         return foreground_launch::run_foreground_host(
-            router_root,
-            command.port.unwrap_or_else(|| {
-                if cfg!(all(debug_assertions, not(test)))
-                    && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none()
-                {
-                    18787
-                } else {
-                    DEFAULT_HOST_PORT
-                }
-            }),
-            command.mcp_bind.unwrap_or_else(|| {
-                default_mcp_bind(
-                    cfg!(all(debug_assertions, not(test)))
-                        && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none(),
-                )
-            }),
-            coordination_paths,
+            foreground_launch::ForegroundHostInputs {
+                router_root,
+                port: command.port.unwrap_or_else(|| {
+                    if cfg!(all(debug_assertions, not(test)))
+                        && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none()
+                    {
+                        18787
+                    } else {
+                        DEFAULT_HOST_PORT
+                    }
+                }),
+                mcp_bind: command.mcp_bind.unwrap_or_else(|| {
+                    default_mcp_bind(
+                        cfg!(all(debug_assertions, not(test)))
+                            && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none(),
+                    )
+                }),
+                provider_operation_retention_days: command.provider_operation_retention_days,
+                coordination_paths,
+                external_provider_launches: provider_launches,
+            },
             context,
             telemetry,
             stdout,
@@ -233,6 +272,31 @@ pub(crate) async fn run_host_command<W: Write + Send>(
         crate::presentation::host::render_terminal_frame(stdout, &frames)?;
     }
     Ok(())
+}
+
+fn external_provider_launches(
+    command: &HostCommand,
+) -> Result<Vec<codex_router_host::ExternalProviderLaunchBinding>, HostCommandError> {
+    let mut launches = Vec::new();
+    if let Some(executable) = command.claude_acp_executable.clone() {
+        launches.push(
+            codex_router_host::ExternalProviderLaunchBinding::claude(
+                executable,
+                command.claude_acp_arguments.clone(),
+            )
+            .map_err(|error| HostCommandError::RouterRoot(error.to_owned()))?,
+        );
+    }
+    if let Some(executable) = command.cursor_acp_executable.clone() {
+        launches.push(
+            codex_router_host::ExternalProviderLaunchBinding::cursor(
+                executable,
+                command.cursor_acp_arguments.clone(),
+            )
+            .map_err(|error| HostCommandError::RouterRoot(error.to_owned()))?,
+        );
+    }
+    Ok(launches)
 }
 
 pub(crate) const fn default_mcp_bind(isolated_debug: bool) -> SocketAddr {
@@ -326,6 +390,45 @@ mod tests {
             replacement_outcome::REPLACEMENT_CONVERGENCE_DEADLINE,
             Duration::from_secs(40),
             "replacement convergence starts only after old-host EOF"
+        );
+    }
+
+    #[test]
+    fn provider_launch_arguments_require_and_retain_explicit_executables() {
+        let command = HostCommand::parse(vec![
+            OsString::from("--claude-acp-executable"),
+            OsString::from("/tmp/claude-agent-acp"),
+            OsString::from("--claude-acp-arguments"),
+            OsString::from("--permission-mode"),
+            OsString::from("--cursor-acp-executable"),
+            OsString::from("/tmp/agent"),
+            OsString::from("--cursor-acp-arguments"),
+            OsString::from("acp"),
+        ])
+        .expect("provider launch arguments");
+
+        let launches = external_provider_launches(&command).expect("validated launches");
+        assert_eq!(launches.len(), 2);
+        assert_eq!(launches[0].launch.arguments, vec!["--permission-mode"]);
+        assert_eq!(launches[1].launch.arguments, vec!["acp"]);
+    }
+
+    #[test]
+    fn provider_operation_retention_is_positive_configurable_and_defaults_to_sixty_days() {
+        let default = HostCommand::parse(Vec::new()).expect("default host command");
+        assert_eq!(default.provider_operation_retention_days().get(), 60);
+        let custom = HostCommand::parse(vec![
+            OsString::from("--provider-operation-retention-days"),
+            OsString::from("7"),
+        ])
+        .expect("custom retention");
+        assert_eq!(custom.provider_operation_retention_days().get(), 7);
+        assert!(
+            HostCommand::parse(vec![
+                OsString::from("--provider-operation-retention-days"),
+                OsString::from("0"),
+            ])
+            .is_err()
         );
     }
 }

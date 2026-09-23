@@ -9,16 +9,86 @@ use collaboration_protocol::{
     ApprovalRequestRecord, ApprovalState, MessageContent, MessageDelivery, NativeSendParams,
     SessionRef, UuidIdentity,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, oneshot};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalApprovalOptionScope {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalApprovalOption {
+    pub option_id: String,
+    pub scope: ExternalApprovalOptionScope,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExternalApprovalRequest {
+    pub requester: SessionRef,
+    pub approver: SessionRef,
+    pub generation: collaboration_protocol::CodexGeneration,
+    pub retirement: tokio_util::sync::CancellationToken,
+    pub operation_metadata: ExternalApprovalOperationMetadata,
+    pub transient_presentation: Option<Value>,
+    pub options: Vec<ExternalApprovalOption>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalApprovalOperationMetadata {
+    pub operation_id: collaboration_protocol::OperationId,
+    pub target: SessionRef,
+    pub binding_generation: collaboration_protocol::CodexGeneration,
+    pub method: &'static str,
+}
+
+impl Serialize for ExternalApprovalOperationMetadata {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SerializedMetadata<'a> {
+            kind: &'static str,
+            operation_id: &'a collaboration_protocol::OperationId,
+            target: &'a SessionRef,
+            binding_generation: &'a collaboration_protocol::CodexGeneration,
+            method: &'static str,
+        }
+
+        SerializedMetadata {
+            kind: "externalProviderPermission",
+            operation_id: &self.operation_id,
+            target: &self.target,
+            binding_generation: &self.binding_generation,
+            method: self.method,
+        }
+        .serialize(serializer)
+    }
+}
+
 struct PendingApproval {
     record: ApprovalRequestRecord,
     offered: BTreeMap<ApprovalDecision, String>,
     completion: oneshot::Sender<BrokeredApprovalOutcome>,
+    generation_authority: ApprovalGenerationAuthority,
+}
+
+#[derive(Clone)]
+enum ApprovalGenerationAuthority {
+    Native,
+    External {
+        generation: collaboration_protocol::CodexGeneration,
+        retirement: tokio_util::sync::CancellationToken,
+    },
 }
 
 pub struct ServiceApprovalBroker {
@@ -33,6 +103,86 @@ pub struct ServiceApprovalBroker {
 }
 
 impl ServiceApprovalBroker {
+    pub async fn request_external(
+        &self,
+        request: ExternalApprovalRequest,
+    ) -> Result<BrokeredApprovalOutcome, ApprovalBrokerError> {
+        if request.requester.endpoint.service_id != self.service_id
+            || request.approver.endpoint.service_id != self.service_id
+        {
+            return Err(ApprovalBrokerError::RouteUnavailable);
+        }
+        if request.requester == request.approver {
+            return Ok(BrokeredApprovalOutcome::Cancelled);
+        }
+        let offered = map_external_options(request.options)?;
+        let request_id = format!(
+            "approval-{}",
+            String::from(crate::new_service_uuid().map_err(|_| ApprovalBrokerError::Unavailable)?)
+        );
+        let record = ApprovalRequestRecord {
+            request_id: request_id.clone(),
+            requester: request.requester,
+            approver: request.approver,
+            generation: request.generation,
+            state: ApprovalState::PendingClientDecision,
+            decision: None,
+            operation: serde_json::to_value(request.operation_metadata)
+                .map_err(|_| ApprovalBrokerError::Unavailable)?,
+            expires_at: (chrono::Utc::now()
+                + chrono::Duration::seconds(APPROVAL_TIMEOUT.as_secs() as i64))
+            .to_rfc3339(),
+        };
+        let (completion, receiver) = oneshot::channel();
+        self.pending.lock().await.insert(
+            request_id.clone(),
+            PendingApproval {
+                record: record.clone(),
+                offered,
+                completion,
+                generation_authority: ApprovalGenerationAuthority::External {
+                    generation: record.generation.clone(),
+                    retirement: request.retirement.clone(),
+                },
+            },
+        );
+        self.record(record.clone()).await?;
+        let mut cancellation = CancellationMarker {
+            request_id: request_id.clone(),
+            pending: Arc::clone(&self.pending),
+            history: Arc::clone(&self.history),
+            history_path: self.history_path.clone(),
+            armed: true,
+        };
+        if self
+            .deliver_with_presentation(&record, request.transient_presentation.as_ref())
+            .await
+            .is_err()
+        {
+            self.pending.lock().await.remove(&request_id);
+            let mut terminal = record;
+            terminal.state = ApprovalState::ApproverUnreachable;
+            self.record(terminal).await?;
+            cancellation.armed = false;
+            return Ok(BrokeredApprovalOutcome::Cancelled);
+        }
+        tokio::select! {
+            biased;
+            () = request.retirement.cancelled() => {
+                self.transition_pending(&request_id, ApprovalState::Cancelled).await?;
+                cancellation.armed = false;
+                Ok(BrokeredApprovalOutcome::Cancelled)
+            }
+            result = tokio::time::timeout(APPROVAL_TIMEOUT, receiver) => match result {
+            Ok(Ok(outcome)) => {
+                cancellation.armed = false;
+                Ok(outcome)
+            }
+            _ => Ok(BrokeredApprovalOutcome::Cancelled),
+            }
+        }
+    }
+
     pub async fn load(
         service_id: UuidIdentity,
         endpoints: EndpointDirectory,
@@ -124,6 +274,33 @@ impl ServiceApprovalBroker {
     }
 }
 
+fn map_external_options(
+    options: Vec<ExternalApprovalOption>,
+) -> Result<BTreeMap<ApprovalDecision, String>, ApprovalBrokerError> {
+    let mut identifiers = std::collections::BTreeSet::new();
+    let mut offered = BTreeMap::new();
+    for option in options {
+        if !identifiers.insert(option.option_id.clone()) {
+            return Err(ApprovalBrokerError::Unavailable);
+        }
+        let decision = match option.scope {
+            ExternalApprovalOptionScope::AllowOnce => Some(ApprovalDecision::Allow),
+            ExternalApprovalOptionScope::RejectOnce => Some(ApprovalDecision::Deny),
+            ExternalApprovalOptionScope::AllowAlways
+            | ExternalApprovalOptionScope::RejectAlways => None,
+        };
+        if let Some(decision) = decision
+            && offered.insert(decision, option.option_id).is_some()
+        {
+            return Err(ApprovalBrokerError::Unavailable);
+        }
+    }
+    if offered.is_empty() {
+        return Err(ApprovalBrokerError::Unavailable);
+    }
+    Ok(offered)
+}
+
 async fn record_history(
     history_path: &std::path::Path,
     history: &Mutex<Vec<ApprovalRequestRecord>>,
@@ -193,13 +370,27 @@ impl ServiceApprovalBroker {
                 .await?;
             return Err("expired");
         }
-        let current_generation = self
-            .backend
-            .gate
-            .acquire()
-            .map_err(|_| "unavailable")?
-            .generation()
-            .clone();
+        let current_generation = match &request.generation_authority {
+            ApprovalGenerationAuthority::Native => self
+                .backend
+                .gate
+                .acquire()
+                .map_err(|_| "unavailable")?
+                .generation()
+                .clone(),
+            ApprovalGenerationAuthority::External {
+                generation,
+                retirement,
+            } => {
+                if retirement.is_cancelled() {
+                    drop(pending);
+                    self.expire_or_cancel_stale(&params.request_id, ApprovalState::Cancelled)
+                        .await?;
+                    return Err("oldGeneration");
+                }
+                generation.clone()
+            }
+        };
         if current_generation != request.record.generation {
             drop(pending);
             self.expire_or_cancel_stale(&params.request_id, ApprovalState::Cancelled)
@@ -239,10 +430,25 @@ impl ServiceApprovalBroker {
     }
 
     async fn deliver(&self, record: &ApprovalRequestRecord) -> Result<(), ApprovalBrokerError> {
+        self.deliver_with_presentation(record, None).await
+    }
+
+    async fn deliver_with_presentation(
+        &self,
+        record: &ApprovalRequestRecord,
+        transient_presentation: Option<&Value>,
+    ) -> Result<(), ApprovalBrokerError> {
         if String::from(record.approver.endpoint.endpoint_id.clone()) != "codex-local" {
             return Err(ApprovalBrokerError::RouteUnavailable);
         }
-        let text = serde_json::to_string(record).map_err(|_| ApprovalBrokerError::Unavailable)?;
+        let mut delivered_record = record.clone();
+        if let Some(presentation) = transient_presentation
+            && let Value::Object(operation) = &mut delivered_record.operation
+        {
+            operation.insert("presentation".to_owned(), presentation.clone());
+        }
+        let text = serde_json::to_string(&delivered_record)
+            .map_err(|_| ApprovalBrokerError::Unavailable)?;
         let params = NativeSendParams {
             target: record.approver.clone(),
             generation: self
@@ -385,6 +591,7 @@ impl ApprovalBroker for ServiceApprovalBroker {
                     record: record.clone(),
                     offered,
                     completion,
+                    generation_authority: ApprovalGenerationAuthority::Native,
                 },
             );
             self.record(record.clone()).await?;

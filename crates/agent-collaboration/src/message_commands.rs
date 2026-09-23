@@ -59,18 +59,20 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
         let mut client =
             ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
                 .await
-                .map_err(MessageSendError::Preparation)?;
+                .map_err(|error| MessageSendError::Preparation(Box::new(error)))?;
         let saved = prepared
             .resolve(&client.identity().service_id)
             .map_err(|_| {
-                MessageSendError::Preparation(ClientError::InvalidRequest("invalid session target"))
+                MessageSendError::Preparation(Box::new(ClientError::InvalidRequest(
+                    "invalid session target",
+                )))
             })?;
         let request = MessageSendRequest {
             target: saved.target,
             message: saved
                 .content
                 .try_into()
-                .map_err(MessageSendError::Preparation)?,
+                .map_err(|error| MessageSendError::Preparation(Box::new(error)))?,
             delivery: saved.delivery,
             generation_guard: saved.generation_guard,
             client_user_message_id: None,
@@ -169,7 +171,8 @@ mod tests {
             ))
         };
         let (preparation, preparation_target) =
-            MessageSendError::Preparation(transport()).into_operation_failure_and_target();
+            MessageSendError::Preparation(Box::new(transport()))
+                .into_operation_failure_and_target();
         assert!(preparation_target.is_none());
         assert_eq!(preparation.effect, OperationEffect::None);
         assert_eq!(
@@ -183,7 +186,7 @@ mod tests {
                 "sessionId":"target"
             }))
             .expect("target"),
-            source: transport(),
+            source: Box::new(transport()),
         }
         .into_operation_failure_and_target();
         assert!(submission_target.is_some());
@@ -199,7 +202,7 @@ mod tests {
                 "sessionId":"target"
             }))
             .expect("target"),
-            source: ClientError::Protocol("malformed result"),
+            source: Box::new(ClientError::Protocol("malformed result")),
         }
         .into_operation_failure_and_target();
         assert!(malformed_target.is_some());
@@ -215,10 +218,10 @@ mod tests {
             ("unavailable", 3),
             ("nativeRejected", 4),
         ] {
-            let (failure, _) = MessageSendError::Preparation(ClientError::Rejected {
+            let (failure, _) = MessageSendError::Preparation(Box::new(ClientError::Rejected {
                 code: -32050,
                 data: Some(serde_json::json!({"kind":service_kind})),
-            })
+            }))
             .into_operation_failure_and_target();
             assert_eq!(operation_failure_exit(&failure), expected, "{service_kind}");
         }

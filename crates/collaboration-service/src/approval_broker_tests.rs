@@ -85,6 +85,7 @@ async fn insert_pending(
             record: record.clone(),
             offered: BTreeMap::from([(ApprovalDecision::Allow, "native-accept".to_owned())]),
             completion,
+            generation_authority: ApprovalGenerationAuthority::Native,
         },
     );
     broker
@@ -140,6 +141,182 @@ async fn decision_is_single_use_actor_bound_and_maps_only_offered_options() {
         broker.list(false).await.approvals[0].decision,
         Some(ApprovalDecision::Allow)
     );
+}
+
+#[test]
+fn external_options_preserve_once_scope_and_reject_ambiguous_or_persistent_grants() {
+    let mapped = map_external_options(vec![
+        ExternalApprovalOption {
+            option_id: "allow-once".to_owned(),
+            scope: ExternalApprovalOptionScope::AllowOnce,
+        },
+        ExternalApprovalOption {
+            option_id: "allow-always".to_owned(),
+            scope: ExternalApprovalOptionScope::AllowAlways,
+        },
+        ExternalApprovalOption {
+            option_id: "reject-once".to_owned(),
+            scope: ExternalApprovalOptionScope::RejectOnce,
+        },
+    ])
+    .expect("once-scoped options map");
+    assert_eq!(
+        mapped.get(&ApprovalDecision::Allow),
+        Some(&"allow-once".to_owned())
+    );
+    assert_eq!(
+        mapped.get(&ApprovalDecision::Deny),
+        Some(&"reject-once".to_owned())
+    );
+    assert!(!mapped.contains_key(&ApprovalDecision::AllowForSession));
+
+    assert!(
+        map_external_options(vec![ExternalApprovalOption {
+            option_id: "allow-always".to_owned(),
+            scope: ExternalApprovalOptionScope::AllowAlways,
+        }])
+        .is_err()
+    );
+    assert!(
+        map_external_options(vec![
+            ExternalApprovalOption {
+                option_id: "first".to_owned(),
+                scope: ExternalApprovalOptionScope::AllowOnce,
+            },
+            ExternalApprovalOption {
+                option_id: "second".to_owned(),
+                scope: ExternalApprovalOptionScope::AllowOnce,
+            },
+        ])
+        .is_err()
+    );
+    assert!(
+        map_external_options(vec![
+            ExternalApprovalOption {
+                option_id: "duplicate".to_owned(),
+                scope: ExternalApprovalOptionScope::AllowOnce,
+            },
+            ExternalApprovalOption {
+                option_id: "duplicate".to_owned(),
+                scope: ExternalApprovalOptionScope::RejectOnce,
+            },
+        ])
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn external_generation_is_independent_and_decision_remains_actor_bound_single_use() {
+    let (broker, native_generation, _directory) = fixture_broker().await;
+    let external_generation: CodexGeneration = serde_json::from_value(json!({
+        "serviceEpoch": String::from(broker.service_id.clone()), "generation": 99
+    }))
+    .expect("external generation");
+    assert_ne!(external_generation, native_generation);
+    let requester = session(&broker.service_id, "external-requester");
+    let approver = session(&broker.service_id, "external-approver");
+    let request_id = "external-approval-test".to_owned();
+    let record = ApprovalRequestRecord {
+        request_id: request_id.clone(),
+        requester,
+        approver: approver.clone(),
+        generation: external_generation.clone(),
+        state: ApprovalState::PendingClientDecision,
+        decision: None,
+        operation: json!({"kind":"externalProviderPermission","operationId":"019f0000-0000-7000-8000-000000001101"}),
+        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+    };
+    let (completion, receiver) = oneshot::channel();
+    broker.pending.lock().await.insert(
+        request_id.clone(),
+        PendingApproval {
+            record: record.clone(),
+            offered: BTreeMap::from([(ApprovalDecision::Allow, "allow-once".to_owned())]),
+            completion,
+            generation_authority: ApprovalGenerationAuthority::External {
+                generation: external_generation,
+                retirement: tokio_util::sync::CancellationToken::new(),
+            },
+        },
+    );
+    broker
+        .record(record)
+        .await
+        .expect("record external approval");
+    let receipt = broker
+        .decide(ApprovalDecideParams {
+            request_id: request_id.clone(),
+            decision: ApprovalDecision::Allow,
+            actor: approver,
+        })
+        .await
+        .expect("external decision");
+    assert_eq!(receipt.scope, None);
+    assert_eq!(
+        receiver.await.expect("outcome"),
+        BrokeredApprovalOutcome::Selected {
+            option_id: "allow-once".to_owned()
+        }
+    );
+    assert!(matches!(
+        broker
+            .decide(ApprovalDecideParams {
+                request_id,
+                decision: ApprovalDecision::Allow,
+                actor: session(&broker.service_id, "external-approver"),
+            })
+            .await,
+        Err("approvalNotPending")
+    ));
+}
+
+#[tokio::test]
+async fn unreachable_external_approver_cancels_with_metadata_only_history() {
+    let (broker, generation, _directory) = fixture_broker().await;
+    let metadata = ExternalApprovalOperationMetadata {
+        operation_id: "019f0000-0000-7000-8000-000000001102"
+            .to_owned()
+            .try_into()
+            .expect("operation ID"),
+        target: session(&broker.service_id, "provider-session"),
+        binding_generation: generation.clone(),
+        method: "session/request_permission",
+    };
+    let operation = serde_json::json!({
+        "kind":"externalProviderPermission",
+        "operationId":"019f0000-0000-7000-8000-000000001102",
+        "target":session(&broker.service_id, "provider-session"),
+        "bindingGeneration":generation.clone(),
+        "method":"session/request_permission"
+    });
+    let outcome = broker
+        .request_external(ExternalApprovalRequest {
+            requester: session(&broker.service_id, "external-requester"),
+            approver: session(&broker.service_id, "external-approver"),
+            generation,
+            retirement: tokio_util::sync::CancellationToken::new(),
+            operation_metadata: metadata,
+            transient_presentation: Some(serde_json::json!({
+                "title":"TRANSIENT_PRESENTATION_SENTINEL",
+                "name":"router-collaboration-endpoints_list",
+                "kind":"other"
+            })),
+            options: vec![ExternalApprovalOption {
+                option_id: "allow-once".to_owned(),
+                scope: ExternalApprovalOptionScope::AllowOnce,
+            }],
+        })
+        .await
+        .expect("external request settles");
+    assert_eq!(outcome, BrokeredApprovalOutcome::Cancelled);
+    let record = broker.list(false).await.approvals.pop().expect("history");
+    assert_eq!(record.state, ApprovalState::ApproverUnreachable);
+    assert_eq!(record.operation, operation);
+    let encoded = serde_json::to_string(&record).expect("history JSON");
+    assert!(!encoded.contains("toolCall"));
+    assert!(!encoded.contains("prompt"));
+    assert!(!encoded.contains("TRANSIENT_PRESENTATION_SENTINEL"));
+    assert!(!encoded.contains("router-collaboration-endpoints_list"));
 }
 
 #[tokio::test]

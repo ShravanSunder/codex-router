@@ -28,10 +28,14 @@ tower-service = "0.3.3"
 [dev-dependencies]
 agent-collaboration = { path = "../agent-collaboration", version = "0.1.30" }
 codex-acp-adapter = { path = "../codex-acp-adapter", version = "0.1.30" }
+codex-router-host = { path = "../codex-router-host", version = "0.1.31" }
 codex-native-integration.workspace = true
 collaboration-service = { path = "../collaboration-service", version = "0.1.30" }
 futures-util.workspace = true
 jsonschema.workspace = true
 reqwest = { workspace = true, features = ["json"] }
+rmcp = { workspace = true, features = ["client"] }
 tempfile = "3.27.0"
 tokio-tungstenite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

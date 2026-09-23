@@ -185,6 +185,35 @@ pub fn control_schema_document(
         )?;
     assembly.add_type::<ConfigurationFailure>("configuration-failure")?;
     assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
+    assembly.add_type::<ConversationOperationFailure>("conversation-operation-failure")?;
+    assembly.add_method::<ConversationCreateRequest, ConversationOperationSubmission>(
+        "conversation/create",
+        &[],
+    )?;
+    assembly.add_method::<ConversationLoadRequest, ConversationOperationSubmission>(
+        "conversation/load",
+        &[],
+    )?;
+    assembly.add_method::<ConversationPromptRequest, ConversationOperationSubmission>(
+        "conversation/prompt",
+        &[],
+    )?;
+    assembly.add_method::<ConversationCancelRequest, ConversationOperationSubmission>(
+        "conversation/cancel",
+        &[],
+    )?;
+    assembly.add_method::<ConversationOperationShowRequest, ConversationOperationSnapshot>(
+        "conversation/operationShow",
+        &[],
+    )?;
+    assembly.add_method::<ConversationOperationWaitRequest, ConversationOperationWaitResult>(
+        "conversation/operationWait",
+        &[],
+    )?;
+    assembly.add_method::<ConversationOperationReconcileRequest, ConversationOperationSnapshot>(
+        "conversation/operationReconcile",
+        &[],
+    )?;
     assembly.add_method::<OperationShowRequest, OperationSnapshot>("operation/show", &[])?;
     assembly.add_method::<OperationShowRequest, OperationSnapshot>("operation/reconcile", &[])?;
     assembly.add_method::<DeliveryShowRequest, DeliveryInspection>("delivery/reconcile", &[])?;
@@ -543,6 +572,9 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     if method.starts_with("instruction/") {
         data = vec![reference("instruction-failure")];
+    }
+    if method.starts_with("conversation/") {
+        data = vec![reference("conversation-operation-failure")];
     }
     if matches!(
         method,

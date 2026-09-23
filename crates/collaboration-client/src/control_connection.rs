@@ -69,7 +69,7 @@ pub(crate) struct ClientConnection {
     incoming: VecDeque<Value>,
     notifications: VecDeque<Value>,
     next_id: u64,
-    failed: bool,
+    pub(crate) failed: bool,
 }
 impl ControlClient {
     pub async fn initialize(

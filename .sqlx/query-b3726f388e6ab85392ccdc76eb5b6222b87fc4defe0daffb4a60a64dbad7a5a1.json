@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM provider_operations\n                     WHERE operation_id=? AND stage=? AND reconciliation_state!=? AND effect!=? AND terminal_at_ms<?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "b3726f388e6ab85392ccdc76eb5b6222b87fc4defe0daffb4a60a64dbad7a5a1"
+}

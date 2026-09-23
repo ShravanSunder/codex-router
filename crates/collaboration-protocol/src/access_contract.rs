@@ -43,8 +43,8 @@ pub enum SettingsObservation {
         router_access: Option<RouterAccess>,
         native_sandbox: Option<serde_json::Value>,
         permission_profile: Option<serde_json::Value>,
-        approval_policy: Option<serde_json::Value>,
-        approvals_reviewer: Option<serde_json::Value>,
+        approval_policy: Box<Option<serde_json::Value>>,
+        approvals_reviewer: Box<Option<serde_json::Value>>,
     },
     Unavailable {
         reason: SettingsUnavailableReason,
