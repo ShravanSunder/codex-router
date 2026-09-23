@@ -35,7 +35,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn app_server_shutdown_policy_uses_fast_grace_and_reap_boundaries() {
-    assert_eq!(APP_SERVER_GRACE_PERIOD, Duration::from_secs(1));
+    assert_eq!(APP_SERVER_GRACE_PERIOD, Duration::from_millis(750));
     assert_eq!(APP_SERVER_SHUTDOWN_TIMEOUT, Duration::from_secs(5));
 
     let mut expected_exit = ExpectedExit::new(4100);
@@ -44,11 +44,11 @@ fn app_server_shutdown_policy_uses_fast_grace_and_reap_boundaries() {
         ShutdownAction::SendTerminate
     );
     assert_eq!(
-        expected_exit.next_action(Duration::from_millis(999), true),
+        expected_exit.next_action(Duration::from_millis(749), true),
         ShutdownAction::Wait
     );
     assert_eq!(
-        expected_exit.next_action(Duration::from_secs(1), true),
+        expected_exit.next_action(Duration::from_millis(750), true),
         ShutdownAction::SendKill
     );
     assert_eq!(
@@ -195,6 +195,23 @@ async fn app_server_force_escalation_kills_the_complete_process_group()
         "SIGTERM-ignoring app-server must be force-killed",
     )?;
     wait_for_process_exit(process_ids[1]).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn owned_router_drains_captured_stderr_without_forwarding_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "head -c 131072 /dev/zero >&2"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut router = RouterChild::spawn(&mut command)?;
+    let status = tokio::time::timeout(Duration::from_secs(5), router.wait_for_exit()).await??;
+    check(
+        status.success(),
+        "router stderr reader must drain a full pipe",
+    )?;
     Ok(())
 }
 

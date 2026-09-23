@@ -8,7 +8,7 @@ use crate::ProcessGroupError;
 use crate::managed_app_server::AppServerChild;
 
 /// Grace period before SIGKILL escalation.
-pub const APP_SERVER_GRACE_PERIOD: Duration = Duration::from_secs(1);
+pub const APP_SERVER_GRACE_PERIOD: Duration = Duration::from_millis(750);
 /// Total app-server shutdown observation bound, including forced reap.
 pub const APP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -20,7 +20,7 @@ pub struct AppServerShutdownDeadlines {
 }
 
 impl AppServerShutdownDeadlines {
-    /// Returns the production one-second grace and bounded reap contract.
+    /// Returns the production subsecond grace and bounded reap contract.
     #[must_use]
     pub const fn production() -> Self {
         Self {
