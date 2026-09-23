@@ -377,6 +377,13 @@ struct StderrLoopbackConnectionErrorReporter;
 
 impl LoopbackConnectionErrorReporter for StderrLoopbackConnectionErrorReporter {
     fn report_connection_error(&self, diagnostic: &str) {
+        // The caller renders only fixed severity, class, and reason labels.
+        // Retain those details in Router telemetry when a Host captures stderr.
+        tracing::warn!(
+            event.name = "codex_router.proxy.loopback_connection_error",
+            diagnostic = %diagnostic,
+            "loopback connection failed"
+        );
         eprintln!("{diagnostic}");
     }
 }

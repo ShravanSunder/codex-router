@@ -86,6 +86,11 @@ pub struct StderrAuditFailureReporter;
 
 impl AuditFailureReporter for StderrAuditFailureReporter {
     fn report_audit_failure(&self, diagnostic: &str) {
+        tracing::error!(
+            event.name = "codex_router.proxy.audit_append_failure",
+            error.kind = "audit_append_failure",
+            "audit append failed"
+        );
         eprintln!("{diagnostic}");
     }
 }

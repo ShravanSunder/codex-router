@@ -85,6 +85,8 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     let launchctl_executable = directory.path().join("launchctl");
     let curl_executable = directory.path().join("curl");
     let launchctl_log = directory.path().join("launchctl.log");
+    let updater_failure_marker = directory.path().join("updater-failure-marker");
+    let curl_failure_marker = directory.path().join("curl-failure-marker");
     let process_log = directory.path().join("app-generations.log");
     std::fs::create_dir_all(
         managed_executable
@@ -123,6 +125,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         new_install.join("codex-router")
     };
 
+    let host_stdout = directory.path().join("host-stdout.log");
     let host_stderr = directory.path().join("host-stderr.log");
     let mut host = tokio::process::Command::new(&binary);
     host.args([
@@ -149,13 +152,21 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     .env("CODEX_ROUTER_COMPILED_CLI_APP_CHILD", "1")
     .env("CODEX_ROUTER_COMPILED_CLI_PROCESS_LOG", &process_log)
     .env("CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES", "1")
+    .env(
+        "CODEX_ROUTER_COMPILED_CLI_UPDATE_FAILURE_MARKER",
+        &updater_failure_marker,
+    )
+    .env(
+        "CODEX_ROUTER_COMPILED_CLI_CURL_FAILURE_MARKER",
+        &curl_failure_marker,
+    )
     .env("CODEX_ROUTER_COMPILED_CLI_MANAGED", &managed_executable)
     .env(
         "PATH",
         prepend_path(curl_executable.parent().ok_or("curl parent is missing")?)?,
     )
     .env("CODEX_ROUTER_DEBUG_READINESS_TIMING", "1")
-    .stdout(Stdio::null())
+    .stdout(Stdio::from(std::fs::File::create(&host_stdout)?))
     .stderr(Stdio::from(std::fs::File::create(&host_stderr)?));
     let mut host = host.spawn()?;
     // Always release owned children, including when an assertion below fails.
@@ -237,6 +248,26 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
 
         check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 1, "app-server update replaced the Host")?;
         check(std::fs::read_to_string(&process_log)?.lines().count() == 3, "changed update child generation missing")?;
+        std::fs::write(&updater_failure_marker, b"fail")?;
+        let failed_update =
+            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["app-server", "update"]).await?;
+        check(!failed_update.status.success(), "failed updater returned a successful CLI exit status")?;
+        check(
+            String::from_utf8(failed_update.stdout)?.contains("update_result: update failed without restart"),
+            "failed updater was not classified before child replacement",
+        )?;
+        check(std::fs::read_to_string(&process_log)?.lines().count() == 3, "failed updater replaced the app-server child")?;
+        std::fs::remove_file(&updater_failure_marker)?;
+        std::fs::write(&curl_failure_marker, b"fail")?;
+        let failed_download =
+            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["app-server", "update"]).await?;
+        check(!failed_download.status.success(), "failed installer download returned a successful CLI exit status")?;
+        check(
+            String::from_utf8(failed_download.stdout)?.contains("update_result: update failed without restart"),
+            "failed installer download was reported as no change",
+        )?;
+        check(std::fs::read_to_string(&process_log)?.lines().count() == 3, "failed download replaced the app-server child")?;
+        std::fs::remove_file(&curl_failure_marker)?;
         let host_process_id = host.id().ok_or("owned Host PID missing")?;
         verify_host_image(host_process_id, &binary)?;
         let lock_path = router_root.join("host.lock");
@@ -262,6 +293,10 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         check(host.try_wait()?.is_none(), "original Host PID exited instead of replacing its image")?;
         verify_host_image(host_process_id, &replacement_binary)?;
         check(std::fs::metadata(&lock_path)?.ino() == lock_inode, "Host replaced its stable lock artifact")?;
+        check(
+            std::fs::metadata(&host_stdout)?.len() == 0,
+            "foreground Host printed startup or re-exec progress to its terminal",
+        )?;
         check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 2, "whole Host restart did not activate once")?;
         let generations = std::fs::read_to_string(&process_log)?;
         check(generations.lines().count() == 4, "whole Host restart child generation missing")?;
@@ -307,7 +342,18 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             rustix::process::Signal::INT,
         )?;
     }
-    let status = tokio::time::timeout(Duration::from_secs(5), host.wait()).await??;
+    let status = tokio::time::timeout(Duration::from_secs(5), host.wait())
+        .await
+        .map_err(|_elapsed| {
+            std::io::Error::other(format!(
+                "fixture Host did not exit after INT; proof={}; stderr={}",
+                proof
+                    .as_ref()
+                    .err()
+                    .map_or("ok".to_owned(), ToString::to_string),
+                std::fs::read_to_string(&host_stderr).unwrap_or_default()
+            ))
+        })??;
     proof.map_err(|error| {
         std::io::Error::other(format!(
             "{error}; fixture Host stderr: {}",
@@ -517,7 +563,7 @@ fn install_launchctl_fixture(executable: &Path) -> std::io::Result<()> {
 fn install_curl_fixture(executable: &Path) -> std::io::Result<()> {
     std::fs::write(
         executable,
-        b"#!/bin/sh\ncat <<'INSTALLER'\n#!/bin/sh\nif [ \"$CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES\" = \"1\" ]; then\n  printf '\\n# changed by update fixture\\n' >> \"$CODEX_ROUTER_COMPILED_CLI_MANAGED\"\nfi\nINSTALLER\n",
+        b"#!/bin/sh\n[ ! -e \"$CODEX_ROUTER_COMPILED_CLI_CURL_FAILURE_MARKER\" ] || exit 22\ncat <<'INSTALLER'\n#!/bin/sh\n[ \"$CODEX_NON_INTERACTIVE\" = \"1\" ] || exit 43\n[ ! -e \"$CODEX_ROUTER_COMPILED_CLI_UPDATE_FAILURE_MARKER\" ] || exit 43\nif [ \"$CODEX_ROUTER_COMPILED_CLI_UPDATE_CHANGES\" = \"1\" ]; then\n  printf '\\n# changed by update fixture\\n' >> \"$CODEX_ROUTER_COMPILED_CLI_MANAGED\"\nfi\nINSTALLER\n",
     )?;
     std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
 }

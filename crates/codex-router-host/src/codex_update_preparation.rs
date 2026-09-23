@@ -141,8 +141,14 @@ pub(crate) async fn prepare_update(
     let mut updater_command = updater_command
         .map(|command| command.command())
         .unwrap_or_else(|| {
-            let mut command = tokio::process::Command::new("/bin/sh");
-            command.args(["-c", "curl -fsSL https://chatgpt.com/codex/install.sh | sh"]);
+            let mut command = tokio::process::Command::new("/bin/bash");
+            command.args([
+                "-o",
+                "pipefail",
+                "-c",
+                "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+            ]);
+            command.env("CODEX_NON_INTERACTIVE", "1");
             command
         });
     updater_command.stdout(std::process::Stdio::null());

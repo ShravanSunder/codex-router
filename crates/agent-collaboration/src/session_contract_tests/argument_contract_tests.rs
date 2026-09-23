@@ -245,8 +245,8 @@ fn sessions_local_new_dry_run_keeps_router_profile_without_remote_attachment() {
 }
 
 #[test]
-fn sessions_command_parses_explicit_filters_for_list_json_last() {
-    let command = match parse_session_arguments([
+fn sessions_command_rejects_listing_and_resuming_last_together() {
+    let error = parse_session_arguments([
         OsString::from("--any"),
         OsString::from("--provider"),
         OsString::from("current"),
@@ -263,29 +263,11 @@ fn sessions_command_parses_explicit_filters_for_list_json_last() {
         OsString::from("--yolo"),
         OsString::from("--model"),
         OsString::from("gpt-5.4-mini"),
-    ]) {
-        Ok(command) => command,
-        Err(error) => panic!("sessions command should parse: {error}"),
-    };
-
-    assert_eq!(command.root, crate::sessions::SessionsRoot::Any);
-    assert_eq!(command.provider, crate::sessions::SessionsProvider::Current);
-    assert_eq!(command.source, crate::sessions::SessionsSource::Subagents);
-    assert_eq!(command.sort, crate::sessions::SessionsSort::Created);
-    assert!(command.list);
-    assert_eq!(command.format, crate::sessions::SessionsFormat::Json);
-    assert!(command.last);
-    assert!(!command.new);
-    assert_eq!(command.limit, 25);
-    assert!(!command.dry_run);
-    assert_eq!(
-        command.codex_args,
-        [
-            OsString::from("--yolo"),
-            OsString::from("--model"),
-            OsString::from("gpt-5.4-mini")
-        ]
-    );
+    ])
+    .expect_err("listing and resuming the last session must be mutually exclusive");
+    assert!(error.contains("cannot be used with"), "{error}");
+    assert!(error.contains("--list"), "{error}");
+    assert!(error.contains("--last"), "{error}");
 }
 
 #[test]

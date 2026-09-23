@@ -15,7 +15,10 @@ use super::operator_client::send_replacement_operator_request;
 use super::operator_client::send_replacement_operator_request_streaming;
 
 pub(super) const REPLACEMENT_CONVERGENCE_DEADLINE: Duration = Duration::from_secs(40);
-const REPLACEMENT_RECOVERY_ACTION: &str = "codex-router host";
+const REPLACEMENT_RECOVERY_ACTION: &str =
+    "start codex-router host with the same --router-root and --port after the old Host exits";
+const APP_SERVER_RECOVERY_ACTION: &str =
+    "inspect host status with the same --router-root and --port before retrying app-server restart";
 
 #[allow(dead_code)]
 pub(super) async fn complete_update_result(
@@ -52,9 +55,21 @@ async fn complete_update_result_with_deadline(
     frames: Vec<OperatorFrame>,
     replacement_deadline: Duration,
 ) -> UpdateResult {
-    let replacement_started = frames
-        .iter()
-        .any(|frame| matches!(frame, OperatorFrame::Progress(_)));
+    let host_replacement_started = frames.iter().any(|frame| {
+        matches!(
+            frame,
+            OperatorFrame::Progress(codex_router_host::HostProgress::ReplacementStarting)
+        )
+    });
+    let app_server_replacement_started = frames.iter().any(|frame| {
+        matches!(
+            frame,
+            OperatorFrame::Progress(
+                codex_router_host::HostProgress::StoppingAppServer
+                    | codex_router_host::HostProgress::StartingAppServer
+            )
+        )
+    });
     if let Some(OperatorFrame::Terminal(response)) = frames.last() {
         if response.request() == &OperatorRequest::UpdateCodex
             && response.classification() == TerminalClassification::Succeeded
@@ -64,10 +79,15 @@ async fn complete_update_result_with_deadline(
                 snapshot: response.snapshot().clone(),
             };
         }
-        if replacement_started {
+        if host_replacement_started || app_server_replacement_started {
             return UpdateResult::UpdatedButReplacementFailed {
                 message: response.message().to_owned(),
-                recovery_action: REPLACEMENT_RECOVERY_ACTION.to_owned(),
+                recovery_action: if host_replacement_started {
+                    REPLACEMENT_RECOVERY_ACTION
+                } else {
+                    APP_SERVER_RECOVERY_ACTION
+                }
+                .to_owned(),
             };
         }
         return if response.classification() == TerminalClassification::Succeeded {
@@ -78,9 +98,17 @@ async fn complete_update_result_with_deadline(
             }
         };
     }
-    if !replacement_started {
+    if !host_replacement_started && !app_server_replacement_started {
         return UpdateResult::FailedWithoutRestart {
             message: "shared Codex host update returned no terminal result".to_owned(),
+        };
+    }
+
+    if app_server_replacement_started && !host_replacement_started {
+        return UpdateResult::UpdatedButReplacementFailed {
+            message: "app-server update lost its terminal result after replacement began"
+                .to_owned(),
+            recovery_action: APP_SERVER_RECOVERY_ACTION.to_owned(),
         };
     }
 
@@ -102,12 +130,14 @@ async fn complete_update_result_with_progress_and_deadline<F>(
 where
     F: FnMut(&OperatorFrame),
 {
-    if frames
+    if frames.iter().any(|frame| {
+        matches!(
+            frame,
+            OperatorFrame::Progress(codex_router_host::HostProgress::ReplacementStarting)
+        )
+    }) && !frames
         .iter()
-        .any(|frame| matches!(frame, OperatorFrame::Progress(_)))
-        && !frames
-            .iter()
-            .any(|frame| matches!(frame, OperatorFrame::Terminal(_)))
+        .any(|frame| matches!(frame, OperatorFrame::Terminal(_)))
     {
         match observe_replacement_with_progress(
             coordination_paths,
@@ -352,6 +382,47 @@ mod tests {
                 _ => assert!(matches!(result, UpdateResult::FailedWithoutRestart { .. })),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn updater_failure_after_preparation_progress_did_not_start_replacement() {
+        let result = complete_update_result_with_deadline(
+            &unused_paths(),
+            vec![
+                OperatorFrame::Progress(HostProgress::UpdatingAppServer),
+                OperatorFrame::terminal(HostTerminalResponse::new(
+                    OperatorRequest::UpdateCodex,
+                    TerminalClassification::Failed,
+                    ready_snapshot(),
+                    "official Codex updater exited unsuccessfully".to_owned(),
+                )),
+            ],
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(result, UpdateResult::FailedWithoutRestart { .. }));
+    }
+
+    #[tokio::test]
+    async fn failed_updated_app_server_points_to_child_restart() {
+        let result = complete_update_result_with_deadline(
+            &unused_paths(),
+            vec![
+                OperatorFrame::Progress(HostProgress::UpdatingAppServer),
+                OperatorFrame::Progress(HostProgress::StoppingAppServer),
+                OperatorFrame::terminal(HostTerminalResponse::new(
+                    OperatorRequest::UpdateCodex,
+                    TerminalClassification::Failed,
+                    ready_snapshot(),
+                    "app-server shutdown failed".to_owned(),
+                )),
+            ],
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(
+            matches!(result, UpdateResult::UpdatedButReplacementFailed { recovery_action, .. } if recovery_action == APP_SERVER_RECOVERY_ACTION)
+        );
     }
 
     #[tokio::test]

@@ -200,7 +200,6 @@ pub(crate) async fn run_host_command<W: Write + Send>(
             },
             context,
             telemetry,
-            stdout,
         )
         .await;
     }
@@ -255,6 +254,11 @@ pub(crate) async fn run_host_command<W: Write + Send>(
         )
         .await;
         crate::presentation::host::render_update_result(stdout, &result)?;
+        if let codex_router_host::UpdateResult::FailedWithoutRestart { message }
+        | codex_router_host::UpdateResult::UpdatedButReplacementFailed { message, .. } = result
+        {
+            return Err(HostCommandError::OperationFailed(message));
+        }
     } else if command.action() == HostAction::Restart {
         let result = replacement_outcome::complete_restart_result_with_progress(
             &coordination_paths,
@@ -270,6 +274,19 @@ pub(crate) async fn run_host_command<W: Write + Send>(
         }
     } else {
         crate::presentation::host::render_terminal_frame(stdout, &frames)?;
+        if command.action() != HostAction::Status
+            && let Some(codex_router_host::OperatorFrame::Terminal(response)) = frames.last()
+            && matches!(
+                response.classification(),
+                codex_router_host::TerminalClassification::Failed
+                    | codex_router_host::TerminalClassification::Busy
+                    | codex_router_host::TerminalClassification::Unavailable
+            )
+        {
+            return Err(HostCommandError::OperationFailed(
+                response.message().to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -339,6 +356,8 @@ const fn operator_request_deadline(action: HostAction) -> Duration {
 pub enum HostCommandError {
     #[error("Host restart failed: {0}")]
     RestartFailed(String),
+    #[error("Host operation failed: {0}")]
+    OperationFailed(String),
     #[error(transparent)]
     DebugProfile(#[from] codex_native_integration::DebugProfileError),
     #[error("failed resolving host router root: {0}")]

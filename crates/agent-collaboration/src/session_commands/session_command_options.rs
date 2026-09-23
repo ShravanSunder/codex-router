@@ -288,7 +288,7 @@ struct ClapSessionsCommand {
     list: bool,
     #[arg(long, value_enum, default_value = "table")]
     format: SessionsFormat,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "list")]
     last: bool,
     /// Resume one complete canonical UUID directly without opening the picker.
     #[arg(long, conflicts_with_all = ["new", "last", "list"])]

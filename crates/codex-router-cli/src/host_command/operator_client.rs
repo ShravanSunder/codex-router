@@ -80,6 +80,24 @@ pub(super) fn replacement_started_without_terminal(frames: &[OperatorFrame]) -> 
         })
 }
 
+fn updated_app_server_started_without_terminal(
+    request: &OperatorRequest,
+    frames: &[OperatorFrame],
+) -> bool {
+    matches!(request, OperatorRequest::UpdateCodex)
+        && !frames
+            .iter()
+            .any(|frame| matches!(frame, OperatorFrame::Terminal(_)))
+        && frames.iter().any(|frame| {
+            matches!(
+                frame,
+                OperatorFrame::Progress(
+                    HostProgress::StoppingAppServer | HostProgress::StartingAppServer
+                )
+            )
+        })
+}
+
 /// Runs the post-reexec exchange, retrying only while the replacement publishes its socket.
 pub(super) async fn send_replacement_operator_request(
     socket: &Path,
@@ -174,7 +192,9 @@ async fn send_operator_request_with_connect_retry(
         on_frame(&frame);
         frames.push(frame);
     }
-    if replacement_started_without_terminal(&frames) {
+    if replacement_started_without_terminal(&frames)
+        || updated_app_server_started_without_terminal(&request, &frames)
+    {
         return Ok(frames);
     }
     if !terminal_seen {
@@ -323,6 +343,42 @@ mod tests {
         .await?;
         assert_eq!(frames.len(), 4);
         assert!(replacement_started_without_terminal(&frames));
+        server.await??;
+        let _ = std::fs::remove_file(&socket);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn updated_app_server_progress_survives_missing_terminal_for_recovery_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let socket = std::env::temp_dir().join(format!(
+            "codex-router-updated-app-server-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).await?;
+            for progress in [
+                HostProgress::UpdatingAppServer,
+                HostProgress::StoppingAppServer,
+            ] {
+                let bytes = encode_operator_frame(&OperatorFrame::Progress(progress))
+                    .map_err(std::io::Error::other)?;
+                stream.write_all(&bytes).await?;
+            }
+            Ok::<_, std::io::Error>(())
+        });
+        let frames = send_operator_request_streaming(
+            &socket,
+            OperatorRequest::UpdateCodex,
+            Duration::from_secs(2),
+            |_| {},
+        )
+        .await?;
+        assert_eq!(frames.len(), 2);
         server.await??;
         let _ = std::fs::remove_file(&socket);
         Ok(())

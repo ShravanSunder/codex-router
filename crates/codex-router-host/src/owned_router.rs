@@ -38,7 +38,7 @@ impl RouterChild {
     /// Spawns the existing router command in an isolated process group.
     pub fn spawn(command: &mut tokio::process::Command) -> Result<Self, ProcessGroupError> {
         Ok(Self {
-            process: ProcessGroupChild::spawn(command)?,
+            process: ProcessGroupChild::spawn_with_stderr_telemetry(command, "router")?,
             term_sent: false,
         })
     }
