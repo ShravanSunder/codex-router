@@ -17,8 +17,8 @@ use rmcp::{
     handler::server::router::tool::ToolRoute,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+        CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, Implementation,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
     },
     schemars, tool, tool_router,
 };
@@ -34,12 +34,14 @@ use std::{
 
 mod catalog_descriptions;
 mod catalog_tools;
+mod provider_conversation_tools;
 mod schema_binding;
 use catalog_descriptions::operation_description;
 use catalog_tools::{
     EmptyToolInput, ThreadWaitToolInput, register_automation_inspection_tools,
     register_automation_mutation_tools, register_board_tools,
 };
+use provider_conversation_tools::register_provider_conversation_tools;
 use schema_binding::{bind_native_schema_refs, load_advertised_native_definitions};
 
 #[derive(Clone, Debug)]
@@ -85,6 +87,7 @@ impl CollaborationMcpServer {
         register_board_tools(&mut tool_router);
         register_automation_inspection_tools(&mut tool_router);
         register_automation_mutation_tools(&mut tool_router);
+        register_provider_conversation_tools(&mut tool_router);
         Self {
             service_directory,
             tool_router,
@@ -115,13 +118,79 @@ impl CollaborationMcpServer {
                 if let Some(schema) = &tool.output_schema {
                     let mut output = serde_json::Value::Object((**schema).clone());
                     bind_native_schema_refs(&mut output, native_definitions.as_ref());
-                    if let serde_json::Value::Object(fields) = output {
+                    normalize_boolean_json_schemas(&mut output);
+                    if let serde_json::Value::Object(mut fields) = output {
+                        fields
+                            .entry("type".to_owned())
+                            .or_insert_with(|| serde_json::Value::String("object".to_owned()));
                         tool.output_schema = Some(std::sync::Arc::new(fields));
                     }
                 }
                 tool
             })
             .collect()
+    }
+}
+
+fn normalize_boolean_json_schemas(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Bool(true) => {
+            *schema = serde_json::Value::Object(serde_json::Map::new());
+        }
+        serde_json::Value::Bool(false) => {
+            *schema = serde_json::json!({"not": {}});
+        }
+        serde_json::Value::Object(fields) => {
+            for keyword in [
+                "additionalItems",
+                "additionalProperties",
+                "contains",
+                "contentSchema",
+                "else",
+                "if",
+                "items",
+                "not",
+                "propertyNames",
+                "then",
+                "unevaluatedItems",
+                "unevaluatedProperties",
+            ] {
+                if let Some(subschema) = fields.get_mut(keyword) {
+                    normalize_schema_or_schema_array(subschema);
+                }
+            }
+            for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+                if let Some(serde_json::Value::Array(subschemas)) = fields.get_mut(keyword) {
+                    for subschema in subschemas {
+                        normalize_boolean_json_schemas(subschema);
+                    }
+                }
+            }
+            for keyword in [
+                "$defs",
+                "definitions",
+                "dependentSchemas",
+                "patternProperties",
+                "properties",
+            ] {
+                if let Some(serde_json::Value::Object(subschemas)) = fields.get_mut(keyword) {
+                    for subschema in subschemas.values_mut() {
+                        normalize_boolean_json_schemas(subschema);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_schema_or_schema_array(schema: &mut serde_json::Value) {
+    if let serde_json::Value::Array(subschemas) = schema {
+        for subschema in subschemas {
+            normalize_boolean_json_schemas(subschema);
+        }
+    } else {
+        normalize_boolean_json_schemas(schema);
     }
 }
 
@@ -647,7 +716,10 @@ impl ServerHandler for CollaborationMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        Ok(ListToolsResult::with_all_items(self.resolved_tools()))
+        let tools = self.resolved_tools();
+        Ok(ListToolsResult::with_all_items(tools)
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {

@@ -125,6 +125,32 @@ pub async fn serve_control_connection(
                     }
                 }
                 Ok(request)
+                    if matches!(
+                        request.method.as_str(),
+                        "conversation/create"
+                            | "conversation/load"
+                            | "conversation/prompt"
+                            | "conversation/cancel"
+                            | "conversation/operationShow"
+                            | "conversation/operationWait"
+                            | "conversation/operationReconcile"
+                    ) =>
+                {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::provider_conversation_dispatch::dispatch(
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request)
                     if matches!(request.method.as_str(), "approval/list" | "approval/decide") =>
                 {
                     let identity = identity.clone();
@@ -566,6 +592,13 @@ fn admit_request(frame: Value, admission: &mut ControlAdmission) -> Result<Reque
     }
     if let Err(failure) = admission.admit(&request.id, &request.method) {
         if failure == AdmissionError::Overloaded {
+            if request.method.starts_with("conversation/") {
+                return Err(crate::provider_conversation_dispatch::overloaded(
+                    id,
+                    &request.method,
+                    request.params,
+                ));
+            }
             return Err(crate::control_overload_response::response(
                 id,
                 &request.method,

@@ -30,6 +30,11 @@ enum ConversationCommand {
     /// `conversation create`, submit its first input with `message send`; alternatively use
     /// `conversation prompt --new`. Permission requests are never automatically approved.
     Prompt(PromptArguments),
+    /// Operate on Host-owned external ACP provider conversations.
+    Provider {
+        #[command(subcommand)]
+        command: crate::provider_conversation_commands::ProviderConversationCommand,
+    },
 }
 #[derive(Args)]
 struct CreateArguments {
@@ -123,6 +128,9 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
     match parsed.command {
         ConversationCommand::Create(args) => run_create(args),
         ConversationCommand::Prompt(args) => run_prompt(args),
+        ConversationCommand::Provider { command } => {
+            crate::provider_conversation_commands::run_provider_conversation_command(command)
+        }
     }
 }
 
@@ -792,7 +800,9 @@ mod tests {
                     )
                 );
             }
-            ConversationCommand::Prompt(_) => panic!("create parse selected prompt"),
+            ConversationCommand::Prompt(_) | ConversationCommand::Provider { .. } => {
+                panic!("create parse selected another command")
+            }
         }
     }
 

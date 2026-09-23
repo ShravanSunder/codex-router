@@ -9,6 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+agent-client-protocol.workspace = true
+futures-util.workspace = true
 message-board = { path = "../message-board", version = "0.1.20" }
 message-board-storage = { path = "../message-board-storage", version = "0.1.20" }
 automation-storage = { path = "../automation-storage", version = "0.1.16" }

@@ -62,6 +62,7 @@ mod session_target_arguments;
 pub use session_inventory_commands::run_session_inventory_command;
 
 mod conversation_commands;
+mod provider_conversation_commands;
 pub use conversation_commands::run_conversation_command;
 
 mod acp_stdio_bridge;

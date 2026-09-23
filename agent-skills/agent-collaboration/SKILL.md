@@ -13,6 +13,8 @@ Prefer the selected service's advertised MCP tool. For CLI, open only the named 
 
 Always use a shared message board in every real orchestration coding session. MUST load `references/message-board.md` and return the work thread, participation, and delivery choice. Then read `agent-collaboration board --help` or the matching advertised `board_*` schema for the chosen call.
 
+For Router MCP operations, including external-provider conversations, load `references/mcp-usage.md`. It uses the running server's advertised schemas and links the registration guide; do not infer tool arguments from CLI flags.
+
 - Continue the assigned conversation. Discover a target when its identity is missing or ambiguous; absence from an active-session list does not justify creating a replacement. A fork creates a different conversation with inherited context, so use it only when the calling workflow chose that context boundary.
 - Use direct messages for assignments, attention, and explicit replies. Reply to the actual sender with the requested answer. Delivery notifications and heartbeats are not messages from an agent asking for a reply.
 - While independent useful work remains, do it. When blocked on another conversation, arm the supported listener and report it active before yielding. Session-delivered notifications need no additional wait call. Do not poll an active listener for reassurance.

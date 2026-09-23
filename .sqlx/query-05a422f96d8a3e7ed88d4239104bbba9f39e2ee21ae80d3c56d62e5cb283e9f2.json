@@ -1,0 +1,170 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT operation_id,operation_kind,binding_json,\n                    target_service_id,target_endpoint_id,target_session_id,\n                    stage,effect,reconciliation_state,admitted_at_ms,dispatched_at_ms,\n                    terminal_at_ms,updated_at_ms\n             FROM provider_operations WHERE operation_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "operation_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "operation_id"
+          }
+        }
+      },
+      {
+        "name": "operation_kind",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "operation_kind"
+          }
+        }
+      },
+      {
+        "name": "binding_json",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "binding_json"
+          }
+        }
+      },
+      {
+        "name": "target_service_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "target_service_id"
+          }
+        }
+      },
+      {
+        "name": "target_endpoint_id",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "target_endpoint_id"
+          }
+        }
+      },
+      {
+        "name": "target_session_id",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "target_session_id"
+          }
+        }
+      },
+      {
+        "name": "stage",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "stage"
+          }
+        }
+      },
+      {
+        "name": "effect",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "effect"
+          }
+        }
+      },
+      {
+        "name": "reconciliation_state",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "reconciliation_state"
+          }
+        }
+      },
+      {
+        "name": "admitted_at_ms",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "admitted_at_ms"
+          }
+        }
+      },
+      {
+        "name": "dispatched_at_ms",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "dispatched_at_ms"
+          }
+        }
+      },
+      {
+        "name": "terminal_at_ms",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "terminal_at_ms"
+          }
+        }
+      },
+      {
+        "name": "updated_at_ms",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "updated_at_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "05a422f96d8a3e7ed88d4239104bbba9f39e2ee21ae80d3c56d62e5cb283e9f2"
+}

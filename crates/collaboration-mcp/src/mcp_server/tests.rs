@@ -11,7 +11,7 @@ fn message_adapter_preserves_preparation_and_submission_effects() {
         ))
     };
     let preparation = super::message_tool_result(Err(
-        collaboration_client::MessageSendError::Preparation(transport()),
+        collaboration_client::MessageSendError::Preparation(Box::new(transport())),
     ));
     assert_eq!(preparation.is_error, Some(true));
     assert_eq!(
@@ -29,7 +29,7 @@ fn message_adapter_preserves_preparation_and_submission_effects() {
     let submission =
         super::message_tool_result(Err(collaboration_client::MessageSendError::Submission {
             target: target.clone(),
-            source: transport(),
+            source: Box::new(transport()),
         }));
     assert_eq!(submission.is_error, Some(true));
     assert_eq!(
@@ -49,14 +49,14 @@ fn message_adapter_preserves_preparation_and_submission_effects() {
 
     let rejection =
         super::message_tool_result(Err(collaboration_client::MessageSendError::Preparation(
-            collaboration_client::ClientError::Rejected {
+            Box::new(collaboration_client::ClientError::Rejected {
                 code: -32050,
                 data: Some(serde_json::json!({
                     "kind":"staleGeneration",
                     "stage":"discovery",
                     "expected":2
                 })),
-            },
+            }),
         )));
     let structured = rejection.structured_content.expect("structured rejection");
     assert_eq!(structured["kind"], "rejected");
@@ -261,14 +261,14 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let tools = server.resolved_tools();
-    assert_eq!(tools.len(), 90);
+    assert_eq!(tools.len(), 97);
     let mut names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 90);
+    assert_eq!(names.len(), 97);
     for tool in tools {
         let input = serde_json::to_value(&tool.input_schema).expect("input schema JSON");
         jsonschema::validator_for(&input)
@@ -519,6 +519,255 @@ fn advertised_native_bundle_is_loaded_into_discovered_tool_schema() {
     assert!(!board_schema.contains("codexNative"));
 }
 
+#[test]
+fn advertised_tool_output_schemas_have_object_roots() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let invalid = server
+        .resolved_tools()
+        .into_iter()
+        .filter_map(|tool| {
+            let schema = tool.output_schema.as_ref()?;
+            let root_type = schema.get("type").and_then(serde_json::Value::as_str);
+            let contains_boolean_subschema =
+                schema_contains_boolean_subschema(&serde_json::Value::Object((**schema).clone()));
+            (root_type != Some("object") || contains_boolean_subschema).then_some((
+                tool.name,
+                root_type.map(str::to_owned),
+                contains_boolean_subschema,
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        invalid.is_empty(),
+        "MCP clients require object-root output schemas: {invalid:?}"
+    );
+}
+
+fn schema_contains_boolean_subschema(schema: &serde_json::Value) -> bool {
+    match schema {
+        serde_json::Value::Bool(_) => true,
+        serde_json::Value::Object(fields) => {
+            [
+                "additionalItems",
+                "additionalProperties",
+                "contains",
+                "contentSchema",
+                "else",
+                "if",
+                "items",
+                "not",
+                "propertyNames",
+                "then",
+                "unevaluatedItems",
+                "unevaluatedProperties",
+            ]
+            .into_iter()
+            .filter_map(|keyword| fields.get(keyword))
+            .any(schema_or_array_contains_boolean)
+                || ["allOf", "anyOf", "oneOf", "prefixItems"]
+                    .into_iter()
+                    .filter_map(|keyword| fields.get(keyword).and_then(serde_json::Value::as_array))
+                    .flatten()
+                    .any(schema_contains_boolean_subschema)
+                || [
+                    "$defs",
+                    "definitions",
+                    "dependentSchemas",
+                    "patternProperties",
+                    "properties",
+                ]
+                .into_iter()
+                .filter_map(|keyword| fields.get(keyword).and_then(serde_json::Value::as_object))
+                .flat_map(|subschemas| subschemas.values())
+                .any(schema_contains_boolean_subschema)
+        }
+        _ => false,
+    }
+}
+
+fn schema_or_array_contains_boolean(schema: &serde_json::Value) -> bool {
+    match schema {
+        serde_json::Value::Array(items) => items.iter().any(schema_contains_boolean_subschema),
+        _ => schema_contains_boolean_subschema(schema),
+    }
+}
+
+#[test]
+fn boolean_schema_normalization_preserves_instance_and_annotation_booleans() {
+    let original = serde_json::json!({
+        "type":"object",
+        "properties":{
+            "anything":true,
+            "never":false,
+            "flag":{
+                "type":"boolean",
+                "const":true,
+                "enum":[true,false],
+                "default":true,
+                "examples":[false],
+                "readOnly":true,
+                "deprecated":false
+            }
+        },
+        "required":["anything","flag"],
+        "additionalProperties":false
+    });
+    let mut normalized = original.clone();
+    super::normalize_boolean_json_schemas(&mut normalized);
+    assert_eq!(normalized["properties"]["anything"], serde_json::json!({}));
+    assert_eq!(
+        normalized["properties"]["never"],
+        serde_json::json!({"not":{}})
+    );
+    assert_eq!(
+        normalized["additionalProperties"],
+        serde_json::json!({"not":{}})
+    );
+    assert_eq!(
+        normalized["properties"]["flag"],
+        original["properties"]["flag"]
+    );
+
+    let original_validator = jsonschema::validator_for(&original).expect("original validator");
+    let normalized_validator =
+        jsonschema::validator_for(&normalized).expect("normalized validator");
+    for instance in [
+        serde_json::json!({"anything":"value","flag":true}),
+        serde_json::json!({"anything":false,"flag":true}),
+        serde_json::json!({"anything":null,"flag":false}),
+        serde_json::json!({"anything":1,"flag":true,"extra":true}),
+        serde_json::json!({"anything":1,"never":null,"flag":true}),
+    ] {
+        assert_eq!(
+            original_validator.is_valid(&instance),
+            normalized_validator.is_valid(&instance),
+            "validator meaning changed for {instance}"
+        );
+    }
+    assert!(normalized_validator.is_valid(&serde_json::json!({"anything":0,"flag":true})));
+    assert!(!normalized_validator.is_valid(&serde_json::json!({"anything":0,"flag":false})));
+    assert!(
+        !normalized_validator
+            .is_valid(&serde_json::json!({"anything":0,"flag":true,"extra":false}))
+    );
+}
+
+#[test]
+fn advertised_object_roots_preserve_original_catalog_semantics() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let original = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .filter_map(|tool| {
+            let schema = tool.output_schema?;
+            (schema.get("type").is_none()).then_some((tool.name, schema))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let advertised = server
+        .resolved_tools()
+        .into_iter()
+        .filter_map(|tool| tool.output_schema.map(|schema| (tool.name, schema)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        original
+            .keys()
+            .map(AsRef::<str>::as_ref)
+            .collect::<Vec<_>>(),
+        vec![
+            "board_message_show",
+            "board_thread_listen_cancel",
+            "board_thread_listen_show",
+            "journal_status"
+        ]
+    );
+
+    let message = serde_json::json!({
+        "messageId":"019f0000-0000-7000-8000-000000000001",
+        "boardId":"019f0000-0000-7000-8000-000000000002",
+        "topicId":"019f0000-0000-7000-8000-000000000003",
+        "placement":{"kind":"topic","topicId":"019f0000-0000-7000-8000-000000000003"},
+        "actor":{"kind":"human","humanId":"schema-test"},
+        "actingFor":null,
+        "text":"schema test",
+        "references":[],
+        "activitySequence":1
+    });
+    let listen = serde_json::json!({
+        "listenId":"019f0000-0000-7000-8000-000000000004",
+        "context":{
+            "reader":{"kind":"human","humanId":"schema-test"},
+            "threads":[],
+            "topicIds":[],
+            "armedAfterSequence":0
+        },
+        "mode":{"kind":"once","maxWaitSeconds":1},
+        "acknowledge":false,
+        "active":false,
+        "delivery":"stdout",
+        "batchesDelivered":0,
+        "firstSequence":null,
+        "lastSequence":null,
+        "catchUp":false,
+        "acknowledged":false,
+        "consecutiveRejections":0,
+        "lastRejection":null
+    });
+    let valid_instances = std::collections::BTreeMap::from([
+        ("board_message_show", message),
+        ("board_thread_listen_cancel", listen.clone()),
+        ("board_thread_listen_show", listen),
+        (
+            "journal_status",
+            serde_json::json!({"storage":"unavailable"}),
+        ),
+    ]);
+    let non_objects = [
+        serde_json::Value::Null,
+        serde_json::json!(false),
+        serde_json::json!(0),
+        serde_json::json!("value"),
+        serde_json::json!([]),
+    ];
+    for (name, original_schema) in original {
+        let advertised_schema = advertised.get(&name).expect("advertised schema");
+        assert_eq!(
+            advertised_schema.get("type"),
+            Some(&serde_json::json!("object"))
+        );
+        let original_value = serde_json::Value::Object((*original_schema).clone());
+        let advertised_value = serde_json::Value::Object((**advertised_schema).clone());
+        let original_validator =
+            jsonschema::validator_for(&original_value).expect("original catalog validator");
+        let advertised_validator =
+            jsonschema::validator_for(&advertised_value).expect("advertised catalog validator");
+        let valid = valid_instances
+            .get(name.as_ref())
+            .expect("valid tool result");
+        assert!(
+            original_validator.is_valid(valid),
+            "invalid original fixture for {name}"
+        );
+        assert!(
+            advertised_validator.is_valid(valid),
+            "valid result narrowed for {name}"
+        );
+        for instance in &non_objects {
+            assert_eq!(
+                original_validator.is_valid(instance),
+                advertised_validator.is_valid(instance),
+                "root meaning changed for {name} and {instance}"
+            );
+            assert!(
+                !original_validator.is_valid(instance),
+                "{name} unexpectedly admitted non-object {instance} before normalization"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn inspect_tool_rejects_well_shaped_wrong_target_response_like_typed_sdk() {
     use rmcp::handler::server::wrapper::Parameters;
@@ -609,6 +858,21 @@ async fn inspect_tool_rejects_well_shaped_wrong_target_response_like_typed_sdk()
 }
 
 fn expected_tool_name(method: &str) -> String {
+    if let Some(provider_method) = method.strip_prefix("conversation/") {
+        return format!(
+            "provider_conversation_{}",
+            provider_method
+                .chars()
+                .flat_map(|character| {
+                    if character.is_ascii_uppercase() {
+                        vec!['_', character.to_ascii_lowercase()]
+                    } else {
+                        vec![character]
+                    }
+                })
+                .collect::<String>()
+        );
+    }
     match method {
         "endpoint/list" => return "endpoints_list".to_owned(),
         "codex/sessionList" => return "sessions_list".to_owned(),

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT operation_id FROM provider_operations\n             WHERE stage=? AND reconciliation_state!=? AND effect!=? AND terminal_at_ms<?\n             ORDER BY terminal_at_ms,operation_id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "operation_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "operation_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8610577769aaacde20e8148dc493d21229ccfc56000e5a283601aebdd999f94b"
+}

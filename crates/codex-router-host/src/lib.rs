@@ -6,6 +6,13 @@ mod child_diagnostics;
 mod codex_update_preparation;
 mod explicit_app_server_restart;
 mod explicit_router_restart;
+mod external_provider_runtime;
+pub use external_provider_runtime::{
+    ExternalProviderAdmission, ExternalProviderApprovalContext, ExternalProviderLaunch,
+    ExternalProviderPromptOutcome, ExternalProviderRuntime, ExternalProviderRuntimeError,
+};
+mod external_provider_supervisor;
+pub use external_provider_supervisor::{ExternalProviderBinding, ExternalProviderSupervisor};
 mod host_configuration;
 mod host_replacement_activation;
 mod host_singleton_authority;
@@ -94,6 +101,7 @@ pub use backend_publication::BackendPublication;
 mod collaboration_runtime;
 pub use collaboration_runtime::{
     BackendSchemaEvidence, CollaborationRuntime, CollaborationRuntimeInputs,
+    ExternalProviderLaunchBinding,
 };
 
 mod native_schema_cache;

@@ -37,6 +37,11 @@ async fn board_open_failure_keeps_unrelated_control_methods_available()
         .await;
     let _close = client.close().await;
     runtime.shutdown().await?;
+    if root.join("provider-operations.sqlite-wal").exists()
+        || root.join("provider-operations.sqlite-shm").exists()
+    {
+        return Err("provider operation sidecars outlived runtime shutdown".into());
+    }
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {

@@ -9,17 +9,25 @@ import typing as t
 from pathlib import Path
 
 
-SqlxPreparationTarget = tuple[str, str, str]
+SqlxPreparationTarget = tuple[str, tuple[str, ...], str]
 SQLX_PREPARATION_TARGETS: t.Final[tuple[SqlxPreparationTarget, ...]] = (
     (
         "codex-router-state",
-        "crates/codex-router-state/migrations",
+        ("crates/codex-router-state/migrations",),
         "account-schema.sqlite",
     ),
     (
         "message-board-storage",
-        "crates/message-board-storage/migrations",
+        ("crates/message-board-storage/migrations",),
         "message-board-schema.sqlite",
+    ),
+    (
+        "collaboration-service",
+        (
+            "crates/message-board-storage/migrations",
+            "crates/collaboration-service/migrations",
+        ),
+        "provider-operation-schema.sqlite",
     ),
 )
 
@@ -90,7 +98,7 @@ def prepare_sqlx_metadata(
         ) as directory:
             for (
                 package_name,
-                migration_source,
+                migration_sources,
                 database_filename,
             ) in SQLX_PREPARATION_TARGETS:
                 database_path = Path(directory) / database_filename
@@ -106,17 +114,19 @@ def prepare_sqlx_metadata(
                 prepare_command.extend(
                     ["--", "--locked", "--package", package_name, "--all-targets"]
                 )
-                commands = [
-                    [str(sqlx), "database", "create"],
+                commands = [[str(sqlx), "database", "create"]]
+                commands.extend(
                     [
                         str(sqlx),
                         "migrate",
                         "run",
+                        *(["--ignore-missing"] if migration_index else []),
                         "--source",
                         migration_source,
-                    ],
-                    prepare_command,
-                ]
+                    ]
+                    for migration_index, migration_source in enumerate(migration_sources)
+                )
+                commands.append(prepare_command)
                 for command in commands:
                     result = run_process(
                         command,

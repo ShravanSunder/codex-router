@@ -5910,6 +5910,7 @@ mod tests {
             .local_addr()
             .expect("mock upstream address should read");
         let (upstream_sender, upstream_receiver) = mpsc::channel();
+        let (release_upstream_sender, release_upstream_receiver) = mpsc::channel();
         let upstream_thread = thread::spawn(move || {
             let (mut first_stream, _) = upstream_listener
                 .accept()
@@ -5926,6 +5927,9 @@ mod tests {
             upstream_sender
                 .send(second_request)
                 .expect("second request should record");
+            release_upstream_receiver
+                .recv()
+                .expect("test should release upstream responses");
 
             for stream in [&mut second_stream, &mut first_stream] {
                 stream
@@ -6001,7 +6005,13 @@ mod tests {
                 br#"{"model":"gpt-5","turn":2}"#,
             )
         });
+        let second_request = upstream_receiver
+            .recv()
+            .expect("second upstream request should record");
         wait_for_responses_history_compaction(&maintenance_completion_receiver);
+        release_upstream_sender
+            .send(())
+            .expect("upstream responses should release");
 
         assert_eq!(
             runtime_thread
@@ -6018,9 +6028,6 @@ mod tests {
                     .starts_with("HTTP/1.1 200 OK\r\n")
             );
         }
-        let second_request = upstream_receiver
-            .recv()
-            .expect("second upstream request should record");
         for (request, expected_body) in [
             (&first_request, r#"{"model":"gpt-5","turn":1}"#),
             (&second_request, r#"{"model":"gpt-5","turn":2}"#),

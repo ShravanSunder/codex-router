@@ -647,8 +647,8 @@ fn observe_settings(
         router_access,
         native_sandbox: sandbox,
         permission_profile,
-        approval_policy,
-        approvals_reviewer,
+        approval_policy: Box::new(approval_policy),
+        approvals_reviewer: Box::new(approvals_reviewer),
     }
 }
 
