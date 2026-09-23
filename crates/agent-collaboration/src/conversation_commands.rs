@@ -529,40 +529,26 @@ fn current_session_ref(
     resolve_current_session_ref(
         service_id,
         from,
-        std::env::var("CODEX_THREAD_ID")
-            .ok()
-            .filter(|value| !value.is_empty()),
-        std::env::var("CLAUDE_CODE_SESSION_ID")
-            .ok()
-            .filter(|value| !value.is_empty()),
+        crate::current_session_identity::read_harness_session_identity,
     )
 }
 
+/// An explicit `--from` wins; otherwise the calling harness names the session.
 fn resolve_current_session_ref(
     service_id: &collaboration_client::protocol::UuidIdentity,
     from: Option<&str>,
-    codex: Option<String>,
-    claude: Option<String>,
+    read_harness: impl FnOnce() -> Result<
+        crate::current_session_identity::HarnessSessionIdentity,
+        crate::current_session_identity::CurrentSessionIdentityError,
+    >,
 ) -> Result<collaboration_client::protocol::SessionRef, String> {
     if let Some(value) = from {
         return serde_json::from_str(value)
             .map_err(|_| crate::message_input_arguments::session_ref_guidance("--from"));
     }
-    let (endpoint_id, session_id) = match (codex, claude) {
-        (Some(session_id), None) => ("codex-local", session_id),
-        (None, Some(session_id)) => ("claude-local", session_id),
-        _ => return Err("exactly one current session identity is required".into()),
-    };
-    Ok(collaboration_client::protocol::SessionRef {
-        endpoint: collaboration_client::protocol::EndpointRef {
-            service_id: service_id.clone(),
-            endpoint_id: endpoint_id
-                .to_owned()
-                .try_into()
-                .map_err(|_| "invalid endpoint")?,
-        },
-        session_id: session_id.try_into().map_err(|_| "invalid session")?,
-    })
+    read_harness()
+        .map_err(|error| error.to_string())?
+        .session_ref(service_id)
 }
 
 fn conversation_target(
@@ -813,25 +799,38 @@ mod tests {
             .try_into()
             .expect("service id");
         let from = r#"{"endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},"sessionId":"cursor-conversation"}"#;
-        let resolved = resolve_current_session_ref(&service_id, Some(from), None, None)
+        let harness = |pairs: &'static [(&'static str, &'static str)]| {
+            move || {
+                crate::current_session_identity::resolve_harness_session_identity(|name| {
+                    pairs
+                        .iter()
+                        .find(|(variable, _)| *variable == name)
+                        .map(|(_, value)| std::ffi::OsString::from(*value))
+                })
+            }
+        };
+        let resolved = resolve_current_session_ref(&service_id, Some(from), harness(&[]))
             .expect("override without env");
         assert_eq!(String::from(resolved.session_id), "cursor-conversation");
         let still_override = resolve_current_session_ref(
             &service_id,
             Some(from),
-            Some("codex-thread".to_owned()),
-            None,
+            harness(&[("CODEX_THREAD_ID", "codex-thread")]),
         )
         .expect("override wins over env");
         assert_eq!(
             String::from(still_override.session_id),
             "cursor-conversation"
         );
-        assert!(resolve_current_session_ref(&service_id, None, None, None).is_err());
-        let implicit =
-            resolve_current_session_ref(&service_id, None, Some("codex-thread".to_owned()), None)
-                .expect("implicit Codex env");
-        assert_eq!(String::from(implicit.session_id), "codex-thread");
+        assert!(resolve_current_session_ref(&service_id, None, harness(&[])).is_err());
+        let implicit = resolve_current_session_ref(
+            &service_id,
+            None,
+            harness(&[("CURSOR_CONVERSATION_ID", "cursor-thread")]),
+        )
+        .expect("implicit Cursor env");
+        assert_eq!(String::from(implicit.endpoint.endpoint_id), "cursor-local");
+        assert_eq!(String::from(implicit.session_id), "cursor-thread");
     }
 
     #[test]
