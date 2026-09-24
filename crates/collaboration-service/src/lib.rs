@@ -22,11 +22,14 @@ mod native_relay_listener;
 mod private_socket_listener;
 pub use native_relay_listener::NativeRelayListener;
 mod provider_operation_store;
+mod provider_session_record;
 pub use provider_operation_store::{
     ProviderOperationAdmission, ProviderOperationAdmissionResult, ProviderOperationRecord,
     ProviderOperationStore, ProviderOperationStoreError,
 };
+mod delivery_acceptance_effect;
 mod delivery_route_projection;
+pub use provider_session_record::ProviderSessionRecord;
 mod provider_conversation_backend;
 mod scheduled_run_contract;
 mod session_delivery_contract;

@@ -1,7 +1,8 @@
 //! Final attempt evidence controls eligibility; an unknown outcome is never a retry signal.
 use crate::{AutomationStore, StorageError};
 use agent_automation::{
-    AttemptId, AttemptOutcome, DeliveryAttempt, DeliveryId, EventId, RouteEffectEvidence,
+    AcceptedDeliveryEffect, AttemptId, AttemptOutcome, DeliveryAttempt, DeliveryId, EventId,
+    RouteEffectEvidence,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{Connection, Row};
@@ -9,6 +10,7 @@ use std::hash::{Hash, Hasher};
 
 pub enum DeliveryResult<TReceipt> {
     Accepted {
+        effect: AcceptedDeliveryEffect,
         receipt: TReceipt,
     },
     KnownNotSubmitted {
@@ -58,8 +60,8 @@ impl AutomationStore {
             return Ok(false);
         }
         let evidence_result = match &completion.result {
-            DeliveryResult::Accepted { .. } => {
-                crate::delivery_effect_transition::DeliveryEvidenceResult::Accepted
+            DeliveryResult::Accepted { effect, .. } => {
+                crate::delivery_effect_transition::DeliveryEvidenceResult::Accepted(*effect)
             }
             DeliveryResult::KnownNotSubmitted { .. } => {
                 crate::delivery_effect_transition::DeliveryEvidenceResult::KnownNotSubmitted
@@ -77,7 +79,7 @@ impl AutomationStore {
         }
         let now_ms = completion.now_ms.max(attempt.started_at_ms);
         let (next_status, outcome, receipt, next_eligible) = match completion.result {
-            DeliveryResult::Accepted { receipt } => (
+            DeliveryResult::Accepted { receipt, .. } => (
                 "accepted",
                 AttemptOutcome::Accepted,
                 Some(serde_json::to_string(&receipt).map_err(|_| StorageError::InvalidRecord)?),

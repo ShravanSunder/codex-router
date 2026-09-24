@@ -1,12 +1,19 @@
 //! Foreground lifecycle control for one shared Codex app-server.
 
 mod app_server_endpoint_guard;
+mod live_session_ownership_check;
+pub use live_session_ownership_check::{LiveSessionOwnership, LiveSessionOwnershipCheck};
 mod app_server_shutdown;
 mod child_diagnostics;
 mod codex_update_preparation;
 mod explicit_app_server_restart;
 mod explicit_router_restart;
 mod external_provider_runtime;
+mod provider_acp_delivery_route;
+mod provider_acp_message_fifo;
+mod provider_acp_route_claim;
+pub use provider_acp_delivery_route::ProviderAcpDeliveryRoute;
+mod provider_acp_session_loading;
 pub use external_provider_runtime::{
     ExternalProviderAdmission, ExternalProviderApprovalContext, ExternalProviderLaunch,
     ExternalProviderPromptOutcome, ExternalProviderRuntime, ExternalProviderRuntimeError,
@@ -31,6 +38,10 @@ pub use provider_configuration_file::{
 };
 mod provider_startup_composition;
 pub use provider_startup_composition::ExternalProviderStartup;
+mod provider_operation_settlement;
+mod provider_prompt_observation;
+mod provider_session_actor;
+pub use provider_session_actor::{ProviderSessionActivity, ProviderSteeringOutcome};
 mod router_compatibility;
 
 pub use app_server_endpoint_guard::AppServerEndpointError;

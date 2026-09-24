@@ -1,6 +1,6 @@
 use agent_automation::{
-    CessationEvidence, DurableMessage, ExpiryRule, NativeEffectEvidence, OperationId,
-    PreparationEffect, SubmissionEffect, TimingRule,
+    AcceptedDeliveryEffect, CessationEvidence, DurableMessage, ExpiryRule, NativeEffectEvidence,
+    OperationId, PreparationEffect, SubmissionEffect, TimingRule,
 };
 use automation_storage::{
     AutomationStore, DeliveryCompletion, DeliveryPreparation, DeliveryResult, WakeCreate,
@@ -103,6 +103,7 @@ async fn explicit_host_recovery_preserves_identity_without_replaying_dispatch()
             attempt_id: claim.attempt_id,
             effects: Some(effects(SubmissionEffect::Accepted).into()),
             result: DeliveryResult::Accepted {
+                effect: AcceptedDeliveryEffect::StartedOrSteered,
                 receipt: "verified native receipt".to_owned(),
             },
             now_ms: 100000,

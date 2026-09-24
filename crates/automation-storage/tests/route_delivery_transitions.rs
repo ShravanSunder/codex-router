@@ -1,7 +1,8 @@
 use agent_automation::{
-    ClaudeCodePeerEffectEvidence, DeliveryStatus, DurableMessage, ExpiryRule, OperationId,
-    PeerWriteEffect, ProviderAcpEffectEvidence, ProviderBindingReference, ProviderSettlementEffect,
-    RouteEffectEvidence, SubmissionEffect, TimingRule,
+    AcceptedDeliveryEffect, CessationEvidence, ClaudeCodePeerEffectEvidence, DeliveryStatus,
+    DurableMessage, ExpiryRule, NativeEffectEvidence, OperationId, PeerWriteEffect,
+    PreparationEffect, ProviderAcpEffectEvidence, ProviderBindingReference,
+    ProviderSettlementEffect, RouteEffectEvidence, SubmissionEffect, TimingRule,
 };
 use automation_storage::{
     AutomationStore, DeliveryCompletion, DeliveryPreparation, DeliveryResult, WakeCreate,
@@ -89,6 +90,113 @@ fn peer_evidence(
             write,
         },
     ))
+}
+
+#[tokio::test]
+async fn provider_router_queue_records_intent_before_acceptance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "provider-router-queued-{}.sqlite",
+        OperationId::generate().as_str()
+    ));
+    let mut store = AutomationStore::open(&path).await?;
+    let (delivery_id, attempt_id) = claimed_attempt(&mut store).await?;
+
+    if !store
+        .prepare_delivery(DeliveryPreparation {
+            delivery_id: delivery_id.clone(),
+            attempt_id: attempt_id.clone(),
+            effects: provider_evidence(attempt_id.clone(), SubmissionEffect::RouterQueued)?,
+        })
+        .await?
+    {
+        return Err("router queue intent was not recorded".into());
+    }
+    if store
+        .complete_delivery(DeliveryCompletion {
+            delivery_id: delivery_id.clone(),
+            attempt_id: attempt_id.clone(),
+            effects: Some(provider_evidence(
+                attempt_id.clone(),
+                SubmissionEffect::RouterQueued,
+            )?),
+            result: DeliveryResult::Accepted {
+                effect: AcceptedDeliveryEffect::Started,
+                receipt: "wrong outcome".to_owned(),
+            },
+            now_ms: 2000,
+        })
+        .await
+        .is_ok()
+    {
+        return Err("queued evidence accepted a started outcome".into());
+    }
+    if !store
+        .complete_delivery(DeliveryCompletion {
+            delivery_id: delivery_id.clone(),
+            attempt_id: attempt_id.clone(),
+            effects: Some(provider_evidence(
+                attempt_id,
+                SubmissionEffect::RouterQueued,
+            )?),
+            result: DeliveryResult::Accepted {
+                effect: AcceptedDeliveryEffect::Queued,
+                receipt: "queued".to_owned(),
+            },
+            now_ms: 2000,
+        })
+        .await?
+    {
+        return Err("queued attempt was not accepted".into());
+    }
+
+    let recorded = store
+        .read_delivery::<String, String, String>(&delivery_id)
+        .await?;
+    if recorded.status != DeliveryStatus::Accepted || recorded.receipt.as_deref() != Some("queued")
+    {
+        return Err("queued receipt was not retained".into());
+    }
+    store.close().await?;
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_attempt_rejects_router_queued_submission() -> Result<(), Box<dyn std::error::Error>>
+{
+    let path = std::env::temp_dir().join(format!(
+        "native-router-queued-{}.sqlite",
+        OperationId::generate().as_str()
+    ));
+    let mut store = AutomationStore::open(&path).await?;
+    let (delivery_id, attempt_id) = claimed_attempt(&mut store).await?;
+    let native = NativeEffectEvidence {
+        target: Some("target".to_owned()),
+        generation: Some("generation-1".to_owned()),
+        client_user_message_id: None,
+        native_turn_id: None,
+        native_submission_id: None,
+        allocation: PreparationEffect::NotRequested,
+        resume: PreparationEffect::NotRequested,
+        submission: SubmissionEffect::RouterQueued,
+        cessation: CessationEvidence::NotApplicable,
+    };
+
+    if store
+        .prepare_delivery(DeliveryPreparation {
+            delivery_id,
+            attempt_id,
+            effects: RouteEffectEvidence::CodexAppServer(native),
+        })
+        .await
+        .is_ok()
+    {
+        return Err("native route accepted provider-only queue evidence".into());
+    }
+    store.close().await?;
+    std::fs::remove_file(path)?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -194,6 +302,7 @@ async fn provider_attempt_requires_matching_dispatch_evidence()
             attempt_id: attempt_id.clone(),
             effects: Some(peer_evidence(PeerWriteEffect::Written)?),
             result: DeliveryResult::Accepted {
+                effect: AcceptedDeliveryEffect::PeerMessageWritten,
                 receipt: "wrong route".into(),
             },
             now_ms: 2000,
@@ -209,6 +318,7 @@ async fn provider_attempt_requires_matching_dispatch_evidence()
             attempt_id: attempt_id.clone(),
             effects: Some(provider_evidence(attempt_id, SubmissionEffect::Accepted)?),
             result: DeliveryResult::Accepted {
+                effect: AcceptedDeliveryEffect::Started,
                 receipt: "provider operation".to_owned(),
             },
             now_ms: 2000,
@@ -240,6 +350,7 @@ async fn peer_write_is_final_and_uncertain_write_never_retries()
         (
             PeerWriteEffect::Written,
             DeliveryResult::Accepted {
+                effect: AcceptedDeliveryEffect::PeerMessageWritten,
                 receipt: "written".to_owned(),
             },
             DeliveryStatus::Accepted,

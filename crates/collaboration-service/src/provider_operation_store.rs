@@ -78,7 +78,7 @@ pub enum ProviderOperationAdmissionResult {
 }
 
 pub struct ProviderOperationStore {
-    connection: SqliteConnection,
+    pub(crate) connection: SqliteConnection,
 }
 
 struct StoredProviderOperationRow {
@@ -416,7 +416,7 @@ fn decode_record(
     Ok(record)
 }
 
-fn encode_enum<T: Serialize>(value: T) -> Result<String, ProviderOperationStoreError> {
+pub(crate) fn encode_enum<T: Serialize>(value: T) -> Result<String, ProviderOperationStoreError> {
     let value =
         serde_json::to_value(value).map_err(|_| ProviderOperationStoreError::InvalidRecord)?;
     value
