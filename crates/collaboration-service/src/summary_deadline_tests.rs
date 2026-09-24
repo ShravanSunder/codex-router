@@ -79,7 +79,7 @@ async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome()
     let evidence = agent_automation::RunExecutionEvidence {
         route: Some(agent_automation::RouteEffectEvidence::ProviderAcp(
             agent_automation::ProviderAcpEffectEvidence {
-                target: Some(provider_target),
+                target: provider_target,
                 generation: generation.clone(),
                 binding: "provider-binding".to_owned().try_into()?,
                 attempt_id: provider_attempt,

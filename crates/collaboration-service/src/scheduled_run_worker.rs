@@ -398,7 +398,7 @@ fn route_preparation_unknown(evidence: &RouteEffectEvidence<SessionRef, CodexGen
 fn route_target(evidence: &RouteEffectEvidence<SessionRef, CodexGeneration>) -> Option<SessionRef> {
     match evidence {
         RouteEffectEvidence::CodexAppServer(native) => native.target.clone(),
-        RouteEffectEvidence::ProviderAcp(provider) => provider.target.clone(),
+        RouteEffectEvidence::ProviderAcp(provider) => Some(provider.target.clone()),
         RouteEffectEvidence::ClaudeCodePeer(_) => None,
     }
 }

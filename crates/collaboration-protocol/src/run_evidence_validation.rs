@@ -123,7 +123,7 @@ fn validate_execution(
                 ..
             }),
         ) => {
-            if selected.as_ref() != Some(target) || operation_id != selected_operation {
+            if target != selected || operation_id != selected_operation {
                 return Err("provider execution disagrees with selected operation evidence");
             }
             validate_timing(

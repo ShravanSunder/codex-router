@@ -19,7 +19,7 @@ pub enum DeliveryRouteEvidence {
     ProviderAcp {
         binding_id: ProviderBindingId,
         generation: CodexGeneration,
-        target: Option<SessionRef>,
+        target: SessionRef,
         operation_id: OperationId,
         submission: SubmissionEffect,
     },

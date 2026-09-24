@@ -42,8 +42,7 @@ impl AutomationStore {
                     && native.submission == SubmissionEffect::Dispatching
             }
             RouteEffectEvidence::ProviderAcp(provider) => {
-                provider.target.is_some()
-                    && provider.submission == SubmissionEffect::Dispatching
+                provider.submission == SubmissionEffect::Dispatching
                     && provider.settlement == ProviderSettlementEffect::NotObserved
             }
             RouteEffectEvidence::ClaudeCodePeer(peer) => peer.write == PeerWriteEffect::Dispatching,
