@@ -53,7 +53,7 @@ async fn known_preparation_rejection_finishes_but_unknown_effects_do_not()
     store
         .begin_run_preparation::<_, String, _, String>(RunPreparationIntent {
             run_id: run_id.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
         })
         .await?;
     let attempt = automation_storage::RunPreparationFailure {

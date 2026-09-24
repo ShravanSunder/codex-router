@@ -3,7 +3,8 @@ use agent_automation::{
     PreparationEffect, SubmissionEffect, TimingRule,
 };
 use automation_storage::{
-    AutomationStore, DeliveryCompletion, DeliveryResult, WakeCreate, WakeEvaluation,
+    AutomationStore, DeliveryCompletion, DeliveryPreparation, DeliveryResult, WakeCreate,
+    WakeEvaluation,
 };
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,13 +73,20 @@ async fn unknown_resume_effect_is_retained_even_when_input_was_not_dispatched()
         .claim_delivery::<String, String, String>(&id, 1000)
         .await?
         .ok_or("missing claim")?;
+    store
+        .prepare_delivery(DeliveryPreparation {
+            delivery_id: id.clone(),
+            attempt_id: claim.attempt_id.clone(),
+            effects: effects(SubmissionEffect::Dispatching).into(),
+        })
+        .await?;
     let mut evidence = effects(SubmissionEffect::NotDispatched);
     evidence.resume = PreparationEffect::Unknown;
     store
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: id.clone(),
             attempt_id: claim.attempt_id,
-            effects: evidence,
+            effects: evidence.into(),
             result: DeliveryResult::Unknown {
                 reason: "resume response lost before input submission".into(),
             },

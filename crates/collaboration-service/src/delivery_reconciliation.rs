@@ -24,19 +24,25 @@ pub(crate) async fn reconcile(
     let Some(attempt) = record.attempt else {
         return Err(StorageError::InvalidRecord);
     };
+    let Some(native) = attempt
+        .effects
+        .as_ref()
+        .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+    else {
+        return Ok(());
+    };
     // Auto dispatch does not durably record whether start or steer won its state check.
     // A queue receipt requires both the original operation and its server submission ID.
     if record.mode != "queue"
-        || attempt.effects.resume != PreparationEffect::NotRequested
-        || attempt.effects.allocation != PreparationEffect::NotRequested
-        || attempt.effects.target.as_ref() != Some(&record.target)
+        || native.resume != PreparationEffect::NotRequested
+        || native.allocation != PreparationEffect::NotRequested
+        || native.target.as_ref() != Some(&record.target)
     {
         return Ok(());
     }
-    let (Some(generation), Some(correlation)) = (
-        &attempt.effects.generation,
-        &attempt.effects.client_user_message_id,
-    ) else {
+    let (Some(generation), Some(correlation)) =
+        (&native.generation, &native.client_user_message_id)
+    else {
         return Ok(());
     };
     let Some(backend) = backend.filter(|backend| backend.endpoint == record.target.endpoint) else {
@@ -81,7 +87,7 @@ pub(crate) async fn reconcile(
                 .map_err(|_| StorageError::InvalidRecord)?,
         },
     };
-    let mut effects = attempt.effects;
+    let mut effects = native.clone();
     effects.submission = SubmissionEffect::Accepted;
     effects.native_submission_id = Some(submission_id);
     store
@@ -90,7 +96,7 @@ pub(crate) async fn reconcile(
         .complete_delivery(DeliveryCompletion {
             delivery_id: record.delivery_id,
             attempt_id: attempt.attempt_id,
-            effects,
+            effects: effects.into(),
             result: DeliveryResult::Accepted { receipt },
             now_ms: chrono::Utc::now().timestamp_millis(),
         })

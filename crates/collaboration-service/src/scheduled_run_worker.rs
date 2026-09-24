@@ -68,13 +68,28 @@ impl ScheduledRunWorker {
             })
             .await;
         }
+        let native = match record.evidence.route.as_ref() {
+            Some(agent_automation::RouteEffectEvidence::CodexAppServer(native)) => native.clone(),
+            Some(
+                agent_automation::RouteEffectEvidence::ProviderAcp(_)
+                | agent_automation::RouteEffectEvidence::ClaudeCodePeer(_),
+            ) => return Ok(()),
+            None if record.phase == RunPhase::Preparing => {
+                let inputs = record.inputs.as_ref().ok_or(StorageError::InvalidRecord)?;
+                let destination = preparation_destination(inputs)?;
+                let mut initial =
+                    crate::native_thread_preparation::initial_automation_effects(&destination);
+                // A selected existing target still needs its first durable preparation write.
+                initial.target = None;
+                initial
+            }
+            None => return Err(StorageError::InvalidRecord),
+        };
         if matches!(
             record.phase,
             RunPhase::Executing | RunPhase::Stopping | RunPhase::Uncertain
         ) {
-            let (Some(target), Some(turn_id)) =
-                (&record.evidence.native.target, &record.native_turn_id)
-            else {
+            let (Some(target), Some(turn_id)) = (&native.target, &record.native_turn_id) else {
                 return Ok(());
             };
             if target.endpoint != backend.endpoint {
@@ -106,7 +121,8 @@ impl ScheduledRunWorker {
                     .lock()
                     .await
                     .begin_run_stop::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
-                        &id, turn_id,
+                        &id,
+                        automation_storage::RunStopIdentity::NativeTurn(turn_id.clone()),
                     )
                     .await?
                 {
@@ -125,13 +141,10 @@ impl ScheduledRunWorker {
         }
         let inputs = record.inputs.ok_or(StorageError::InvalidRecord)?;
         if record.evidence.timing.is_some()
-            || matches!(
-                record.evidence.native.allocation,
-                PreparationEffect::Unknown
-            )
-            || matches!(record.evidence.native.resume, PreparationEffect::Unknown)
+            || matches!(native.allocation, PreparationEffect::Unknown)
+            || matches!(native.resume, PreparationEffect::Unknown)
         {
-            let mut effects = record.evidence.native;
+            let mut effects = native.clone();
             effects.submission = agent_automation::SubmissionEffect::Unknown;
             self.store
                 .lock()
@@ -143,7 +156,7 @@ impl ScheduledRunWorker {
                 .await?;
             return Ok(());
         }
-        let target = record.evidence.native.target.clone();
+        let target = native.target.clone();
         let text = match render_instructions(
             &inputs,
             record.schedule_id.as_str(),
@@ -155,7 +168,7 @@ impl ScheduledRunWorker {
                 self.store.lock().await.fail_run_preparation::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
                 automation_storage::RunPreparationFailure {
                     run_id: id,
-                    effects: record.evidence.native,
+                    effects: native.clone(),
                     explanation: "Combined instructions and continuity exceed the supported request size; no native input was submitted; any earlier preparation effects remain recorded. Shorten instructions or continuity for future runs.".into(),
                     now_ms: chrono::Utc::now().timestamp_millis(),
                 },
@@ -164,27 +177,11 @@ impl ScheduledRunWorker {
             }
         };
         let Some(target) = target else {
-            let destination = match &inputs.execution_configuration.destination {
-                ExecutionDestination::Unprepared | ExecutionDestination::FreshEachRunUnprepared => {
-                    return Err(StorageError::InvalidRecord);
-                }
-                ExecutionDestination::OwnedThread { target, cwd } => {
-                    DestinationPreparation::Existing {
-                        target: target.clone(),
-                        cwd: cwd.clone(),
-                    }
-                }
-                ExecutionDestination::FreshEachRun { endpoint, cwd } => {
-                    DestinationPreparation::Fresh {
-                        endpoint: endpoint.clone(),
-                        cwd: cwd.clone(),
-                    }
-                }
-            };
+            let destination = preparation_destination(&inputs)?;
             if *crate::native_thread_preparation::endpoint(&destination) != backend.endpoint {
                 return Err(StorageError::ActivationUnavailable);
             }
-            let mut intent = record.evidence.native;
+            let mut intent = native.clone();
             intent.generation = Some(admission.generation().clone());
             if matches!(destination, DestinationPreparation::Fresh { .. }) {
                 intent.allocation = PreparationEffect::Unknown;
@@ -200,7 +197,7 @@ impl ScheduledRunWorker {
                 .begin_run_preparation::<_, EndpointRef, _, NativeSendReceipt>(
                     RunPreparationIntent {
                         run_id: id.clone(),
-                        effects: intent,
+                        effects: intent.into(),
                     },
                 )
                 .await?
@@ -283,7 +280,7 @@ impl ScheduledRunWorker {
                 schedule_id: record.schedule_id,
                 target,
                 text,
-                effects: record.evidence.native,
+                effects: native,
                 configuration: &self.configuration,
                 effort: inputs
                     .execution_configuration
@@ -293,6 +290,23 @@ impl ScheduledRunWorker {
             },
         )
         .await
+    }
+}
+fn preparation_destination(
+    inputs: &agent_automation::CapturedRunInputs<SessionRef, EndpointRef>,
+) -> Result<DestinationPreparation, StorageError> {
+    match &inputs.execution_configuration.destination {
+        ExecutionDestination::Unprepared | ExecutionDestination::FreshEachRunUnprepared => {
+            Err(StorageError::InvalidRecord)
+        }
+        ExecutionDestination::OwnedThread { target, cwd } => Ok(DestinationPreparation::Existing {
+            target: target.clone(),
+            cwd: cwd.clone(),
+        }),
+        ExecutionDestination::FreshEachRun { endpoint, cwd } => Ok(DestinationPreparation::Fresh {
+            endpoint: endpoint.clone(),
+            cwd: cwd.clone(),
+        }),
     }
 }
 fn render_instructions(

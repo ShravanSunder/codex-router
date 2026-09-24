@@ -40,6 +40,13 @@ impl<'de> Deserialize<'de> for RunSnapshot {
 impl RunSnapshot {
     pub fn validate_evidence(&self) -> Result<(), &'static str> {
         let evidence = &self.execution_evidence;
+        if evidence.native.is_none()
+            && (evidence.timing.is_some()
+                || evidence.acceptance.is_some()
+                || self.summary.is_some())
+        {
+            return Err("unselected execution cannot have timing, acceptance, or summary evidence");
+        }
         if let Some(timing) = &evidence.timing {
             let start = instant(&timing.dispatch_started_at)?;
             let deadline = instant(&timing.deadline_at)?;
@@ -50,17 +57,21 @@ impl RunSnapshot {
             }
         }
         if let Some(execution) = execution(&self.state) {
+            let native = evidence
+                .native
+                .as_ref()
+                .ok_or("state.execution requires selected native evidence")?;
             let timing = evidence
                 .timing
                 .as_ref()
                 .ok_or("state.execution requires executionEvidence.timing")?;
-            if evidence.native.target.as_ref() != Some(&execution.target) {
+            if native.target.as_ref() != Some(&execution.target) {
                 return Err(
                     "state.execution.target disagrees with executionEvidence.native.target",
                 );
             }
             if execution.turn_id.is_empty()
-                || evidence.native.native_turn_id.as_deref() != Some(execution.turn_id.as_str())
+                || native.native_turn_id.as_deref() != Some(execution.turn_id.as_str())
             {
                 return Err(
                     "state.execution.nativeTurnId disagrees with executionEvidence.native.nativeTurnId",
@@ -75,10 +86,14 @@ impl RunSnapshot {
             }
         }
         if let Some(receipt) = &evidence.acceptance {
-            if !matches!(evidence.native.submission, SubmissionEffect::Accepted)
-                || evidence.native.target.as_ref() != Some(&receipt.target)
-                || evidence.native.generation.as_ref() != Some(&receipt.generation)
-                || evidence.native.client_user_message_id.as_deref()
+            let native = evidence
+                .native
+                .as_ref()
+                .ok_or("acceptance requires selected native evidence")?;
+            if !matches!(native.submission, SubmissionEffect::Accepted)
+                || native.target.as_ref() != Some(&receipt.target)
+                || native.generation.as_ref() != Some(&receipt.generation)
+                || native.client_user_message_id.as_deref()
                     != Some(String::from(receipt.client_user_message_id.clone()).as_str())
             {
                 return Err(
@@ -94,7 +109,7 @@ impl RunSnapshot {
                     return Err("scheduled execution cannot use a queue receipt as turn evidence");
                 }
             };
-            if evidence.native.native_turn_id.as_deref() != Some(turn_id.as_str()) {
+            if native.native_turn_id.as_deref() != Some(turn_id.as_str()) {
                 return Err(
                     "executionEvidence.acceptance turn disagrees with native turn identity",
                 );
@@ -102,8 +117,15 @@ impl RunSnapshot {
         }
         if let Some(summary) = &self.summary
             && (summary.source_run_id != self.run_id
-                || evidence.native.target.as_ref() != Some(&summary.source_target)
-                || evidence.native.native_turn_id.as_deref()
+                || evidence
+                    .native
+                    .as_ref()
+                    .and_then(|native| native.target.as_ref())
+                    != Some(&summary.source_target)
+                || evidence
+                    .native
+                    .as_ref()
+                    .and_then(|native| native.native_turn_id.as_deref())
                     != Some(summary.source_turn_id.as_str()))
         {
             return Err("summary source disagrees with its producing Run execution");

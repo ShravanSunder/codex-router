@@ -105,7 +105,7 @@ async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
         thread_binding_id: None,
         native_turn_id: Some("worker-turn".into()),
         evidence: agent_automation::RunExecutionEvidence {
-            native: effects,
+            route: Some(effects.into()),
             timing: None,
             acceptance: None,
         },

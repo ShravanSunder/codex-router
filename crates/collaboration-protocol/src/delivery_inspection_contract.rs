@@ -59,12 +59,14 @@ pub enum DeliveryEvidence {
     NotDispatched,
     Dispatching {
         attempt_id: AttemptId,
-        effects: NativeEffectEvidence,
+        #[serde(deserialize_with = "Option::deserialize")]
+        effects: Option<NativeEffectEvidence>,
     },
     KnownNotSubmitted {
         attempt_id: AttemptId,
         reason: String,
-        effects: NativeEffectEvidence,
+        #[serde(deserialize_with = "Option::deserialize")]
+        effects: Option<NativeEffectEvidence>,
     },
     Accepted {
         attempt_id: AttemptId,

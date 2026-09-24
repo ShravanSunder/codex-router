@@ -1,8 +1,7 @@
 //! Final attempt evidence controls eligibility; an unknown outcome is never a retry signal.
 use crate::{AutomationStore, StorageError};
 use agent_automation::{
-    AttemptId, AttemptOutcome, DeliveryAttempt, DeliveryId, EventId, NativeEffectEvidence,
-    PreparationEffect, SubmissionEffect,
+    AttemptId, AttemptOutcome, DeliveryAttempt, DeliveryId, EventId, RouteEffectEvidence,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{Connection, Row};
@@ -16,7 +15,7 @@ pub enum DeliveryResult<TReceipt> {
 pub struct DeliveryCompletion<TTarget, TGeneration, TReceipt> {
     pub delivery_id: DeliveryId,
     pub attempt_id: AttemptId,
-    pub effects: NativeEffectEvidence<TTarget, TGeneration>,
+    pub effects: RouteEffectEvidence<TTarget, TGeneration>,
     pub result: DeliveryResult<TReceipt>,
     pub now_ms: i64,
 }
@@ -26,8 +25,8 @@ impl AutomationStore {
         completion: DeliveryCompletion<TTarget, TGeneration, TReceipt>,
     ) -> Result<bool, StorageError>
     where
-        TTarget: Serialize + DeserializeOwned,
-        TGeneration: Serialize + DeserializeOwned,
+        TTarget: PartialEq + Serialize + DeserializeOwned,
+        TGeneration: PartialEq + Serialize + DeserializeOwned,
         TReceipt: Serialize,
     {
         if completion.now_ms < 0 {
@@ -49,26 +48,33 @@ impl AutomationStore {
             transaction.commit().await?;
             return Ok(false);
         }
+        let evidence_result = match &completion.result {
+            DeliveryResult::Accepted { .. } => {
+                crate::delivery_effect_transition::DeliveryEvidenceResult::Accepted
+            }
+            DeliveryResult::KnownNotSubmitted { .. } => {
+                crate::delivery_effect_transition::DeliveryEvidenceResult::KnownNotSubmitted
+            }
+            DeliveryResult::Unknown { .. } => {
+                crate::delivery_effect_transition::DeliveryEvidenceResult::Unknown
+            }
+        };
+        if !crate::delivery_effect_transition::allows_completion(
+            attempt.effects.as_ref(),
+            &completion.effects,
+            evidence_result,
+        ) {
+            return Err(StorageError::InvalidRecord);
+        }
         let now_ms = completion.now_ms.max(attempt.started_at_ms);
         let (next_status, outcome, receipt, next_eligible) = match completion.result {
-            DeliveryResult::Accepted { receipt } => {
-                if completion.effects.submission != SubmissionEffect::Accepted {
-                    return Err(StorageError::InvalidRecord);
-                }
-                (
-                    "accepted",
-                    AttemptOutcome::Accepted,
-                    Some(serde_json::to_string(&receipt).map_err(|_| StorageError::InvalidRecord)?),
-                    now_ms,
-                )
-            }
+            DeliveryResult::Accepted { receipt } => (
+                "accepted",
+                AttemptOutcome::Accepted,
+                Some(serde_json::to_string(&receipt).map_err(|_| StorageError::InvalidRecord)?),
+                now_ms,
+            ),
             DeliveryResult::KnownNotSubmitted { reason, retryable } => {
-                if !matches!(
-                    completion.effects.submission,
-                    SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
-                ) {
-                    return Err(StorageError::InvalidRecord);
-                }
                 let next = if retryable {
                     now_ms
                         .checked_add(retry_delay_ms(attempt.attempt_number, &attempt.attempt_id))
@@ -92,22 +98,14 @@ impl AutomationStore {
                     next,
                 )
             }
-            DeliveryResult::Unknown { reason } => {
-                if completion.effects.submission != SubmissionEffect::Unknown
-                    && completion.effects.resume != PreparationEffect::Unknown
-                    && completion.effects.allocation != PreparationEffect::Unknown
-                {
-                    return Err(StorageError::InvalidRecord);
-                }
-                (
-                    "uncertain",
-                    AttemptOutcome::Unknown { reason },
-                    None,
-                    now_ms,
-                )
-            }
+            DeliveryResult::Unknown { reason } => (
+                "uncertain",
+                AttemptOutcome::Unknown { reason },
+                None,
+                now_ms,
+            ),
         };
-        attempt.effects = completion.effects;
+        attempt.effects = Some(completion.effects);
         attempt.outcome = outcome;
         attempt.completed_at_ms = Some(now_ms);
         let encoded = serde_json::to_string(&attempt).map_err(|_| StorageError::InvalidRecord)?;
@@ -125,7 +123,7 @@ impl AutomationStore {
         Ok(true)
     }
 }
-fn retry_delay_ms(number: u32, id: &AttemptId) -> i64 {
+pub(crate) fn retry_delay_ms(number: u32, id: &AttemptId) -> i64 {
     let exponent = number.saturating_sub(1).min(6);
     let base = (1000_i64 << exponent).min(60_000);
     let headroom = (60_000 - base).min(base / 5);

@@ -132,13 +132,42 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
         || !attempts.coverage.latest_attempt_included
         || !matches!(
             attempt.evidence,
-            collaboration_protocol::DeliveryEvidence::Dispatching { .. }
+            collaboration_protocol::DeliveryEvidence::Dispatching { effects: None, .. }
         )
     {
-        return Err("attempt inspection lost admitted submission evidence".into());
+        return Err("claimed attempt falsely reported a client dispatch".into());
     }
     // A scripted native acceptance exercises receipt projection through the real SDK.
     let generation = json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1});
+    let dispatching: agent_automation::NativeEffectEvidence<
+        collaboration_protocol::SessionRef,
+        collaboration_protocol::CodexGeneration,
+    > = serde_json::from_value(json!({
+        "target":target,"generation":generation,"clientUserMessageId":claimed.attempt_id,
+        "nativeTurnId":null,"nativeSubmissionId":null,
+        "allocation":"notRequested","resume":"notRequested","submission":"dispatching",
+        "cessation":"notApplicable"
+    }))?;
+    store
+        .lock()
+        .await
+        .prepare_delivery(automation_storage::DeliveryPreparation {
+            delivery_id: delivery.clone(),
+            attempt_id: claimed.attempt_id.clone(),
+            effects: dispatching.into(),
+        })
+        .await?;
+    let dispatched = client
+        .read_delivery_attempts(collaboration_protocol::DeliveryAttemptsRequest {
+            delivery_id: delivery.clone(),
+            cursor: None,
+            limit: 50.try_into()?,
+        })
+        .await?;
+    if !matches!(dispatched.records.as_slice(), [record] if matches!(record.evidence, collaboration_protocol::DeliveryEvidence::Dispatching { effects: Some(_), .. }))
+    {
+        return Err("first evidence write did not expose native dispatch".into());
+    }
     let receipt: collaboration_protocol::NativeSendReceipt = serde_json::from_value(json!({
         "target":target,"generation":generation,"inputKind":"agent",
         "representation":"declaredAgentText","clientUserMessageId":claimed.attempt_id,
@@ -160,7 +189,7 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
         .complete_delivery(automation_storage::DeliveryCompletion {
             delivery_id: delivery.clone(),
             attempt_id: claimed.attempt_id,
-            effects,
+            effects: effects.into(),
             result: automation_storage::DeliveryResult::Accepted {
                 receipt: receipt.clone(),
             },

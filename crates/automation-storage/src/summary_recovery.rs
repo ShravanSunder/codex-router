@@ -90,7 +90,10 @@ impl AutomationStore {
                         crate::summary_admission::SummaryAttemptSeed {
                             source_target: record
                                 .evidence
-                                .native
+                                .route
+                                .as_ref()
+                                .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+                                .ok_or(StorageError::InvalidRecord)?
                                 .target
                                 .clone()
                                 .ok_or(StorageError::InvalidRecord)?,

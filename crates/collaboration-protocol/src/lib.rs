@@ -47,6 +47,10 @@ pub use control_schema_document::control_schema_document;
 mod control_schema_identity;
 pub use control_schema_identity::{ControlSchema, ControlSchemaError};
 mod message_content;
+mod session_delivery_outcome;
+pub use session_delivery_outcome::{
+    DeliveryCorrelationId, DeliveryIdentityError, DeliveryOutcome, SessionReachability,
+};
 mod native_schema_references;
 mod native_session_catalog;
 pub use message_content::{

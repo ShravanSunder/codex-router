@@ -99,10 +99,13 @@ pub async fn exercise(proof: &mut ProofContext) -> ProofResult<()> {
                 } => {
                     if execution.target != target
                         || u32::from(execution.effective_timeout_seconds) != 2
-                        || !matches!(
-                            run.execution_evidence.native.cessation,
-                            CessationEvidence::Confirmed
-                        )
+                        || !run
+                            .execution_evidence
+                            .native
+                            .as_ref()
+                            .is_some_and(|native| {
+                                matches!(native.cessation, CessationEvidence::Confirmed)
+                            })
                         || run.summary.is_some()
                     {
                         return Err("Timed worker lost its exact target, override, cessation or continued-thread semantics".into());

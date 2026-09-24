@@ -68,7 +68,7 @@ impl WakeNativeSender {
                 .prepare_delivery(DeliveryPreparation {
                     delivery_id: id.clone(),
                     attempt_id: claim.attempt_id.clone(),
-                    effects: effects.clone(),
+                    effects: effects.clone().into(),
                 })
                 .await?;
             if !prepared {
@@ -128,7 +128,7 @@ impl WakeNativeSender {
             .complete_delivery(DeliveryCompletion {
                 delivery_id: id,
                 attempt_id: claim.attempt_id,
-                effects,
+                effects: effects.into(),
                 result,
                 now_ms: chrono::Utc::now().timestamp_millis(),
             })

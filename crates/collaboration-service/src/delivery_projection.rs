@@ -32,15 +32,40 @@ pub(crate) fn snapshot(
             DeliveryEvidence::NotDispatched
         }
         None => return Err(()),
+        Some(attempt) if attempt.effects.is_none() => match attempt.outcome {
+            AttemptOutcome::InProgress if record.status == DeliveryStatus::Dispatching => {
+                DeliveryEvidence::Dispatching {
+                    attempt_id: attempt.attempt_id,
+                    effects: None,
+                }
+            }
+            AttemptOutcome::KnownNotSubmitted { reason, .. }
+                if matches!(
+                    record.status,
+                    DeliveryStatus::Retryable | DeliveryStatus::Failed | DeliveryStatus::Discarded
+                ) =>
+            {
+                DeliveryEvidence::KnownNotSubmitted {
+                    attempt_id: attempt.attempt_id,
+                    reason,
+                    effects: None,
+                }
+            }
+            _ => return Err(()),
+        },
         Some(attempt) => {
-            let effects =
-                serde_json::from_value(serde_json::to_value(attempt.effects).map_err(|_| ())?)
-                    .map_err(|_| ())?;
+            let native = attempt
+                .effects
+                .as_ref()
+                .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+                .ok_or(())?;
+            let effects = serde_json::from_value(serde_json::to_value(native).map_err(|_| ())?)
+                .map_err(|_| ())?;
             match attempt.outcome {
                 AttemptOutcome::InProgress if record.status == DeliveryStatus::Dispatching => {
                     DeliveryEvidence::Dispatching {
                         attempt_id: attempt.attempt_id,
-                        effects,
+                        effects: Some(effects),
                     }
                 }
                 AttemptOutcome::Accepted if record.status == DeliveryStatus::Accepted => {
@@ -60,7 +85,7 @@ pub(crate) fn snapshot(
                     DeliveryEvidence::KnownNotSubmitted {
                         attempt_id: attempt.attempt_id,
                         reason,
-                        effects,
+                        effects: Some(effects),
                     }
                 }
                 AttemptOutcome::Unknown { reason }

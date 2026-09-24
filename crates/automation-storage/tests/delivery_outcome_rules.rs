@@ -1,9 +1,10 @@
 use agent_automation::{
-    CessationEvidence, DurableMessage, ExpiryRule, NativeEffectEvidence, OperationId,
-    PreparationEffect, SubmissionEffect, TimingRule,
+    AttemptId, CessationEvidence, DeliveryId, DurableMessage, ExpiryRule, NativeEffectEvidence,
+    OperationId, PreparationEffect, SubmissionEffect, TimingRule,
 };
 use automation_storage::{
-    AutomationStore, DeliveryCompletion, DeliveryResult, WakeCreate, WakeEvaluation,
+    AutomationStore, DeliveryCompletion, DeliveryPreparation, DeliveryResult, WakeCreate,
+    WakeEvaluation,
 };
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +42,23 @@ fn effects(submission: SubmissionEffect) -> NativeEffectEvidence<String, String>
         cessation: CessationEvidence::NotApplicable,
     }
 }
+async fn prepare_dispatching(
+    store: &mut AutomationStore,
+    delivery_id: &DeliveryId,
+    attempt_id: &AttemptId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !store
+        .prepare_delivery(DeliveryPreparation {
+            delivery_id: delivery_id.clone(),
+            attempt_id: attempt_id.clone(),
+            effects: effects(SubmissionEffect::Dispatching).into(),
+        })
+        .await?
+    {
+        return Err("dispatch evidence was not recorded".into());
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn cancellation_retains_latest_acceptance_and_current_uncertainty()
@@ -77,6 +95,7 @@ async fn cancellation_retains_latest_acceptance_and_current_uncertainty()
             .claim_delivery::<String, String, String>(&id, now_ms)
             .await?
             .ok_or("expected dispatch claim")?;
+        prepare_dispatching(&mut store, &id, &claim.attempt_id).await?;
         let (submission, result) = if occurrence < 3 {
             (
                 SubmissionEffect::Accepted,
@@ -96,7 +115,7 @@ async fn cancellation_retains_latest_acceptance_and_current_uncertainty()
             .complete_delivery(DeliveryCompletion {
                 delivery_id: id.clone(),
                 attempt_id: claim.attempt_id,
-                effects: effects(submission),
+                effects: effects(submission).into(),
                 result,
                 now_ms,
             })
@@ -173,7 +192,7 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: id.clone(),
             attempt_id: first.attempt_id.clone(),
-            effects: effects(SubmissionEffect::Rejected),
+            effects: effects(SubmissionEffect::Rejected).into(),
             result: DeliveryResult::KnownNotSubmitted {
                 reason: "temporary unavailable".into(),
                 retryable: true,
@@ -195,6 +214,7 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
         .claim_delivery::<String, String, String>(&id, 100000)
         .await?
         .ok_or("known non-submission could not retry")?;
+    prepare_dispatching(&mut store, &id, &next.attempt_id).await?;
     if next.attempt_id == first.attempt_id {
         return Err("retry reused attempt identity".into());
     }
@@ -202,7 +222,7 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: id.clone(),
             attempt_id: next.attempt_id.clone(),
-            effects: effects(SubmissionEffect::Unknown),
+            effects: effects(SubmissionEffect::Unknown).into(),
             result: DeliveryResult::Unknown {
                 reason: "response lost".into(),
             },
@@ -290,7 +310,7 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
         .complete_delivery(DeliveryCompletion {
             delivery_id: id,
             attempt_id: first.attempt_id,
-            effects: effects(SubmissionEffect::Accepted),
+            effects: effects(SubmissionEffect::Accepted).into(),
             result: DeliveryResult::Accepted {
                 receipt: "old receipt".to_owned(),
             },
@@ -338,6 +358,7 @@ async fn pause_during_dispatch_prevents_late_rejection_from_resurrecting_message
         .claim_delivery::<String, String, String>(&id, 60000)
         .await?
         .ok_or("missing claim")?;
+    prepare_dispatching(&mut store, &id, &claim.attempt_id).await?;
     store
         .mutate_wakeup::<Message>(&WakeMutation {
             operation_id: OperationId::generate(),
@@ -359,7 +380,7 @@ async fn pause_during_dispatch_prevents_late_rejection_from_resurrecting_message
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: id.clone(),
             attempt_id: claim.attempt_id,
-            effects: effects(SubmissionEffect::Rejected),
+            effects: effects(SubmissionEffect::Rejected).into(),
             result: DeliveryResult::KnownNotSubmitted {
                 reason: "late temporary rejection".into(),
                 retryable: true,
@@ -414,6 +435,7 @@ async fn pause_preserves_late_acceptance_and_unknown_effects()
             .claim_delivery::<String, String, String>(&id, 60000)
             .await?
             .ok_or("missing claim")?;
+        prepare_dispatching(&mut store, &id, &claim.attempt_id).await?;
         store
             .mutate_wakeup::<Message>(&WakeMutation {
                 operation_id: OperationId::generate(),
@@ -444,7 +466,7 @@ async fn pause_preserves_late_acceptance_and_unknown_effects()
             .complete_delivery(DeliveryCompletion {
                 delivery_id: id.clone(),
                 attempt_id: claim.attempt_id,
-                effects: effects(effect),
+                effects: effects(effect).into(),
                 result,
                 now_ms: 62000,
             })

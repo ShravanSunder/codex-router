@@ -102,7 +102,12 @@ pub async fn exercise() -> ProofResult<()> {
         if let Some(run) = page.records.first() {
             match &run.state {
                 RunState::Preparing { .. }
-                    if run.execution_evidence.native.target.as_ref() == Some(&target) =>
+                    if run
+                        .execution_evidence
+                        .native
+                        .as_ref()
+                        .and_then(|native| native.target.as_ref())
+                        == Some(&target) =>
                 {
                     let turns = proof.turns(&target).await?;
                     if turns.iter().any(|turn| {

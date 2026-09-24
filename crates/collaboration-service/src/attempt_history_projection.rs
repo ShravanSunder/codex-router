@@ -10,20 +10,49 @@ pub(crate) async fn delivery(
     delivery_id: &agent_automation::DeliveryId,
     attempt: agent_automation::DeliveryAttempt<SessionRef, CodexGeneration>,
 ) -> Result<AttemptInspection, StorageError> {
+    if attempt.effects.is_none() {
+        let evidence = match attempt.outcome {
+            agent_automation::AttemptOutcome::InProgress => DeliveryEvidence::Dispatching {
+                attempt_id: attempt.attempt_id.clone(),
+                effects: None,
+            },
+            agent_automation::AttemptOutcome::KnownNotSubmitted { reason, .. } => {
+                DeliveryEvidence::KnownNotSubmitted {
+                    attempt_id: attempt.attempt_id.clone(),
+                    reason,
+                    effects: None,
+                }
+            }
+            _ => return Err(StorageError::InvalidRecord),
+        };
+        return Ok(AttemptInspection {
+            attempt_id: attempt.attempt_id,
+            delivery_id: delivery_id.clone(),
+            attempt_number: attempt.attempt_number,
+            began_at: timestamp(attempt.started_at_ms)?,
+            ended_at: attempt.completed_at_ms.map(timestamp).transpose()?,
+            evidence,
+        });
+    }
+    let native = attempt
+        .effects
+        .as_ref()
+        .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+        .ok_or(StorageError::InvalidRecord)?;
     let effects = serde_json::from_value(
-        serde_json::to_value(&attempt.effects).map_err(|_| StorageError::InvalidRecord)?,
+        serde_json::to_value(native).map_err(|_| StorageError::InvalidRecord)?,
     )
     .map_err(|_| StorageError::InvalidRecord)?;
     let evidence = match attempt.outcome {
         agent_automation::AttemptOutcome::InProgress => DeliveryEvidence::Dispatching {
             attempt_id: attempt.attempt_id.clone(),
-            effects,
+            effects: Some(effects),
         },
         agent_automation::AttemptOutcome::KnownNotSubmitted { reason, .. } => {
             DeliveryEvidence::KnownNotSubmitted {
                 attempt_id: attempt.attempt_id.clone(),
                 reason,
-                effects,
+                effects: Some(effects),
             }
         }
         agent_automation::AttemptOutcome::Unknown { reason } => DeliveryEvidence::OutcomeUnknown {

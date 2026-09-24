@@ -1,19 +1,22 @@
 //! Eligible dispatch captures its budget once; waiting time never consumes execution timeout.
 use crate::{AutomationStore, StorageError};
-use agent_automation::{NativeEffectEvidence, RunExecutionEvidence, RunId};
+use agent_automation::{
+    PeerWriteEffect, ProviderSettlementEffect, RouteEffectEvidence, RunExecutionEvidence, RunId,
+    SubmissionEffect,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::Connection;
 pub struct RunDispatchIntent<TTarget, TGeneration> {
     pub run_id: RunId,
-    pub effects: NativeEffectEvidence<TTarget, TGeneration>,
+    pub effects: RouteEffectEvidence<TTarget, TGeneration>,
     pub configured_timeout_seconds: u32,
     pub now_ms: i64,
 }
 impl AutomationStore {
     pub async fn begin_run_dispatch<
-        TTarget: Serialize + DeserializeOwned,
+        TTarget: PartialEq + Serialize + DeserializeOwned,
         TEndpoint: DeserializeOwned,
-        TGeneration: Serialize + DeserializeOwned,
+        TGeneration: PartialEq + Serialize + DeserializeOwned,
         TReceipt: Serialize + DeserializeOwned,
     >(
         &mut self,
@@ -29,24 +32,63 @@ impl AutomationStore {
         if record.phase != agent_automation::RunPhase::Preparing
             || record.evidence.timing.is_some()
             || record.evidence.acceptance.is_some()
-            || request.effects.target.is_none()
-            || request.effects.generation.is_none()
-            || request.effects.submission != agent_automation::SubmissionEffect::Dispatching
         {
             return Err(StorageError::InvalidRecord);
         }
-        if matches!(
-            record.evidence.native.submission,
-            agent_automation::SubmissionEffect::Dispatching
-                | agent_automation::SubmissionEffect::Accepted
-                | agent_automation::SubmissionEffect::Unknown
-        ) || matches!(
-            record.evidence.native.allocation,
-            agent_automation::PreparationEffect::Unknown
-        ) || matches!(
-            record.evidence.native.resume,
-            agent_automation::PreparationEffect::Unknown
-        ) {
+        let dispatching = match &request.effects {
+            RouteEffectEvidence::CodexAppServer(native) => {
+                native.target.is_some()
+                    && native.generation.is_some()
+                    && native.submission == SubmissionEffect::Dispatching
+            }
+            RouteEffectEvidence::ProviderAcp(provider) => {
+                provider.submission == SubmissionEffect::Dispatching
+                    && provider.settlement == ProviderSettlementEffect::NotObserved
+            }
+            RouteEffectEvidence::ClaudeCodePeer(peer) => peer.write == PeerWriteEffect::Dispatching,
+        };
+        if !dispatching {
+            return Err(StorageError::InvalidRecord);
+        }
+        let selected = record
+            .evidence
+            .route
+            .as_ref()
+            .ok_or(StorageError::InvalidRecord)?;
+        let same_selected_route = match (selected, &request.effects) {
+            (
+                RouteEffectEvidence::CodexAppServer(before),
+                RouteEffectEvidence::CodexAppServer(after),
+            ) => {
+                before.target == after.target
+                    && before.generation == after.generation
+                    && !matches!(
+                        before.submission,
+                        SubmissionEffect::Dispatching
+                            | SubmissionEffect::Accepted
+                            | SubmissionEffect::Unknown
+                    )
+                    && before.allocation != agent_automation::PreparationEffect::Unknown
+                    && before.resume != agent_automation::PreparationEffect::Unknown
+            }
+            (RouteEffectEvidence::ProviderAcp(before), RouteEffectEvidence::ProviderAcp(after)) => {
+                before.target == after.target
+                    && before.generation == after.generation
+                    && before.binding == after.binding
+                    && before.attempt_id == after.attempt_id
+                    && before.submission == SubmissionEffect::Dispatching
+            }
+            (
+                RouteEffectEvidence::ClaudeCodePeer(before),
+                RouteEffectEvidence::ClaudeCodePeer(after),
+            ) => {
+                before.session_id == after.session_id
+                    && before.process_id == after.process_id
+                    && before.write == PeerWriteEffect::Dispatching
+            }
+            _ => false,
+        };
+        if !same_selected_route {
             return Err(StorageError::InvalidRecord);
         }
         let inputs = record.inputs.ok_or(StorageError::InvalidRecord)?;
@@ -58,7 +100,7 @@ impl AutomationStore {
             .ok_or(StorageError::InvalidRecord)?;
         let deadline = timing.deadline_at_ms;
         let evidence = RunExecutionEvidence {
-            native: request.effects,
+            route: Some(request.effects),
             timing: Some(timing),
             acceptance: None,
         };

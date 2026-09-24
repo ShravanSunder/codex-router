@@ -68,10 +68,20 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         submission: SubmissionEffect::Dispatching,
         cessation: CessationEvidence::Unconfirmed,
     };
+    let mut prepared = effects.clone();
+    prepared.submission = SubmissionEffect::NotDispatched;
+    store
+        .begin_run_preparation::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+            automation_storage::RunPreparationIntent {
+                run_id: run.clone(),
+                effects: prepared.into(),
+            },
+        )
+        .await?;
     store
         .begin_run_dispatch::<_, EndpointRef, _, NativeSendReceipt>(RunDispatchIntent {
             run_id: run.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
             configured_timeout_seconds: 3600,
             now_ms: 1000,
         })
@@ -84,7 +94,7 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
     store
         .record_run_submission::<_, EndpointRef, _, _>(RunSubmissionResult {
             run_id: run.clone(),
-            effects,
+            effects: effects.into(),
             outcome: RunSubmissionOutcome::Accepted {
                 turn_id: "fixture-turn".into(),
                 receipt,
@@ -92,10 +102,10 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         })
         .await?;
     store
-        .complete_run_turn::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+        .complete_run_settlement::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
             RunCompletion {
                 run_id: run.clone(),
-                native_turn_id: "fixture-turn".into(),
+                settlement: automation_storage::RunStopIdentity::NativeTurn("fixture-turn".into()),
                 outcome: agent_automation::WorkerOutcome::Completed { explanation: None },
                 now_ms: 2000,
             },

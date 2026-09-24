@@ -130,10 +130,20 @@ async fn worker_timeout_crash_child() -> TestResult<()> {
             "allocation":"notRequested","resume":"notRequested","submission":"dispatching","cessation":"unconfirmed"
         }),
     )?;
+    let mut prepared = effects.clone();
+    prepared.submission = agent_automation::SubmissionEffect::NotDispatched;
+    store
+        .begin_run_preparation::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+            automation_storage::RunPreparationIntent {
+                run_id: run_id.clone(),
+                effects: prepared.into(),
+            },
+        )
+        .await?;
     store
         .begin_run_dispatch::<_, EndpointRef, _, NativeSendReceipt>(RunDispatchIntent {
             run_id: run_id.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
             configured_timeout_seconds: 1,
             now_ms: 61000,
         })
@@ -146,7 +156,7 @@ async fn worker_timeout_crash_child() -> TestResult<()> {
     store
         .record_run_submission::<_, EndpointRef, _, _>(RunSubmissionResult {
             run_id: run_id.clone(),
-            effects,
+            effects: effects.into(),
             outcome: RunSubmissionOutcome::Accepted {
                 turn_id: "recorded-turn".into(),
                 receipt,
@@ -232,7 +242,14 @@ async fn recover(root: &Path) -> TestResult<()> {
         .read_run::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(&run_id)
         .await?;
     if before.phase != RunPhase::Stopping
-        || before.evidence.native.cessation != agent_automation::CessationEvidence::Unconfirmed
+        || before
+            .evidence
+            .route
+            .as_ref()
+            .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+            .ok_or("expected Codex evidence")?
+            .cessation
+            != agent_automation::CessationEvidence::Unconfirmed
     {
         return Err("crash invented cessation or lost stopping intent".into());
     }
@@ -328,7 +345,13 @@ async fn recover(root: &Path) -> TestResult<()> {
             .await?;
         if stopped {
             if record.phase != RunPhase::Finished
-                || record.evidence.native.cessation
+                || record
+                    .evidence
+                    .route
+                    .as_ref()
+                    .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+                    .ok_or("expected Codex evidence")?
+                    .cessation
                     != agent_automation::CessationEvidence::Confirmed
                 || inventory.active_run_id.is_some()
             {

@@ -1,8 +1,8 @@
 //! Claim a native submission exactly once locally; unresolved effects are never silently replayed.
 use crate::{AutomationStore, StorageError};
 use agent_automation::{
-    AttemptId, AttemptOutcome, CessationEvidence, DeliveryAttempt, DeliveryId, DeliveryStatus,
-    EventId, NativeEffectEvidence, PreparationEffect, SubmissionEffect, WakeState, WakeupId,
+    AttemptId, AttemptOutcome, DeliveryAttempt, DeliveryId, DeliveryStatus, EventId, WakeState,
+    WakeupId,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{Connection, Row};
@@ -112,17 +112,7 @@ impl AutomationStore {
             started_at_ms: now_ms,
             completed_at_ms: None,
             discard_on_non_submission: false,
-            effects: NativeEffectEvidence {
-                target: Some(target.clone()),
-                generation: None,
-                client_user_message_id: Some(id.as_str().to_owned()),
-                native_turn_id: None,
-                native_submission_id: None,
-                allocation: PreparationEffect::NotRequested,
-                resume: PreparationEffect::NotRequested,
-                submission: SubmissionEffect::Dispatching,
-                cessation: CessationEvidence::NotApplicable,
-            },
+            effects: None,
             outcome: AttemptOutcome::InProgress,
         };
         let encoded = serde_json::to_string(&attempt).map_err(|_| StorageError::InvalidRecord)?;

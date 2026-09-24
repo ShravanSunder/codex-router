@@ -76,6 +76,9 @@ pub enum WorkerOutcome {
         #[serde(deserialize_with = "Option::deserialize")]
         explanation: Option<String>,
     },
+    PeerMessageWritten {
+        explanation: String,
+    },
 }
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(
@@ -141,7 +144,8 @@ pub struct ExecutionTiming {
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunExecutionEvidence {
-    pub native: NativeEffectEvidence,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub native: Option<NativeEffectEvidence>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub timing: Option<ExecutionTiming>,
     #[serde(deserialize_with = "Option::deserialize")]

@@ -27,7 +27,21 @@ pub use provider_operation_store::{
     ProviderOperationStore, ProviderOperationStoreError,
 };
 mod provider_conversation_backend;
+mod scheduled_run_contract;
+mod session_delivery_contract;
 pub use provider_conversation_backend::{ProviderConversationBackend, ProviderConversationFuture};
+pub use scheduled_run_contract::{
+    FreshSessionRequest, NativeTurnRef, PreparedTarget, RunEvidenceSink, RunReconciliation,
+    RunSettlement, RunSubmission, RunSummarySource, ScheduleDestination, ScheduleSupport,
+    ScheduledRunExecution, ScheduledRunRoute, ScheduledRunSubmission, SettlementEvidence,
+    StopRequestOutcome,
+};
+pub use session_delivery_contract::{
+    AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
+    DeliveryClientReceipt, DeliveryContractError, DeliveryFuture, DeliveryPrecondition,
+    DeliveryReceipt, DeliveryRequest, RouteClaim, RouteUnavailableReason, SessionDeliveryRoute,
+    SessionMessageDelivery,
+};
 mod provider_conversation_dispatch;
 mod service_identity_storage;
 pub use service_identity_storage::{load_service_identity, new_service_uuid};

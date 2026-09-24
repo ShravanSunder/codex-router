@@ -132,7 +132,7 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
         .await
         .begin_run_dispatch::<_, EndpointRef, _, NativeSendReceipt>(RunDispatchIntent {
             run_id: input.run_id.clone(),
-            effects: input.effects.clone(),
+            effects: input.effects.clone().into(),
             configured_timeout_seconds: u32::from(configuration.execution_timeout_seconds),
             now_ms: chrono::Utc::now().timestamp_millis(),
         })
@@ -210,7 +210,7 @@ pub(crate) async fn dispatch(mut input: ScheduledDispatch<'_>) -> Result<(), Sto
         .await
         .record_run_submission::<_, EndpointRef, _, _>(RunSubmissionResult {
             run_id: input.run_id,
-            effects: input.effects,
+            effects: input.effects.into(),
             outcome,
         })
         .await?;

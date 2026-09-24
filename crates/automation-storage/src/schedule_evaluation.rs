@@ -52,10 +52,13 @@ impl AutomationStore {
             None => (RunId::generate(), true),
         };
         if created {
-            // No native effect exists yet. This is the closed empty RunExecutionEvidence shape.
-            let evidence = serde_json::json!({"native":{"target":null,"generation":null,"clientUserMessageId":null,"nativeTurnId":null,"nativeSubmissionId":null,"allocation":"notRequested","resume":"notRequested","submission":"notDispatched","cessation":"notApplicable"},"timing":null,"acceptance":null});
+            let evidence = agent_automation::RunExecutionEvidence::<(), (), ()> {
+                route: None,
+                timing: None,
+                acceptance: None,
+            };
             sqlx::query("INSERT INTO workflow_runs(run_id,schedule_id,due_at_ms,run_status,execution_evidence_json) VALUES (?,?,?,'waiting',?)")
-                .bind(run_id.as_str()).bind(schedule_id.as_str()).bind(due).bind(evidence.to_string()).execute(&mut *transaction).await?;
+                .bind(run_id.as_str()).bind(schedule_id.as_str()).bind(due).bind(serde_json::to_string(&evidence).map_err(|_| StorageError::InvalidRecord)?).execute(&mut *transaction).await?;
         }
         sqlx::query("UPDATE schedule_timing_state SET evaluated_through_ms=?,next_due_at_ms=? WHERE schedule_id=?")
             .bind(now_ms).bind(next).bind(schedule_id.as_str()).execute(&mut *transaction).await?;

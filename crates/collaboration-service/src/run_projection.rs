@@ -8,6 +8,18 @@ use collaboration_protocol::{
 pub(crate) fn snapshot(
     record: RunRecord<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>,
 ) -> Result<RunSnapshot, ()> {
+    let native = record
+        .evidence
+        .route
+        .as_ref()
+        .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+        .map(|native| {
+            serde_json::from_value::<collaboration_protocol::NativeEffectEvidence>(
+                serde_json::to_value(native).map_err(|_| ())?,
+            )
+            .map_err(|_| ())
+        })
+        .transpose()?;
     let inputs = record
         .inputs
         .map(|inputs| {
@@ -41,7 +53,7 @@ pub(crate) fn snapshot(
         })
         .transpose()?;
     let execution = match (
-        &record.evidence.native.target,
+        native.as_ref().and_then(|native| native.target.as_ref()),
         &record.native_turn_id,
         &timing,
     ) {
@@ -90,10 +102,7 @@ pub(crate) fn snapshot(
         due_at: timestamp(record.due_at_ms)?,
         state,
         execution_evidence: RunExecutionEvidence {
-            native: serde_json::from_value(
-                serde_json::to_value(record.evidence.native).map_err(|_| ())?,
-            )
-            .map_err(|_| ())?,
+            native,
             timing,
             acceptance: record.evidence.acceptance,
         },

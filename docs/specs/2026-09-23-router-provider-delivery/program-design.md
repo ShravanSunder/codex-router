@@ -79,7 +79,7 @@ flowchart BT
 |---|---|---|---|
 | agent-automation | `route_effect_evidence.rs` | `RouteEffectEvidence`: the per-route evidence a wake attempt or run records (see Attempt and run evidence). The Codex variant is today's `NativeEffectEvidence`, unchanged. | A route's evidence changes |
 | automation-storage | existing transition modules | Transitions validate the evidence variant they receive: native checks unchanged for `codexAppServer`, new checks for `providerAcp` and `claudeCodePeer`. No SQL schema change (evidence lives in existing JSON `TEXT` columns). | Legal run/attempt transitions change |
-| collaboration-protocol | `session_delivery_outcome.rs` | E5 `DeliveryOutcome`, E7 `SessionReachability`, `DeliveryAttemptId` (UUIDv7 newtype). Wire types, because they appear in receipts, wake and run records, CLI, and MCP. Origin and mode reuse the existing `MessageContent` (`Agent{sender}` / `HumanUser` / `Router`) and `MessageDelivery` (`Auto` / `Queue` / `Steer`). | Outcome vocabulary changes |
+| collaboration-protocol | `session_delivery_outcome.rs` | E5 `DeliveryOutcome`, E7 `SessionReachability`, `DeliveryCorrelationId`. Attempt identity reuses the existing UUIDv7 `agent_automation::AttemptId` (no second attempt newtype). Wire types, because they appear in receipts, wake and run records, CLI, and MCP. Origin and mode reuse the existing `MessageContent` (`Agent{sender}` / `HumanUser` / `Router`) and `MessageDelivery` (`Auto` / `Queue` / `Steer`). | Outcome vocabulary changes |
 | collaboration-service | `session_delivery_contract.rs` | `DeliveryRequest`, `DeliveryPrecondition`, `SessionMessageDelivery` (feature-facing), `SessionDeliveryRoute` (client-facing), `RouteClaim`, `AttemptEvidenceSink`. | Seam shape changes |
 | | `scheduled_run_contract.rs` | `ScheduledRunExecution` (feature-facing), `ScheduledRunRoute` (client-facing), `ScheduleSupport`, `RunSettlement`, `RunEvidenceSink`. | Run lifecycle contract changes |
 | | `session_delivery_router.rs` | `SessionDeliveryRouter`: route selection (E7); dispatch of recorded-evidence operations to the route that produced the evidence; implements both feature-facing interfaces. | Selection policy changes |
@@ -115,7 +115,7 @@ pub struct DeliveryRequest {
     pub mode: MessageDelivery,              // Auto | Queue | Steer
     pub precondition: DeliveryPrecondition, // caller guard, enforced at route admission
     pub correlation: DeliveryCorrelationId, // E4: same across attempts
-    pub attempt: DeliveryAttemptId,         // fresh per attempt (R20)
+    pub attempt: AttemptId,         // fresh per attempt (R20)
 }
 
 /// The caller's existing guard, carried as data. Today's meanings are kept:
@@ -212,9 +212,11 @@ Stored records stay owned by `automation-storage`; the feature decides when to a
 | Variant | Recorded before the side effect | Recorded after | Settlement / stop / reconcile |
 |---|---|---|---|
 | `codexAppServer` | today's `NativeEffectEvidence` (target, generation, resume/allocation, `Dispatching`, client user message ID) | native turn/submission IDs | exactly today's native paths: turn completion, `InterruptTurn`, queue-list reconciliation (with the feature-supplied original mode and message, below) |
-| `providerAcp` | binding identity and generation, provider operation ID (= `DeliveryAttemptId`), `Dispatching` | operation admitted | the provider operation store: `PromptCompleted` settles, ACP `cancel` stops, operation lookup reconciles (never replays) |
+| `providerAcp` | binding reference and generation, attempt ID (the provider operation ID is derived from it), `Dispatching` | operation admitted | the provider operation store: `PromptCompleted` settles, ACP `cancel` stops, operation lookup reconciles (never replays) |
 | `claudeCodePeer` | session ID, pid, `Dispatching` | `Written` once the full frame was written | none: written is final, there is no stop; an interrupted write stays `unknown` and is never replayed |
 
+- Evidence references: `agent-automation` sits below `collaboration-protocol`, so `providerAcp` evidence holds its own validated references (binding ID validated like `ProviderBindingId`, generation as the existing generic generation type, and the attempt's `AttemptId`), not the protocol's full `ProviderBindingIdentity`. The provider route converts them at its boundary and resolves the full binding through the provider operation store.
+- Before route selection: a wake attempt is claimed durably before any route is chosen (`delivery_claims.rs`), and a run is created `waiting` before any route is chosen (`schedule_evaluation.rs`). Their route evidence is therefore absent until the selected route's first sink write (the app-server route writes at today's `prepare_delivery` / `begin_run_preparation` points). Because every route records `Dispatching` before any client I/O, a crash while the evidence is absent is known not submitted. Completion requires evidence of the route that delivered.
 - Compatibility: existing JSON with the native field decodes as `codexAppServer` unchanged, so no data migration. Native transition checks (`run_submission_outcomes.rs:38`, `run_stop_state.rs:24`, `run_completion_state.rs:32`) apply to that variant exactly as today; the other variants get their own checks in the same modules.
 - Reconciliation inputs: the feature passes `AttemptReconciliationContext`, meaning the original target, message, and mode from its own attempt record plus the recorded evidence. The route keeps today's positive-evidence checks unchanged (`delivery_reconciliation.rs:29,48,136`): only a queue-mode original, and only a unique queue item whose text equals the rendered original message, recovers acceptance. A reused correlation with different text, duplicates, a missing entry, or a partial scan stays unknown. The route returns the result; the feature persists it.
 - Pre-effect persistence: the route calls the sink with `Dispatching` evidence before touching its client, and the feature persists it in the same transaction discipline it uses today (`prepare_delivery`, `begin_run_preparation`). A crash after that point leaves an uncertain record that only the owning route's reconcile can resolve.
@@ -274,7 +276,7 @@ Feature outcome handling, now written once per feature against E5 only:
 | Feature | On `notSubmitted { retryable: true }` | On `unknown` / accepted | On `rejected` |
 |---|---|---|---|
 | message send | return to caller (R19) | return to caller | return to caller |
-| wake | new attempt with a fresh `DeliveryAttemptId` under the existing retry policy (R19, R20) | record; no further attempt; `unknown` goes to `reconcile_attempt` (R20) | record failure |
+| wake | new attempt with a fresh `AttemptId` under the existing retry policy (R19, R20) | record; no further attempt; `unknown` goes to `reconcile_attempt` (R20) | record failure |
 | board listen push | retry batch under the existing policy | record batch delivered | end the listen after repeated rejects (existing) |
 | approval notice | deny the request (undeliverable) | wait for `approval decide` | deny |
 
@@ -287,7 +289,7 @@ Feature outcome handling, now written once per feature against E5 only:
 
 ## Provider ACP route (Claude, Cursor)
 
-The route wraps `ExternalProviderSupervisor` and its runtime. Delivery is a new supervisor entry, separate from `ProviderConversationBackend`: that trait keeps the `conversation/*` operations (create, load, prompt, cancel, show, wait, reconcile), and delivery does not widen it. Each attempt's `DeliveryAttemptId` becomes the provider operation ID. A supplied `DeliveryPrecondition` is checked against the binding generation before any I/O (`staleGeneration`).
+The route wraps `ExternalProviderSupervisor` and its runtime. Delivery is a new supervisor entry, separate from `ProviderConversationBackend`: that trait keeps the `conversation/*` operations (create, load, prompt, cancel, show, wait, reconcile), and delivery does not widen it. Each attempt's `AttemptId` becomes the provider operation ID. A supplied `DeliveryPrecondition` is checked against the binding generation before any I/O (`staleGeneration`).
 
 ```mermaid
 stateDiagram-v2
@@ -392,7 +394,7 @@ flowchart LR
 | A session becomes live in Claude Code between claim and provider load | provider route (`LiveSessionOwnershipCheck` before `session/load`) | `notSubmitted { retryable: true }`; no load. |
 | A chosen route's state changes between claim and deliver | the chosen route | Re-checks on deliver; `notSubmitted { retryable: true }`. No fall-through to another route within one attempt. |
 | App-server or provider temporarily unavailable | router tier 4 | `notSubmitted { retryable: true }`; existing wake/listen retry applies. |
-| Same logical delivery retried | feature attempt record | A new attempt gets a fresh `DeliveryAttemptId` only after the previous one is known-none; `unknown` goes to the owning route's `reconcile_attempt`; accepted stops retries (R20). |
+| Same logical delivery retried | feature attempt record | A new attempt gets a fresh `AttemptId` only after the previous one is known-none; `unknown` goes to the owning route's `reconcile_attempt`; accepted stops retries (R20). |
 | Crash after `Dispatching` evidence was recorded | owning route's reconcile, with the feature-supplied original mode and message | Native: today's queue-evidence reconciliation (unique exact-text queue match only). Provider: operation-store lookup. Peer: stays `unknown`. Never replayed. |
 | Provider process exits | CollaborationRuntime | Endpoint `Unavailable` (existing retirement); sessions `NotLoaded`; queued messages dropped; in-flight runs settle as the operation store reports. |
 | Provider output not retained, or Host restarted, before a provider run's summary | run worker + provider scheduled-run route | Summary source `Unavailable { reason }`; worker outcome kept, summary blocked with the cause, existing explicit skip or recovery required (R26). |

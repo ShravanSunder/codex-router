@@ -14,7 +14,13 @@ pub(crate) async fn reconcile(
     let Some(backend) = backend else {
         return Ok(());
     };
-    let Some(target) = record.evidence.native.target.as_ref() else {
+    let Some(target) = record
+        .evidence
+        .route
+        .as_ref()
+        .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+        .and_then(|native| native.target.as_ref())
+    else {
         return Ok(());
     };
     if target.endpoint != backend.endpoint {
@@ -60,8 +66,15 @@ pub(crate) async fn observe_worker(
     admission: &NativeAdmission,
     record: &RunRecord<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>,
 ) -> Result<bool, StorageError> {
-    let (Some(target), Some(turn_id)) = (&record.evidence.native.target, &record.native_turn_id)
-    else {
+    let (Some(target), Some(turn_id)) = (
+        record
+            .evidence
+            .route
+            .as_ref()
+            .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+            .and_then(|native| native.target.as_ref()),
+        &record.native_turn_id,
+    ) else {
         return Ok(false);
     };
     let retired = admission.retirement();
@@ -99,10 +112,10 @@ pub(crate) async fn observe_worker(
     store
         .lock()
         .await
-        .complete_run_turn::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+        .complete_run_settlement::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
             RunCompletion {
                 run_id: record.run_id.clone(),
-                native_turn_id: turn_id.clone(),
+                settlement: automation_storage::RunStopIdentity::NativeTurn(turn_id.clone()),
                 outcome,
                 now_ms: chrono::Utc::now().timestamp_millis(),
             },

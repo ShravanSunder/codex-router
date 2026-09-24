@@ -19,7 +19,7 @@ impl AutomationStore {
         request: &SummaryAdmission,
     ) -> Result<SummaryAttempt<TTarget, TGeneration>, StorageError> {
         let mut transaction = self.connection.begin_with("BEGIN IMMEDIATE").await?;
-        let record =
+        let mut record =
             crate::run_inspection::read_current::<TTarget, TEndpoint, TGeneration, TReceipt>(
                 &mut transaction,
                 &request.run_id,
@@ -27,7 +27,14 @@ impl AutomationStore {
             .await?;
         if record.phase != agent_automation::RunPhase::SummaryRequired
             || record.worker_outcome.is_none()
-            || record.evidence.native.cessation != agent_automation::CessationEvidence::Confirmed
+            || record
+                .evidence
+                .route
+                .as_ref()
+                .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+                .ok_or(StorageError::InvalidRecord)?
+                .cessation
+                != agent_automation::CessationEvidence::Confirmed
         {
             return Err(StorageError::InvalidRecord);
         }
@@ -38,8 +45,12 @@ impl AutomationStore {
         let attempt = make_attempt(SummaryAttemptSeed {
             source_target: record
                 .evidence
-                .native
+                .route
+                .as_mut()
+                .and_then(agent_automation::RouteEffectEvidence::codex_app_server_mut)
+                .ok_or(StorageError::InvalidRecord)?
                 .target
+                .take()
                 .ok_or(StorageError::InvalidRecord)?,
             source_turn_id: record.native_turn_id.ok_or(StorageError::InvalidRecord)?,
             timeout_seconds: request.timeout_seconds,
