@@ -135,7 +135,7 @@ pub use acp_schema_catalog::{
 };
 
 mod instruction_contract;
-pub use agent_automation::{AttemptId, DeliveryId, EventId};
+pub use agent_automation::{AttemptId, DeliveryId, EventId, PeerWriteEffect};
 pub use agent_automation::{InstructionId, InstructionText, OperationId, RevisionId, WakeupId};
 pub use instruction_contract::{
     InstructionCreateParams, InstructionShowParams, InstructionSnapshot, InstructionUpdateParams,
@@ -222,11 +222,14 @@ pub use schedule_preparation_contract::{DestinationPreparation, SchedulePrepareR
 
 mod run_evidence_validation;
 mod run_execution_contract;
+mod run_execution_reference;
+pub use agent_automation::SummarySourceReference;
 pub use run_execution_contract::{
     CapturedRunInputs, ContinuityInput, ExecutionTiming, FrozenExecutionConfiguration,
-    NativeExecution, RetainedSummary, RunExecutionEvidence, RunRecoveryRequest, RunShowRequest,
-    RunSnapshot, RunState, WorkerOutcome,
+    RetainedSummary, RunExecutionEvidence, RunRecoveryRequest, RunShowRequest, RunSnapshot,
+    RunState, WorkerOutcome,
 };
+pub use run_execution_reference::{NativeExecution, RunExecution};
 mod run_failure_contract;
 pub use run_failure_contract::{RunFailure, RunFailureKind, RunFailureStage, RunNextAction};
 

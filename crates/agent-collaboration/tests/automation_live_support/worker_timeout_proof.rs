@@ -1,9 +1,10 @@
 //! A real native worker is stopped by its captured schedule timeout, not by the test driver.
 use super::proof_context::{ProofContext, ProofResult};
 use collaboration_client::protocol::{
-    CessationEvidence, DestinationPreparation, ExecutionDestination, InstructionCreateParams,
-    OperationId, RunListRequest, RunState, ScheduleCreateRequest, ScheduleDefinition,
-    ScheduleEnableRequest, SchedulePrepareRequest, TimingRequest, WorkerOutcome,
+    CessationEvidence, DeliveryRouteEvidence, DestinationPreparation, ExecutionDestination,
+    InstructionCreateParams, OperationId, RunExecution, RunListRequest, RunState,
+    ScheduleCreateRequest, ScheduleDefinition, ScheduleEnableRequest, SchedulePrepareRequest,
+    TimingRequest, WorkerOutcome,
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -97,15 +98,15 @@ pub async fn exercise(proof: &mut ProofContext) -> ProofResult<()> {
                     outcome: WorkerOutcome::Interrupted { .. },
                     ..
                 } => {
+                    let RunExecution::CodexAppServer(execution) = execution else {
+                        return Err("Timed worker did not use the native route".into());
+                    };
                     if execution.target != target
                         || u32::from(execution.effective_timeout_seconds) != 2
-                        || !run
-                            .execution_evidence
-                            .native
-                            .as_ref()
-                            .is_some_and(|native| {
-                                matches!(native.cessation, CessationEvidence::Confirmed)
-                            })
+                        || !run.execution_evidence.route.as_ref().is_some_and(|route| {
+                            matches!(route, DeliveryRouteEvidence::CodexAppServer(native)
+                                    if matches!(native.cessation, CessationEvidence::Confirmed))
+                        })
                         || run.summary.is_some()
                     {
                         return Err("Timed worker lost its exact target, override, cessation or continued-thread semantics".into());

@@ -7,7 +7,8 @@ use agent_automation::{
 };
 use automation_storage::{
     AutomationStore, RunAdmission, RunCompletion, RunDispatchIntent, RunPreparationIntent,
-    RunStopIdentity, RunSubmissionOutcome, RunSubmissionResult, ScheduleCreate,
+    RunStopIdentity, RunSubmissionOutcome, RunSubmissionResult, ScheduleCreate, SummaryAdmission,
+    SummaryCompletion, SummaryProgress,
 };
 use sqlx::Connection;
 
@@ -317,6 +318,170 @@ async fn peer_written_run_finishes_without_claiming_turn_completion()
         .await?
     {
         return Err("final peer write accepted a stop request".into());
+    }
+    store.close().await?;
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_summary_reference_feeds_the_next_fresh_run()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "provider-summary-{}.sqlite",
+        OperationId::generate().as_str()
+    ));
+    let mut store = AutomationStore::open(&path).await?;
+    let instruction = store
+        .create_instruction(
+            &OperationId::generate(),
+            &InstructionText::try_from("Check provider job".to_owned())?,
+            0,
+        )
+        .await?;
+    let schedule = store
+        .create_schedule(&ScheduleCreate::<String, String> {
+            operation_id: OperationId::generate(),
+            definition: ScheduleDefinition {
+                instruction_id: instruction.instruction_id,
+                timing: TimingRule::Interval { seconds: 60 },
+                enabled: true,
+                destination: ExecutionDestination::FreshEachRun {
+                    endpoint: "provider-endpoint".into(),
+                    cwd: "/isolated-fixture".into(),
+                },
+                execution_timeout_seconds: Some(120),
+                model: Some("fixture-model".into()),
+                effort: Some("medium".into()),
+            },
+            imported_continuity: ContinuityInput::None,
+            now_ms: 0,
+        })
+        .await?;
+    let first_run = store
+        .enqueue_due_run::<String, String>(&schedule.schedule_id, 60000)
+        .await?
+        .ok_or("first run missing")?;
+    store
+        .admit_waiting_run::<String, String>(&schedule.schedule_id, 61000)
+        .await?;
+    let provider_attempt = AttemptId::generate();
+    let preparing = provider_evidence(
+        provider_attempt.clone(),
+        SubmissionEffect::Dispatching,
+        ProviderSettlementEffect::NotObserved,
+    )?;
+    store
+        .begin_run_preparation::<String, String, String, String>(RunPreparationIntent {
+            run_id: first_run.clone(),
+            effects: preparing.clone(),
+        })
+        .await?;
+    store
+        .begin_run_dispatch::<String, String, String, String>(RunDispatchIntent {
+            run_id: first_run.clone(),
+            effects: preparing,
+            configured_timeout_seconds: 3600,
+            now_ms: 62000,
+        })
+        .await?;
+    store
+        .record_run_submission::<String, String, String, String>(RunSubmissionResult {
+            run_id: first_run.clone(),
+            effects: provider_evidence(
+                provider_attempt.clone(),
+                SubmissionEffect::Accepted,
+                ProviderSettlementEffect::NotObserved,
+            )?,
+            outcome: RunSubmissionOutcome::ProviderAdmitted {
+                receipt: "provider accepted".into(),
+            },
+        })
+        .await?;
+    if !store
+        .complete_run_settlement::<String, String, String, String>(RunCompletion {
+            run_id: first_run.clone(),
+            settlement: RunStopIdentity::ProviderOperation(provider_attempt.clone()),
+            outcome: WorkerOutcome::Completed { explanation: None },
+            now_ms: 63000,
+        })
+        .await?
+    {
+        return Err("provider operation did not settle its exact run".into());
+    }
+    let attempt = store
+        .begin_required_summary::<String, String, String, String>(&SummaryAdmission {
+            run_id: first_run.clone(),
+            timeout_seconds: 900,
+            now_ms: 64000,
+        })
+        .await?;
+    if attempt.source_reference
+        != (agent_automation::SummarySourceReference::ProviderOperation {
+            attempt_id: provider_attempt.clone(),
+        })
+    {
+        return Err("summary admission invented a native turn source".into());
+    }
+    let summary_turn = "summary-turn".to_owned();
+    let summary_target = "summary-worker".to_owned();
+    store
+        .record_summary_progress::<String, String>(SummaryProgress {
+            run_id: first_run.clone(),
+            attempt_id: attempt.attempt_id.clone(),
+            phase: agent_automation::SummaryPhase::Running,
+            effects: NativeEffectEvidence {
+                target: Some(summary_target.clone()),
+                generation: Some("summary-generation".into()),
+                client_user_message_id: Some(attempt.attempt_id.as_str().into()),
+                native_turn_id: Some(summary_turn.clone()),
+                native_submission_id: None,
+                allocation: PreparationEffect::Accepted,
+                resume: PreparationEffect::NotRequested,
+                submission: SubmissionEffect::Accepted,
+                cessation: CessationEvidence::Unconfirmed,
+            },
+            target: Some(summary_target),
+            native_turn_id: Some(summary_turn.clone()),
+            explanation: None,
+        })
+        .await?;
+    if !store
+        .complete_summary::<String, String>(SummaryCompletion {
+            run_id: first_run.clone(),
+            attempt_id: attempt.attempt_id,
+            native_turn_id: summary_turn,
+            text: InstructionText::try_from("Provider work completed".to_owned())?,
+            now_ms: 65000,
+        })
+        .await?
+    {
+        return Err("provider summary did not complete".into());
+    }
+    let next_run = store
+        .enqueue_due_run::<String, String>(&schedule.schedule_id, 120000)
+        .await?
+        .ok_or("successor run missing")?;
+    let next = store
+        .admit_waiting_run::<String, String>(&schedule.schedule_id, 121000)
+        .await?;
+    let RunAdmission::Admitted { inputs, .. } = next else {
+        return Err("successor run was not admitted".into());
+    };
+    match inputs.continuity {
+        ContinuityInput::LocalSummary {
+            source_run_id,
+            source_reference:
+                agent_automation::SummarySourceReference::ProviderOperation { attempt_id },
+            text,
+            ..
+        } if source_run_id == first_run
+            && attempt_id == provider_attempt
+            && text == "Provider work completed" => {}
+        _ => return Err("successor did not inherit exact provider summary provenance".into()),
+    }
+    if next_run == first_run {
+        return Err("summary reused the prior run identity".into());
     }
     store.close().await?;
     std::fs::remove_file(path)?;

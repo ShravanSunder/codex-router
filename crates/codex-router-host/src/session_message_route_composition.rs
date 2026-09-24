@@ -4,13 +4,13 @@ use claude_code_peer_messaging::{ClaudeCodePeerSocket, ClaudeCodeSessionRegistry
 use collaboration_protocol::UuidIdentity;
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, ProviderOperationStore, SessionDeliveryRoute,
-    SessionDeliveryRouter, SessionMessageDelivery,
+    SessionDeliveryRouter,
 };
 use std::{io, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 pub(crate) struct SessionMessageRouteComposition {
-    pub(crate) delivery: Arc<dyn SessionMessageDelivery>,
+    pub(crate) router: Arc<SessionDeliveryRouter>,
     pub(crate) provider_route: Option<Arc<ProviderAcpDeliveryRoute>>,
 }
 
@@ -57,7 +57,7 @@ pub(crate) fn compose_session_message_routes(
     };
     routes.push(peer_route);
     Ok(SessionMessageRouteComposition {
-        delivery: Arc::new(SessionDeliveryRouter::new(routes)),
+        router: Arc::new(SessionDeliveryRouter::new(routes)),
         provider_route,
     })
 }

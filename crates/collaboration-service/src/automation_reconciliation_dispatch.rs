@@ -1,6 +1,6 @@
 //! Reconciliation reads exact native evidence and never repeats a native mutation.
 use crate::{ServiceIdentity, automation_inspection_failure as failure};
-use collaboration_protocol::{CodexGeneration, DeliveryShowRequest, NativeSendReceipt, SessionRef};
+use collaboration_protocol::{CodexGeneration, DeliveryShowRequest, SessionRef};
 use serde_json::{Value, json};
 
 pub(crate) async fn delivery(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
@@ -77,16 +77,21 @@ pub(crate) async fn run(id: Value, params: Value, identity: &ServiceIdentity) ->
             );
         }
     };
-    let record = match store.lock().await.read_run::<SessionRef, collaboration_protocol::EndpointRef, CodexGeneration, NativeSendReceipt>(&params.run_id).await {
+    let record = match store.lock().await.read_run::<SessionRef, collaboration_protocol::EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(&params.run_id).await {
         Ok(record) => record,
         Err(error) => return failure::response(id, failure::storage(error)),
     };
-    if let Err(error) =
-        crate::run_reconciliation::reconcile(store, identity.native_backend.as_ref(), record).await
+    if let Err(error) = crate::run_reconciliation::reconcile(
+        store,
+        identity.scheduled_run_execution.as_ref(),
+        identity.native_backend.as_ref(),
+        record,
+    )
+    .await
     {
         return failure::response(id, failure::storage(error));
     }
-    let record = match store.lock().await.read_run::<SessionRef, collaboration_protocol::EndpointRef, CodexGeneration, NativeSendReceipt>(&params.run_id).await {
+    let record = match store.lock().await.read_run::<SessionRef, collaboration_protocol::EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(&params.run_id).await {
         Ok(record) => record,
         Err(error) => return failure::response(id, failure::storage(error)),
     };

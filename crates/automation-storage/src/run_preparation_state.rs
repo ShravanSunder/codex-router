@@ -16,7 +16,7 @@ pub struct RunPreparedTarget<TTarget, TGeneration> {
 }
 pub struct RunPreparationFailure<TTarget, TGeneration> {
     pub run_id: RunId,
-    pub effects: NativeEffectEvidence<TTarget, TGeneration>,
+    pub effects: RouteEffectEvidence<TTarget, TGeneration>,
     pub explanation: String,
     pub now_ms: i64,
 }
@@ -24,24 +24,35 @@ impl AutomationStore {
     /// A known preparation failure never consumed an execution budget.
     /// Preserve an already prepared target when local input validation fails afterward.
     pub async fn fail_run_preparation<
-        TTarget: Serialize + DeserializeOwned,
+        TTarget: PartialEq + Serialize + DeserializeOwned,
         TEndpoint: DeserializeOwned,
-        TGeneration: Serialize + DeserializeOwned,
+        TGeneration: PartialEq + Serialize + DeserializeOwned,
         TReceipt: Serialize + DeserializeOwned,
     >(
         &mut self,
         request: RunPreparationFailure<TTarget, TGeneration>,
     ) -> Result<bool, StorageError> {
         use agent_automation::{PreparationEffect, SubmissionEffect};
-        if request.now_ms < 0
-            || request.explanation.is_empty()
-            || request.effects.allocation == PreparationEffect::Unknown
-            || request.effects.resume == PreparationEffect::Unknown
-            || !matches!(
-                request.effects.submission,
-                SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
-            )
-        {
+        let known_none = match &request.effects {
+            RouteEffectEvidence::CodexAppServer(native) => {
+                native.allocation != PreparationEffect::Unknown
+                    && native.resume != PreparationEffect::Unknown
+                    && matches!(
+                        native.submission,
+                        SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
+                    )
+            }
+            RouteEffectEvidence::ProviderAcp(provider) => {
+                matches!(
+                    provider.submission,
+                    SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
+                ) && provider.settlement == agent_automation::ProviderSettlementEffect::NotObserved
+            }
+            RouteEffectEvidence::ClaudeCodePeer(peer) => {
+                peer.write == PeerWriteEffect::NotDispatched
+            }
+        };
+        if request.now_ms < 0 || request.explanation.is_empty() || !known_none {
             return Err(StorageError::InvalidRecord);
         }
         let mut transaction = self.connection.begin_with("BEGIN IMMEDIATE").await?;
@@ -58,7 +69,15 @@ impl AutomationStore {
             transaction.commit().await?;
             return Ok(false);
         }
-        record.evidence.route = Some(request.effects.into());
+        if record
+            .evidence
+            .route
+            .as_ref()
+            .is_some_and(|prior| !prior.same_client_identity(&request.effects))
+        {
+            return Err(StorageError::InvalidRecord);
+        }
+        record.evidence.route = Some(request.effects);
         let outcome = agent_automation::WorkerOutcome::Failed {
             explanation: Some(request.explanation),
         };

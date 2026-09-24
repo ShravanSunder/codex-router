@@ -1,5 +1,6 @@
 use collaboration_service::{
-    DeliveryPrecondition, RouteClaim, RouteUnavailableReason, RunSettlement, RunSummarySource,
+    DeliveryPrecondition, RouteClaim, RouteUnavailableReason, RunSettlement, RunSubmission,
+    RunSummarySource,
 };
 use serde_json::{json, to_value};
 
@@ -62,6 +63,42 @@ fn provider_summary_source_preserves_text_and_unavailable_reason()
         let decoded: RunSettlement = serde_json::from_value(encoded.clone())?;
         if to_value(decoded)? != encoded {
             return Err("settled summary source changed during round trip".into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn scheduled_submission_and_settlement_keep_distinct_recovery_outcomes()
+-> Result<(), Box<dyn std::error::Error>> {
+    for submission in [
+        RunSubmission::NotStartedBusy,
+        RunSubmission::Rejected(collaboration_protocol::DeliveryRejection {
+            reason: collaboration_protocol::DeliveryRejectionReason::Busy,
+            next_action: collaboration_protocol::DeliveryNextAction::RetryLater,
+            client_code: None,
+            detail: Some("worker still active".into()),
+        }),
+        RunSubmission::Unknown,
+    ] {
+        let encoded = to_value(&submission)?;
+        let decoded: RunSubmission = serde_json::from_value(encoded.clone())?;
+        if to_value(decoded)? != encoded {
+            return Err("scheduled submission changed during round trip".into());
+        }
+    }
+    for settlement in [
+        RunSettlement::Pending,
+        RunSettlement::Failed {
+            reason: "native turn failed".into(),
+        },
+        RunSettlement::Interrupted,
+        RunSettlement::WrittenWithoutCompletion,
+    ] {
+        let encoded = to_value(&settlement)?;
+        let decoded: RunSettlement = serde_json::from_value(encoded.clone())?;
+        if to_value(decoded)? != encoded {
+            return Err("run settlement changed during round trip".into());
         }
     }
     Ok(())

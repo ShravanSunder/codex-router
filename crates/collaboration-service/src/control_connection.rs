@@ -427,7 +427,7 @@ pub async fn serve_control_connection(
                                 id: json!(id),
                                 params: request.params,
                                 service_id: &identity.service_id,
-                                backend: identity.native_backend.as_ref(),
+                                execution: identity.scheduled_run_execution.as_ref(),
                                 store: identity.automation.as_ref(),
                             },
                         )
@@ -454,7 +454,7 @@ pub async fn serve_control_connection(
                         let response = crate::schedule_dispatch::dispatch(
                             crate::schedule_dispatch::ScheduleRequest {
                                 service_id: &identity.service_id,
-                                backend: identity.native_backend.as_ref(),
+                                execution: identity.scheduled_run_execution.as_ref(),
                                 id: json!(id),
                                 method: &request.method,
                                 params: request.params,

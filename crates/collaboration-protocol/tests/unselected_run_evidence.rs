@@ -8,7 +8,7 @@ fn waiting_run_exposes_absent_client_evidence_without_inventing_native_effects()
         "scheduleId": agent_automation::ScheduleId::generate(),
         "dueAt": "2026-09-24T00:00:00Z",
         "state": {"kind":"waiting"},
-        "executionEvidence": {"native":null,"timing":null,"acceptance":null},
+        "executionEvidence": {"route":null,"timing":null,"acceptance":null},
         "summary":null
     });
     let decoded: RunSnapshot =
@@ -17,7 +17,7 @@ fn waiting_run_exposes_absent_client_evidence_without_inventing_native_effects()
     let evidence: RunExecutionEvidence =
         serde_json::from_value(waiting["executionEvidence"].clone())
             .expect("absent native evidence decodes");
-    assert!(evidence.native.is_none());
+    assert!(evidence.route.is_none());
 }
 
 #[test]
@@ -27,7 +27,7 @@ fn absent_client_evidence_cannot_carry_an_execution_budget() {
         "scheduleId": agent_automation::ScheduleId::generate(),
         "dueAt": "2026-09-24T00:00:00Z",
         "state": {"kind":"waiting"},
-        "executionEvidence": {"native":null,"timing":{
+        "executionEvidence": {"route":null,"timing":{
             "dispatchStartedAt":"2026-09-24T00:00:00Z",
             "effectiveTimeoutSeconds":60,
             "deadlineAt":"2026-09-24T00:01:00Z"

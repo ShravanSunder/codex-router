@@ -1,6 +1,6 @@
 //! Each collection keeps its existing typed record projection and native evidence validation.
 use automation_storage::{AutomationCollection, AutomationStore, StorageError};
-use collaboration_protocol::{CodexGeneration, EndpointRef, NativeSendReceipt, SessionRef};
+use collaboration_protocol::{CodexGeneration, EndpointRef, SessionRef};
 use serde_json::Value;
 
 pub(crate) async fn project_record(
@@ -39,7 +39,7 @@ pub(crate) async fn project_record(
                 .try_into()
                 .map_err(|_| StorageError::InvalidRecord)?;
             let record = store
-                .read_run::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(&id)
+                .read_run::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(&id)
                 .await?;
             if record.schedule_id != *schedule_id {
                 return Err(StorageError::InvalidRecord);

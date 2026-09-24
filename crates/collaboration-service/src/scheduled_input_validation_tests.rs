@@ -3,7 +3,11 @@ use super::*;
 use agent_automation::{
     ContinuityInput, InstructionText, OperationId, ScheduleDefinition, TimingRule,
 };
-use automation_storage::{RunAdmission, ScheduleCreate, ScheduleEdit, ScheduleMutation};
+use automation_storage::{
+    RunAdmission, RunPreparedTarget, ScheduleCreate, ScheduleEdit, ScheduleMutation,
+    ThreadBindingClaim,
+};
+use collaboration_protocol::NativeSendReceipt;
 use serde_json::json;
 
 #[tokio::test]
@@ -128,13 +132,15 @@ async fn exercise_input_validation(
             )
             .await?;
     }
+    let backend = NativeControlBackend {
+        endpoint,
+        gate,
+        codex_home: root.clone(),
+    };
     let worker = ScheduledRunWorker {
         store: store.clone(),
-        backend: Some(NativeControlBackend {
-            endpoint,
-            gate,
-            codex_home: root.clone(),
-        }),
+        execution: Arc::new(crate::CodexAppServerScheduledRuns::new(backend.clone())),
+        backend: Some(backend),
         configuration: crate::AutomationConfigurationHandle::default(),
     };
     worker.step(run.clone()).await?;

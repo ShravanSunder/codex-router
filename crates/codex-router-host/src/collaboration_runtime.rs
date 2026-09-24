@@ -344,7 +344,11 @@ impl CollaborationRuntime {
                     Ok,
                 )?,
             )?;
-        let session_delivery = message_routes.delivery;
+        let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
+            message_routes.router.clone();
+        let scheduled_run_execution: std::sync::Arc<
+            dyn collaboration_service::ScheduledRunExecution,
+        > = message_routes.router;
         let provider_delivery_route = message_routes.provider_route;
         approval_broker
             .install_session_delivery(std::sync::Arc::clone(&session_delivery))
@@ -356,6 +360,7 @@ impl CollaborationRuntime {
         }
         let identity = identity
             .with_session_delivery(session_delivery)
+            .with_scheduled_run_execution(scheduled_run_execution)
             .with_native_backend(native_backend)
             .map_err(io::Error::other)?;
         let identity = identity.with_approval_broker(std::sync::Arc::clone(&approval_broker));

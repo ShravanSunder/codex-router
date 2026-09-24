@@ -9,7 +9,7 @@ use automation_storage::{
     ThreadBindingClaim,
 };
 use codex_native_integration::{NativeConnectionError, NativeOperation, NativeProtocolConnection};
-use collaboration_protocol::{CodexGeneration, EndpointRef, NativeSendReceipt, SessionRef};
+use collaboration_protocol::{CodexGeneration, EndpointRef, SessionRef};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -20,7 +20,14 @@ pub(crate) struct SummaryStep<'a> {
     pub work: SummaryWork,
     pub store: &'a Arc<Mutex<AutomationStore>>,
     pub admission: &'a NativeAdmission,
-    pub record: RunRecord<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>,
+    pub summary_endpoint: EndpointRef,
+    pub source: Option<crate::RunSummarySource>,
+    pub record: RunRecord<
+        SessionRef,
+        EndpointRef,
+        CodexGeneration,
+        crate::stored_run_receipt::StoredRunReceipt,
+    >,
     pub timeout_seconds: u32,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,7 +50,7 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
             .store
             .lock()
             .await
-            .begin_required_summary::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+            .begin_required_summary::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(
                 &SummaryAdmission {
                     run_id: id,
                     timeout_seconds: input.timeout_seconds,
@@ -249,7 +256,7 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
             .and_then(|id| id.to_owned().try_into().ok());
         attempt.effects.allocation = PreparationEffect::Accepted;
         let summary_target = summary_id.map(|session_id| SessionRef {
-            endpoint: attempt.source_target.endpoint.clone(),
+            endpoint: input.summary_endpoint,
             session_id,
         });
         attempt.effects.target = summary_target.clone();
@@ -283,33 +290,65 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
         persist(input.store, &id, &attempt).await?;
         return Ok(());
     };
-    let source = crate::scheduled_native_observation::read_turn(
-        input.admission,
-        &attempt.source_target,
-        &attempt.source_turn_id,
-    )
-    .await;
-    let source = match source {
-        Ok(Some(source)) => source,
-        _ => return block(
-            input.store,
-            id,
-            attempt,
-            false,
-            "Completed worker turn could not be read for summary; no summary input was submitted.",
-        )
-        .await,
+    let text = match input.source {
+        Some(crate::RunSummarySource::NativeTurn { turn }) => {
+            let source_turn_id = String::from(turn.turn_id);
+            if turn.target != attempt.source_target
+                || attempt.source_reference.native_turn_id() != Some(source_turn_id.as_str())
+            {
+                return Err(StorageError::InvalidRecord);
+            }
+            let source = crate::scheduled_native_observation::read_turn(
+                input.admission,
+                &attempt.source_target,
+                &source_turn_id,
+            )
+            .await;
+            let source = match source {
+                Ok(Some(source)) => source,
+                _ => return block(
+                    input.store,
+                    id,
+                    attempt,
+                    false,
+                    "Completed worker turn could not be read for summary; no summary input was submitted.",
+                )
+                .await,
+            };
+            let source_text =
+                serde_json::to_string(&source).map_err(|_| StorageError::InvalidRecord)?;
+            if source_text.len() > 900000 {
+                return block(input.store,id,attempt,false,"Worker turn exceeds the bounded summary input frame; inspect and explicitly skip or reduce source context.").await;
+            }
+            format!(
+                "Summarize this exact completed worker turn for the next scheduled run.\nSource thread: {}\nSource turn: {}\n\nQuoted native turn evidence:\n{}",
+                String::from(attempt.source_target.session_id.clone()),
+                source_turn_id,
+                source_text
+            )
+        }
+        Some(crate::RunSummarySource::ProviderResponse { text }) => {
+            let agent_automation::SummarySourceReference::ProviderOperation { attempt_id } =
+                &attempt.source_reference
+            else {
+                return Err(StorageError::InvalidRecord);
+            };
+            if text.len() > 900000 {
+                return block(input.store,id,attempt,false,"Provider response exceeds the bounded summary input frame; inspect and explicitly skip or reduce source context.").await;
+            }
+            format!(
+                "Summarize this exact completed provider response for the next scheduled run.\nSource operation: {}\n\nQuoted provider response:\n{}",
+                attempt_id.as_str(),
+                text
+            )
+        }
+        Some(crate::RunSummarySource::Unavailable { reason }) => {
+            return block(input.store, id, attempt, false, &format!("Provider summary source is unavailable: {reason}. Inspect and explicitly skip or retry when output is available.")).await;
+        }
+        None => {
+            return block(input.store, id, attempt, false, "Completed worker source is unavailable; inspect and explicitly skip or retry when output is available.").await;
+        }
     };
-    let source_text = serde_json::to_string(&source).map_err(|_| StorageError::InvalidRecord)?;
-    if source_text.len() > 900000 {
-        return block(input.store,id,attempt,false,"Worker turn exceeds the bounded summary input frame; inspect and explicitly skip or reduce source context.").await;
-    }
-    let text = format!(
-        "Summarize this exact completed worker turn for the next scheduled run.\nSource thread: {}\nSource turn: {}\n\nQuoted native turn evidence:\n{}",
-        String::from(attempt.source_target.session_id.clone()),
-        attempt.source_turn_id,
-        source_text
-    );
     attempt.effects.generation = Some(input.admission.generation().clone());
     attempt.effects.submission = SubmissionEffect::Dispatching;
     attempt.effects.client_user_message_id = Some(attempt.attempt_id.as_str().into());

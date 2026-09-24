@@ -2,8 +2,9 @@
 use super::proof_context::{ProofContext, ProofResult, agent_text};
 use collaboration_client::protocol::{
     AutomationConfigureRequest, CessationEvidence, ExecutionDestination, InstructionCreateParams,
-    OperationId, RunListRequest, RunState, RunSummariesRequest, ScheduleCreateRequest,
-    ScheduleDefinition, ScheduleShowRequest, SummaryInspectionState, TimingRequest, WorkerOutcome,
+    OperationId, RunExecution, RunListRequest, RunState, RunSummariesRequest,
+    ScheduleCreateRequest, ScheduleDefinition, ScheduleShowRequest, SummaryInspectionState,
+    TimingRequest, WorkerOutcome,
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -101,6 +102,9 @@ pub async fn exercise() -> ProofResult<()> {
     } = &blocked.state
     else {
         return Err("Summary failure changed the worker outcome".into());
+    };
+    let RunExecution::CodexAppServer(execution) = execution else {
+        return Err("Summary timeout worker did not use the native route".into());
     };
     let attempts = proof
         .client

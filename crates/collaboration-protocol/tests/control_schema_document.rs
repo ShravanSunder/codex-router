@@ -182,3 +182,95 @@ fn bound_native_thread_uses_exact_offline_schema_and_closed_control_result() {
     response["result"]["extra"] = json!(true);
     assert!(!validator.is_valid(&response));
 }
+
+#[test]
+fn run_show_schema_accepts_selected_provider_and_peer_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut schema = control_schema_document(None)?;
+    let response_ref = schema["x-methods"]["run/show"]["response"]["$ref"]
+        .as_str()
+        .ok_or("run/show response schema missing")?
+        .to_owned();
+    schema["$ref"] = json!(response_ref);
+    let validator = jsonschema::validator_for(&schema)?;
+    let service = "00000000-0000-4000-8000-000000000001";
+    let endpoint = json!({"serviceId":service,"endpointId":"claude-local"});
+    let target = json!({"endpoint":endpoint,"sessionId":"provider-worker"});
+    let operation = agent_automation::AttemptId::generate();
+    let start = "2026-09-24T00:00:00Z";
+    let deadline = "2026-09-24T00:02:00Z";
+    let inputs = json!({
+        "scheduleChangeId":agent_automation::ChangeId::generate(),
+        "instructionRevisionId":agent_automation::RevisionId::generate(),
+        "instructionText":"Check provider job",
+        "continuity":{"kind":"none"},
+        "executionConfiguration":{
+            "destination":{"kind":"ownedThread","target":target,"cwd":"/isolated-fixture"},
+            "executionTimeoutSeconds":120,
+            "model":"fixture-model",
+            "effort":"medium"
+        }
+    });
+    let provider = json!({
+        "runId":agent_automation::RunId::generate(),
+        "scheduleId":agent_automation::ScheduleId::generate(),
+        "dueAt":start,
+        "state":{"kind":"executing","inputs":inputs,"execution":{
+            "kind":"providerAcp","target":target,"operationId":operation,
+            "startedAt":start,"deadlineAt":deadline,"effectiveTimeoutSeconds":120
+        }},
+        "executionEvidence":{
+            "route":{"kind":"providerAcp","bindingId":"fixture-binding",
+                "generation":{"serviceEpoch":service,"generation":1},
+                "target":target,"operationId":operation,"submission":"accepted"},
+            "timing":{"dispatchStartedAt":start,"effectiveTimeoutSeconds":120,"deadlineAt":deadline},
+            "acceptance":{"outcome":{"kind":"started"},"reachability":"providerAcp",
+                "client":{"kind":"providerAcp","operationId":operation}}
+        },
+        "summary":null
+    });
+    let _: collaboration_protocol::RunSnapshot = serde_json::from_value(provider.clone())?;
+    let response = json!({"jsonrpc":"2.0","id":"provider-run","result":provider});
+    if !validator.is_valid(&response) {
+        return Err("run/show schema rejected provider route evidence".into());
+    }
+    let mut obsolete = response;
+    obsolete["result"]["executionEvidence"]["native"] = json!({});
+    if validator.is_valid(&obsolete) {
+        return Err("run/show schema accepted the removed native-only field".into());
+    }
+
+    let peer_target = json!({"endpoint":endpoint,"sessionId":"peer-worker"});
+    let peer_inputs = json!({
+        "scheduleChangeId":agent_automation::ChangeId::generate(),
+        "instructionRevisionId":agent_automation::RevisionId::generate(),
+        "instructionText":"Notify peer",
+        "continuity":{"kind":"none"},
+        "executionConfiguration":{
+            "destination":{"kind":"ownedThread","target":peer_target,"cwd":"/isolated-fixture"},
+            "executionTimeoutSeconds":120,
+            "model":"fixture-model",
+            "effort":"medium"
+        }
+    });
+    let peer = json!({
+        "runId":agent_automation::RunId::generate(),
+        "scheduleId":agent_automation::ScheduleId::generate(),
+        "dueAt":start,
+        "state":{"kind":"finished","inputs":peer_inputs,
+            "execution":{"kind":"claudeCodePeer","target":peer_target,"writtenAt":start},
+            "outcome":{"kind":"peerMessageWritten","explanation":"written"},
+            "summaryRunId":null},
+        "executionEvidence":{
+            "route":{"kind":"claudeCodePeer","sessionId":"peer-worker","write":"written"},
+            "timing":{"dispatchStartedAt":start,"effectiveTimeoutSeconds":120,"deadlineAt":deadline},
+            "acceptance":null
+        },
+        "summary":null
+    });
+    let _: collaboration_protocol::RunSnapshot = serde_json::from_value(peer.clone())?;
+    if !validator.is_valid(&json!({"jsonrpc":"2.0","id":"peer-run","result":peer})) {
+        return Err("run/show schema rejected final peer write evidence".into());
+    }
+    Ok(())
+}

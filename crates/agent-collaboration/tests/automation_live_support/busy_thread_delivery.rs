@@ -2,10 +2,11 @@
 use super::proof_context::{ProofContext, ProofResult};
 use codex_native_integration::NativeOperation;
 use collaboration_client::protocol::{
-    DeliveryClientReceipt, DeliveryReceipt, DestinationPreparation, ExecutionDestination,
-    InstructionCreateParams, MessageContent, MessageDelivery, NativeSendAcceptance, OperationId,
-    RunListRequest, RunState, ScheduleCreateRequest, ScheduleDefinition, ScheduleEnableRequest,
-    SchedulePrepareRequest, SessionMessageSendParams, SessionRef, TimingRequest,
+    DeliveryClientReceipt, DeliveryReceipt, DeliveryRouteEvidence, DestinationPreparation,
+    ExecutionDestination, InstructionCreateParams, MessageContent, MessageDelivery,
+    NativeSendAcceptance, OperationId, RunExecution, RunListRequest, RunState,
+    ScheduleCreateRequest, ScheduleDefinition, ScheduleEnableRequest, SchedulePrepareRequest,
+    SessionMessageSendParams, SessionRef, TimingRequest,
 };
 use collaboration_client::{ClientError, ControlClient};
 use serde_json::{Value, json};
@@ -107,9 +108,12 @@ pub async fn exercise() -> ProofResult<()> {
                 RunState::Preparing { .. }
                     if run
                         .execution_evidence
-                        .native
+                        .route
                         .as_ref()
-                        .and_then(|native| native.target.as_ref())
+                        .and_then(|route| match route {
+                            DeliveryRouteEvidence::CodexAppServer(native) => native.target.as_ref(),
+                            _ => None,
+                        })
                         == Some(&target) =>
                 {
                     let turns = proof.turns(&target).await?;
@@ -150,6 +154,9 @@ pub async fn exercise() -> ProofResult<()> {
                 RunState::Finished {
                     execution, outcome, ..
                 } => {
+                    let RunExecution::CodexAppServer(execution) = execution else {
+                        return Err("Busy-thread schedule did not use the native route".into());
+                    };
                     if !sent_note
                         || busy_observations < 2
                         || execution.target != target

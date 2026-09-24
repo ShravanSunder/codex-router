@@ -39,6 +39,8 @@ mod run_execution;
 pub use run_execution::{ExecutionTiming, RunExecutionEvidence, RunRecord, WorkerOutcome};
 mod summary_attempt;
 pub use summary_attempt::{SummaryAttempt, SummaryPhase};
+mod summary_source_reference;
+pub use summary_source_reference::SummarySourceReference;
 
 mod portable_schedule_package;
 pub use portable_schedule_package::{

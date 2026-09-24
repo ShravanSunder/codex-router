@@ -3,9 +3,8 @@ use automation_storage::{
     AutomationStore, StorageError, SummaryRecoveryAction, SummaryRecoveryRequest,
 };
 use collaboration_protocol::{
-    CodexGeneration, EndpointRef, LocalMutationEvidence, LocalMutationState, NativeSendReceipt,
-    RunFailure, RunFailureKind, RunFailureStage, RunNextAction, RunRecoveryRequest, RunShowRequest,
-    SessionRef,
+    CodexGeneration, EndpointRef, LocalMutationEvidence, LocalMutationState, RunFailure,
+    RunFailureKind, RunFailureStage, RunNextAction, RunRecoveryRequest, RunShowRequest, SessionRef,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -53,7 +52,7 @@ pub(crate) async fn dispatch(request: RunRequest<'_>) -> Value {
             store
                 .lock()
                 .await
-                .read_run::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+                .read_run::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(
                     &params.run_id,
                 )
                 .await
@@ -83,7 +82,7 @@ pub(crate) async fn dispatch(request: RunRequest<'_>) -> Value {
             store
                 .lock()
                 .await
-                .recover_summary::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+                .recover_summary::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(
                     &SummaryRecoveryRequest {
                         operation_id: params.operation_id,
                         run_id: params.run_id,

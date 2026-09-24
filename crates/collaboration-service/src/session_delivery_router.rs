@@ -13,7 +13,7 @@ use futures_util::future::join_all;
 use std::sync::Arc;
 
 pub struct SessionDeliveryRouter {
-    routes: Vec<Arc<dyn SessionDeliveryRoute>>,
+    pub(crate) routes: Vec<Arc<dyn SessionDeliveryRoute>>,
 }
 
 impl SessionDeliveryRouter {
