@@ -77,6 +77,7 @@ async fn stale_strict_generation_stops_before_evidence_or_native_io()
             gate,
             codex_home: std::path::PathBuf::from("/tmp"),
         },
+        std::sync::Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
     );
     let sink = Arc::new(CountingEvidenceSink(AtomicUsize::new(0)));
     let request = DeliveryRequest {
@@ -148,7 +149,7 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
         "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":schemas.schema_digest(),"generation":generation}]
     }))?;
     let directory = EndpointDirectory::new(service_id.clone());
-    directory.publish(description)?;
+    directory.publish(description.clone())?;
     let gate = NativeGenerationGate::default();
     gate.activate(generation, socket_path.clone(), Some(schemas))?;
     let route = CodexAppServerDeliveryRoute::new(
@@ -159,6 +160,7 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
             gate,
             codex_home: root.clone(),
         },
+        std::sync::Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
     );
     let sink = Arc::new(RecordingEvidenceSink(Mutex::new(Vec::new())));
     let observed = Arc::clone(&sink);
@@ -246,6 +248,254 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
     }
     drop(records);
     std::fs::remove_file(socket_path)?;
+    std::fs::remove_dir(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn held_empty_codex_thread_rejects_steer_then_starts_first_message_on_its_connection()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use codex_acp_adapter::{AcpConnectionInputs, AcpStoredSessions, serve_acp_connection};
+    use std::{future::Future, io, pin::Pin};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    struct EmptyStoredSessions;
+    impl AcpStoredSessions for EmptyStoredSessions {
+        fn list(&self, _: Value) -> Pin<Box<dyn Future<Output = io::Result<Value>> + Send + '_>> {
+            Box::pin(async { Ok(json!({"sessions":[]})) })
+        }
+    }
+    let root = std::path::PathBuf::from("/tmp").join(format!("held-route-{}", std::process::id()));
+    std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+    let scratch_scope = "session-00000000-0000-4000-8000-000000000099";
+    let scratch_parent = root.join("scratch");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&scratch_parent)?;
+    let scratch = scratch_parent.join(scratch_scope);
+    std::fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+    let socket_path = root.join("native.sock");
+    let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())?;
+    let target: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"empty-thread"
+    }))?;
+    let generation: CodexGeneration =
+        serde_json::from_value(json!({"serviceEpoch":service_id,"generation":1}))?;
+    let mut definitions = serde_json::Map::new();
+    for name in [
+        "ThreadRead",
+        "ThreadResume",
+        "ThreadStart",
+        "ThreadLoadedList",
+        "ThreadTurnsList",
+        "TurnStart",
+        "TurnSteer",
+        "TurnInterrupt",
+        "ThreadQueueAdd",
+    ] {
+        definitions.insert(format!("{name}Params"), json!({"type":"object"}));
+        definitions.insert(format!("{name}Response"), json!({"type":"object"}));
+    }
+    let bundle = codex_native_integration::NativeSchemaBundle::from_documents(BTreeMap::from([(
+        "codex_app_server_protocol.schemas.json".to_owned(),
+        serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))?,
+    )]))?;
+    let schemas = Arc::new(codex_native_integration::NativePayloadSchemas::from_bundle(
+        &bundle,
+    )?);
+    let description: EndpointDescription = serde_json::from_value(json!({
+        "endpoint":target.endpoint,"label":"Fixture","availability":{"state":"available","observedAt":"2026-09-24T00:00:00Z"},
+        "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":schemas.schema_digest(),"generation":generation}]
+    }))?;
+    let directory = EndpointDirectory::new(service_id.clone());
+    directory.publish(description.clone())?;
+    let gate = NativeGenerationGate::default();
+    gate.activate(
+        generation.clone(),
+        socket_path.clone(),
+        Some(Arc::clone(&schemas)),
+    )?;
+    let holder = Arc::new(collaboration_service::UnmaterializedThreadHolder::new());
+    let route = Arc::new(CodexAppServerDeliveryRoute::new(
+        service_id.clone(),
+        directory,
+        NativeControlBackend {
+            endpoint: target.endpoint.clone(),
+            gate,
+            codex_home: root.clone(),
+        },
+        Arc::clone(&holder),
+    ));
+    let evidence = Arc::new(RecordingEvidenceSink(Mutex::new(Vec::new())));
+    let observed = Arc::clone(&evidence);
+    let backend_scratch = scratch.clone();
+    let backend = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut wire = tokio_tungstenite::accept_async(stream).await?;
+        for method in [
+            "initialize",
+            "initialized",
+            "thread/start",
+            "thread/queue/add",
+            "turn/start",
+        ] {
+            let frame = tokio::time::timeout(Duration::from_secs(3), wire.next())
+                .await?
+                .ok_or("native connection closed")??;
+            let request: Value = serde_json::from_str(frame.to_text()?)?;
+            if request["method"] != method {
+                return Err::<(), Box<dyn std::error::Error + Send + Sync>>(
+                    format!("unexpected native method: {}", request["method"]).into(),
+                );
+            }
+            if method == "initialized" {
+                continue;
+            }
+            if method == "turn/start" {
+                let effects = observed.0.lock().map_err(|_| "evidence lock")?;
+                if !effects.iter().any(|effect| {
+                    matches!(effect, RouteEffectEvidence::CodexAppServer(native)
+                    if native.submission == SubmissionEffect::Dispatching)
+                }) {
+                    return Err("held message reached native I/O before evidence".into());
+                }
+            }
+            let result = match method {
+                "initialize" => json!({}),
+                "thread/start" => json!({
+                    "cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review",
+                    "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
+                    "sandbox":{"type":"workspaceWrite","writableRoots":[backend_scratch]},
+                    "thread":{"id":"empty-thread","cwd":"/work","turns":[]}
+                }),
+                "thread/queue/add" => json!({"queuedSubmission":{"id":"queued-one"}}),
+                _ => json!({"turn":{"id":"first-turn"}}),
+            };
+            wire.send(Message::Text(
+                json!({"id":request["id"],"result":result})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        }
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let (client, server) = tokio::net::UnixStream::pair()?;
+    let serving = tokio::spawn(serve_acp_connection(
+        server,
+        AcpConnectionInputs {
+            backend_path: socket_path.clone(),
+            generation,
+            schemas,
+            stored_sessions: Arc::new(EmptyStoredSessions),
+            approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+            holder: holder.clone(),
+            retired: tokio_util::sync::CancellationToken::new(),
+        },
+    ));
+    let (read, mut write) = client.into_split();
+    let mut read = BufReader::new(read);
+    write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1}}\n").await?;
+    let mut response = String::new();
+    read.read_line(&mut response).await?;
+    write
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{
+                    "cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{
+                        "model":"gpt-5.6-sol","effort":"medium","access":"workspace-write",
+                        "scratchScope":scratch_scope,"scratchPath":scratch,
+                        "createdBy":target,"approver":target
+                    }}
+                }})
+            )
+            .as_bytes(),
+        )
+        .await?;
+    response.clear();
+    tokio::time::timeout(Duration::from_secs(3), read.read_line(&mut response)).await??;
+    let created: Value = serde_json::from_str(&response)?;
+    if created["result"]["sessionId"] != "empty-thread" {
+        return Err(format!("session/new failed: {created}").into());
+    }
+    write.shutdown().await?;
+    serving.await??;
+    if !holder.contains("empty-thread") {
+        return Err("closing session/new did not hold its empty native thread".into());
+    }
+    let make_request = |mode| DeliveryRequest {
+        target: target.clone(),
+        message: MessageContent::Router {
+            text: "hello".to_owned().try_into().unwrap(),
+        },
+        mode,
+        precondition: DeliveryPrecondition::Unpinned,
+        correlation: DeliveryCorrelationId::generate(),
+        attempt: agent_automation::AttemptId::generate(),
+    };
+    let steer = route
+        .deliver(make_request(MessageDelivery::Steer), evidence.as_ref())
+        .await?;
+    if !matches!(steer.outcome, DeliveryOutcome::NotSubmitted { .. })
+        || !holder.contains("empty-thread")
+    {
+        return Err("steer consumed the unmaterialized binding".into());
+    }
+    let queued = route
+        .deliver(make_request(MessageDelivery::Queue), evidence.as_ref())
+        .await?;
+    if !matches!(queued.outcome, DeliveryOutcome::Queued) || !holder.contains("empty-thread") {
+        return Err("queue did not use and retain the held native connection".into());
+    }
+    let routed: Arc<dyn SessionDeliveryRoute> = route;
+    let delivery: Arc<dyn collaboration_service::SessionMessageDelivery> =
+        Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
+            routed,
+        ]));
+    let identity = collaboration_service::ServiceIdentity::new(
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000001",
+        &format!("sha256:{}", "a".repeat(64)),
+    )
+    .map_err(std::io::Error::other)?
+    .with_endpoints(vec![description])
+    .map_err(std::io::Error::other)?
+    .with_session_delivery(delivery);
+    let (control_socket, control_server) = tokio::net::UnixStream::pair()?;
+    let control_task = tokio::spawn(collaboration_service::serve_control_connection(
+        control_server,
+        identity,
+    ));
+    let mut control =
+        collaboration_client::ControlClient::initialize(control_socket, "held-thread-message", "1")
+            .await?;
+    let started = control
+        .send_message(collaboration_client::MessageSendRequest {
+            target: target.clone(),
+            message: collaboration_client::PublicMessageContent::HumanUser {
+                text: "hello".to_owned().try_into()?,
+            },
+            delivery: MessageDelivery::Auto,
+            generation_guard: None,
+            correlation: None,
+        })
+        .await?;
+    if !matches!(started.outcome, DeliveryOutcome::StartedOrSteered)
+        || !matches!(
+            started.client,
+            Some(DeliveryClientReceipt::CodexAppServer(_))
+        )
+        || holder.contains("empty-thread")
+    {
+        return Err("first message did not start through the held connection".into());
+    }
+    control.close().await?;
+    control_task.await??;
+    backend.await??;
+    std::fs::remove_file(socket_path)?;
+    std::fs::remove_dir(scratch)?;
+    std::fs::remove_dir(scratch_parent)?;
     std::fs::remove_dir(root)?;
     Ok(())
 }

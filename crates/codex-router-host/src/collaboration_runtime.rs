@@ -407,11 +407,14 @@ impl CollaborationRuntime {
         )
         .await
         .map_err(io::Error::other)?;
+        let unmaterialized_threads =
+            std::sync::Arc::new(collaboration_service::UnmaterializedThreadHolder::new());
         let codex_route: std::sync::Arc<dyn collaboration_service::SessionDeliveryRoute> =
             std::sync::Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(
                 service_id.clone(),
                 identity.endpoint_directory(),
                 native_backend.clone(),
+                std::sync::Arc::clone(&unmaterialized_threads),
             ));
         let session_router =
             std::sync::Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
@@ -457,6 +460,7 @@ impl CollaborationRuntime {
             publication.admission_gate(),
             stored,
             approval_broker,
+            unmaterialized_threads,
         )?
         .with_connection_budget(permits);
         let publication = publication.with_acp_listener()?;

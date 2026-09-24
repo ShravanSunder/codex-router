@@ -18,6 +18,7 @@ pub(crate) struct NativeMessageRequest<'a> {
     pub service_id: &'a UuidIdentity,
     pub backend: &'a NativeControlBackend,
     pub endpoints: &'a [EndpointDescription],
+    pub held_connection: Option<&'a mut NativeProtocolConnection>,
 }
 
 pub(crate) enum NativeMessageOutcome {
@@ -25,7 +26,9 @@ pub(crate) enum NativeMessageOutcome {
     Failed(Value),
 }
 
-pub(crate) async fn dispatch_message(request: NativeMessageRequest<'_>) -> NativeMessageOutcome {
+pub(crate) async fn dispatch_message(
+    mut request: NativeMessageRequest<'_>,
+) -> NativeMessageOutcome {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut effects = MessageEffects::new(request.id);
     let params = request.params;
@@ -76,17 +79,29 @@ pub(crate) async fn dispatch_message(request: NativeMessageRequest<'_>) -> Nativ
     };
     effects.correlation = Some(correlation.clone());
     let retired = admission.retirement();
-    let connection = tokio::time::timeout_at(deadline, async {
-        tokio::select! {
-            biased;
-            _ = retired.cancelled() => Err(NativeConnectionError::Unavailable),
-            result = NativeProtocolConnection::connect(admission.backend_path()) => result,
-        }
-    })
-    .await
-    .unwrap_or(Err(NativeConnectionError::Unavailable));
-    let Ok(connection) = connection else {
-        return NativeMessageOutcome::Failed(effects.failure("unavailable", "inspect"));
+    let held = request.held_connection.is_some();
+    let mut opened_connection = None;
+    if !held {
+        let connection = tokio::time::timeout_at(deadline, async {
+            tokio::select! {
+                biased;
+                _ = retired.cancelled() => Err(NativeConnectionError::Unavailable),
+                result = NativeProtocolConnection::connect(admission.backend_path()) => result,
+            }
+        })
+        .await
+        .unwrap_or(Err(NativeConnectionError::Unavailable));
+        let Ok(connection) = connection else {
+            return NativeMessageOutcome::Failed(effects.failure("unavailable", "inspect"));
+        };
+        opened_connection = Some(connection);
+    }
+    let connection = match request.held_connection.take() {
+        Some(connection) => connection,
+        None => match opened_connection.as_mut() {
+            Some(connection) => connection,
+            None => return NativeMessageOutcome::Failed(effects.failure("unavailable", "inspect")),
+        },
     };
     let mut session = MessageSession {
         deadline,
@@ -97,7 +112,13 @@ pub(crate) async fn dispatch_message(request: NativeMessageRequest<'_>) -> Nativ
     };
     let target_id = String::from(params.target.session_id.clone());
     let result = session
-        .deliver(&target_id, params.delivery, &rendered.text, &correlation)
+        .deliver(
+            &target_id,
+            params.delivery,
+            &rendered.text,
+            &correlation,
+            held,
+        )
         .await;
     let acceptance = match result {
         Ok(value) => value,
@@ -122,14 +143,14 @@ pub(crate) async fn dispatch_message(request: NativeMessageRequest<'_>) -> Nativ
     NativeMessageOutcome::Accepted(receipt)
 }
 
-struct MessageSession {
+struct MessageSession<'a> {
     deadline: tokio::time::Instant,
-    connection: NativeProtocolConnection,
+    connection: &'a mut NativeProtocolConnection,
     schemas: Arc<NativePayloadSchemas>,
     retired: CancellationToken,
     effects: MessageEffects,
 }
-impl MessageSession {
+impl MessageSession<'_> {
     async fn call(
         &mut self,
         operation: NativeOperation,
@@ -140,6 +161,10 @@ impl MessageSession {
             return Err(self.effects.failure("unavailable", stage));
         }
         let mutation = matches!(stage, "resume" | "start" | "steer" | "queue");
+        let missing_thread_message = (operation == NativeOperation::ReadThread)
+            .then(|| params.get("threadId").and_then(Value::as_str))
+            .flatten()
+            .map(|id| format!("thread not loaded: {id}"));
         if stage == "resume" {
             self.effects.resume = "unknown";
         } else if mutation {
@@ -161,6 +186,18 @@ impl MessageSession {
                             self.effects.submission = "rejected";
                         }
                         let native = self.connection.take_last_rejection();
+                        if let Some(expected) = missing_thread_message.as_deref()
+                            && code == -32600
+                            && native
+                                .as_ref()
+                                .and_then(|error| error.get("message"))
+                                .and_then(Value::as_str)
+                                == Some(expected)
+                        {
+                            return Err(self
+                                .effects
+                                .failure("threadMissingOrUnmaterialized", stage));
+                        }
                         return Err(self.effects.native_rejection(stage, code, native.as_ref()));
                     }
                     NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable => {
@@ -223,12 +260,20 @@ impl MessageSession {
         delivery: MessageDelivery,
         text: &str,
         correlation: &str,
+        held_unmaterialized: bool,
     ) -> Result<NativeSendAcceptance, Value> {
-        let thread = self.read_thread_metadata(id).await?;
-        let status = thread
-            .pointer("/status/type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| self.effects.failure("unsupportedCapability", "inspect"))?;
+        let thread = if held_unmaterialized {
+            None
+        } else {
+            Some(self.read_thread_metadata(id).await?)
+        };
+        let status = match thread.as_ref() {
+            None => "idle",
+            Some(thread) => thread
+                .pointer("/status/type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| self.effects.failure("unsupportedCapability", "inspect"))?,
+        };
         let input = json!([{"type":"text","text":text}]);
         if delivery == MessageDelivery::Queue {
             if status == "notLoaded" {

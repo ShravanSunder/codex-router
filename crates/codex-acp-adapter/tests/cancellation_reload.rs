@@ -1,4 +1,7 @@
-use codex_acp_adapter::{AcpConnectionInputs, AcpStoredSessions, serve_acp_connection};
+use codex_acp_adapter::{
+    AcpConnectionInputs, AcpSessionBinding, AcpStoredSessions, HeldBindingCheckout,
+    UnmaterializedBindingStore, serve_acp_connection,
+};
 use codex_native_integration::{NativePayloadSchemas, NativeSchemaBundle};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -7,6 +10,15 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::tungstenite::Message;
 
 struct EmptyCatalog;
+struct TestBindingHolder;
+impl UnmaterializedBindingStore for TestBindingHolder {
+    fn hold(&self, _binding: AcpSessionBinding) {}
+    fn checkout(&self, _session_id: &str) -> HeldBindingCheckout {
+        HeldBindingCheckout::Missing
+    }
+    fn restore(&self, _binding: AcpSessionBinding) {}
+    fn finish(&self, _session_id: &str) {}
+}
 impl AcpStoredSessions for EmptyCatalog {
     fn list(&self, _: Value) -> Pin<Box<dyn Future<Output = io::Result<Value>> + Send + '_>> {
         Box::pin(async { Ok(json!({"sessions":[]})) })
@@ -104,6 +116,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
             schemas: Arc::new(NativePayloadSchemas::from_bundle(&bundle).unwrap()),
             stored_sessions: Arc::new(EmptyCatalog),
             approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+            holder: Arc::new(TestBindingHolder),
             retired: tokio_util::sync::CancellationToken::new(),
         },
     ));

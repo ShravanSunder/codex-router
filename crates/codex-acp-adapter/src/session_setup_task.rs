@@ -7,6 +7,7 @@ use std::{path::PathBuf, sync::Arc};
 
 pub(crate) struct SetupTaskInputs {
     pub known_session: Option<AcpSessionBinding>,
+    pub adopt_unmaterialized: bool,
     pub backend_path: PathBuf,
     pub schemas: Arc<NativePayloadSchemas>,
     pub generation: CodexGeneration,
@@ -30,6 +31,15 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
         }
     };
     if let Some(mut session) = inputs.known_session {
+        if inputs.adopt_unmaterialized {
+            let outcome = session
+                .adopt_unmaterialized(&mut catalog, &inputs.generation, &inputs.params)
+                .map(|()| (Vec::new(), json!({})));
+            return SetupTaskOutput {
+                binding: Some(session),
+                outcome,
+            };
+        }
         let outcome = match session
             .resume_with_receipt(&mut catalog, &inputs.generation, &inputs.params)
             .await

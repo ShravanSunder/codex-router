@@ -1,8 +1,8 @@
 //! ACP connection routing over bounded carriers and one shared native backend.
 use crate::session_setup_task::{SetupTaskInputs, SetupTaskOutput, run_session_setup};
 use crate::{
-    AcpNegotiation, AcpRouterChannels, AcpSchemaCatalog, AcpSessionRegistry,
-    acp_connection_channels, run_acp_transport,
+    AcpNegotiation, AcpRouterChannels, AcpSchemaCatalog, AcpSessionRegistry, HeldBindingCheckout,
+    UnmaterializedBindingStore, acp_connection_channels, run_acp_transport,
 };
 use codex_native_integration::NativePayloadSchemas;
 use collaboration_protocol::CodexGeneration;
@@ -22,6 +22,7 @@ pub struct AcpConnectionInputs {
     pub stored_sessions: Arc<dyn AcpStoredSessions>,
     pub retired: CancellationToken,
     pub approval_broker: Arc<dyn crate::ApprovalBroker>,
+    pub holder: Arc<dyn UnmaterializedBindingStore>,
 }
 pub async fn serve_acp_connection<TStream: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: TStream,
@@ -44,7 +45,11 @@ async fn route_connection(
     let mut schema = AcpSchemaCatalog::load().map_err(io::Error::other)?;
     let mut negotiation = AcpNegotiation::default();
     let actor_retirement = inputs.retired.child_token();
-    let mut sessions = AcpSessionRegistry::new(router.output.clone(), actor_retirement);
+    let mut sessions = AcpSessionRegistry::new(
+        router.output.clone(),
+        actor_retirement,
+        Arc::clone(&inputs.holder),
+    );
     let mut used_ids = BTreeSet::new();
     let mut catalog_requests: tokio::task::JoinSet<(Value, io::Result<Value>)> =
         tokio::task::JoinSet::new();
@@ -114,16 +119,43 @@ async fn route_connection(
                         router.output.send(error(id,-32603,"Session setup capacity unavailable")).await?;continue;
                     }
                     let requested_session=if create_new {None} else {params.get("sessionId").and_then(Value::as_str).map(str::to_owned)};
-                    let known_session=if let Some(session_id)=requested_session.as_ref() {
+                    let mut known_session=if let Some(session_id)=requested_session.as_ref() {
                         match sessions.reserve_load(session_id,setup_requests.len()) {
                             Ok(binding)=>binding,
                             Err(_)=>{router.output.send(error(id,-32600,"Session busy or capacity unavailable")).await?;continue;},
                         }
                     } else {None};
+                    let mut adopted_held = false;
+                    if known_session.is_none() && let Some(session_id) = requested_session.as_ref() {
+                        match inputs.holder.checkout(session_id) {
+                            HeldBindingCheckout::Ready(binding) => {
+                                known_session = Some(*binding);
+                                adopted_held = true;
+                            }
+                            HeldBindingCheckout::Busy => {
+                                sessions.finish_failed_load(session_id);
+                                router.output.send(error(id,-32600,"Held session is busy")).await?;
+                                continue;
+                            }
+                            HeldBindingCheckout::Missing => {}
+                        }
+                    }
                     let cancellation_barrier=requested_session.as_ref().and_then(|session| sessions.cancellation_barrier(session));
-                    let setup=SetupTaskInputs { cancellation_barrier, known_session, backend_path:inputs.backend_path.clone(), schemas:Arc::clone(&inputs.schemas), generation:inputs.generation.clone(), params, create_new, approval_broker:Arc::clone(&inputs.approval_broker) };
+                    let setup=SetupTaskInputs { cancellation_barrier, known_session, adopt_unmaterialized:adopted_held, backend_path:inputs.backend_path.clone(), schemas:Arc::clone(&inputs.schemas), generation:inputs.generation.clone(), params, create_new, approval_broker:Arc::clone(&inputs.approval_broker) };
+                    let holder=Arc::clone(&inputs.holder);
                     setup_requests.spawn(async move {
-                        let outcome=run_session_setup(setup).await;
+                        let mut checkout = match (adopted_held, requested_session.as_ref()) {
+                            (true, Some(session_id)) => Some(CheckedOutBinding::new(holder, session_id.clone())),
+                            _ => None,
+                        };
+                        let mut outcome=run_session_setup(setup).await;
+                        if let Some(checkout) = checkout.as_mut() {
+                            if outcome.outcome.is_err() && let Some(binding)=outcome.binding.take() {
+                                checkout.restore(binding);
+                            } else {
+                                checkout.finish();
+                            }
+                        }
                         drop(frame);
                         (id,requested_session,outcome)
                     });
@@ -152,6 +184,35 @@ async fn route_connection(
     while catalog_requests.join_next().await.is_some() {}
     sessions.shutdown().await;
     result
+}
+struct CheckedOutBinding {
+    holder: Arc<dyn UnmaterializedBindingStore>,
+    session_id: String,
+    active: bool,
+}
+impl CheckedOutBinding {
+    fn new(holder: Arc<dyn UnmaterializedBindingStore>, session_id: String) -> Self {
+        Self {
+            holder,
+            session_id,
+            active: true,
+        }
+    }
+    fn restore(&mut self, binding: crate::AcpSessionBinding) {
+        self.holder.restore(binding);
+        self.active = false;
+    }
+    fn finish(&mut self) {
+        self.holder.finish(&self.session_id);
+        self.active = false;
+    }
+}
+impl Drop for CheckedOutBinding {
+    fn drop(&mut self) {
+        if self.active {
+            self.holder.finish(&self.session_id);
+        }
+    }
 }
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})

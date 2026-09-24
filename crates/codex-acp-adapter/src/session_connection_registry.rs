@@ -4,7 +4,7 @@ use crate::{
     run_prompt_task, translate_prompt_content,
 };
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -13,6 +13,19 @@ enum SessionSlot {
     Busy(mpsc::Sender<PromptCommand>),
     Detached,
     Loading,
+}
+pub enum HeldBindingCheckout {
+    Ready(Box<AcpSessionBinding>),
+    Busy,
+    Missing,
+}
+
+/// Host-owned bindings survive an ACP frontend connection until the first turn starts.
+pub trait UnmaterializedBindingStore: Send + Sync {
+    fn hold(&self, binding: AcpSessionBinding);
+    fn checkout(&self, session_id: &str) -> HeldBindingCheckout;
+    fn restore(&self, binding: AcpSessionBinding);
+    fn finish(&self, session_id: &str);
 }
 #[derive(Debug, thiserror::Error)]
 pub enum SessionRegistryError {
@@ -31,16 +44,22 @@ pub struct AcpSessionRegistry {
     prompts: JoinSet<(String, crate::PromptTaskCompletion)>,
     output: AcpOutputSender,
     retired: CancellationToken,
+    holder: Arc<dyn UnmaterializedBindingStore>,
 }
 impl AcpSessionRegistry {
     #[must_use]
-    pub fn new(output: AcpOutputSender, retired: CancellationToken) -> Self {
+    pub fn new(
+        output: AcpOutputSender,
+        retired: CancellationToken,
+        holder: Arc<dyn UnmaterializedBindingStore>,
+    ) -> Self {
         Self {
             sessions: BTreeMap::new(),
             cancellation_barriers: BTreeMap::new(),
             prompts: JoinSet::new(),
             output,
             retired,
+            holder,
         }
     }
     pub fn insert(&mut self, session: AcpSessionBinding) -> Result<(), SessionRegistryError> {
@@ -187,13 +206,27 @@ impl AcpSessionRegistry {
             }
         }
         let drained = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            while self.prompts.join_next().await.is_some() {}
+            while let Some(completed) = self.prompts.join_next().await {
+                if let Ok(completed) = completed
+                    && let Some(binding) = completed.1.binding
+                    && binding.is_unmaterialized()
+                {
+                    self.holder.hold(binding);
+                }
+            }
         })
         .await;
         self.retired.cancel();
         if drained.is_err() {
             self.prompts.abort_all();
             while self.prompts.join_next().await.is_some() {}
+        }
+        for (_, slot) in self.sessions {
+            if let SessionSlot::Ready(binding) = slot
+                && binding.is_unmaterialized()
+            {
+                self.holder.hold(*binding);
+            }
         }
     }
 }

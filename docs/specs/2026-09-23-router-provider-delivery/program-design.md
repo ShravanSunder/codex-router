@@ -52,7 +52,7 @@ flowchart TB
 
 Queue placement for provider messages: a **Router-held per-session FIFO in the provider route (selected)**, rather than the Claude adapter's own prompt queueing. That gives one mechanism for Claude and Cursor and keeps one prompt per session under Router's approval model. Debt: queued-but-unstarted messages are lost if the Host stops, and the caller bears that (they see `queued`, not `started`). Owner accepted, 2026-09-24. Scheduled runs do not use this queue (see Scheduled runs).
 
-Created-but-empty Codex conversations (R8): **hold the thread in the Codex route (selected)** rather than requiring a first message at create. Debt: held threads do not survive a Host restart, and delivery then reports `notSubmitted` "conversation was never started and the Host restarted; create it again". Owner accepted, 2026-09-24.
+Created-but-empty Codex conversations (R8): **hold the thread in the Codex route (selected)** rather than requiring a first message at create. Debt: held threads do not survive a Host restart. The holder is memory-only, so after a restart Router cannot tell a lost empty thread from any other missing thread, and no durable marker is added. When a Codex thread cannot be read, delivery reports `notSubmitted` with a truthful conditional explanation: "thread not found or never started; if it was created without a first message, it was lost when the Host restarted — create it again". Owner accepted, 2026-09-24.
 
 ## Packages and modules
 

@@ -9,6 +9,7 @@ use agent_automation::{
     CessationEvidence, NativeEffectEvidence, PreparationEffect, RouteEffectEvidence,
     SubmissionEffect,
 };
+use codex_acp_adapter::{HeldBindingCheckout, UnmaterializedBindingStore};
 use collaboration_protocol::{
     AcceptedResumeEffect, CodexGeneration, DeliveryNextAction, DeliveryOutcome, DeliveryRejection,
     DeliveryRejectionReason, MessageDelivery, NativeSendAcceptance, NativeSendParams,
@@ -20,6 +21,7 @@ pub struct CodexAppServerDeliveryRoute {
     service_id: UuidIdentity,
     endpoints: EndpointDirectory,
     backend: NativeControlBackend,
+    holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
 }
 
 impl CodexAppServerDeliveryRoute {
@@ -28,11 +30,13 @@ impl CodexAppServerDeliveryRoute {
         service_id: UuidIdentity,
         endpoints: EndpointDirectory,
         backend: NativeControlBackend,
+        holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
     ) -> Self {
         Self {
             service_id,
             endpoints,
             backend,
+            holder,
         }
     }
 
@@ -76,7 +80,7 @@ impl CodexAppServerDeliveryRoute {
             .endpoints;
         let params = NativeSendParams {
             target: request.target.clone(),
-            generation,
+            generation: generation.clone(),
             message: request.message,
             delivery: request.mode,
             client_user_message_id: Some(
@@ -88,16 +92,77 @@ impl CodexAppServerDeliveryRoute {
                     .map_err(|_| DeliveryContractError::InvalidEvidence)?,
             ),
         };
-        let response = crate::native_message_dispatch::dispatch_message(
-            crate::native_message_dispatch::NativeMessageRequest {
-                params,
-                id: json!(request.attempt.as_str()),
-                service_id: &self.service_id,
-                backend: &self.backend,
-                endpoints: &endpoints,
-            },
-        )
-        .await;
+        let checked_out = self
+            .holder
+            .checkout(&String::from(request.target.session_id.clone()));
+        let response = match checked_out {
+            HeldBindingCheckout::Ready(mut binding) => {
+                let mut checkout = HeldBindingCleanup::new(&self.holder, binding.session_id());
+                if binding.generation() != &generation {
+                    checkout.finish();
+                    effects.submission = SubmissionEffect::NotDispatched;
+                    effects.resume = PreparationEffect::NotRequested;
+                    sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                        .await?;
+                    return Ok(not_submitted("staleGeneration", false));
+                }
+                let response = crate::native_message_dispatch::dispatch_message(
+                    crate::native_message_dispatch::NativeMessageRequest {
+                        params,
+                        id: json!(request.attempt.as_str()),
+                        service_id: &self.service_id,
+                        backend: &self.backend,
+                        endpoints: &endpoints,
+                        held_connection: Some(binding.connection_mut()),
+                    },
+                )
+                .await;
+                match &response {
+                    crate::native_message_dispatch::NativeMessageOutcome::Accepted(receipt)
+                        if matches!(
+                            receipt.acceptance,
+                            NativeSendAcceptance::QueueAccepted { .. }
+                        ) =>
+                    {
+                        self.holder.restore(*binding);
+                        checkout.disarm();
+                    }
+                    crate::native_message_dispatch::NativeMessageOutcome::Failed(failure)
+                        if matches!(
+                            failure
+                                .pointer("/error/data/effects/submission")
+                                .and_then(Value::as_str),
+                            Some("notDispatched" | "rejected")
+                        ) =>
+                    {
+                        self.holder.restore(*binding);
+                        checkout.disarm();
+                    }
+                    _ => checkout.finish(),
+                }
+                response
+            }
+            HeldBindingCheckout::Busy => {
+                effects.submission = SubmissionEffect::NotDispatched;
+                effects.resume = PreparationEffect::NotRequested;
+                sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                    .await?;
+                return Ok(not_submitted("Held session is busy", true));
+            }
+            HeldBindingCheckout::Missing => {
+                crate::native_message_dispatch::dispatch_message(
+                    crate::native_message_dispatch::NativeMessageRequest {
+                        params,
+                        id: json!(request.attempt.as_str()),
+                        service_id: &self.service_id,
+                        backend: &self.backend,
+                        endpoints: &endpoints,
+                        held_connection: None,
+                    },
+                )
+                .await
+            }
+        };
         let receipt = interpret_native_response(&request.target, response, &mut effects);
         if sink
             .record(RouteEffectEvidence::CodexAppServer(effects))
@@ -111,6 +176,35 @@ impl CodexAppServerDeliveryRoute {
             });
         }
         Ok(receipt)
+    }
+}
+
+struct HeldBindingCleanup<'a> {
+    holder: &'a crate::UnmaterializedThreadHolder,
+    session_id: String,
+    active: bool,
+}
+impl<'a> HeldBindingCleanup<'a> {
+    fn new(holder: &'a crate::UnmaterializedThreadHolder, session_id: &str) -> Self {
+        Self {
+            holder,
+            session_id: session_id.into(),
+            active: true,
+        }
+    }
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+    fn finish(&mut self) {
+        self.holder.finish(&self.session_id);
+        self.disarm();
+    }
+}
+impl Drop for HeldBindingCleanup<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.holder.finish(&self.session_id);
+        }
     }
 }
 
@@ -241,6 +335,14 @@ fn interpret_native_response(
                 || effects.submission == SubmissionEffect::Unknown
             {
                 (DeliveryOutcome::Unknown, None)
+            } else if kind == "threadMissingOrUnmaterialized" {
+                (
+                    DeliveryOutcome::NotSubmitted {
+                        retryable: false,
+                        reason: "thread not found or never started; if it was created without a first message, it was lost when the Host restarted — create it again".into(),
+                    },
+                    None,
+                )
             } else if kind == "nativeRejected" || kind == "unsupportedCapability" {
                 let reason = data
                     .and_then(|value| value.get("reason"))

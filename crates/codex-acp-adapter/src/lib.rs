@@ -30,7 +30,9 @@ pub use prompt_connection_task::{
     PromptCommand, PromptTaskCompletion, PromptTaskInputs, run_prompt_task,
 };
 pub use queued_frame_budget::{AcpOutputSender, QueuedAcpFrame, bounded_acp_output};
-pub use session_connection_registry::{AcpSessionRegistry, SessionRegistryError};
+pub use session_connection_registry::{
+    AcpSessionRegistry, HeldBindingCheckout, SessionRegistryError, UnmaterializedBindingStore,
+};
 pub use stored_session_listing::NativeStoredSessions;
 mod tool_progress_projection;
 pub use assistant_text_projection::{PromptTarget, TextProjectionError, project_assistant_text};

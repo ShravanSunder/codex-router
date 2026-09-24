@@ -223,6 +223,7 @@ async fn approval_broker_fixture(
             service_id.clone(),
             endpoints,
             native_backend,
+            Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
         ));
     broker.install_session_delivery(Arc::new(
         collaboration_service::SessionDeliveryRouter::new(vec![route]),

@@ -1,5 +1,6 @@
 use codex_acp_adapter::{
-    AcpSchemaCatalog, AcpSessionBinding, PendingAcpPrompt, PromptEvent, SessionSetupInputs,
+    AcpSchemaCatalog, AcpSessionBinding, HeldBindingCheckout, PendingAcpPrompt, PromptEvent,
+    SessionSetupInputs, UnmaterializedBindingStore,
 };
 use codex_native_integration::{
     NativePayloadSchemas, NativeProtocolConnection, NativeSchemaBundle,
@@ -14,6 +15,15 @@ use tokio_tungstenite::{
 
 /// Fixture recency: the thread's last update sits this far in the past.
 const IDLE_FIXTURE_SECONDS: i64 = 90;
+struct TestBindingHolder;
+impl UnmaterializedBindingStore for TestBindingHolder {
+    fn hold(&self, _binding: AcpSessionBinding) {}
+    fn checkout(&self, _session_id: &str) -> HeldBindingCheckout {
+        HeldBindingCheckout::Missing
+    }
+    fn restore(&self, _binding: AcpSessionBinding) {}
+    fn finish(&self, _session_id: &str) {}
+}
 const TEST_SCRATCH: &str =
     "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
 /// Omits the effort key entirely when the caller requested none.
@@ -194,7 +204,11 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
         if use_task {
             let closed = tokio_util::sync::CancellationToken::new();
             let (output, mut frames) = codex_acp_adapter::bounded_acp_output(closed.clone());
-            let mut registry = codex_acp_adapter::AcpSessionRegistry::new(output, closed);
+            let mut registry = codex_acp_adapter::AcpSessionRegistry::new(
+                output,
+                closed,
+                Arc::new(TestBindingHolder),
+            );
             registry
                 .insert(session)
                 .unwrap_or_else(|error| panic!("insert: {error}"));

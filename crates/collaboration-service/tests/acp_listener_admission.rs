@@ -1,5 +1,5 @@
 use codex_acp_adapter::NativeStoredSessions;
-use collaboration_service::{AcpChannelListener, NativeGenerationGate};
+use collaboration_service::{AcpChannelListener, NativeGenerationGate, UnmaterializedThreadHolder};
 use std::{os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
@@ -18,6 +18,7 @@ async fn acp_listener_rejects_unavailable_backend_and_cleans_its_owned_socket() 
         NativeGenerationGate::default(),
         Arc::new(NativeStoredSessions::new(root.clone(), "fixture".into())),
         Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+        Arc::new(UnmaterializedThreadHolder::new()),
     )
     .unwrap();
     let stop = CancellationToken::new();
@@ -81,6 +82,7 @@ async fn published_acp_carrier_initializes_and_retires_with_native_generation() 
         gate.clone(),
         Arc::new(NativeStoredSessions::new(root.clone(), "fixture".into())),
         Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+        Arc::new(UnmaterializedThreadHolder::new()),
     )
     .unwrap();
     let stop = CancellationToken::new();

@@ -303,6 +303,7 @@ fn identity(
         collaboration_protocol::UuidIdentity::try_from(SERVICE.to_owned())?,
         identity.endpoint_directory(),
         backend,
+        Arc::new(crate::UnmaterializedThreadHolder::new()),
     ));
     let delivery: Arc<dyn SessionMessageDelivery> =
         Arc::new(SessionDeliveryRouter::new(vec![route]));

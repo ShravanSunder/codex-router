@@ -123,6 +123,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             .unwrap_or_else(|error| panic!("service id: {error}")),
         identity.endpoint_directory(),
         native_backend,
+        Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
     ));
     let delivery: Arc<dyn SessionMessageDelivery> =
         Arc::new(SessionDeliveryRouter::new(vec![route]));

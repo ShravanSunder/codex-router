@@ -128,6 +128,7 @@ impl ApprovalFixture {
                 service_id.clone(),
                 endpoints,
                 native_backend.clone(),
+                Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
             ));
         broker
             .install_session_delivery(Arc::new(collaboration_service::SessionDeliveryRouter::new(

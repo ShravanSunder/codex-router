@@ -111,6 +111,7 @@ async fn exercise_delivery(
         service_id.to_owned().try_into()?,
         identity.endpoint_directory(),
         native_backend,
+        Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
     ));
     let delivery: Arc<dyn SessionMessageDelivery> =
         Arc::new(SessionDeliveryRouter::new(vec![route]));
