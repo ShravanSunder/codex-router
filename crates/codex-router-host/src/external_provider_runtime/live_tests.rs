@@ -287,10 +287,12 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
         },
-        vec![crate::ExternalProviderLaunchBinding::claude(
-            owned_host_endpoint_fixture().executable,
-            owned_host_endpoint_fixture().arguments,
-        )?],
+        vec![crate::ExternalProviderStartup::Launch(
+            crate::ExternalProviderLaunchBinding::claude(
+                owned_host_endpoint_fixture().executable,
+                owned_host_endpoint_fixture().arguments,
+            )?,
+        )],
     )
     .await?;
     let manifest: collaboration_protocol::ServiceManifest =

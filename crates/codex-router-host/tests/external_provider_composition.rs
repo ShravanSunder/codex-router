@@ -1,5 +1,6 @@
 use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
+    ExternalProviderStartup,
 };
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
@@ -44,9 +45,9 @@ sys.stdin.read()
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
         },
-        vec![
+        vec![ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
-        ],
+        )],
     )
     .await
     .expect("collaboration runtime");
@@ -168,7 +169,9 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
         },
-        vec![ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("binding")],
+        vec![ExternalProviderStartup::Launch(
+            ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("binding"),
+        )],
     )
     .await
     .expect("runtime");

@@ -10,7 +10,7 @@ pub(super) struct CollaborationLifecycle {
     codex_home: PathBuf,
     backend_socket: PathBuf,
     mcp_bind: std::net::SocketAddr,
-    external_provider_launches: Vec<crate::ExternalProviderLaunchBinding>,
+    external_provider_startups: Vec<crate::ExternalProviderStartup>,
     provider_operation_retention_days: std::num::NonZeroU32,
     runtime: Option<CollaborationRuntime>,
     published_child: Option<u32>,
@@ -32,7 +32,7 @@ impl CollaborationLifecycle {
                 .to_owned(),
             backend_socket: config.app_server_socket().to_owned(),
             mcp_bind: config.mcp_bind(),
-            external_provider_launches: config.external_provider_launches().to_vec(),
+            external_provider_startups: config.external_provider_startups().to_vec(),
             provider_operation_retention_days: config.provider_operation_retention_days(),
             runtime: None,
             published_child: None,
@@ -85,7 +85,7 @@ impl CollaborationLifecycle {
                     mcp_bind: self.mcp_bind,
                     native_schema: export.clone(),
                 },
-                self.external_provider_launches.clone(),
+                self.external_provider_startups.clone(),
             )
             .await?;
             runtime

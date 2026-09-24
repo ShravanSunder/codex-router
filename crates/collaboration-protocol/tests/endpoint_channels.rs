@@ -21,6 +21,14 @@ fn invalid_channel_carrier_and_empty_channels_are_rejected() {
     assert!(serde_json::from_value::<EndpointDescription>(wrong).is_err());
 }
 
+#[test]
+fn unavailable_endpoint_has_no_transport_and_names_a_fix() {
+    let endpoint = json!({"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},"label":"Claude Code","availability":{"state":"unavailable","observedAt":"2026-09-24T12:00:00Z","reason":"executable not found","fix":"install claude-agent-acp"},"channels":[]});
+    let decoded: EndpointDescription =
+        serde_json::from_value(endpoint.clone()).expect("unavailable provider with no transport");
+    assert_eq!(serde_json::to_value(decoded).expect("serialize"), endpoint);
+}
+
 fn external_provider_endpoint() -> Value {
     json!({
         "endpoint": {

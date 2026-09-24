@@ -232,10 +232,10 @@ async fn live_cursor_create_wait_prompt_wait_through_compiled_cli() {
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
         },
-        vec![
+        vec![codex_router_host::ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::cursor(executable, arguments)
                 .expect("Cursor provider binding"),
-        ],
+        )],
     )
     .await
     .expect("collaboration runtime");

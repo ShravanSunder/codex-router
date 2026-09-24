@@ -24,6 +24,13 @@ mod operator_connection;
 mod operator_messages;
 mod owned_router;
 mod process_group_child;
+mod provider_configuration_file;
+pub use provider_configuration_file::{
+    ProviderConfigurationEntries, ProviderConfigurationEntry, ProviderConfigurationError,
+    ProviderConfigurationFile,
+};
+mod provider_startup_composition;
+pub use provider_startup_composition::ExternalProviderStartup;
 mod router_compatibility;
 
 pub use app_server_endpoint_guard::AppServerEndpointError;

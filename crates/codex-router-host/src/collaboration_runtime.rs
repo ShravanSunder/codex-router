@@ -1,11 +1,8 @@
 //! Host-owned composition of public listeners and lifecycle publication.
 use crate::BackendPublication;
 use collaboration_protocol::{
-    ChannelDescription, CodexGeneration, EndpointAvailability, EndpointDescription, EndpointId,
-    EndpointRef, GenerationNumber, NonEmptyText, ObservationTimestamp, ProviderBindingId,
-    ProviderBindingIdentity, ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence,
-    ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind, ProviderRuntimeIdentity,
-    ProviderTransport, SchemaDigest, UuidIdentity,
+    CodexGeneration, EndpointAvailability, EndpointId, EndpointRef, NonEmptyText,
+    ObservationTimestamp, ProviderKind, SchemaDigest, UuidIdentity,
 };
 use collaboration_service::{
     LocalControlService, NativeRelayListener, ServiceIdentity, load_service_identity,
@@ -165,7 +162,7 @@ impl CollaborationRuntime {
 
     pub async fn start_with_external_providers(
         inputs: CollaborationRuntimeInputs,
-        provider_launches: Vec<ExternalProviderLaunchBinding>,
+        provider_launches: Vec<crate::ExternalProviderStartup>,
     ) -> io::Result<Self> {
         let service_id = load_service_identity(&inputs.directory)?;
         let service_epoch = new_service_uuid()?;
@@ -288,101 +285,26 @@ impl CollaborationRuntime {
         )
         .await?;
         let mcp_url = mcp.local_url();
-        let mut external_provider_supervisor = None;
-        let mut provider_retirements = Vec::new();
-        if !provider_launches.is_empty() {
-            let store = provider_store.clone().ok_or_else(|| {
-                io::Error::other("external provider operation storage is unavailable")
-            })?;
-            let mut bindings = Vec::with_capacity(provider_launches.len());
-            let mut endpoint_descriptions = Vec::with_capacity(provider_launches.len());
-            for (index, configured) in provider_launches.into_iter().enumerate() {
-                let runtime = crate::ExternalProviderRuntime::initialize_with_mcp_http(
-                    configured.launch,
-                    "router-collaboration",
-                    mcp_url.clone(),
-                )
-                .await
+        let startup = crate::provider_startup_composition::compose_provider_startup(
+            provider_launches,
+            provider_store.clone(),
+            &service_id,
+            &service_epoch,
+            &mcp_url,
+        )
+        .await?;
+        let provider_retirements = startup.retirements;
+        let external_provider_supervisor = startup.supervisor;
+        if !startup.endpoints.is_empty() {
+            identity = identity
+                .with_endpoints(startup.endpoints)
                 .map_err(io::Error::other)?;
-                let endpoint = EndpointRef {
-                    service_id: service_id.clone(),
-                    endpoint_id: configured.endpoint_id,
-                };
-                let generation_number = GenerationNumber::try_from(
-                    u64::try_from(index)
-                        .map_err(io::Error::other)?
-                        .saturating_add(1),
-                )
-                .map_err(io::Error::other)?;
-                let runtime_name = runtime.admission().runtime_name.clone().unwrap_or_else(|| {
-                    match configured.provider {
-                        ProviderKind::ClaudeCode => "claude-code",
-                        ProviderKind::Cursor => "cursor",
-                    }
-                    .to_owned()
-                });
-                let runtime_identity = ProviderRuntimeIdentity {
-                    provider: configured.provider,
-                    runtime_name: NonEmptyText::try_from(runtime_name).map_err(io::Error::other)?,
-                    runtime_version: runtime
-                        .admission()
-                        .runtime_version
-                        .clone()
-                        .map(NonEmptyText::try_from)
-                        .transpose()
-                        .map_err(io::Error::other)?,
-                };
-                let capabilities = provider_capabilities(
-                    runtime.admission().supports_load,
-                    runtime.admission().supports_mcp_http,
-                )?;
-                let binding_id = ProviderBindingId::try_from(String::from(new_service_uuid()?))
-                    .map_err(io::Error::other)?;
-                let generation = CodexGeneration {
-                    service_epoch: service_epoch.clone(),
-                    generation: generation_number,
-                };
-                let binding = ProviderBindingIdentity {
-                    endpoint: endpoint.clone(),
-                    binding_id: binding_id.clone(),
-                    runtime: runtime_identity.clone(),
-                    transport: ProviderTransport::StdioAcp,
-                    generation: generation.clone(),
-                    capabilities: capabilities.clone(),
-                };
-                let endpoint_description = EndpointDescription {
-                    endpoint,
-                    label: configured.label,
-                    availability: EndpointAvailability::Available {
-                        observed_at: current_observation_timestamp()?,
-                    },
-                    channels: vec![ChannelDescription::ExternalProvider {
-                        transport: ProviderTransport::StdioAcp,
-                        binding_id,
-                        binding_generation: generation_number,
-                        runtime: runtime_identity,
-                        capabilities,
-                    }],
-                };
-                provider_retirements.push((runtime.retirement(), endpoint_description.clone()));
-                endpoint_descriptions.push(endpoint_description);
-                bindings.push(crate::ExternalProviderBinding {
-                    identity: binding,
-                    runtime,
-                });
-            }
-            let supervisor = std::sync::Arc::new(
-                crate::ExternalProviderSupervisor::new(bindings, store)
-                    .map_err(io::Error::other)?,
-            );
+        }
+        if let Some(supervisor) = &external_provider_supervisor {
             let provider_backend: std::sync::Arc<
                 dyn collaboration_service::ProviderConversationBackend,
             > = supervisor.clone();
-            identity = identity
-                .with_endpoints(endpoint_descriptions)
-                .map_err(io::Error::other)?
-                .with_provider_conversation_backend(provider_backend);
-            external_provider_supervisor = Some(supervisor);
+            identity = identity.with_provider_conversation_backend(provider_backend);
         }
         let endpoint = EndpointRef {
             service_id: service_id.clone(),
@@ -485,6 +407,12 @@ impl CollaborationRuntime {
                     observed_at: current_observation_timestamp()?,
                     reason: NonEmptyText::try_from("provider process retired".to_owned())
                         .map_err(io::Error::other)?,
+                    fix: Some(
+                        NonEmptyText::try_from(
+                            "restart the Host to relaunch the provider".to_owned(),
+                        )
+                        .map_err(io::Error::other)?,
+                    ),
                 };
                 directory.publish(description)
             });
@@ -878,65 +806,5 @@ fn current_observation_timestamp() -> io::Result<ObservationTimestamp> {
     ObservationTimestamp::try_from(
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     )
-    .map_err(io::Error::other)
-}
-
-fn provider_capabilities(
-    supports_load: bool,
-    supports_mcp_http: bool,
-) -> io::Result<ProviderCapabilities> {
-    ProviderCapabilities::try_from(vec![
-        ProviderCapability {
-            name: ProviderCapabilityName::Create,
-            status: ProviderCapabilityStatus::Supported,
-            evidence: ProviderCapabilityEvidence::Advertised,
-        },
-        ProviderCapability {
-            name: ProviderCapabilityName::Prompt,
-            status: ProviderCapabilityStatus::Supported,
-            evidence: ProviderCapabilityEvidence::Advertised,
-        },
-        ProviderCapability {
-            name: ProviderCapabilityName::Load,
-            status: if supports_load {
-                ProviderCapabilityStatus::Supported
-            } else {
-                ProviderCapabilityStatus::Unsupported
-            },
-            evidence: if supports_load {
-                ProviderCapabilityEvidence::Advertised
-            } else {
-                ProviderCapabilityEvidence::NotAvailable
-            },
-        },
-        ProviderCapability {
-            name: ProviderCapabilityName::Cancel,
-            status: ProviderCapabilityStatus::Supported,
-            evidence: ProviderCapabilityEvidence::Advertised,
-        },
-        ProviderCapability {
-            name: ProviderCapabilityName::Permissions,
-            status: ProviderCapabilityStatus::Unverified,
-            evidence: ProviderCapabilityEvidence::NotAvailable,
-        },
-        ProviderCapability {
-            name: ProviderCapabilityName::CollaborationMcp,
-            status: if supports_mcp_http {
-                ProviderCapabilityStatus::Supported
-            } else {
-                ProviderCapabilityStatus::Unsupported
-            },
-            evidence: if supports_mcp_http {
-                ProviderCapabilityEvidence::Advertised
-            } else {
-                ProviderCapabilityEvidence::NotAvailable
-            },
-        },
-        ProviderCapability {
-            name: ProviderCapabilityName::CallerDetach,
-            status: ProviderCapabilityStatus::Supported,
-            evidence: ProviderCapabilityEvidence::RouterQualified,
-        },
-    ])
     .map_err(io::Error::other)
 }

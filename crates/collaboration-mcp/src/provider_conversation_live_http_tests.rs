@@ -182,7 +182,7 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
         },
-        vec![binding],
+        vec![codex_router_host::ExternalProviderStartup::Launch(binding)],
     )
     .await
     .expect("collaboration runtime with external provider");
