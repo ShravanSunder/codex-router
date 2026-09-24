@@ -18,6 +18,7 @@ automation-storage = { path = "../automation-storage", version = "0.1.16" }
 chrono.workspace = true
 lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14" }
+claude-code-peer-messaging = { path = "../claude-code-peer-messaging", version = "0.1.37" }
 collaboration-service = { path = "../collaboration-service", version = "0.1.14" }
 collaboration-mcp = { path = "../collaboration-mcp", version = "0.1.30" }
 codex-native-integration.workspace = true
@@ -33,6 +34,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 tempfile = "3.27.0"
 toml = "1.1.2"
 sqlx.workspace = true

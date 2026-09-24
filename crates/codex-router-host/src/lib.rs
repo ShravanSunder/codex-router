@@ -5,6 +5,8 @@ mod live_session_ownership_check;
 pub use live_session_ownership_check::{LiveSessionOwnership, LiveSessionOwnershipCheck};
 mod app_server_shutdown;
 mod child_diagnostics;
+mod claude_code_peer_delivery_route;
+pub use claude_code_peer_delivery_route::ClaudeCodePeerDeliveryRoute;
 mod codex_update_preparation;
 mod explicit_app_server_restart;
 mod explicit_router_restart;
