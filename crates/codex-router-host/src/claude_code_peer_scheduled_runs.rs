@@ -87,7 +87,7 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
                     return Ok(SchedulePreparationOutcome::Failed(
                         SchedulePreparationFailure {
                             kind: ScheduleFailureKind::UnsupportedCapability,
-                            explanation: "Claude Code peer sessions cannot be forked".into(),
+                            explanation: "Create the session first (conversation create), then schedule it as an existing target; Claude Code peer sessions cannot be forked".into(),
                             evidence,
                             uncertain: false,
                         },

@@ -16,6 +16,7 @@ mod provider_acp_delivery_route;
 mod provider_acp_message_fifo;
 mod provider_acp_route_claim;
 pub use provider_acp_delivery_route::ProviderAcpDeliveryRoute;
+mod provider_acp_scheduled_runs;
 mod provider_acp_session_loading;
 pub use external_provider_runtime::{
     ExternalProviderAdmission, ExternalProviderApprovalContext, ExternalProviderLaunch,

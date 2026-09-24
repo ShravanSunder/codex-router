@@ -110,6 +110,17 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
         ScheduleSupport::Unsupported { missing }
         if missing.contains(&ScheduleCapability::CreateSession)
     ));
+    assert!(matches!(
+        route
+            .support(&ScheduleDestination::Fork {
+                source: target.clone(),
+                through_turn_id: "turn-1".to_owned().try_into().expect("turn ID"),
+            })
+            .await
+            .expect("fork support"),
+        ScheduleSupport::Unsupported { missing }
+        if missing.contains(&ScheduleCapability::ForkSession)
+    ));
     let router = SessionDeliveryRouter::new(vec![Arc::new(route) as Arc<dyn SessionDeliveryRoute>]);
     let initial = router
         .initial_evidence(&ScheduleDestination::Existing {
