@@ -146,12 +146,23 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         .pointer("/result/record")
         .ok_or("missing Run result")?;
     let _: collaboration_client::protocol::RunSnapshot = serde_json::from_value(snapshot.clone())?;
+    if snapshot
+        .pointer("/state/execution/kind")
+        .and_then(Value::as_str)
+        != Some("codexAppServer")
+        || snapshot
+            .pointer("/executionEvidence/route/kind")
+            .and_then(Value::as_str)
+            != Some("codexAppServer")
+    {
+        return Err("CLI lost the native run route identity".into());
+    }
     for (pointer, replacement) in [
         ("/state/execution/nativeTurnId", json!("another-turn")),
         ("/state/execution/target/sessionId", json!("another-thread")),
         ("/state/execution/deadlineAt", json!("2026-09-09T23:59:59Z")),
         (
-            "/executionEvidence/acceptance/acceptance/turnId",
+            "/executionEvidence/acceptance/client/acceptance/turnId",
             json!("another-turn"),
         ),
     ] {
@@ -172,7 +183,7 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         .and_then(Value::as_str)
         != Some("finished")
         || value
-            .pointer("/result/record/executionEvidence/acceptance/acceptance/turnId")
+            .pointer("/result/record/executionEvidence/acceptance/client/acceptance/turnId")
             .and_then(Value::as_str)
             != Some("fixture-turn")
     {

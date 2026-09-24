@@ -18,6 +18,10 @@ pub enum DeliveryContractError {
     InvalidEvidence,
     #[error("delivery client operation failed")]
     ClientOperation,
+    #[error("prepared target is owned by another schedule")]
+    PreparationOwnershipConflict,
+    #[error("schedule changed during preparation")]
+    PreparationChangeConflict,
 }
 
 #[derive(Clone, Debug)]

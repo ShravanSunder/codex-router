@@ -7,6 +7,7 @@ use agent_automation::{
 use automation_storage::{
     RunDispatchIntent, RunSubmissionOutcome, RunSubmissionResult, ScheduleCreate,
 };
+use collaboration_protocol::NativeSendReceipt;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
@@ -424,15 +425,17 @@ fn fixture_worker(
     )?;
     let gate = crate::NativeGenerationGate::default();
     gate.activate(generation, socket, Some(schemas))?;
+    let backend = NativeControlBackend {
+        endpoint: serde_json::from_value(
+            json!({"serviceId":SERVICE_ID,"endpointId":"codex-local"}),
+        )?,
+        gate,
+        codex_home: root.to_owned(),
+    };
     Ok(ScheduledRunWorker {
         store,
-        backend: Some(NativeControlBackend {
-            endpoint: serde_json::from_value(
-                json!({"serviceId":SERVICE_ID,"endpointId":"codex-local"}),
-            )?,
-            gate,
-            codex_home: root.to_owned(),
-        }),
+        execution: Arc::new(crate::CodexAppServerScheduledRuns::new(backend.clone())),
+        backend: Some(backend),
         configuration: crate::AutomationConfigurationHandle::default(),
     })
 }

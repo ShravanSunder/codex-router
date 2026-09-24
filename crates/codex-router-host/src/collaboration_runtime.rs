@@ -413,10 +413,15 @@ impl CollaborationRuntime {
                 identity.endpoint_directory(),
                 native_backend.clone(),
             ));
-        let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
+        let session_router =
             std::sync::Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
                 codex_route,
             ]));
+        let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
+            session_router.clone();
+        let scheduled_run_execution: std::sync::Arc<
+            dyn collaboration_service::ScheduledRunExecution,
+        > = session_router;
         approval_broker
             .install_session_delivery(std::sync::Arc::clone(&session_delivery))
             .map_err(io::Error::other)?;
@@ -427,6 +432,7 @@ impl CollaborationRuntime {
         }
         let identity = identity
             .with_session_delivery(session_delivery)
+            .with_scheduled_run_execution(scheduled_run_execution)
             .with_native_backend(native_backend)
             .map_err(io::Error::other)?;
         let identity = identity.with_approval_broker(std::sync::Arc::clone(&approval_broker));

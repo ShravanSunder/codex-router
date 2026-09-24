@@ -1,5 +1,5 @@
 //! Enable admission requires a prepared owned address or an available fresh-thread endpoint.
-use crate::NativeControlBackend;
+use crate::{ScheduleDestination, ScheduleSupport, ScheduledRunExecution};
 use agent_automation::{ExecutionDestination, OperationId, ScheduleDefinition, ScheduleId};
 use automation_storage::{AutomationStore, BindingAddress, StorageError};
 use collaboration_protocol::{EndpointRef, SessionRef, UuidIdentity};
@@ -10,7 +10,7 @@ pub(crate) struct ActivationRequest<'a> {
     pub schedule_id: Option<&'a ScheduleId>,
     pub operation_id: &'a OperationId,
     pub service_id: &'a UuidIdentity,
-    pub backend: Option<&'a NativeControlBackend>,
+    pub execution: Option<&'a Arc<dyn ScheduledRunExecution>>,
 }
 pub(crate) async fn validate(
     store: &Arc<Mutex<AutomationStore>>,
@@ -25,7 +25,7 @@ pub(crate) async fn validate(
     {
         return Ok(());
     }
-    let endpoint = match &request.definition.destination {
+    let destination = match &request.definition.destination {
         ExecutionDestination::FreshEachRunUnprepared => {
             return Err(StorageError::InvalidSchedule {
                 field: "destination",
@@ -38,7 +38,9 @@ pub(crate) async fn validate(
                 reason: "prepare the destination before enabling future triggers",
             });
         }
-        ExecutionDestination::FreshEachRun { endpoint, .. } => endpoint,
+        ExecutionDestination::FreshEachRun { endpoint, .. } => ScheduleDestination::Fresh {
+            endpoint: endpoint.clone(),
+        },
         ExecutionDestination::OwnedThread { target, .. } => {
             let Some(schedule_id) = request.schedule_id else {
                 return Err(StorageError::InvalidSchedule {
@@ -62,8 +64,15 @@ pub(crate) async fn validate(
                     reason: "thread address is not owned by this schedule; use explicit destination preparation",
                 });
             }
-            &target.endpoint
+            ScheduleDestination::Existing {
+                target: target.clone(),
+            }
         }
+    };
+    let endpoint = match &destination {
+        ScheduleDestination::Fresh { endpoint } => endpoint,
+        ScheduleDestination::Existing { target } => &target.endpoint,
+        ScheduleDestination::Fork { .. } => return Err(StorageError::ActivationUnavailable),
     };
     if &endpoint.service_id != request.service_id {
         return Err(StorageError::InvalidSchedule {
@@ -71,36 +80,14 @@ pub(crate) async fn validate(
             reason: "endpoint belongs to another service",
         });
     }
-    let backend = request
-        .backend
-        .filter(|backend| backend.endpoint == *endpoint)
-        .ok_or(StorageError::ActivationUnavailable)?;
-    let admission = backend
-        .gate
-        .acquire()
-        .map_err(|_| StorageError::ActivationUnavailable)?;
-    let schemas = admission
-        .schemas()
-        .ok_or(StorageError::ActivationUnavailable)?;
-    use codex_native_integration::NativeOperation;
-    let required = [
-        NativeOperation::ReadThread,
-        NativeOperation::StartTurn,
-        NativeOperation::InterruptTurn,
-        if matches!(
-            request.definition.destination,
-            ExecutionDestination::FreshEachRun { .. }
-        ) {
-            NativeOperation::StartThread
-        } else {
-            NativeOperation::ResumeThread
-        },
-    ];
-    if required
-        .iter()
-        .any(|operation| !schemas.supports_operation(*operation))
+    match request
+        .execution
+        .ok_or(StorageError::ActivationUnavailable)?
+        .support(&destination)
+        .await
+        .map_err(|_| StorageError::ActivationUnavailable)?
     {
-        return Err(StorageError::ActivationUnavailable);
+        ScheduleSupport::Supported { .. } => Ok(()),
+        ScheduleSupport::Unsupported { .. } => Err(StorageError::ActivationUnavailable),
     }
-    Ok(())
 }

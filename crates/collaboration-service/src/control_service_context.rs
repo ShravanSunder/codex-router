@@ -17,6 +17,7 @@ pub struct ServiceIdentity {
     pub(crate) journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
     pub(crate) native_backend: Option<crate::NativeControlBackend>,
     pub(crate) session_delivery: Option<std::sync::Arc<dyn crate::SessionMessageDelivery>>,
+    pub(crate) scheduled_run_execution: Option<std::sync::Arc<dyn crate::ScheduledRunExecution>>,
     pub(crate) approval_broker: Option<std::sync::Arc<crate::ServiceApprovalBroker>>,
     pub(crate) automation:
         Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
@@ -49,13 +50,17 @@ impl ServiceIdentity {
     }
 
     pub fn schedule_timing_worker(&self) -> Option<crate::ScheduleTimingWorker> {
-        self.automation.as_ref().map(|store| {
-            crate::ScheduleTimingWorker::new(
-                std::sync::Arc::clone(store),
-                self.native_backend.clone(),
-                self.configuration.clone(),
-            )
-        })
+        self.automation
+            .as_ref()
+            .zip(self.scheduled_run_execution.as_ref())
+            .map(|(store, execution)| {
+                crate::ScheduleTimingWorker::new(
+                    std::sync::Arc::clone(store),
+                    std::sync::Arc::clone(execution),
+                    self.native_backend.clone(),
+                    self.configuration.clone(),
+                )
+            })
     }
 
     pub fn wake_timing_worker(&self) -> Option<crate::WakeTimingWorker> {
@@ -114,6 +119,14 @@ impl ServiceIdentity {
         delivery: std::sync::Arc<dyn crate::SessionMessageDelivery>,
     ) -> Self {
         self.session_delivery = Some(delivery);
+        self
+    }
+    #[must_use]
+    pub fn with_scheduled_run_execution(
+        mut self,
+        execution: std::sync::Arc<dyn crate::ScheduledRunExecution>,
+    ) -> Self {
+        self.scheduled_run_execution = Some(execution);
         self
     }
     #[must_use]
@@ -176,6 +189,7 @@ impl ServiceIdentity {
             journal: None,
             native_backend: None,
             session_delivery: None,
+            scheduled_run_execution: None,
             approval_broker: None,
             wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,

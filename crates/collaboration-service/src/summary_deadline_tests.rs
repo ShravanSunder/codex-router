@@ -22,6 +22,190 @@ async fn summary_connection_failure_preserves_timeout_retry_without_stopping_int
     exercise_timeout_connection(true).await
 }
 
+#[tokio::test]
+async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome() -> TestResult<()> {
+    let directory = std::env::temp_dir().join(format!(
+        "provider-summary-unavailable-{}",
+        agent_automation::OperationId::generate().as_str()
+    ));
+    std::fs::create_dir(&directory)?;
+    let path = directory.join("automation.sqlite");
+    let store = AutomationStore::open(&path).await?;
+    let service = "00000000-0000-4000-8000-000000000001";
+    let summary_endpoint: EndpointRef =
+        serde_json::from_value(json!({"serviceId":service,"endpointId":"codex-local"}))?;
+    let provider_target: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":service,"endpointId":"claude-local"},
+        "sessionId":"provider-worker"
+    }))?;
+    let summary_target = SessionRef {
+        endpoint: summary_endpoint.clone(),
+        session_id: "summary-worker".to_owned().try_into()?,
+    };
+    let generation: CodexGeneration =
+        serde_json::from_value(json!({"serviceEpoch":service,"generation":1}))?;
+    let provider_attempt = agent_automation::AttemptId::generate();
+    let run_id = agent_automation::RunId::generate();
+    let schedule_id = agent_automation::ScheduleId::generate();
+    let instruction_id = agent_automation::InstructionId::generate();
+    let revision_id = agent_automation::RevisionId::generate();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let worker_outcome = agent_automation::WorkerOutcome::Completed { explanation: None };
+    let attempt = SummaryAttempt {
+        attempt_id: agent_automation::AttemptId::generate(),
+        source_target: provider_target.clone(),
+        source_reference: agent_automation::SummarySourceReference::ProviderOperation {
+            attempt_id: provider_attempt.clone(),
+        },
+        target: Some(summary_target.clone()),
+        native_turn_id: None,
+        effective_timeout_seconds: 900,
+        started_at_ms: now_ms,
+        deadline_at_ms: now_ms + 900_000,
+        phase: SummaryPhase::Preparing,
+        effects: agent_automation::NativeEffectEvidence {
+            target: Some(summary_target),
+            generation: Some(generation.clone()),
+            client_user_message_id: None,
+            native_turn_id: None,
+            native_submission_id: None,
+            allocation: PreparationEffect::Accepted,
+            resume: PreparationEffect::NotRequested,
+            submission: SubmissionEffect::NotDispatched,
+            cessation: CessationEvidence::NotApplicable,
+        },
+        explanation: None,
+    };
+    let evidence = agent_automation::RunExecutionEvidence {
+        route: Some(agent_automation::RouteEffectEvidence::ProviderAcp(
+            agent_automation::ProviderAcpEffectEvidence {
+                target: provider_target,
+                generation: generation.clone(),
+                binding: "provider-binding".to_owned().try_into()?,
+                attempt_id: provider_attempt,
+                submission: SubmissionEffect::Accepted,
+                settlement: agent_automation::ProviderSettlementEffect::Confirmed,
+            },
+        )),
+        timing: agent_automation::ExecutionTiming::start(now_ms - 120_000, 120),
+        acceptance: None::<crate::stored_run_receipt::StoredRunReceipt>,
+    };
+    let mut seed = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .foreign_keys(true),
+    )
+    .await?;
+    let mut transaction = seed.begin().await?;
+    sqlx::query("INSERT INTO instruction_documents VALUES (?,?, 'fixture',0)")
+        .bind(instruction_id.as_str())
+        .bind(revision_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("INSERT INTO instruction_revisions VALUES (?,?,'fixture',NULL,0)")
+        .bind(revision_id.as_str())
+        .bind(instruction_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("INSERT INTO schedule_definitions VALUES (?,?,?,0,'{}','{}',0,0)")
+        .bind(schedule_id.as_str())
+        .bind(agent_automation::ChangeId::generate().as_str())
+        .bind(instruction_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("INSERT INTO workflow_runs(run_id,schedule_id,due_at_ms,run_status,execution_evidence_json,worker_outcome_json,summary_attempt_json,execution_started_at_ms,execution_deadline_at_ms,effective_timeout_seconds) VALUES (?,?,0,'summaryRunning',?,?,?,?,?,?)")
+        .bind(run_id.as_str())
+        .bind(schedule_id.as_str())
+        .bind(serde_json::to_string(&evidence)?)
+        .bind(serde_json::to_string(&worker_outcome)?)
+        .bind(serde_json::to_string(&attempt)?)
+        .bind(now_ms - 120_000)
+        .bind(now_ms)
+        .bind(120_i64)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    seed.close().await?;
+    let mut definitions = serde_json::Map::new();
+    for name in [
+        "ThreadRead",
+        "ThreadTurnsList",
+        "ThreadResume",
+        "ThreadStart",
+        "ThreadLoadedList",
+        "TurnStart",
+        "TurnSteer",
+        "TurnInterrupt",
+    ] {
+        definitions.insert(format!("{name}Params"), json!({"type":"object"}));
+        definitions.insert(format!("{name}Response"), json!({"type":"object"}));
+    }
+    let bundle = codex_native_integration::NativeSchemaBundle::from_documents(BTreeMap::from([(
+        "codex_app_server_protocol.schemas.json".to_owned(),
+        serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))?,
+    )]))?;
+    let schemas = Arc::new(codex_native_integration::NativePayloadSchemas::from_bundle(
+        &bundle,
+    )?);
+    let gate = crate::NativeGenerationGate::default();
+    gate.activate(generation, directory.join("absent.sock"), Some(schemas))?;
+    let admission = gate.acquire()?;
+    let store = Arc::new(Mutex::new(store));
+    let record = RunRecord {
+        run_id: run_id.clone(),
+        schedule_id,
+        due_at_ms: 0,
+        phase: RunPhase::SummaryRunning,
+        inputs: None,
+        thread_binding_id: None,
+        native_turn_id: None,
+        evidence,
+        worker_outcome: Some(worker_outcome),
+        summary_attempt: Some(attempt),
+        summary_text: None,
+        summary_source: None,
+        completed_at_ms: None,
+    };
+    step(SummaryStep {
+        work: SummaryWork::Advance,
+        store: &store,
+        admission: &admission,
+        summary_endpoint,
+        source: Some(crate::RunSummarySource::Unavailable {
+            reason: "provider response no longer retained".into(),
+        }),
+        record,
+        timeout_seconds: 900,
+    })
+    .await
+    .map_err(|error| format!("unavailable source step: {error}"))?;
+    let blocked = store
+        .lock()
+        .await
+        .read_run::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(&run_id)
+        .await
+        .map_err(|error| format!("unavailable source read: {error}"))?;
+    if blocked.phase != RunPhase::SummaryBlocked
+        || !matches!(
+            blocked.worker_outcome,
+            Some(agent_automation::WorkerOutcome::Completed { .. })
+        )
+        || !blocked.summary_attempt.as_ref().is_some_and(|attempt| {
+            attempt.phase == SummaryPhase::Failed
+                && attempt
+                    .explanation
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("provider response no longer retained"))
+        })
+    {
+        return Err("unavailable provider response did not block only the summary".into());
+    }
+    drop(store);
+    std::fs::remove_file(path)?;
+    std::fs::remove_dir(directory)?;
+    Ok(())
+}
+
 async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
     let directory = crash_tests::child_root()?.unwrap_or_else(|| {
         std::path::PathBuf::from("/tmp").join(format!(
@@ -60,7 +244,9 @@ async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
     let attempt = SummaryAttempt {
         attempt_id: agent_automation::AttemptId::generate(),
         source_target: target.clone(),
-        source_turn_id: "worker-turn".into(),
+        source_reference: agent_automation::SummarySourceReference::NativeTurn {
+            turn_id: "worker-turn".into(),
+        },
         target: Some(target),
         native_turn_id: Some("summary-turn".into()),
         effective_timeout_seconds: 1,
@@ -226,6 +412,8 @@ async fn exercise_timeout_connection(fail_connection: bool) -> TestResult<()> {
         work: SummaryWork::Advance,
         store: &store,
         admission: &admission,
+        summary_endpoint: endpoint.clone(),
+        source: None,
         record,
         timeout_seconds: 1,
     })

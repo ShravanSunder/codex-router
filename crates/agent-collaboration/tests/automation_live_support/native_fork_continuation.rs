@@ -2,7 +2,7 @@
 use super::proof_context::{ProofContext, ProofResult, agent_text};
 use collaboration_client::protocol::{
     DeliveryClientReceipt, DestinationPreparation, ExecutionDestination, InstructionCreateParams,
-    MessageContent, MessageDelivery, NativeSendAcceptance, OperationId, RunState,
+    MessageContent, MessageDelivery, NativeSendAcceptance, OperationId, RunExecution, RunState,
     ScheduleCreateRequest, ScheduleDefinition, SchedulePrepareRequest, ScheduleUpdateRequest,
     SessionMessageSendParams, TimingRequest, WorkerOutcome,
 };
@@ -111,6 +111,9 @@ pub async fn exercise() -> ProofResult<()> {
     } = &run.state
     else {
         return Err("Forked scheduled worker did not complete".into());
+    };
+    let RunExecution::CodexAppServer(execution) = execution else {
+        return Err("Forked scheduled worker did not use the native route".into());
     };
     if execution.target != target || run.summary.is_some() {
         return Err(

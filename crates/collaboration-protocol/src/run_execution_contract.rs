@@ -1,7 +1,8 @@
 //! Complete public Run state preserves frozen inputs, actual native receipts and separate summary results.
 use crate::{
-    ChangeId, ExecutionDestination, NativeEffectEvidence, NativeSendReceipt, ObservationTimestamp,
-    OperationId, PositiveSeconds, RevisionId, RunId, ScheduleId, SessionRef,
+    ChangeId, DeliveryReceipt, DeliveryRouteEvidence, ExecutionDestination, ObservationTimestamp,
+    OperationId, PositiveSeconds, RevisionId, RunExecution, RunId, ScheduleId, SessionRef,
+    SummarySourceReference,
 };
 use agent_automation::AttemptId;
 use schemars::JsonSchema;
@@ -22,7 +23,7 @@ pub enum ContinuityInput {
         text: String,
         source_run_id: RunId,
         source_target: SessionRef,
-        source_turn_id: String,
+        source_reference: SummarySourceReference,
     },
     ImportedSummary {
         text: String,
@@ -50,16 +51,6 @@ pub struct CapturedRunInputs {
     pub instruction_text: crate::InstructionText,
     pub continuity: ContinuityInput,
     pub execution_configuration: FrozenExecutionConfiguration,
-}
-#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NativeExecution {
-    pub target: SessionRef,
-    #[serde(rename = "nativeTurnId")]
-    pub turn_id: String,
-    pub started_at: ObservationTimestamp,
-    pub deadline_at: ObservationTimestamp,
-    pub effective_timeout_seconds: PositiveSeconds,
 }
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
@@ -94,32 +85,32 @@ pub enum RunState {
     },
     Executing {
         inputs: CapturedRunInputs,
-        execution: NativeExecution,
+        execution: RunExecution,
     },
     Stopping {
         inputs: CapturedRunInputs,
-        execution: NativeExecution,
+        execution: RunExecution,
     },
     SummaryRequired {
         inputs: CapturedRunInputs,
-        execution: NativeExecution,
+        execution: RunExecution,
         outcome: WorkerOutcome,
     },
     SummaryRunning {
         inputs: CapturedRunInputs,
-        execution: NativeExecution,
+        execution: RunExecution,
         outcome: WorkerOutcome,
         summary_attempt_id: AttemptId,
     },
     SummaryBlocked {
         inputs: CapturedRunInputs,
-        execution: NativeExecution,
+        execution: RunExecution,
         outcome: WorkerOutcome,
         explanation: String,
     },
     Finished {
         inputs: CapturedRunInputs,
-        execution: NativeExecution,
+        execution: RunExecution,
         outcome: WorkerOutcome,
         #[serde(deserialize_with = "Option::deserialize")]
         summary_run_id: Option<RunId>,
@@ -130,7 +121,7 @@ pub enum RunState {
     Uncertain {
         inputs: CapturedRunInputs,
         #[serde(deserialize_with = "Option::deserialize")]
-        known_execution: Option<NativeExecution>,
+        known_execution: Option<RunExecution>,
         explanation: String,
     },
 }
@@ -145,11 +136,11 @@ pub struct ExecutionTiming {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunExecutionEvidence {
     #[serde(deserialize_with = "Option::deserialize")]
-    pub native: Option<NativeEffectEvidence>,
+    pub route: Option<DeliveryRouteEvidence>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub timing: Option<ExecutionTiming>,
     #[serde(deserialize_with = "Option::deserialize")]
-    pub acceptance: Option<NativeSendReceipt>,
+    pub acceptance: Option<DeliveryReceipt>,
 }
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -157,7 +148,7 @@ pub struct RetainedSummary {
     pub text: String,
     pub source_run_id: RunId,
     pub source_target: SessionRef,
-    pub source_turn_id: String,
+    pub source_reference: SummarySourceReference,
     pub summary_attempt_id: AttemptId,
 }
 #[derive(Clone, Debug, JsonSchema, Serialize)]

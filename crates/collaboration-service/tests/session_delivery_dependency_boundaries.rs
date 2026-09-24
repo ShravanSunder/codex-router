@@ -20,6 +20,22 @@ fn message_features_do_not_import_client_routes() {
             "listen admission",
             include_str!("../src/thread_listen_dispatch.rs"),
         ),
+        (
+            "scheduled run worker",
+            include_str!("../src/scheduled_run_worker.rs"),
+        ),
+        (
+            "run reconciliation",
+            include_str!("../src/run_reconciliation.rs"),
+        ),
+        (
+            "schedule activation",
+            include_str!("../src/schedule_activation.rs"),
+        ),
+        (
+            "schedule preparation",
+            include_str!("../src/schedule_preparation_dispatch.rs"),
+        ),
     ];
     for (feature, source) in features {
         for forbidden in [
@@ -28,6 +44,7 @@ fn message_features_do_not_import_client_routes() {
             "provider_acp_delivery_route",
             "claude_code_peer_delivery_route",
             "codex_native_integration",
+            "NativeOperation",
             "codex/messageSend",
             "codex-local",
             "claude-local",

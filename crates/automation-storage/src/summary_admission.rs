@@ -1,6 +1,8 @@
 //! Initial summary admission preserves the Run's occupied execution slot.
 use crate::{AutomationStore, StorageError};
-use agent_automation::{RunId, SummaryAttempt};
+use agent_automation::{
+    RouteEffectEvidence, RouteSettlementState, RunId, SummaryAttempt, SummarySourceReference,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::Connection;
 pub struct SummaryAdmission {
@@ -10,7 +12,7 @@ pub struct SummaryAdmission {
 }
 impl AutomationStore {
     pub async fn begin_required_summary<
-        TTarget: Serialize + DeserializeOwned,
+        TTarget: Clone + Serialize + DeserializeOwned,
         TEndpoint: DeserializeOwned,
         TGeneration: Serialize + DeserializeOwned,
         TReceipt: DeserializeOwned,
@@ -19,7 +21,7 @@ impl AutomationStore {
         request: &SummaryAdmission,
     ) -> Result<SummaryAttempt<TTarget, TGeneration>, StorageError> {
         let mut transaction = self.connection.begin_with("BEGIN IMMEDIATE").await?;
-        let mut record =
+        let record =
             crate::run_inspection::read_current::<TTarget, TEndpoint, TGeneration, TReceipt>(
                 &mut transaction,
                 &request.run_id,
@@ -27,32 +29,43 @@ impl AutomationStore {
             .await?;
         if record.phase != agent_automation::RunPhase::SummaryRequired
             || record.worker_outcome.is_none()
-            || record
-                .evidence
-                .route
-                .as_ref()
-                .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
-                .ok_or(StorageError::InvalidRecord)?
-                .cessation
-                != agent_automation::CessationEvidence::Confirmed
         {
+            return Err(StorageError::InvalidRecord);
+        }
+        let route = record
+            .evidence
+            .route
+            .as_ref()
+            .ok_or(StorageError::InvalidRecord)?;
+        if !matches!(
+            route.settlement_state(),
+            RouteSettlementState::NativeTurnConfirmed
+                | RouteSettlementState::ProviderOperationConfirmed
+        ) {
             return Err(StorageError::InvalidRecord);
         }
         let inventory = crate::run_inventory::load(&mut transaction, &record.schedule_id).await?;
         if inventory.occupying.as_ref() != Some(&request.run_id) {
             return Err(StorageError::InvalidRecord);
         }
+        let (source_target, source_reference) = match route {
+            RouteEffectEvidence::CodexAppServer(native) => (
+                native.target.clone().ok_or(StorageError::InvalidRecord)?,
+                SummarySourceReference::NativeTurn {
+                    turn_id: record.native_turn_id.ok_or(StorageError::InvalidRecord)?,
+                },
+            ),
+            RouteEffectEvidence::ProviderAcp(provider) => (
+                provider.target.clone(),
+                SummarySourceReference::ProviderOperation {
+                    attempt_id: provider.attempt_id.clone(),
+                },
+            ),
+            RouteEffectEvidence::ClaudeCodePeer(_) => return Err(StorageError::InvalidRecord),
+        };
         let attempt = make_attempt(SummaryAttemptSeed {
-            source_target: record
-                .evidence
-                .route
-                .as_mut()
-                .and_then(agent_automation::RouteEffectEvidence::codex_app_server_mut)
-                .ok_or(StorageError::InvalidRecord)?
-                .target
-                .take()
-                .ok_or(StorageError::InvalidRecord)?,
-            source_turn_id: record.native_turn_id.ok_or(StorageError::InvalidRecord)?,
+            source_target,
+            source_reference,
             timeout_seconds: request.timeout_seconds,
             now_ms: request.now_ms,
         })?;
@@ -64,7 +77,7 @@ impl AutomationStore {
 
 pub(crate) struct SummaryAttemptSeed<TTarget> {
     pub source_target: TTarget,
-    pub source_turn_id: String,
+    pub source_reference: agent_automation::SummarySourceReference,
     pub timeout_seconds: u32,
     pub now_ms: i64,
 }
@@ -76,7 +89,7 @@ pub(crate) fn make_attempt<TTarget, TGeneration>(
     Ok(SummaryAttempt {
         attempt_id: agent_automation::AttemptId::generate(),
         source_target: seed.source_target,
-        source_turn_id: seed.source_turn_id,
+        source_reference: seed.source_reference,
         target: None,
         native_turn_id: None,
         effective_timeout_seconds: seed.timeout_seconds,

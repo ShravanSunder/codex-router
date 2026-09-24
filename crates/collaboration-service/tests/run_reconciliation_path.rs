@@ -168,17 +168,21 @@ async fn exercise(
         path,
         Some(schemas),
     )?;
+    let native_backend = NativeControlBackend {
+        endpoint: target.endpoint,
+        gate,
+        codex_home: root.clone(),
+    };
     let identity = ServiceIdentity::new(
         service_id,
         service_id,
         &format!("sha256:{}", "a".repeat(64)),
     )?
     .with_automation_store(store.clone())
-    .with_native_backend(NativeControlBackend {
-        endpoint: target.endpoint,
-        gate,
-        codex_home: root.clone(),
-    })?;
+    .with_scheduled_run_execution(Arc::new(
+        collaboration_service::CodexAppServerScheduledRuns::new(native_backend.clone()),
+    ))
+    .with_native_backend(native_backend)?;
     let (socket, server) = tokio::net::UnixStream::pair()?;
     let service = tokio::spawn(serve_control_connection(server, identity));
     let mut client = ControlClient::initialize(socket, "run-reconcile-fixture", "1").await?;

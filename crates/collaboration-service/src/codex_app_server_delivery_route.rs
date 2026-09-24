@@ -115,6 +115,12 @@ impl CodexAppServerDeliveryRoute {
 }
 
 impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
+    fn scheduled_runs(&self) -> Option<std::sync::Arc<dyn crate::ScheduledRunRoute>> {
+        Some(std::sync::Arc::new(
+            crate::CodexAppServerScheduledRuns::new(self.backend.clone()),
+        ))
+    }
+
     fn reachability(&self) -> SessionReachability {
         SessionReachability::CodexAppServer
     }
