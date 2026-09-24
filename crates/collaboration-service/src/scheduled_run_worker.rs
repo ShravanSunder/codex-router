@@ -104,11 +104,7 @@ impl ScheduledRunWorker {
             };
             match self.execution.summary_source(context).await {
                 Ok(source) => Some(source),
-                Err(DeliveryContractError::ClientOperation) => {
-                    Some(crate::RunSummarySource::Unavailable {
-                        reason: "scheduled source route is unavailable".into(),
-                    })
-                }
+                Err(DeliveryContractError::ClientOperation) => None,
                 Err(_) => return Err(StorageError::InvalidRecord),
             }
         } else {

@@ -327,24 +327,6 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
                 source_text
             )
         }
-        Some(crate::RunSummarySource::ProviderResponse { text }) => {
-            let agent_automation::SummarySourceReference::ProviderOperation { attempt_id } =
-                &attempt.source_reference
-            else {
-                return Err(StorageError::InvalidRecord);
-            };
-            if text.len() > 900000 {
-                return block(input.store,id,attempt,false,"Provider response exceeds the bounded summary input frame; inspect and explicitly skip or reduce source context.").await;
-            }
-            format!(
-                "Summarize this exact completed provider response for the next scheduled run.\nSource operation: {}\n\nQuoted provider response:\n{}",
-                attempt_id.as_str(),
-                text
-            )
-        }
-        Some(crate::RunSummarySource::Unavailable { reason }) => {
-            return block(input.store, id, attempt, false, &format!("Provider summary source is unavailable: {reason}. Inspect and explicitly skip or retry when output is available.")).await;
-        }
         None => {
             return block(input.store, id, attempt, false, "Completed worker source is unavailable; inspect and explicitly skip or retry when output is available.").await;
         }

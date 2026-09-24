@@ -3,13 +3,12 @@ use super::ProviderAcpScheduledRuns;
 use agent_automation::{ProviderAcpEffectEvidence, RouteEffectEvidence, SubmissionEffect};
 use collaboration_protocol::{
     CodexGeneration, ConversationOperationSettlement, ConversationOperationWaitOutput,
-    ConversationOperationWaitRequest, ConversationOutputUnavailableReason, OperationId,
-    PositiveSeconds, ProviderOperationEffect, ProviderOperationStage, ProviderPromptStopReason,
-    SessionRef,
+    ConversationOperationWaitRequest, OperationId, PositiveSeconds, ProviderOperationEffect,
+    ProviderOperationStage, ProviderPromptStopReason, SessionRef,
 };
 use collaboration_service::{
     DeliveryContractError, ProviderConversationBackend, RunObservationContext, RunReconciliation,
-    RunSettlement, RunSummarySource,
+    RunSettlement,
 };
 
 impl ProviderAcpScheduledRuns {
@@ -62,7 +61,7 @@ impl ProviderAcpScheduledRuns {
                             ConversationOperationSettlement::PromptCompleted {
                                 target,
                                 stop_reason,
-                                response,
+                                ..
                             },
                     } if provider.target.eq(&target) => match stop_reason {
                         ProviderPromptStopReason::Cancelled => Ok(RunSettlement::Interrupted),
@@ -73,28 +72,19 @@ impl ProviderAcpScheduledRuns {
                         | ProviderPromptStopReason::MaxTokens
                         | ProviderPromptStopReason::MaxTurnRequests => {
                             Ok(RunSettlement::Completed {
-                                summary_source: response.map_or_else(
-                                    || RunSummarySource::Unavailable {
-                                        reason: "Provider response text was not retained".into(),
-                                    },
-                                    |text| RunSummarySource::ProviderResponse {
-                                        text: String::from(text),
-                                    },
-                                ),
+                                summary_source: None,
                             })
                         }
                     },
                     ConversationOperationWaitOutput::Available { .. } => {
                         Err(DeliveryContractError::InvalidEvidence)
                     }
-                    ConversationOperationWaitOutput::OutputUnavailable { reason }
+                    ConversationOperationWaitOutput::OutputUnavailable { .. }
                         if result.operation.stage == ProviderOperationStage::Terminal
                             && result.operation.effect == ProviderOperationEffect::Applied =>
                     {
                         Ok(RunSettlement::Completed {
-                            summary_source: RunSummarySource::Unavailable {
-                                reason: unavailable_reason(reason).into(),
-                            },
+                            summary_source: None,
                         })
                     }
                     ConversationOperationWaitOutput::OutputUnavailable { .. }
@@ -117,23 +107,6 @@ impl ProviderAcpScheduledRuns {
             Err(failure) => Ok(RunSettlement::Failed {
                 reason: String::from(failure.message),
             }),
-        }
-    }
-
-    pub(super) async fn summary_for_provider_run(
-        &self,
-        context: &RunObservationContext,
-    ) -> Result<RunSummarySource, DeliveryContractError> {
-        match self.observe_provider_run(context).await? {
-            RunSettlement::Completed { summary_source } => Ok(summary_source),
-            RunSettlement::Pending => Ok(RunSummarySource::Unavailable {
-                reason: "Provider response is not available yet".into(),
-            }),
-            RunSettlement::Failed { reason } => Ok(RunSummarySource::Unavailable { reason }),
-            RunSettlement::Interrupted => Ok(RunSummarySource::Unavailable {
-                reason: "Provider prompt was interrupted".into(),
-            }),
-            RunSettlement::WrittenWithoutCompletion => Err(DeliveryContractError::InvalidEvidence),
         }
     }
 
@@ -179,14 +152,5 @@ impl ProviderAcpScheduledRuns {
             }
             _ => Ok(RunReconciliation::StillUnknown),
         }
-    }
-}
-
-fn unavailable_reason(reason: ConversationOutputUnavailableReason) -> &'static str {
-    match reason {
-        ConversationOutputUnavailableReason::HostRestarted => {
-            "Provider response unavailable after Host restart"
-        }
-        ConversationOutputUnavailableReason::NotRetained => "Provider response was not retained",
     }
 }

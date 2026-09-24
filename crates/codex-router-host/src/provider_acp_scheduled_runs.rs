@@ -307,9 +307,9 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
 
     fn summary_source(
         &self,
-        context: RunObservationContext,
+        _context: RunObservationContext,
     ) -> DeliveryFuture<'_, RunSummarySource> {
-        Box::pin(async move { self.summary_for_provider_run(&context).await })
+        Box::pin(async { Err(DeliveryContractError::InvalidEvidence) })
     }
 
     fn request_stop<'a>(

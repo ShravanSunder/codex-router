@@ -296,9 +296,7 @@ impl ScheduledRunExecution for FakeScheduledExecution {
         Box::pin(async {
             Ok(match self.settlement_plan {
                 FakeSettlementPlan::Completed => RunSettlement::Completed {
-                    summary_source: RunSummarySource::ProviderResponse {
-                        text: "provider completed".into(),
-                    },
+                    summary_source: None,
                 },
                 FakeSettlementPlan::Failed => RunSettlement::Failed {
                     reason: "fixture operation failed".into(),
@@ -313,11 +311,7 @@ impl ScheduledRunExecution for FakeScheduledExecution {
     }
 
     fn summary_source(&self, _: RunObservationContext) -> DeliveryFuture<'_, RunSummarySource> {
-        Box::pin(async {
-            Ok(RunSummarySource::ProviderResponse {
-                text: "provider completed".into(),
-            })
-        })
+        Box::pin(async { Err(DeliveryContractError::InvalidEvidence) })
     }
 
     fn request_stop<'a>(

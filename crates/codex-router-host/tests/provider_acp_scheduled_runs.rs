@@ -23,10 +23,9 @@ use collaboration_service::{
     DeliveryContractError, DeliveryFuture, DeliveryPrecondition, EndpointDirectory,
     PreparationEvidenceSink, PreparedTarget, ProviderConversationBackend, ProviderOperationStore,
     ProviderSessionRecord, RunEvidenceDisposition, RunEvidenceSink, RunObservationContext,
-    RunReconciliation, RunSettlement, RunSubmission, RunSummarySource, ScheduleCapability,
-    ScheduleDestination, SchedulePreparationOutcome, SchedulePreparationRequest, ScheduleSupport,
-    ScheduledRunExecution, ScheduledRunSubmission, SessionDeliveryRoute, SessionDeliveryRouter,
-    SettlementEvidence,
+    RunReconciliation, RunSettlement, RunSubmission, ScheduleCapability, ScheduleDestination,
+    SchedulePreparationOutcome, SchedulePreparationRequest, ScheduleSupport, ScheduledRunExecution,
+    ScheduledRunSubmission, SessionDeliveryRoute, SessionDeliveryRouter, SettlementEvidence,
 };
 use serde_json::json;
 use std::{
@@ -144,7 +143,7 @@ sys.stdin.read()
 }
 
 #[tokio::test]
-async fn busy_provider_run_starts_when_idle_and_retains_live_summary() {
+async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     let root = tempfile::tempdir().expect("fixture root");
     let event_socket = root.path().join("active.sock");
     let listener = tokio::net::UnixListener::bind(&event_socket).expect("active event listener");
@@ -433,12 +432,8 @@ async fn busy_provider_run_starts_when_idle_and_retains_live_summary() {
             .await
             .expect("settlement"),
         RunSettlement::Completed {
-            summary_source: RunSummarySource::ProviderResponse { text }
-        } if text == "provider summary text"
-    ));
-    assert!(matches!(
-        router.summary_source(context.clone()).await.expect("summary source"),
-        RunSummarySource::ProviderResponse { text } if text == "provider summary text"
+            summary_source: None
+        }
     ));
     let restarted_supervisor = Arc::new(
         ExternalProviderSupervisor::new(Vec::new(), Arc::clone(&store))
@@ -455,11 +450,12 @@ async fn busy_provider_run_starts_when_idle_and_retains_live_summary() {
         SessionDeliveryRouter::new(vec![restarted_route as Arc<dyn SessionDeliveryRoute>]);
     assert!(matches!(
         restarted_router
-            .summary_source(context.clone())
+            .observe_settlement(context.clone())
             .await
-            .expect("restarted summary source"),
-        RunSummarySource::Unavailable { reason }
-        if reason.contains("Host restart")
+            .expect("restarted settlement"),
+        RunSettlement::Completed {
+            summary_source: None
+        }
     ));
     let mut crash_context = context.clone();
     crash_context.run_id = RunId::generate();

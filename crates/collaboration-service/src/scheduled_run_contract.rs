@@ -150,16 +150,18 @@ pub struct NativeTurnRef {
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum RunSummarySource {
     NativeTurn { turn: NativeTurnRef },
-    ProviderResponse { text: String },
-    Unavailable { reason: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum RunSettlement {
     Pending,
-    Completed { summary_source: RunSummarySource },
-    Failed { reason: String },
+    Completed {
+        summary_source: Option<RunSummarySource>,
+    },
+    Failed {
+        reason: String,
+    },
     Interrupted,
     WrittenWithoutCompletion,
 }
