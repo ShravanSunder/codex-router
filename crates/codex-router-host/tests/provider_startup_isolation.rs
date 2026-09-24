@@ -16,6 +16,7 @@ fn runtime_inputs(directory: &Path) -> CollaborationRuntimeInputs {
         backend_socket: directory.join("backend.sock"),
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
+        peer_registry_directory: None,
     }
 }
 

@@ -2,13 +2,14 @@ use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
     ExternalProviderStartup,
 };
-use collaboration_client::ControlClient;
+use collaboration_client::{ControlClient, MessageSendRequest, PublicMessageContent};
 use collaboration_protocol::{
     ChannelDescription, CodexGeneration, ConversationCreateRequest,
     ConversationOperationSettlement, ConversationOperationWaitOutput,
-    ConversationOperationWaitRequest, ConversationPromptRequest, EndpointAvailability, EndpointId,
-    EndpointRef, MessageContent, MessageText, OperationId, PositiveSeconds,
-    ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef,
+    ConversationOperationWaitRequest, ConversationPromptRequest, DeliveryOutcome,
+    EndpointAvailability, EndpointId, EndpointRef, MessageContent, MessageText, OperationId,
+    PositiveSeconds, ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess, SessionId,
+    SessionRef,
 };
 use std::os::unix::fs::PermissionsExt as _;
 
@@ -23,13 +24,19 @@ async fn initialized_control_reaches_host_owned_provider_and_reuses_target() {
         r#"#!/usr/bin/python3
 import json,sys
 request=json.loads(sys.stdin.readline())
-print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{'loadSession':True},'agentInfo':{'name':'composition-fixture','version':'1'}}})); sys.stdout.flush()
+print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{'loadSession':True},'agentInfo':{'name':'composition-fixture','version':'1'},'_meta':{'steering':{'supported':True}}}})); sys.stdout.flush()
 request=json.loads(sys.stdin.readline())
 assert request['method']=='session/new'
 print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'provider-session'}})); sys.stdout.flush()
 request=json.loads(sys.stdin.readline())
 assert request['method']=='session/prompt'
 print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end_turn'}})); sys.stdout.flush()
+steer=json.loads(sys.stdin.readline())
+assert steer['method']=='_session/steering'
+print(json.dumps({'jsonrpc':'2.0','id':steer['id'],'result':{'outcome':'promptRequired'}})); sys.stdout.flush()
+prompt=json.loads(sys.stdin.readline())
+assert prompt['method']=='session/prompt'
+print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})); sys.stdout.flush()
 sys.stdin.read()
 "#,
     )
@@ -44,6 +51,7 @@ sys.stdin.read()
             backend_socket: root.path().join("backend.sock"),
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
+            peer_registry_directory: None,
         },
         vec![ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
@@ -145,6 +153,23 @@ sys.stdin.read()
         } if settled_target == target
     ));
 
+    let receipt = client
+        .send_message(MessageSendRequest {
+            target,
+            message: PublicMessageContent::HumanUser {
+                text: MessageText::try_from("routed provider message".to_owned()).expect("message"),
+            },
+            delivery: collaboration_protocol::MessageDelivery::Auto,
+            generation_guard: None,
+            correlation: None,
+        })
+        .await
+        .expect("message receipt");
+    assert!(
+        matches!(receipt.outcome, DeliveryOutcome::Started),
+        "{receipt:?}"
+    );
+
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
@@ -168,6 +193,7 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
             backend_socket: root.path().join("backend.sock"),
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
+            peer_registry_directory: None,
         },
         vec![ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("binding"),

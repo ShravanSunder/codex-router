@@ -84,6 +84,7 @@ impl CollaborationLifecycle {
                     backend_socket: self.backend_socket.clone(),
                     mcp_bind: self.mcp_bind,
                     native_schema: export.clone(),
+                    peer_registry_directory: None,
                 },
                 self.external_provider_startups.clone(),
             )

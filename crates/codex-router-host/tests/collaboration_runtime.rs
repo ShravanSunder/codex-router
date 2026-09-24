@@ -19,6 +19,7 @@ async fn post_bind_manifest_failure_releases_mcp_port() {
         backend_socket: root.path().join("backend.sock"),
         mcp_bind,
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await;
     assert!(result.is_err());
@@ -42,6 +43,7 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
         backend_socket: root.join("backend.sock"),
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
+        peer_registry_directory: None,
     };
     let mut runtime = CollaborationRuntime::start(inputs())
         .await
@@ -321,6 +323,7 @@ async fn occupied_mcp_port_is_a_visible_startup_failure_without_fallback() {
         backend_socket: root.path().join("backend.sock"),
         mcp_bind,
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await;
     let error = match result {

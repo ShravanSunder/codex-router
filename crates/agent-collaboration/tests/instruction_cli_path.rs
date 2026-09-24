@@ -17,6 +17,7 @@ async fn cli_creates_and_reads_instruction_through_host() -> Result<(), Box<dyn 
         backend_socket: root.join("absent.sock"),
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await?;
     // Act: the documented CLI operation must reach Host-created persistent state.

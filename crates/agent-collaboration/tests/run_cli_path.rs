@@ -118,6 +118,7 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         backend_socket: root.join("absent.sock"),
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await?;
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))

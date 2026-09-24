@@ -45,6 +45,7 @@ mod provider_prompt_observation;
 mod provider_session_actor;
 pub use provider_session_actor::{ProviderSessionActivity, ProviderSteeringOutcome};
 mod router_compatibility;
+mod session_message_route_composition;
 
 pub use app_server_endpoint_guard::AppServerEndpointError;
 pub use app_server_endpoint_guard::require_unowned_app_server_endpoint;

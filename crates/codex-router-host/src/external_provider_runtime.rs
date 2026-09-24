@@ -350,8 +350,9 @@ pub struct ExternalProviderRuntime {
     permission_request_count: Arc<AtomicU64>,
     #[cfg(test)]
     permission_outcome: Arc<std::sync::atomic::AtomicU8>,
-    approval_broker:
-        Arc<tokio::sync::RwLock<Option<Arc<collaboration_service::ServiceApprovalBroker>>>>,
+    approval_broker: Arc<
+        tokio::sync::RwLock<Option<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>>,
+    >,
     approval_contexts: Arc<std::sync::Mutex<HashMap<String, ExternalProviderApprovalContext>>>,
     #[cfg(test)]
     test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
@@ -419,7 +420,7 @@ impl ExternalProviderRuntime {
         #[cfg(test)]
         let callback_permission_outcome = Arc::clone(&permission_outcome);
         let approval_broker = Arc::new(tokio::sync::RwLock::new(
-            None::<Arc<collaboration_service::ServiceApprovalBroker>>,
+            None::<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>,
         ));
         let callback_approval_broker = Arc::clone(&approval_broker);
         let approval_contexts = Arc::new(std::sync::Mutex::new(HashMap::<
@@ -460,7 +461,11 @@ impl ExternalProviderRuntime {
                         let context = callback_approval_contexts.lock().ok().and_then(|contexts| {
                             contexts.get(request.session_id.0.as_ref()).cloned()
                         });
-                        let broker = callback_approval_broker.read().await.clone();
+                        let broker = callback_approval_broker
+                            .read()
+                            .await
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade);
                         let outcome = match (broker, context) {
                             (Some(broker), Some(context)) => {
                                 let options = request
@@ -824,7 +829,7 @@ impl ExternalProviderRuntime {
         &self,
         broker: Arc<collaboration_service::ServiceApprovalBroker>,
     ) {
-        *self.approval_broker.write().await = Some(broker);
+        *self.approval_broker.write().await = Some(Arc::downgrade(&broker));
     }
 
     pub async fn prompt_with_approval_context(

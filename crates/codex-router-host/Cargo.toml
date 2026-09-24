@@ -38,7 +38,7 @@ sha2.workspace = true
 tempfile = "3.27.0"
 toml = "1.1.2"
 sqlx.workspace = true
-tokio = { workspace = true, features = ["io-std"] }
+tokio = { workspace = true, features = ["io-std", "test-util"] }
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }

@@ -19,6 +19,8 @@ pub struct CollaborationRuntimeInputs {
     pub mcp_bind: std::net::SocketAddr,
     /// An actual executable-bound export, or metadata-only schema admission.
     pub native_schema: Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>>,
+    /// Fixture override; normal Host starts read the owner's ~/.claude/sessions.
+    pub peer_registry_directory: Option<PathBuf>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderLaunchBinding {
@@ -90,6 +92,7 @@ pub struct CollaborationRuntime {
     provider_store:
         Option<std::sync::Arc<tokio::sync::Mutex<collaboration_service::ProviderOperationStore>>>,
     external_provider_supervisor: Option<std::sync::Arc<crate::ExternalProviderSupervisor>>,
+    provider_delivery_route: Option<std::sync::Arc<crate::ProviderAcpDeliveryRoute>>,
     provider_retention: Option<tokio::task::JoinHandle<()>>,
     directory: PathBuf,
     control_schema: collaboration_protocol::ControlSchema,
@@ -329,16 +332,20 @@ impl CollaborationRuntime {
         )
         .await
         .map_err(io::Error::other)?;
-        let codex_route: std::sync::Arc<dyn collaboration_service::SessionDeliveryRoute> =
-            std::sync::Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(
+        let message_routes =
+            crate::session_message_route_composition::compose_session_message_routes(
                 service_id.clone(),
                 identity.endpoint_directory(),
                 native_backend.clone(),
-            ));
-        let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
-            std::sync::Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
-                codex_route,
-            ]));
+                external_provider_supervisor.clone(),
+                provider_store.clone(),
+                inputs.peer_registry_directory.clone().map_or_else(
+                    crate::session_message_route_composition::default_peer_registry_directory,
+                    Ok,
+                )?,
+            )?;
+        let session_delivery = message_routes.delivery;
+        let provider_delivery_route = message_routes.provider_route;
         approval_broker
             .install_session_delivery(std::sync::Arc::clone(&session_delivery))
             .map_err(io::Error::other)?;
@@ -439,6 +446,7 @@ impl CollaborationRuntime {
             board_store,
             provider_store,
             external_provider_supervisor,
+            provider_delivery_route,
             provider_retention: None,
             directory: inputs.directory,
             control_schema,
@@ -705,6 +713,9 @@ impl CollaborationRuntime {
         }
         if let Err(error) = self.publication.admission_gate().retire() {
             failure.get_or_insert(error);
+        }
+        if let Some(route) = self.provider_delivery_route.take() {
+            route.shutdown_queue().await;
         }
         if let Some(supervisor) = self.external_provider_supervisor.take()
             && let Err(message) = supervisor.shutdown().await

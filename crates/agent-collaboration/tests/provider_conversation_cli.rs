@@ -231,6 +231,7 @@ async fn live_cursor_create_wait_prompt_wait_through_compiled_cli() {
             backend_socket: service_directory.join("unused-backend.sock"),
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
+            peer_registry_directory: None,
         },
         vec![codex_router_host::ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::cursor(executable, arguments)
