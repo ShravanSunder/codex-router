@@ -16,6 +16,7 @@ pub struct ServiceIdentity {
     pub(crate) wake_wait_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
     pub(crate) native_backend: Option<crate::NativeControlBackend>,
+    pub(crate) session_delivery: Option<std::sync::Arc<dyn crate::SessionMessageDelivery>>,
     pub(crate) approval_broker: Option<std::sync::Arc<crate::ServiceApprovalBroker>>,
     pub(crate) automation:
         Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
@@ -58,17 +59,18 @@ impl ServiceIdentity {
     }
 
     pub fn wake_timing_worker(&self) -> Option<crate::WakeTimingWorker> {
-        self.automation.as_ref().map(|store| {
-            crate::WakeTimingWorker::new(
-                std::sync::Arc::clone(store),
-                crate::wakeup_native_sender::WakeNativeSender {
-                    service_id: self.service_id.clone(),
-                    endpoints: self.directory.clone(),
-                    backend: self.native_backend.clone(),
-                    configuration: self.configuration.clone(),
-                },
-            )
-        })
+        self.automation
+            .as_ref()
+            .zip(self.session_delivery.as_ref())
+            .map(|(store, delivery)| {
+                crate::WakeTimingWorker::new(
+                    std::sync::Arc::clone(store),
+                    crate::wakeup_delivery_sender::WakeDeliverySender {
+                        delivery: std::sync::Arc::clone(delivery),
+                        configuration: self.configuration.clone(),
+                    },
+                )
+            })
     }
 
     pub fn with_automation_store(
@@ -104,6 +106,15 @@ impl ServiceIdentity {
         }
         self.native_backend = Some(backend);
         Ok(self)
+    }
+
+    #[must_use]
+    pub fn with_session_delivery(
+        mut self,
+        delivery: std::sync::Arc<dyn crate::SessionMessageDelivery>,
+    ) -> Self {
+        self.session_delivery = Some(delivery);
+        self
     }
     #[must_use]
     pub fn with_approval_broker(
@@ -170,6 +181,7 @@ impl ServiceIdentity {
             schema_digest: digest,
             journal: None,
             native_backend: None,
+            session_delivery: None,
             approval_broker: None,
             wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,

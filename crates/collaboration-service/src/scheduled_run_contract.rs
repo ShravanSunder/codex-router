@@ -104,21 +104,21 @@ pub trait RunEvidenceSink: Send + Sync {
 
 pub trait ScheduledRunExecution: Send + Sync {
     fn support(&self, destination: &ScheduleDestination) -> DeliveryFuture<'_, ScheduleSupport>;
-    fn prepare_existing_target(
-        &self,
+    fn prepare_existing_target<'a>(
+        &'a self,
         target: &SessionRef,
-        sink: &dyn RunEvidenceSink,
-    ) -> DeliveryFuture<'_, PreparedTarget>;
-    fn prepare_fresh_session(
-        &self,
+        sink: &'a dyn RunEvidenceSink,
+    ) -> DeliveryFuture<'a, PreparedTarget>;
+    fn prepare_fresh_session<'a>(
+        &'a self,
         request: FreshSessionRequest,
-        sink: &dyn RunEvidenceSink,
-    ) -> DeliveryFuture<'_, PreparedTarget>;
-    fn submit_run(
-        &self,
+        sink: &'a dyn RunEvidenceSink,
+    ) -> DeliveryFuture<'a, PreparedTarget>;
+    fn submit_run<'a>(
+        &'a self,
         run: ScheduledRunSubmission,
-        sink: &dyn RunEvidenceSink,
-    ) -> DeliveryFuture<'_, RunSubmission>;
+        sink: &'a dyn RunEvidenceSink,
+    ) -> DeliveryFuture<'a, RunSubmission>;
     fn observe_settlement(
         &self,
         recorded: &RouteEffectEvidence<SessionRef, CodexGeneration>,

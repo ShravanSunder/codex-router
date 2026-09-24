@@ -1,6 +1,8 @@
 //! Evidence identifies the client that may reconcile an uncertain side effect.
 use crate::{AttemptId, CessationEvidence, NativeEffectEvidence, SubmissionEffect};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -199,7 +201,7 @@ impl ProviderBindingReference {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PeerWriteEffect {
     NotDispatched,
@@ -215,6 +217,16 @@ pub struct PeerProcessId(u32);
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PeerSessionReference(String);
+
+impl JsonSchema for PeerSessionReference {
+    fn schema_name() -> Cow<'static, str> {
+        "PeerSessionReference".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"string", "minLength":1, "maxLength":4096})
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("peer session reference requires 1 to 4096 UTF-8 bytes without NUL")]

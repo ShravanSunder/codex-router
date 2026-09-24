@@ -54,7 +54,7 @@ pub(crate) async fn project_record(
                 .try_into()
                 .map_err(|_| StorageError::InvalidRecord)?;
             let record = store
-                .read_delivery::<SessionRef, CodexGeneration, NativeSendReceipt>(&id)
+                .read_delivery::<SessionRef, CodexGeneration, crate::stored_delivery_receipt::StoredDeliveryReceipt>(&id)
                 .await?;
             if wakeup_id.as_ref().is_some_and(|id| *id != record.wakeup_id) {
                 return Err(StorageError::InvalidRecord);

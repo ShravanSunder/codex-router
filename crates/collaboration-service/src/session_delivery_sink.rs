@@ -1,16 +1,15 @@
-//! Background Thread Listen delivery through the ordinary native message dispatcher.
-use crate::{EndpointDirectory, NativeControlBackend};
-use collaboration_protocol::{
-    MessageContent, MessageDelivery, NativeSendParams, SessionRef, UuidIdentity,
+//! Background Thread Listen delivery through the injected session delivery seam.
+use crate::{
+    DeliveryPrecondition, DeliveryRequest, SessionMessageDelivery,
+    session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
+use collaboration_protocol::{DeliveryOutcome, MessageContent, MessageDelivery, SessionRef};
 use message_board::{BatchSink, BatchSinkFailure, ListenDeliveryRecord, ThreadListenBatchSet};
-use serde_json::{Value, json};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(crate) struct SessionDeliverySink {
-    pub(crate) service_id: UuidIdentity,
-    pub(crate) endpoints: EndpointDirectory,
-    pub(crate) backend: Option<NativeControlBackend>,
+    pub(crate) delivery: Arc<dyn SessionMessageDelivery>,
     pub(crate) target: SessionRef,
 }
 
@@ -27,58 +26,41 @@ impl BatchSink for SessionDeliverySink {
 
 impl SessionDeliverySink {
     async fn dispatch(&self, record: ListenDeliveryRecord) -> Result<(), BatchSinkFailure> {
-        let generation = self
-            .backend
-            .as_ref()
-            .and_then(|backend| backend.gate.acquire().ok())
-            .map(|admission| admission.generation().clone())
-            .ok_or(BatchSinkFailure::Unavailable)?;
         let text = render_record(&record).map_err(|_| BatchSinkFailure::Unavailable)?;
-        // A native RPC correlation id, not a Listen identity.
-        let request_id = crate::new_service_uuid().map_err(|_| BatchSinkFailure::Unavailable)?;
         // A delivery is Router's own record; the target session did not send it.
         let message = MessageContent::Router {
             text: text.try_into().map_err(|_| BatchSinkFailure::Unavailable)?,
         };
-        let params = NativeSendParams {
+        let request = DeliveryRequest {
             target: self.target.clone(),
-            generation,
             message,
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            precondition: DeliveryPrecondition::Unpinned,
+            correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
+            attempt: agent_automation::AttemptId::generate(),
         };
-        let endpoints = self
-            .endpoints
-            .subscribe()
-            .and_then(|subscription| subscription.snapshot())
-            .map_err(|_| BatchSinkFailure::Unavailable)?
-            .endpoints;
-        let response = crate::native_message_dispatch::dispatch_message(
-            crate::native_control_dispatch::NativeControlRequest {
-                method: "codex/messageSend",
-                params: serde_json::to_value(params).map_err(|_| BatchSinkFailure::Unavailable)?,
-                id: json!(String::from(request_id)),
-                service_id: &self.service_id,
-                backend: self.backend.as_ref(),
-                endpoints: &endpoints,
-                stored_observation: None,
-                access_routes: None,
-            },
-        )
-        .await;
-        if response.get("result").is_some() {
-            Ok(())
-        } else if response.pointer("/error/data/kind").and_then(Value::as_str)
-            == Some("nativeRejected")
-        {
-            Err(BatchSinkFailure::Rejected {
-                evidence: response
-                    .pointer("/error/data")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            })
-        } else {
-            Err(BatchSinkFailure::Unavailable)
+        let receipt = self
+            .delivery
+            .deliver(request, &UnstoredAttemptEvidenceSink)
+            .await
+            .map_err(|_| BatchSinkFailure::Unavailable)?;
+        match &receipt.outcome {
+            DeliveryOutcome::Started
+            | DeliveryOutcome::Steered
+            | DeliveryOutcome::StartedOrSteered
+            | DeliveryOutcome::Queued
+            | DeliveryOutcome::PeerMessageWritten
+            | DeliveryOutcome::Unknown => Ok(()),
+            DeliveryOutcome::Rejected(_)
+            | DeliveryOutcome::NotSubmitted {
+                retryable: false, ..
+            } => Err(BatchSinkFailure::Rejected {
+                evidence: serde_json::to_value(receipt)
+                    .map_err(|_| BatchSinkFailure::Unavailable)?,
+            }),
+            DeliveryOutcome::NotSubmitted {
+                retryable: true, ..
+            } => Err(BatchSinkFailure::Unavailable),
         }
     }
 }
@@ -123,4 +105,97 @@ fn batch_summary(batch_set: &ThreadListenBatchSet) -> String {
         "Thread activity: {threads}; count {count}; sequences {first}-{last}; catchUp: {}.",
         batch_set.catch_up
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
+        DeliveryReceipt,
+    };
+    use collaboration_protocol::{
+        DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason, SessionReachability,
+    };
+    use message_board::{ListenId, ThreadListenHeartbeat, ThreadListenHeartbeatKind};
+
+    struct FakeDelivery(DeliveryOutcome);
+
+    impl SessionMessageDelivery for FakeDelivery {
+        fn deliver<'a>(
+            &'a self,
+            _: DeliveryRequest,
+            _: &'a dyn AttemptEvidenceSink,
+        ) -> DeliveryFuture<'a, DeliveryReceipt> {
+            Box::pin(async move {
+                Ok(DeliveryReceipt {
+                    outcome: self.0.clone(),
+                    reachability: Some(SessionReachability::ProviderAcp),
+                    client: None,
+                })
+            })
+        }
+
+        fn reconcile_attempt(
+            &self,
+            _: AttemptReconciliationContext,
+        ) -> DeliveryFuture<'_, AttemptReconciliation> {
+            Box::pin(async { Ok(AttemptReconciliation::StillUnknown) })
+        }
+    }
+
+    async fn push(outcome: DeliveryOutcome) -> Result<(), BatchSinkFailure> {
+        let target: SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"fixture-provider"},
+            "sessionId":"reader"
+        })).expect("fixture session");
+        let sink = SessionDeliverySink {
+            delivery: Arc::new(FakeDelivery(outcome)),
+            target,
+        };
+        sink.deliver(ListenDeliveryRecord::Heartbeat(ThreadListenHeartbeat {
+            kind: ThreadListenHeartbeatKind::ListenHeartbeat,
+            listen_id: ListenId::generate(),
+            last_sequence: None,
+            mark: 1,
+            text: "heartbeat".into(),
+        }))
+        .await
+    }
+
+    #[tokio::test]
+    async fn listen_push_uses_client_neutral_outcomes() {
+        assert!(push(DeliveryOutcome::Started).await.is_ok());
+        assert!(push(DeliveryOutcome::Unknown).await.is_ok());
+        assert_eq!(
+            push(DeliveryOutcome::NotSubmitted {
+                retryable: true,
+                reason: "starting".into()
+            })
+            .await,
+            Err(BatchSinkFailure::Unavailable),
+        );
+        let rejected = push(DeliveryOutcome::Rejected(DeliveryRejection {
+            reason: DeliveryRejectionReason::Busy,
+            next_action: DeliveryNextAction::InspectTarget,
+            client_code: Some(-32000),
+            detail: None,
+        }))
+        .await;
+        let Err(BatchSinkFailure::Rejected { evidence }) = rejected else {
+            panic!("rejected push did not expose its receipt");
+        };
+        assert_eq!(
+            evidence
+                .pointer("/outcome/reason")
+                .and_then(serde_json::Value::as_str),
+            Some("busy")
+        );
+        assert_eq!(
+            evidence
+                .pointer("/outcome/clientCode")
+                .and_then(serde_json::Value::as_i64),
+            Some(-32000)
+        );
+    }
 }

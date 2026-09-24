@@ -1,8 +1,8 @@
 //! The feature-facing delivery seam and the route-facing client contract.
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
-    AttemptId, CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, MessageContent,
-    MessageDelivery, NonEmptyText, SessionReachability, SessionRef,
+    AttemptId, CodexGeneration, DeliveryCorrelationId, DeliveryReceipt, MessageContent,
+    MessageDelivery, SessionReachability, SessionRef,
 };
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -44,24 +44,8 @@ pub struct AttemptReconciliationContext {
     pub recorded: RouteEffectEvidence<SessionRef, CodexGeneration>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-pub enum DeliveryClientReceipt {
-    CodexTurn { turn_id: NonEmptyText },
-    CodexSubmission { submission_id: NonEmptyText },
-    ProviderOperation { operation_id: AttemptId },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DeliveryReceipt {
-    pub outcome: DeliveryOutcome,
-    pub reachability: SessionReachability,
-    pub client_receipt: Option<DeliveryClientReceipt>,
-}
-
 pub enum AttemptReconciliation {
-    Accepted(DeliveryReceipt),
+    Accepted(Box<DeliveryReceipt>),
     KnownNotSubmitted,
     StillUnknown,
 }
@@ -95,12 +79,24 @@ pub trait AttemptEvidenceSink: Send + Sync {
     ) -> DeliveryFuture<'_, ()>;
 }
 
-pub trait SessionMessageDelivery: Send + Sync {
-    fn deliver(
+/// Direct and transient messages have no durable attempt record to update.
+pub(crate) struct UnstoredAttemptEvidenceSink;
+
+impl AttemptEvidenceSink for UnstoredAttemptEvidenceSink {
+    fn record(
         &self,
+        _: RouteEffectEvidence<SessionRef, CodexGeneration>,
+    ) -> DeliveryFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+pub trait SessionMessageDelivery: Send + Sync {
+    fn deliver<'a>(
+        &'a self,
         request: DeliveryRequest,
-        evidence: &dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'_, DeliveryReceipt>;
+        evidence: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, DeliveryReceipt>;
 
     fn reconcile_attempt(
         &self,
@@ -111,11 +107,11 @@ pub trait SessionMessageDelivery: Send + Sync {
 pub trait SessionDeliveryRoute: Send + Sync {
     fn reachability(&self) -> SessionReachability;
     fn claim(&self, target: &SessionRef) -> DeliveryFuture<'_, RouteClaim>;
-    fn deliver(
-        &self,
+    fn deliver<'a>(
+        &'a self,
         request: DeliveryRequest,
-        evidence: &dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'_, DeliveryOutcome>;
+        evidence: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, DeliveryReceipt>;
     fn reconcile_attempt(
         &self,
         context: AttemptReconciliationContext,

@@ -46,11 +46,19 @@ pub use control_error_validation::control_error_is_valid;
 pub use control_schema_document::control_schema_document;
 mod control_schema_identity;
 pub use control_schema_identity::{ControlSchema, ControlSchemaError};
+mod delivery_rejection;
+mod delivery_route_evidence;
 mod message_content;
 mod session_delivery_outcome;
+pub use delivery_rejection::{DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason};
+mod session_delivery_receipt;
+mod session_message_send;
+pub use delivery_route_evidence::DeliveryRouteEvidence;
 pub use session_delivery_outcome::{
     DeliveryCorrelationId, DeliveryIdentityError, DeliveryOutcome, SessionReachability,
 };
+pub use session_delivery_receipt::{DeliveryClientReceipt, DeliveryReceipt};
+pub use session_message_send::SessionMessageSendParams;
 mod native_schema_references;
 mod native_session_catalog;
 pub use message_content::{

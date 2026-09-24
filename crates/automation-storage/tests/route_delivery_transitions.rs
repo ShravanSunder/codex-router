@@ -92,6 +92,61 @@ fn peer_evidence(
 }
 
 #[tokio::test]
+async fn unselected_attempt_completes_known_none_without_inventing_client_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "unselected-attempt-{}.sqlite",
+        OperationId::generate().as_str()
+    ));
+    let mut store = AutomationStore::open(&path).await?;
+    let (delivery_id, attempt_id) = claimed_attempt(&mut store).await?;
+    if store
+        .complete_delivery(DeliveryCompletion::<String, String, String> {
+            delivery_id: delivery_id.clone(),
+            attempt_id: attempt_id.clone(),
+            effects: None,
+            result: DeliveryResult::Unknown {
+                reason: "no route".into(),
+                receipt: None,
+            },
+            now_ms: 2000,
+        })
+        .await
+        .is_ok()
+    {
+        return Err("unselected attempt became uncertain".into());
+    }
+    if !store
+        .complete_delivery(DeliveryCompletion::<String, String, String> {
+            delivery_id: delivery_id.clone(),
+            attempt_id,
+            effects: None,
+            result: DeliveryResult::KnownNotSubmitted {
+                reason: "provider starting".into(),
+                retryable: true,
+                receipt: Some("not-submitted-receipt".into()),
+            },
+            now_ms: 2000,
+        })
+        .await?
+    {
+        return Err("known-none attempt did not complete".into());
+    }
+    let record = store
+        .read_delivery::<String, String, String>(&delivery_id)
+        .await?;
+    if record.status != DeliveryStatus::Retryable
+        || record.attempt.and_then(|attempt| attempt.effects).is_some()
+        || record.receipt.as_deref() != Some("not-submitted-receipt")
+    {
+        return Err("known-none attempt invented route evidence".into());
+    }
+    store.close().await?;
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_attempt_requires_matching_dispatch_evidence()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join(format!(
@@ -137,7 +192,7 @@ async fn provider_attempt_requires_matching_dispatch_evidence()
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: delivery_id.clone(),
             attempt_id: attempt_id.clone(),
-            effects: peer_evidence(PeerWriteEffect::Written)?,
+            effects: Some(peer_evidence(PeerWriteEffect::Written)?),
             result: DeliveryResult::Accepted {
                 receipt: "wrong route".into(),
             },
@@ -152,7 +207,7 @@ async fn provider_attempt_requires_matching_dispatch_evidence()
         .complete_delivery(DeliveryCompletion {
             delivery_id: delivery_id.clone(),
             attempt_id: attempt_id.clone(),
-            effects: provider_evidence(attempt_id, SubmissionEffect::Accepted)?,
+            effects: Some(provider_evidence(attempt_id, SubmissionEffect::Accepted)?),
             result: DeliveryResult::Accepted {
                 receipt: "provider operation".to_owned(),
             },
@@ -193,6 +248,7 @@ async fn peer_write_is_final_and_uncertain_write_never_retries()
             PeerWriteEffect::Unknown,
             DeliveryResult::Unknown {
                 reason: "partial write".into(),
+                receipt: None,
             },
             DeliveryStatus::Uncertain,
         ),
@@ -228,7 +284,7 @@ async fn peer_write_is_final_and_uncertain_write_never_retries()
             .complete_delivery(DeliveryCompletion {
                 delivery_id: delivery_id.clone(),
                 attempt_id,
-                effects: peer_evidence(write)?,
+                effects: Some(peer_evidence(write)?),
                 result,
                 now_ms: 2000,
             })

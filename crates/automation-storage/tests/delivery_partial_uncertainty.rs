@@ -86,9 +86,10 @@ async fn unknown_resume_effect_is_retained_even_when_input_was_not_dispatched()
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: id.clone(),
             attempt_id: claim.attempt_id,
-            effects: evidence.into(),
+            effects: Some(evidence.into()),
             result: DeliveryResult::Unknown {
                 reason: "resume response lost before input submission".into(),
+                receipt: None,
             },
             now_ms: 2000,
         })

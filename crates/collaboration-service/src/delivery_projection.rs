@@ -1,12 +1,16 @@
-//! Validate materialized native evidence before exposing it to SDK/CLI callers.
+//! Validate and project selected route evidence for SDK and CLI inspection.
 use agent_automation::{AttemptOutcome, DeliveryStatus};
 use automation_storage::DeliveryRecord;
 use collaboration_protocol::{
     CodexGeneration, DeliveryDisposition, DeliveryEvidence, DeliveryInspection, DeliverySource,
-    MessageDelivery, NativeSendReceipt, SessionRef,
+    MessageDelivery, SessionRef,
 };
 pub(crate) fn snapshot(
-    record: DeliveryRecord<SessionRef, CodexGeneration, NativeSendReceipt>,
+    record: DeliveryRecord<
+        SessionRef,
+        CodexGeneration,
+        crate::stored_delivery_receipt::StoredDeliveryReceipt,
+    >,
 ) -> Result<DeliveryInspection, ()> {
     let mode = match record.mode.as_str() {
         "auto" => MessageDelivery::Auto,
@@ -49,18 +53,14 @@ pub(crate) fn snapshot(
                     attempt_id: attempt.attempt_id,
                     reason,
                     effects: None,
+                    receipt: record.receipt.map(|stored| stored.into_public()),
                 }
             }
             _ => return Err(()),
         },
         Some(attempt) => {
-            let native = attempt
-                .effects
-                .as_ref()
-                .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
-                .ok_or(())?;
-            let effects = serde_json::from_value(serde_json::to_value(native).map_err(|_| ())?)
-                .map_err(|_| ())?;
+            let effects =
+                crate::delivery_route_projection::project(attempt.effects.as_ref().ok_or(())?)?;
             match attempt.outcome {
                 AttemptOutcome::InProgress if record.status == DeliveryStatus::Dispatching => {
                     DeliveryEvidence::Dispatching {
@@ -71,7 +71,7 @@ pub(crate) fn snapshot(
                 AttemptOutcome::Accepted if record.status == DeliveryStatus::Accepted => {
                     DeliveryEvidence::Accepted {
                         attempt_id: attempt.attempt_id,
-                        receipt: record.receipt.ok_or(())?,
+                        receipt: record.receipt.ok_or(())?.into_public(),
                     }
                 }
                 AttemptOutcome::KnownNotSubmitted { reason, .. }
@@ -86,6 +86,7 @@ pub(crate) fn snapshot(
                         attempt_id: attempt.attempt_id,
                         reason,
                         effects: Some(effects),
+                        receipt: record.receipt.map(|stored| stored.into_public()),
                     }
                 }
                 AttemptOutcome::Unknown { reason }
@@ -95,6 +96,7 @@ pub(crate) fn snapshot(
                         attempt_id: attempt.attempt_id,
                         effects,
                         explanation: reason,
+                        receipt: record.receipt.map(|stored| stored.into_public()),
                     }
                 }
                 _ => return Err(()),

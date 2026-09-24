@@ -1,5 +1,5 @@
 //! Stored catalog and live native inventory keep separate, endpoint-bound pagination.
-use crate::native_control_dispatch::NativeControlRequest;
+use crate::native_control_request::NativeControlRequest;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use codex_native_integration::{
     NativeOperation, NativeProtocolConnection, StoredThreadCatalog, StoredThreadCursor,

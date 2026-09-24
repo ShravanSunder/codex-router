@@ -114,7 +114,7 @@ impl AutomationStore {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|_| StorageError::InvalidRecord)?;
-        sqlx::query("INSERT INTO mailbox_deliveries(delivery_id,wakeup_id,occurrence_id,due_at_ms,fired_at_ms,target_json,message_json,delivery_mode,generation_guard_json,delivery_status,eligible_at_ms,expires_at_ms,latest_attempt_json,accepted_receipt_json,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,NULL,NULL,?)")
+        sqlx::query("INSERT INTO mailbox_deliveries(delivery_id,wakeup_id,occurrence_id,due_at_ms,fired_at_ms,target_json,message_json,delivery_mode,generation_guard_json,delivery_status,eligible_at_ms,expires_at_ms,latest_attempt_json,outcome_receipt_json,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,NULL,NULL,?)")
         .bind(delivery_id.as_str()).bind(id.as_str()).bind(fire.occurrence_id.as_str()).bind(due).bind(now_ms).bind(target).bind(message).bind(current.definition.message.delivery_mode()).bind(guard).bind(now_ms).bind(current.definition.expires_at_ms).bind(now_ms).execute(&mut *transaction).await?;
         let first = serde_json::to_string(current.first_fire.as_ref().unwrap_or(&fire))
             .map_err(|_| StorageError::InvalidRecord)?;

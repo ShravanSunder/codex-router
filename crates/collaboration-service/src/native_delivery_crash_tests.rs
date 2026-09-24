@@ -1,10 +1,15 @@
 //! Abrupt sender process loss preserves delivery identity and never manufactures acceptance.
 use super::*;
+use crate::{
+    CodexAppServerDeliveryRoute, NativeControlBackend, SessionDeliveryRoute, SessionDeliveryRouter,
+    SessionMessageDelivery,
+};
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     DeliveryDisposition, DeliveryEvidence, DeliveryShowRequest, OperationId, SavedMessage,
 };
 use futures_util::{SinkExt, StreamExt};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     os::unix::fs::DirBuilderExt,
@@ -40,7 +45,7 @@ async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> 
             tokio::process::Command::new(std::env::current_exe()?)
                 .args([
                     "--exact",
-                    "wakeup_native_sender::crash_tests::native_delivery_crash_child",
+                    "wakeup_delivery_sender::crash_tests::native_delivery_crash_child",
                     "--ignored",
                     "--nocapture",
                 ])
@@ -80,7 +85,7 @@ async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> 
         let before = store
             .lock()
             .await
-            .read_delivery::<SessionRef, CodexGeneration, NativeSendReceipt>(&delivery)
+            .read_delivery::<SessionRef, CodexGeneration, crate::stored_delivery_receipt::StoredDeliveryReceipt>(&delivery)
             .await?;
         let before_attempt = before.attempt.ok_or("persisted attempt missing")?;
         if before.status != agent_automation::DeliveryStatus::Dispatching
@@ -132,7 +137,7 @@ async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> 
         let recovered = store
             .lock()
             .await
-            .read_delivery::<SessionRef, CodexGeneration, NativeSendReceipt>(&delivery)
+            .read_delivery::<SessionRef, CodexGeneration, crate::stored_delivery_receipt::StoredDeliveryReceipt>(&delivery)
             .await?;
         if recovered.receipt.is_some() {
             return Err("recovery fabricated a lost native acceptance receipt".into());
@@ -237,10 +242,10 @@ async fn native_delivery_crash_child() -> TestResult<()> {
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let identity = identity(&root, Arc::clone(&store), OLD_EPOCH)?;
-    let sender = WakeNativeSender {
-        service_id: identity.service_id,
-        endpoints: identity.directory,
-        backend: identity.native_backend,
+    let sender = WakeDeliverySender {
+        delivery: identity
+            .session_delivery
+            .ok_or("session delivery missing")?,
         configuration: identity.configuration,
     };
     sender.dispatch(store, delivery_id).await?;
@@ -281,17 +286,25 @@ fn identity(
     )?;
     let gate = crate::NativeGenerationGate::default();
     gate.activate(generation, root.join("native.sock"), Some(schemas))?;
-    Ok(
+    let backend = NativeControlBackend {
+        endpoint,
+        gate,
+        codex_home: root.to_owned(),
+    };
+    let identity =
         crate::ServiceIdentity::new(SERVICE, epoch, &format!("sha256:{}", "a".repeat(64)))
             .map_err(std::io::Error::other)?
             .with_automation_store(store)
             .with_endpoints(vec![description])
             .map_err(std::io::Error::other)?
-            .with_native_backend(NativeControlBackend {
-                endpoint,
-                gate,
-                codex_home: root.to_owned(),
-            })
-            .map_err(std::io::Error::other)?,
-    )
+            .with_native_backend(backend.clone())
+            .map_err(std::io::Error::other)?;
+    let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
+        collaboration_protocol::UuidIdentity::try_from(SERVICE.to_owned())?,
+        identity.endpoint_directory(),
+        backend,
+    ));
+    let delivery: Arc<dyn SessionMessageDelivery> =
+        Arc::new(SessionDeliveryRouter::new(vec![route]));
+    Ok(identity.with_session_delivery(delivery))
 }

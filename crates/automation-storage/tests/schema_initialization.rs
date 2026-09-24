@@ -247,7 +247,7 @@ async fn fresh_database_runs_native_baseline_and_reopens() -> Result<(), Box<dyn
     let database = TestDatabase::new("fresh");
     AutomationStore::open(&database.path).await?.close().await?;
     let history = migration_history(&database.path).await?;
-    ensure_eq!(history.len(), 1);
+    ensure_eq!(history.len(), 2);
     ensure!(history[0].1);
     ensure!(!history[0].2.is_empty());
     AutomationStore::open(&database.path).await?.close().await?;
@@ -264,10 +264,62 @@ async fn exact_v1_is_adopted_without_changing_domain_state()
     AutomationStore::open(&database.path).await?.close().await?;
     assert_preserved_domain_state(&database.path).await?;
     let history = migration_history(&database.path).await?;
-    ensure_eq!(history.len(), 1);
+    ensure_eq!(history.len(), 2);
     AutomationStore::open(&database.path).await?.close().await?;
     assert_preserved_domain_state(&database.path).await?;
     ensure_eq!(migration_history(&database.path).await?, history);
+    Ok(())
+}
+
+#[tokio::test]
+async fn receipt_column_migration_preserves_existing_rows() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = TestDatabase::new("receipt-rename");
+    create_legacy_v1(&database.path, LEGACY_V1_SCHEMA).await?;
+    seed_all_domain_tables(&database.path).await?;
+    let mut connection = connect(&database.path).await?;
+    sqlx::query(
+        "UPDATE mailbox_deliveries SET accepted_receipt_json=? WHERE delivery_id='delivery-1'",
+    )
+    .bind("{\"legacy\":true}")
+    .execute(&mut connection)
+    .await?;
+    connection.close().await?;
+
+    AutomationStore::open(&database.path).await?.close().await?;
+    let mut connection = connect(&database.path).await?;
+    let retained: String = sqlx::query_scalar(
+        "SELECT outcome_receipt_json FROM mailbox_deliveries WHERE delivery_id='delivery-1'",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    ensure_eq!(retained, "{\"legacy\":true}");
+    connection.close().await?;
+    ensure_eq!(migration_history(&database.path).await?.len(), 2);
+
+    let valid_delivery_id = agent_automation::DeliveryId::generate();
+    let mut connection = connect(&database.path).await?;
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut connection)
+        .await?;
+    sqlx::query("UPDATE mailbox_deliveries SET delivery_id=?,latest_attempt_json=NULL,outcome_receipt_json='not-json' WHERE delivery_id='delivery-1'")
+        .bind(valid_delivery_id.as_str())
+        .execute(&mut connection).await?;
+    sqlx::query("UPDATE wakeup_definitions SET pending_delivery_id=? WHERE pending_delivery_id='delivery-1'")
+        .bind(valid_delivery_id.as_str())
+        .execute(&mut connection).await?;
+    sqlx::query("PRAGMA foreign_keys=ON")
+        .execute(&mut connection)
+        .await?;
+    connection.close().await?;
+    let mut store = AutomationStore::open(&database.path).await?;
+    let result = store
+        .read_delivery::<serde_json::Value, serde_json::Value, serde_json::Value>(
+            &valid_delivery_id,
+        )
+        .await;
+    ensure!(matches!(result, Err(StorageError::InvalidRecord)));
+    store.close().await?;
     Ok(())
 }
 
@@ -495,7 +547,7 @@ async fn held_writer_returns_database_error_without_partial_history_then_retry_s
     lock.close().await?;
     ensure!(!has_migration_history_table(&database.path).await?);
     AutomationStore::open(&database.path).await?.close().await?;
-    ensure_eq!(migration_history(&database.path).await?.len(), 1);
+    ensure_eq!(migration_history(&database.path).await?.len(), 2);
     Ok(())
 }
 
@@ -509,6 +561,6 @@ async fn concurrent_fresh_openers_converge_on_one_history_row()
     );
     first?.close().await?;
     second?.close().await?;
-    ensure_eq!(migration_history(&database.path).await?.len(), 1);
+    ensure_eq!(migration_history(&database.path).await?.len(), 2);
     Ok(())
 }

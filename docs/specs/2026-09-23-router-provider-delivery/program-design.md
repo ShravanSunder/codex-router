@@ -11,7 +11,7 @@ The design splits the two with interfaces and injection:
 ```mermaid
 flowchart TB
   subgraph features["Layer 1 — Router features (WHAT and WHEN; never see a client)"]
-    send["message send\ncodex/messageSend"]
+    send["message send\nmessage/send"]
     wake["wake sender"]
     listen["board listen push"]
     approval["approval notice"]
@@ -271,6 +271,20 @@ sequenceDiagram
 
 `DeliveryOutcome` is one tagged enum in the protocol: `started`, `steered`, `startedOrSteered`, `queued`, `peerMessageWritten`, `notSubmitted { retryable, reason }`, `rejected { reason }`, `unknown`. The receipt adds the reachability used and keeps client identifiers beside it: native turn/submission IDs from the app-server route, and the provider operation ID from the provider route. Native receipts map without losing strength, so today's `StartedOrSteered` stays `startedOrSteered`. Records written before this change keep their native receipt meaning.
 
+Public inspection shape (wake show/history, delivery records; owned by `collaboration-protocol`):
+- `DeliveryReceipt { outcome, reachability, client }` moves to the protocol, where `client` is `Option<DeliveryClientReceipt>` and `DeliveryClientReceipt::{codexAppServer(NativeSendReceipt), providerAcp { operationId }, claudeCodePeer}`. The service uses the protocol type. `reachability` is `Option<SessionReachability>`: `Some` names the route selection chose (also when that route then reported `notSubmitted`), and `None` means no route was selected (all `NotMine`, or a retryable `Unavailable` decided before selection). `client` is `Some` only when a client produced receipt evidence; a stale guard, pre-I/O `notSubmitted`, a selection `rejected`, or an `unknown` without client IDs carries `None`. A client value is never fabricated.
+- `DeliveryRouteEvidence` is the public projection of stored route evidence: `codexAppServer(NativeEffectEvidence)` (today's public native evidence, unchanged inside), `providerAcp { bindingId, generation, target, operationId, submission }`, `claudeCodePeer { sessionId, write }`.
+- `DeliveryEvidence` variants carry `Option<DeliveryRouteEvidence>` (`None` before route selection) instead of `Option<NativeEffectEvidence>`, and `Accepted` carries `DeliveryReceipt` instead of `NativeSendReceipt`.
+- Rejections carry structured, client-neutral diagnostics: `rejected(DeliveryRejection { reason, nextAction, clientCode, detail })`.
+  - `reason` is a closed set: today's native reasons (`childThread`, `busy`, `notResumable`, `permissionDenied`, `unsupportedCapability`, `unknown`) plus route reasons (`endpointUnavailable`, `noRoute`, `liveElsewhere`, `steerUnsupported`, `queueUnsupported`, `staleGeneration`).
+  - `nextAction` is a closed set: today's `inspectTarget`, `useDeliverySteer`, `requestApproval`, `correctRequest`, `retryLater`.
+  - `clientCode` is the client's own code when one exists (the native JSON-RPC code for the app-server route; the provider error code for ACP).
+  - `detail` is optional human text, such as "steer unsupported by Cursor".
+  - The app-server route fills these from today's `classify_native_rejection`, so native diagnostics are unchanged in content.
+- `message/send` always returns a `DeliveryReceipt` for any delivery outcome, including `rejected`, `notSubmitted`, and `unknown`. Control errors are reserved for invalid requests and service failures (validation, overload). The CLI keeps a non-zero exit and prints the same reason and next action for rejected and not-submitted outcomes. The MCP tool marks them as errors while returning the receipt.
+- Stored and inspected wake attempts keep the full receipt for every completed attempt, not only accepted ones. A migration renames the stored column `accepted_receipt_json` to `outcome_receipt_json`. The service stores a `DeliveryReceipt` there for accepted, rejected, not-submitted, and unknown outcomes. Old native accepted rows still decode through the private stored-receipt type. Public `KnownNotSubmitted` and `OutcomeUnknown` gain `receipt: Option<DeliveryReceipt>`, which is `None` for legacy rows and pre-selection outcomes. So a rejected wake keeps its structured `DeliveryRejection`. When a later retry replaces the latest attempt, the archived `attemptCompleted` event carries that attempt's receipt too (an optional field; legacy archived events decode as `None`), so attempt history and the automation event history show every earlier attempt's receipt.
+- This is a hard cutover of the wire shape: Codex information is preserved, nested under `codexAppServer`. In-repo CLI, MCP, and the control schema are updated together. Stored rows decode through the storage types as already specified.
+
 Feature outcome handling, now written once per feature against E5 only:
 
 | Feature | On `notSubmitted { retryable: true }` | On `unknown` / accepted | On `rejected` |
@@ -282,7 +296,7 @@ Feature outcome handling, now written once per feature against E5 only:
 
 ## Codex app-server route
 
-- Messages: `native_message_dispatch` stays the implementation but returns a typed `DeliveryOutcome` plus native IDs instead of a JSON-RPC `Value`, enforces `DeliveryPrecondition` exactly as it enforces generation today (`native_message_dispatch.rs:39`), and reports native evidence through the sink. `codex/messageSend` becomes a feature like the others: it parses params, calls `SessionMessageDelivery`, and renders the receipt into its existing response shape, so its wire behaviour is unchanged for Codex targets. Wake reconciliation (`delivery_reconciliation.rs`) moves into the route's `reconcile_attempt` unchanged.
+- Messages: `native_message_dispatch` stays the implementation but returns a typed `DeliveryOutcome` plus native IDs instead of a JSON-RPC `Value`, enforces `DeliveryPrecondition` exactly as it enforces generation today (`native_message_dispatch.rs:39`), and reports native evidence through the sink. Direct message send becomes a feature like the others: the Codex-only Control method `codex/messageSend` (`NativeSendParams -> NativeSendReceipt`) is replaced by one client-neutral method `message/send` (target, message, mode, optional generation guard as `DeliveryPrecondition`, optional correlation → `DeliveryReceipt`). It parses params, calls `SessionMessageDelivery`, and returns the receipt. For Codex targets the native receipt is carried unchanged inside `client: codexAppServer(NativeSendReceipt)`, so no native evidence is lost. This is a hard cutover: the in-repo client, CLI, MCP, and control schema move together, and there is no second method. Wake reconciliation (`delivery_reconciliation.rs`) moves into the route's `reconcile_attempt` unchanged.
 - Held threads (R8): the route checks `UnmaterializedThreadHolder` first. A held thread is loaded and idle, so it gets native semantics through the held binding: `auto` starts the first turn (`started`), `queue` uses native queue add (`queued`), and `steer` is `notSubmitted` "no running turn".
 - How threads get held: `session/new` runs `thread/start` (`session_creation.rs:313-326`), but the CLI exits and the ACP connection closes. `sessions.shutdown()` then drops the binding (`acp_connection_dispatch.rs:153`, `session_connection_registry.rs:183-198`), and upstream Codex refuses to resume or read an unmaterialized thread. On connection close, bindings whose thread has no turn move to the holder instead. A later `session/load` for a held thread adopts the held binding instead of calling `thread/resume`. The holder releases a binding once its first turn starts.
 - Scheduled runs: `codex_app_server_scheduled_runs.rs` holds today's reusable-target preparation (`schedule_preparation_dispatch.rs:157`), activation checks (`schedule_activation.rs:74-104`: ReadThread, StartTurn, InterruptTurn), fresh-thread preparation, idle-wait dispatch, observation, stop (`begin_run_stop` → `InterruptTurn` → observe), and run reconciliation (`run_reconciliation.rs`), moved behind `ScheduledRunRoute` with unchanged behaviour.
@@ -311,6 +325,14 @@ stateDiagram-v2
 | Running | Claude: `_session/steering` → `steered`. Cursor: enqueue → `queued` | enqueue → `queued` | `_session/steering` → `steered` | `rejected` "steer unsupported by Cursor" |
 | Running, turn settles with queue non-empty | next queued message starts as a new turn (stays Running) | | | |
 
+- Queued provider messages (evidence lifecycle):
+  - Accepting a message into the Router-held FIFO involves no client I/O. Before returning, the route records `providerAcp` evidence with submission `routerQueued` through the sink. `routerQueued` is a new `SubmissionEffect` that is legal only for this variant. The feature then completes the attempt as accepted with outcome `queued`. The feature's attempt is finished; its record never waits on the later submission.
+  - When the item reaches the head and the session is idle, the route submits it as its own provider operation. It uses today's supervisor admission (`prepare_operation`) with the item's `AttemptId` as the operation ID, and that evidence lives in the provider operation store, owned by the route.
+  - Reconciliation of `routerQueued` evidence looks the `AttemptId` up in that store. If it is absent, the queue was lost to a restart and the attempt is known not submitted and retryable. If it is present, the operation's state decides.
+  - The sink is never retained beyond `deliver`.
+- Steered messages are not provider operations. `_session/steering` injects into the running prompt, which already is an operation, so no new public operation kind or settlement is added.
+  - Evidence: the route records `providerAcp` evidence (`Dispatching`, keyed by the attempt's `AttemptId`) before the steering request. On `injected` it returns `steered`, with receipt `providerAcp { operation_id }` naming the running prompt's operation.
+  - A crash between the request and the reply leaves the attempt `unknown`, and it is never replayed. Reconciliation of steer evidence reports still-unknown, because there is no store record to consult.
 - Capabilities: the runtime keeps `InitializeResponse._meta.steering.supported` in the admission record. Steer is an untyped `_session/steering` request (`UntypedMessage::new`) with `_meta.steering.idleBehavior = "promptRequired"`, handled inside `run_provider_session` like the existing prompt (`runtime.rs:989-1060`). The existing `LocalBusy` rejection of a second prompt (`runtime.rs:800, 1047`) is replaced by the table.
 - Provider session records (target, cwd, access policy, creator, approver) are written when a create or load settles. They make `CanLoad` claims possible (R16) and supply the approver. They live in the provider operation store (SQLite, metadata only) under a new migration.
 - Scheduled runs (`provider_acp_scheduled_runs.rs`):
@@ -384,7 +406,7 @@ flowchart LR
 - Cross-endpoint rule: `validate_conversation_create_request` (`acp_conversation.rs:768-786`) keeps the same-service checks and drops the endpoint-equality checks for `createdBy` and `approver` (R9).
 - CLI: `conversation create|prompt|load|cancel` handle every endpoint, and `--operation-id` is optional (allocated and printed first). `conversation provider …` is removed, and `conversation operation show|wait|reconcile` is added.
 - MCP: `conversation_create`, `conversation_prompt`, `conversation_create_and_prompt`, `conversation_load`, `conversation_cancel`, and `conversation_operation_show|wait|reconcile` dispatch by endpoint. The `provider_conversation_*` tools are removed. The `OperationId` validation error names UUIDv7 and a generator command.
-- Error schema fix: `codex/sessionInspect` and `rename` error data gain the same `reason`, `nextAction` and `nativeCode` fields as `codex/messageSend` (`control_schema_document.rs:309-320,505-536`). Real native rejections then reach the caller instead of "Native control connection unavailable".
+- Error schema fix: `codex/sessionInspect` and `rename` error data gain the same `reason`, `nextAction` and `nativeCode` fields that native send errors carry (`control_schema_document.rs:309-320,505-536`). Real native rejections then reach the caller instead of "Native control connection unavailable".
 
 ## Failure and concurrency
 

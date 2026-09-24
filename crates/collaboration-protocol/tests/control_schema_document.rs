@@ -65,7 +65,7 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
         "codex/sessionList",
         "codex/sessionInspect",
         "codex/sessionRename",
-        "codex/messageSend",
+        "message/send",
         "codex/turnInterrupt",
         "approval/list",
         "approval/decide",

@@ -342,17 +342,26 @@ async fn approval_broker_fixture(
     }))?;
     let endpoints = EndpointDirectory::new(service_id.clone());
     endpoints.publish(endpoint_description)?;
+    let native_backend = NativeControlBackend {
+        codex_home: root.path().to_path_buf(),
+        endpoint: approver.endpoint.clone(),
+        gate,
+    };
     let broker = ServiceApprovalBroker::load(
         service_id.clone(),
-        endpoints,
-        NativeControlBackend {
-            codex_home: root.path().to_path_buf(),
-            endpoint: approver.endpoint.clone(),
-            gate,
-        },
+        native_backend.clone(),
         root.path().join("approval-routes.json"),
     )
     .await?;
+    let route: Arc<dyn collaboration_service::SessionDeliveryRoute> =
+        Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(
+            service_id.clone(),
+            endpoints,
+            native_backend,
+        ));
+    broker.install_session_delivery(Arc::new(
+        collaboration_service::SessionDeliveryRouter::new(vec![route]),
+    ))?;
     let backend = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut socket = tokio_tungstenite::accept_async(stream).await?;

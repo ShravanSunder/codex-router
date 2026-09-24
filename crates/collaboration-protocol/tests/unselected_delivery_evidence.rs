@@ -15,7 +15,9 @@ fn preselection_delivery_preserves_attempt_identity_without_native_evidence()
         "reason":"Host stopped before a route was selected","effects":null
     });
     let decoded: DeliveryEvidence = serde_json::from_value(known_none.clone())?;
-    if to_value(decoded)? != known_none {
+    let mut projected = known_none;
+    projected["receipt"] = serde_json::Value::Null;
+    if to_value(decoded)? != projected {
         return Err("known non-submission lost its reason or attempt identity".into());
     }
     Ok(())

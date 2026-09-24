@@ -122,7 +122,7 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
             let (stream, _) = listener.accept().await.expect("Control accept");
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
-            for method in ["control/initialize", "endpoint/list", "codex/messageSend"] {
+            for method in ["control/initialize", "message/send"] {
                 let request: Value = serde_json::from_str(
                     &lines
                         .next_line()
@@ -132,21 +132,17 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
                 )
                 .expect("Control JSON");
                 assert_eq!(request["method"], method);
-                if method == "codex/messageSend" {
+                if method == "message/send" {
                     assert_eq!(request["params"]["target"]["sessionId"], "proof-thread");
                     if let Some(kind) = rejection_kind {
-                        let mut data = json!({
-                            "kind":kind,"stage":"start","message":"Message operation failed",
-                            "effects":{"resume":"notRequested","submission":"unknown"}
-                        });
-                        if kind == "nativeRejected" {
-                            let fields = data.as_object_mut().expect("rejection fields");
-                            fields.insert("reason".to_owned(), json!("busy"));
-                            fields.insert("nextAction".to_owned(), json!("inspectTarget"));
-                        }
+                        let outcome = if kind == "nativeRejected" {
+                            json!({"kind":"rejected","reason":"busy","nextAction":"inspectTarget","clientCode":-32000,"detail":"native client is busy"})
+                        } else {
+                            json!({"kind":"unknown"})
+                        };
                         let response = json!({
                             "jsonrpc":"2.0","id":request["id"],
-                            "error":{"code":-32050,"message":"native response failed","data":data}
+                            "result":{"outcome":outcome,"reachability":"codexAppServer","client":null}
                         });
                         write
                             .write_all(format!("{response}\n").as_bytes())
@@ -156,7 +152,7 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
                     break;
                 }
                 let result = if method == "control/initialize" {
-                    json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"controlSchemaDigest":digest})
+                    json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"serviceVersion":"0.1.37","controlSchemaDigest":digest})
                 } else {
                     json!({"serviceEpoch":epoch,"sequence":0,"endpoints":[{
                         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"Fixture Codex",
@@ -217,10 +213,29 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
             Value,
             collaboration_client::protocol::AdapterOperationFailure,
         > = serde_json::from_value(result.clone()).expect("published finite message record");
-        assert_eq!(result["target"]["sessionId"], "proof-thread", "{label}");
-        assert_eq!(result["error"]["effect"], "unknown", "{label}");
         if let Some(kind) = rejection_kind {
-            assert_eq!(result["error"]["serviceKind"], kind, "{label}: {result}");
+            assert_eq!(
+                result["result"]["record"]["reachability"], "codexAppServer",
+                "{label}"
+            );
+            let outcome = &result["result"]["record"]["outcome"];
+            assert_eq!(
+                outcome["kind"],
+                if kind == "nativeRejected" {
+                    "rejected"
+                } else {
+                    "unknown"
+                },
+                "{label}: {result}"
+            );
+            if kind == "nativeRejected" {
+                assert_eq!(outcome["reason"], "busy");
+                assert_eq!(outcome["nextAction"], "inspectTarget");
+                assert_eq!(outcome["clientCode"], -32000);
+            }
+        } else {
+            assert_eq!(result["target"]["sessionId"], "proof-thread", "{label}");
+            assert_eq!(result["error"]["effect"], "unknown", "{label}");
         }
         assert!(output.stderr.is_empty(), "{label}");
     }

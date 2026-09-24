@@ -241,12 +241,10 @@ pub(super) fn finalize_command(
             pending.request.reader = finalize_actor(&pending.actor, client)?;
             if pending.request.delivery == ThreadListenDelivery::Session {
                 match &pending.request.reader {
-                    Identity::Session { session }
-                        if session.endpoint.endpoint_id.as_str() == "codex-local" => {}
+                    Identity::Session { .. } => {}
                     _ => {
                         return Err(
-                            "--deliver session requires the calling codex-local session identity"
-                                .into(),
+                            "--deliver session requires the calling session identity".into()
                         );
                     }
                 }
@@ -991,9 +989,9 @@ fn prepare_thread_listen(
         .and_then(parse_actor_input)?;
     if delivery == ThreadListenDelivery::Session
         && let ActorInput::Explicit(identity) = &actor
-        && !is_codex_session_identity(identity)
+        && !is_session_identity(identity)
     {
-        return Err("--deliver session requires the calling codex-local session identity".into());
+        return Err("--deliver session requires the calling session identity".into());
     }
     let acknowledge = match (arguments.acknowledge, arguments.no_acknowledge) {
         (true, false) => true,
@@ -1025,8 +1023,8 @@ fn prepare_thread_listen(
     ))
 }
 
-pub(super) fn is_codex_session_identity(identity: &Identity) -> bool {
-    matches!(identity, Identity::Session { session } if session.endpoint.endpoint_id.as_str() == "codex-local")
+pub(super) fn is_session_identity(identity: &Identity) -> bool {
+    matches!(identity, Identity::Session { .. })
 }
 
 fn prepare_thread_wait(
