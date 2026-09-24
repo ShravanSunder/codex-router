@@ -7,6 +7,7 @@ mod app_server_shutdown;
 mod child_diagnostics;
 mod claude_code_peer_delivery_route;
 pub use claude_code_peer_delivery_route::ClaudeCodePeerDeliveryRoute;
+mod claude_code_peer_scheduled_runs;
 mod codex_update_preparation;
 mod explicit_app_server_restart;
 mod explicit_router_restart;

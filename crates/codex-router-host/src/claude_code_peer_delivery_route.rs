@@ -19,6 +19,7 @@ use collaboration_service::{
 };
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct ClaudeCodePeerDeliveryRoute {
     service_id: UuidIdentity,
     registry: Arc<ClaudeCodeSessionRegistry>,
@@ -39,12 +40,12 @@ impl ClaudeCodePeerDeliveryRoute {
         }
     }
 
-    fn serves(&self, target: &SessionRef) -> bool {
+    pub(crate) fn serves(&self, target: &SessionRef) -> bool {
         target.endpoint.service_id == self.service_id
             && String::from(target.endpoint.endpoint_id.clone()) == "claude-local"
     }
 
-    async fn lookup(&self, target: &SessionRef) -> PeerSessionLookup {
+    pub(crate) async fn lookup(&self, target: &SessionRef) -> PeerSessionLookup {
         let registry = Arc::clone(&self.registry);
         let session_id = target.session_id.clone();
         match tokio::task::spawn_blocking(move || registry.lookup(&session_id)).await {
@@ -55,7 +56,7 @@ impl ClaudeCodePeerDeliveryRoute {
         }
     }
 
-    fn evidence(
+    pub(crate) fn evidence(
         peer: &PeerSessionRecord,
         write: PeerWriteEffect,
     ) -> Result<RouteEffectEvidence<SessionRef, CodexGeneration>, DeliveryContractError> {
@@ -70,7 +71,7 @@ impl ClaudeCodePeerDeliveryRoute {
         ))
     }
 
-    fn render_peer_message(
+    pub(crate) fn render_peer_message(
         target: &SessionRef,
         message: &MessageContent,
     ) -> Result<String, DeliveryContractError> {
@@ -94,6 +95,14 @@ impl ClaudeCodePeerDeliveryRoute {
                 rendered.text,
             )),
         }
+    }
+
+    pub(crate) async fn write_peer_message(
+        &self,
+        peer: &PeerSessionRecord,
+        message: &str,
+    ) -> PeerSocketWriteOutcome {
+        self.socket.write_user_message(peer, message).await
     }
 }
 
@@ -140,6 +149,9 @@ impl LiveSessionOwnershipCheck for ClaudeCodePeerDeliveryRoute {
 }
 
 impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
+    fn scheduled_runs(&self) -> Option<Arc<dyn collaboration_service::ScheduledRunRoute>> {
+        Some(Arc::new(self.clone()))
+    }
     fn reachability(&self) -> SessionReachability {
         SessionReachability::ClaudeCodePeer
     }
