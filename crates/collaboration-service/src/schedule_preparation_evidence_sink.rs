@@ -72,7 +72,9 @@ fn validate_prepared_target(prepared: &PreparedTarget) -> Result<(), DeliveryCon
         RouteEffectEvidence::CodexAppServer(native) => {
             native.target.as_ref() == Some(&prepared.target)
         }
-        RouteEffectEvidence::ProviderAcp(provider) => provider.target == prepared.target,
+        RouteEffectEvidence::ProviderAcp(provider) => {
+            provider.target.as_ref() == Some(&prepared.target)
+        }
         RouteEffectEvidence::ClaudeCodePeer(peer) => {
             peer.session_id.as_str() == String::from(prepared.target.session_id.clone())
         }
@@ -95,6 +97,15 @@ fn same_preparation_identity(
         ) => {
             before.generation == after.generation
                 && before.client_user_message_id == after.client_user_message_id
+                && before
+                    .target
+                    .as_ref()
+                    .is_none_or(|target| after.target.as_ref() == Some(target))
+        }
+        (RouteEffectEvidence::ProviderAcp(before), RouteEffectEvidence::ProviderAcp(after)) => {
+            before.generation == after.generation
+                && before.binding == after.binding
+                && before.attempt_id == after.attempt_id
                 && before
                     .target
                     .as_ref()

@@ -379,7 +379,7 @@ async fn router_queued_reconciliation_uses_only_the_operation_store() {
     let operation_id =
         agent_automation::OperationId::try_from(attempt.as_str().to_owned()).expect("operation ID");
     let evidence = RouteEffectEvidence::ProviderAcp(ProviderAcpEffectEvidence {
-        target: target.clone(),
+        target: Some(target.clone()),
         generation: binding.generation.clone(),
         binding: ProviderBindingReference::try_from(String::from(binding.binding_id.clone()))
             .expect("binding reference"),

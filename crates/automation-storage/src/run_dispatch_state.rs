@@ -42,7 +42,8 @@ impl AutomationStore {
                     && native.submission == SubmissionEffect::Dispatching
             }
             RouteEffectEvidence::ProviderAcp(provider) => {
-                provider.submission == SubmissionEffect::Dispatching
+                provider.target.is_some()
+                    && provider.submission == SubmissionEffect::Dispatching
                     && provider.settlement == ProviderSettlementEffect::NotObserved
             }
             RouteEffectEvidence::ClaudeCodePeer(peer) => peer.write == PeerWriteEffect::Dispatching,
@@ -76,7 +77,8 @@ impl AutomationStore {
                     && before.generation == after.generation
                     && before.binding == after.binding
                     && before.attempt_id == after.attempt_id
-                    && before.submission == SubmissionEffect::Dispatching
+                    && before.submission == SubmissionEffect::NotDispatched
+                    && after.submission == SubmissionEffect::Dispatching
             }
             (
                 RouteEffectEvidence::ClaudeCodePeer(before),
@@ -84,7 +86,8 @@ impl AutomationStore {
             ) => {
                 before.session_id == after.session_id
                     && before.process_id == after.process_id
-                    && before.write == PeerWriteEffect::Dispatching
+                    && before.write == PeerWriteEffect::NotDispatched
+                    && after.write == PeerWriteEffect::Dispatching
             }
             _ => false,
         };

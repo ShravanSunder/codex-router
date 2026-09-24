@@ -101,7 +101,7 @@ impl AutomationStore {
                         },
                     ),
                     agent_automation::RouteEffectEvidence::ProviderAcp(provider) => (
-                        provider.target.clone(),
+                        provider.target.clone().ok_or(StorageError::InvalidRecord)?,
                         agent_automation::SummarySourceReference::ProviderOperation {
                             attempt_id: provider.attempt_id.clone(),
                         },

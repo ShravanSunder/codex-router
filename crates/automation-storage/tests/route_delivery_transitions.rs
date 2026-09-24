@@ -70,7 +70,7 @@ fn provider_evidence(
 ) -> Result<RouteEffectEvidence<String, String>, Box<dyn std::error::Error>> {
     Ok(RouteEffectEvidence::ProviderAcp(
         ProviderAcpEffectEvidence {
-            target: "target".into(),
+            target: Some("target".into()),
             generation: "generation-1".into(),
             binding: ProviderBindingReference::try_from("binding-1".to_owned())?,
             attempt_id,

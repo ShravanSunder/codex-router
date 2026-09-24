@@ -309,21 +309,21 @@ impl ScheduledRunWorker {
         match prepared {
             Ok(_) => Ok(()),
             Err(DeliveryContractError::ClientOperation) => {
-                let Some(RouteEffectEvidence::CodexAppServer(native)) = sink.latest().await else {
+                let Some(evidence) = sink.latest().await else {
                     return Ok(());
                 };
-                if matches!(native.allocation, PreparationEffect::Unknown)
-                    || matches!(native.resume, PreparationEffect::Unknown)
+                if let RouteEffectEvidence::CodexAppServer(native) = &evidence
+                    && route_preparation_unknown(&evidence)
                 {
                     self.store.lock().await.retain_run_uncertainty::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(
-                        RunUncertainty { run_id: record.run_id, effects: native },
+                        RunUncertainty { run_id: record.run_id, effects: native.clone() },
                     ).await?;
                 } else {
                     self.store.lock().await.fail_run_preparation::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(
                         automation_storage::RunPreparationFailure {
                             run_id: record.run_id,
-                            effects: native.into(),
-                            explanation: "Native preparation could not confirm its target; no worker input was submitted.".into(),
+                            effects: evidence,
+                            explanation: "Route preparation could not confirm its target; no worker input was submitted.".into(),
                             now_ms: chrono::Utc::now().timestamp_millis(),
                         },
                     ).await?;
@@ -360,6 +360,9 @@ impl ScheduledRunWorker {
                         .timestamp_millis();
                     RunSubmissionOutcome::PeerWritten {
                         written_at_ms: timestamp,
+                        receipt: crate::stored_run_receipt::StoredRunReceipt::Current(
+                            acceptance.receipt,
+                        ),
                     }
                 }
             },
@@ -395,7 +398,7 @@ fn route_preparation_unknown(evidence: &RouteEffectEvidence<SessionRef, CodexGen
 fn route_target(evidence: &RouteEffectEvidence<SessionRef, CodexGeneration>) -> Option<SessionRef> {
     match evidence {
         RouteEffectEvidence::CodexAppServer(native) => native.target.clone(),
-        RouteEffectEvidence::ProviderAcp(provider) => Some(provider.target.clone()),
+        RouteEffectEvidence::ProviderAcp(provider) => provider.target.clone(),
         RouteEffectEvidence::ClaudeCodePeer(_) => None,
     }
 }

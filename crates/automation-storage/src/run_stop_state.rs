@@ -7,6 +7,7 @@ use sqlx::Connection;
 pub enum RunStopIdentity {
     NativeTurn(String),
     ProviderOperation(AttemptId),
+    PeerMessageWritten,
 }
 impl AutomationStore {
     pub async fn begin_run_stop<

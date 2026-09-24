@@ -148,7 +148,7 @@ impl ProviderAcpDeliveryRoute {
                 .map_err(|_| DeliveryContractError::InvalidEvidence)?;
         Ok(RouteEffectEvidence::ProviderAcp(
             ProviderAcpEffectEvidence {
-                target: request.target.clone(),
+                target: Some(request.target.clone()),
                 generation: binding.generation.clone(),
                 binding: reference,
                 attempt_id: request.attempt.clone(),
@@ -495,7 +495,7 @@ impl SessionDeliveryRoute for ProviderAcpDeliveryRoute {
             let RouteEffectEvidence::ProviderAcp(provider) = context.recorded else {
                 return Err(DeliveryContractError::InvalidEvidence);
             };
-            if provider.target != context.target {
+            if provider.target.as_ref() != Some(&context.target) {
                 return Err(DeliveryContractError::InvalidEvidence);
             }
             let operation_id = OperationId::try_from(provider.attempt_id.as_str().to_owned())

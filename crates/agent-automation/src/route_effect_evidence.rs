@@ -78,7 +78,11 @@ impl<TTarget: PartialEq, TGeneration: PartialEq> RouteEffectEvidence<TTarget, TG
                     && before.client_user_message_id == after.client_user_message_id
             }
             (Self::ProviderAcp(before), Self::ProviderAcp(after)) => {
-                before.target == after.target
+                (before.target == after.target
+                    || (before.target.is_none()
+                        && before.submission == SubmissionEffect::NotDispatched
+                        && before.settlement == ProviderSettlementEffect::NotObserved
+                        && after.target.is_some()))
                     && before.generation == after.generation
                     && before.binding == after.binding
                     && before.attempt_id == after.attempt_id
@@ -102,7 +106,7 @@ impl<TTarget, TGeneration> From<NativeEffectEvidence<TTarget, TGeneration>>
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderAcpEffectEvidence<TTarget, TGeneration> {
-    pub target: TTarget,
+    pub target: Option<TTarget>,
     pub generation: TGeneration,
     pub binding: ProviderBindingReference,
     pub attempt_id: AttemptId,
@@ -113,6 +117,12 @@ pub struct ProviderAcpEffectEvidence<TTarget, TGeneration> {
 impl<TTarget, TGeneration> ProviderAcpEffectEvidence<TTarget, TGeneration> {
     #[must_use]
     pub fn is_valid(&self) -> bool {
+        if self.target.is_none()
+            && (self.submission != SubmissionEffect::NotDispatched
+                || self.settlement != ProviderSettlementEffect::NotObserved)
+        {
+            return false;
+        }
         match self.settlement {
             ProviderSettlementEffect::NotObserved => true,
             ProviderSettlementEffect::StopRequested | ProviderSettlementEffect::Confirmed => {
@@ -125,7 +135,7 @@ impl<TTarget, TGeneration> ProviderAcpEffectEvidence<TTarget, TGeneration> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProviderAcpEffectFields<TTarget, TGeneration> {
-    target: TTarget,
+    target: Option<TTarget>,
     generation: TGeneration,
     binding: ProviderBindingReference,
     attempt_id: AttemptId,

@@ -67,7 +67,7 @@ pub(crate) fn snapshot<TReceipt: Into<DeliveryReceipt>>(
                 ..
             }),
             Some(timing),
-        ) => Some(RunExecution::ProviderAcp {
+        ) => target.as_ref().map(|target| RunExecution::ProviderAcp {
             target: target.clone(),
             operation_id: operation_id.clone(),
             started_at: timing.dispatch_started_at.clone(),

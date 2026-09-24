@@ -83,7 +83,7 @@ fn router_queued_evidence_is_provider_only() {
     assert!(serde_json::from_value::<RouteEffectEvidence<String, String>>(native).is_err());
 
     let provider = RouteEffectEvidence::<String, String>::ProviderAcp(ProviderAcpEffectEvidence {
-        target: "claude-thread".to_owned(),
+        target: Some("claude-thread".to_owned()),
         generation: "generation-2".to_owned(),
         binding: ProviderBindingReference::try_from("binding-1".to_owned()).expect("binding"),
         attempt_id: agent_automation::AttemptId::generate(),
@@ -98,7 +98,7 @@ fn router_queued_evidence_is_provider_only() {
 #[test]
 fn provider_and_peer_evidence_round_trip_as_separate_routes() {
     let provider = RouteEffectEvidence::<String, String>::ProviderAcp(ProviderAcpEffectEvidence {
-        target: "claude-thread".to_owned(),
+        target: Some("claude-thread".to_owned()),
         generation: "generation-2".to_owned(),
         binding: ProviderBindingReference::try_from("binding-1".to_owned()).unwrap(),
         attempt_id: agent_automation::AttemptId::generate(),
@@ -127,6 +127,46 @@ fn provider_and_peer_evidence_round_trip_as_separate_routes() {
 }
 
 #[test]
+fn fresh_provider_intent_can_learn_target_only_before_submission() {
+    let intent = ProviderAcpEffectEvidence::<String, String> {
+        target: None,
+        generation: "generation-2".to_owned(),
+        binding: ProviderBindingReference::try_from("binding-1".to_owned()).unwrap(),
+        attempt_id: agent_automation::AttemptId::generate(),
+        submission: SubmissionEffect::NotDispatched,
+        settlement: ProviderSettlementEffect::NotObserved,
+    };
+    let mut prepared = intent.clone();
+    prepared.target = Some("created-session".to_owned());
+    assert!(intent.is_valid());
+    assert!(
+        RouteEffectEvidence::ProviderAcp(intent.clone())
+            .same_client_identity(&RouteEffectEvidence::ProviderAcp(prepared.clone()))
+    );
+    assert!(
+        !RouteEffectEvidence::ProviderAcp(prepared.clone())
+            .same_client_identity(&RouteEffectEvidence::ProviderAcp(intent.clone()))
+    );
+    let mut invalid = intent;
+    invalid.submission = SubmissionEffect::Accepted;
+    assert!(!invalid.is_valid());
+    let encoded = serde_json::to_value(invalid).unwrap();
+    assert!(
+        serde_json::from_value::<RouteEffectEvidence<String, String>>(serde_json::json!({
+            "kind":"providerAcp",
+            "target":null,
+            "generation":"generation-2",
+            "binding":"binding-1",
+            "attemptId":prepared.attempt_id,
+            "submission":"accepted",
+            "settlement":"notObserved"
+        }))
+        .is_err()
+    );
+    assert_eq!(encoded["target"], serde_json::Value::Null);
+}
+
+#[test]
 fn route_settlement_distinguishes_turn_operation_and_write_evidence() {
     let native: NativeEffectEvidence<String, String> =
         serde_json::from_value(legacy_native()).expect("native evidence decodes");
@@ -136,7 +176,7 @@ fn route_settlement_distinguishes_turn_operation_and_write_evidence() {
     );
 
     let mut provider_effect = ProviderAcpEffectEvidence {
-        target: "claude-thread".to_owned(),
+        target: Some("claude-thread".to_owned()),
         generation: "generation-2".to_owned(),
         binding: "binding-1".to_owned().try_into().expect("valid binding"),
         attempt_id: agent_automation::AttemptId::generate(),

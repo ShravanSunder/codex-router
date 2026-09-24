@@ -2,10 +2,15 @@
 //! A peer scheduled run is a write-only acceptance through the real socket client.
 use agent_automation::{CapturedRunInputs, RouteEffectEvidence, RunId, RunPhase};
 use claude_code_peer_messaging::{ClaudeCodePeerSocket, ClaudeCodeSessionRegistry};
-use codex_router_host::ClaudeCodePeerDeliveryRoute;
+use codex_router_host::{
+    ClaudeCodePeerDeliveryRoute, CollaborationRuntime, CollaborationRuntimeInputs,
+};
+use collaboration_client::ControlClient;
 use collaboration_protocol::{
-    CodexGeneration, DeliveryOutcome, EndpointId, EndpointRef, MessageText, RunExecution,
-    SessionId, SessionRef, UuidIdentity,
+    AutomationConfigureRequest, CodexGeneration, DeliveryOutcome, EndpointId, EndpointRef,
+    InstructionCreateParams, InstructionText, MessageText, OperationId, RunExecution,
+    RunShowRequest, RunState, ScheduleCreateRequest, ScheduleEnableRequest, SchedulePrepareRequest,
+    SessionId, SessionRef, UuidIdentity, WorkerOutcome,
 };
 use collaboration_service::{
     DeliveryFuture, DeliveryPrecondition, RunEvidenceDisposition, RunEvidenceSink,
@@ -15,7 +20,8 @@ use collaboration_service::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use std::{os::unix::fs::PermissionsExt as _, sync::Arc};
+use sqlx::Connection as _;
+use std::{os::unix::fs::PermissionsExt as _, path::Path, sync::Arc};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 
 struct RecordedRunEvidence(
@@ -38,14 +44,10 @@ impl RunEvidenceSink for RecordedRunEvidence {
     }
 }
 
-#[tokio::test]
-async fn existing_live_peer_run_finishes_as_written_without_summary() {
-    let root = tempfile::tempdir().expect("registry root");
-    let session_id = SessionId::try_from("peer-run".to_owned()).expect("session ID");
-    let socket_path = root.path().join("peer.sock");
+fn publish_peer(root: &Path, session_id: &SessionId, socket_path: &Path) {
     let process_id = std::process::id();
     std::fs::write(
-        root.path().join(format!("{process_id}.json")),
+        root.join(format!("{process_id}.json")),
         json!({
             "pid": process_id,
             "sessionId": String::from(session_id.clone()),
@@ -57,13 +59,21 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
     )
     .expect("registry record");
     let digest = Sha256::digest(socket_path.to_str().expect("socket path").as_bytes());
-    let key = root.path().join(format!("{process_id}.{digest:x}.key"));
+    let key = root.join(format!("{process_id}.{digest:x}.key"));
     std::fs::write(
         &key,
         json!({"peerToken":"0123456789abcdef0123456789abcdef"}).to_string(),
     )
     .expect("peer key");
     std::fs::set_permissions(key, std::fs::Permissions::from_mode(0o600)).expect("private key");
+}
+
+#[tokio::test]
+async fn existing_live_peer_run_finishes_as_written_without_summary() {
+    let root = tempfile::tempdir().expect("registry root");
+    let session_id = SessionId::try_from("peer-run".to_owned()).expect("session ID");
+    let socket_path = root.path().join("peer.sock");
+    publish_peer(root.path(), &session_id, &socket_path);
     let listener = tokio::net::UnixListener::bind(&socket_path).expect("peer listener");
     let target = SessionRef {
         endpoint: EndpointRef {
@@ -136,7 +146,7 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
         "continuity":{"kind":"none"},
         "executionConfiguration":{
             "destination":{"kind":"ownedThread","target":target,"cwd":"/tmp"},
-            "executionTimeoutSeconds":120,"model":null,"effort":null
+            "executionTimeoutSeconds":120,"model":"fixture-model","effort":"medium"
         }
     }))
     .expect("captured inputs");
@@ -202,4 +212,166 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
             .expect("stop outcome"),
         StopRequestOutcome::Unsupported
     ));
+}
+
+#[tokio::test]
+async fn host_worker_finalizes_peer_run_as_written() {
+    let root = tempfile::tempdir().expect("Host root");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private Host root");
+    let registry = root.path().join("peer-registry");
+    std::fs::create_dir(&registry).expect("registry directory");
+    let session_id = SessionId::try_from("scheduled-peer-host".to_owned()).expect("session ID");
+    let socket_path = registry.join("peer.sock");
+    publish_peer(&registry, &session_id, &socket_path);
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("peer listener");
+    let receiver = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("peer accepted");
+        let mut lines = BufReader::new(stream).lines();
+        let _auth = lines.next_line().await.expect("auth frame").expect("auth");
+        let user: Value =
+            serde_json::from_str(&lines.next_line().await.expect("user frame").expect("user"))
+                .expect("user JSON");
+        user
+    });
+    let runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
+        directory: root.path().to_owned(),
+        codex_home: root.path().to_owned(),
+        backend_socket: root.path().join("absent-native.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        native_schema: None,
+        peer_registry_directory: Some(registry),
+    })
+    .await
+    .expect("Host runtime");
+    let target = SessionRef {
+        endpoint: EndpointRef {
+            service_id: runtime.service_id().clone(),
+            endpoint_id: EndpointId::try_from("claude-local".to_owned()).expect("endpoint ID"),
+        },
+        session_id,
+    };
+    let mut client = ControlClient::connect(root.path(), "peer-run-host-proof", "1")
+        .await
+        .expect("Control client");
+    client
+        .configure_automation(AutomationConfigureRequest {
+            operation_id: OperationId::generate(),
+            execution_timeout_seconds: 120.try_into().expect("execution timeout"),
+            summary_timeout_seconds: 30.try_into().expect("summary timeout"),
+        })
+        .await
+        .expect("automation configured");
+    let instruction = client
+        .create_instruction(InstructionCreateParams {
+            operation_id: OperationId::generate(),
+            text: InstructionText::try_from("Check peer work".to_owned()).expect("instruction"),
+        })
+        .await
+        .expect("instruction created");
+    let schedule: ScheduleCreateRequest = serde_json::from_value(json!({
+        "operationId":OperationId::generate(),
+        "definition":{
+            "instructionId":instruction.instruction_id,
+            "timing":{"kind":"after","seconds":1},
+            "enabled":false,
+            "destination":{"kind":"unprepared"},
+            "executionTimeoutSeconds":120,"model":"fixture-model","effort":"medium"
+        }
+    }))
+    .expect("schedule request");
+    let created = client
+        .create_schedule(schedule)
+        .await
+        .expect("schedule created");
+    client
+        .prepare_schedule(SchedulePrepareRequest {
+            operation_id: OperationId::generate(),
+            schedule_id: created.schedule_id.clone(),
+            destination: collaboration_protocol::DestinationPreparation::Existing {
+                target: target.clone(),
+                cwd: root.path().display().to_string(),
+            },
+        })
+        .await
+        .expect("peer schedule prepared");
+    let created = client
+        .enable_schedule(ScheduleEnableRequest {
+            operation_id: OperationId::generate(),
+            schedule_id: created.schedule_id,
+        })
+        .await
+        .expect("peer schedule enabled");
+    let mut database = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(root.path().join("automation.sqlite")),
+    )
+    .await
+    .expect("automation database");
+    let run_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let found: Option<String> =
+                sqlx::query_scalar("SELECT run_id FROM workflow_runs WHERE schedule_id=? LIMIT 1")
+                    .bind(created.schedule_id.as_str())
+                    .fetch_optional(&mut database)
+                    .await
+                    .expect("run lookup");
+            if let Some(found) = found {
+                break RunId::try_from(found).expect("run ID");
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("run admission deadline");
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let snapshot = client
+                .read_run(RunShowRequest {
+                    run_id: run_id.clone(),
+                })
+                .await
+                .expect("run inspection");
+            if matches!(snapshot.state, RunState::Finished { .. }) {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let finished = match finished {
+        Ok(finished) => finished,
+        Err(_) => {
+            let snapshot = client
+                .read_run(RunShowRequest { run_id })
+                .await
+                .expect("timed-out run inspection");
+            panic!("peer run finish deadline: {snapshot:?}");
+        }
+    };
+    assert!(matches!(
+        finished.state,
+        RunState::Finished {
+            execution: RunExecution::ClaudeCodePeer { .. },
+            outcome: WorkerOutcome::PeerMessageWritten { .. },
+            summary_run_id: None,
+            ..
+        }
+    ));
+    assert_eq!(
+        finished
+            .execution_evidence
+            .acceptance
+            .expect("acceptance receipt")
+            .outcome,
+        DeliveryOutcome::PeerMessageWritten
+    );
+    assert!(finished.summary.is_none());
+    assert!(
+        receiver.await.expect("peer receiver")["message"]["content"]
+            .as_str()
+            .expect("peer content")
+            .contains("Check peer work")
+    );
+    client.close().await.expect("Control close");
+    runtime.shutdown().await.expect("Host shutdown");
 }

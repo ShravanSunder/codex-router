@@ -127,7 +127,7 @@ mod tests {
 
     fn provider(submission: SubmissionEffect) -> RouteEffectEvidence<String, String> {
         RouteEffectEvidence::ProviderAcp(ProviderAcpEffectEvidence {
-            target: "target".to_owned(),
+            target: Some("target".to_owned()),
             generation: "generation".to_owned(),
             binding: ProviderBindingReference::try_from("binding".to_owned()).expect("binding"),
             attempt_id: AttemptId::try_from("018f1f62-6571-7ef0-8f0c-001122334499".to_owned())

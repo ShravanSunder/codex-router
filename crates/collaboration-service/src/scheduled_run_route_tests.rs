@@ -60,12 +60,12 @@ impl FakeScheduledExecution {
         match self.kind {
             FakeRouteKind::Provider => {
                 RouteEffectEvidence::ProviderAcp(ProviderAcpEffectEvidence {
-                    target: self.target.clone(),
+                    target: Some(self.target.clone()),
                     generation: self.generation.clone(),
                     binding: ProviderBindingReference::try_from("fixture-binding".to_owned())
                         .unwrap_or_else(|error| panic!("binding: {error}")),
                     attempt_id: self.attempt_id.clone(),
-                    submission: SubmissionEffect::Dispatching,
+                    submission: SubmissionEffect::NotDispatched,
                     settlement: ProviderSettlementEffect::NotObserved,
                 })
             }
@@ -77,7 +77,7 @@ impl FakeScheduledExecution {
                     process_id: 42_u32
                         .try_into()
                         .unwrap_or_else(|error| panic!("process: {error}")),
-                    write: PeerWriteEffect::Dispatching,
+                    write: PeerWriteEffect::NotDispatched,
                 })
             }
         }
@@ -190,8 +190,14 @@ impl ScheduledRunExecution for FakeScheduledExecution {
                 return Ok(RunSubmission::NotStartedBusy);
             }
             let mut evidence = run.recorded;
-            if let RouteEffectEvidence::ClaudeCodePeer(peer) = &mut evidence {
-                peer.write = PeerWriteEffect::Dispatching;
+            match &mut evidence {
+                RouteEffectEvidence::ProviderAcp(provider) => {
+                    provider.submission = SubmissionEffect::Dispatching;
+                }
+                RouteEffectEvidence::ClaudeCodePeer(peer) => {
+                    peer.write = PeerWriteEffect::Dispatching;
+                }
+                RouteEffectEvidence::CodexAppServer(_) => {}
             }
             let timing = match sink.record(evidence.clone()).await? {
                 RunEvidenceDisposition::Recorded {
