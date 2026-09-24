@@ -118,12 +118,22 @@ impl ApprovalFixture {
         };
         let broker = ServiceApprovalBroker::load(
             service_id.clone(),
-            endpoints,
             native_backend.clone(),
             directory.path().join("approval-routes.json"),
         )
         .await
         .expect("approval broker");
+        let route: Arc<dyn collaboration_service::SessionDeliveryRoute> =
+            Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(
+                service_id.clone(),
+                endpoints,
+                native_backend.clone(),
+            ));
+        broker
+            .install_session_delivery(Arc::new(collaboration_service::SessionDeliveryRouter::new(
+                vec![route],
+            )))
+            .expect("delivery injection");
         broker
             .register_route(ApprovalRoute {
                 thread_id: String::from(requester.session_id.clone()),

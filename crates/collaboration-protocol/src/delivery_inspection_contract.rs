@@ -1,6 +1,7 @@
 //! Delivery eligibility and native evidence are separate, explicit inspection dimensions.
 use crate::{
-    CodexGeneration, MessageDelivery, NativeSendReceipt, ObservationTimestamp, SessionRef,
+    CodexGeneration, DeliveryReceipt, DeliveryRouteEvidence, MessageDelivery, ObservationTimestamp,
+    SessionRef,
 };
 use agent_automation::{AttemptId, DeliveryId, OccurrenceId, WakeupId};
 use schemars::JsonSchema;
@@ -60,22 +61,26 @@ pub enum DeliveryEvidence {
     Dispatching {
         attempt_id: AttemptId,
         #[serde(deserialize_with = "Option::deserialize")]
-        effects: Option<NativeEffectEvidence>,
+        effects: Option<DeliveryRouteEvidence>,
     },
     KnownNotSubmitted {
         attempt_id: AttemptId,
         reason: String,
         #[serde(deserialize_with = "Option::deserialize")]
-        effects: Option<NativeEffectEvidence>,
+        effects: Option<DeliveryRouteEvidence>,
+        #[serde(default, deserialize_with = "Option::deserialize")]
+        receipt: Option<DeliveryReceipt>,
     },
     Accepted {
         attempt_id: AttemptId,
-        receipt: NativeSendReceipt,
+        receipt: DeliveryReceipt,
     },
     OutcomeUnknown {
         attempt_id: AttemptId,
-        effects: NativeEffectEvidence,
+        effects: DeliveryRouteEvidence,
         explanation: String,
+        #[serde(default, deserialize_with = "Option::deserialize")]
+        receipt: Option<DeliveryReceipt>,
     },
 }
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]

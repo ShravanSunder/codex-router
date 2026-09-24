@@ -108,6 +108,7 @@ async fn cancellation_retains_latest_acceptance_and_current_uncertainty()
                 SubmissionEffect::Unknown,
                 DeliveryResult::Unknown {
                     reason: "reply lost".into(),
+                    receipt: None,
                 },
             )
         };
@@ -115,7 +116,7 @@ async fn cancellation_retains_latest_acceptance_and_current_uncertainty()
             .complete_delivery(DeliveryCompletion {
                 delivery_id: id.clone(),
                 attempt_id: claim.attempt_id,
-                effects: effects(submission).into(),
+                effects: Some(effects(submission).into()),
                 result,
                 now_ms,
             })
@@ -192,10 +193,11 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: id.clone(),
             attempt_id: first.attempt_id.clone(),
-            effects: effects(SubmissionEffect::Rejected).into(),
+            effects: Some(effects(SubmissionEffect::Rejected).into()),
             result: DeliveryResult::KnownNotSubmitted {
                 reason: "temporary unavailable".into(),
                 retryable: true,
+                receipt: None,
             },
             now_ms: 1000,
         })
@@ -222,9 +224,10 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: id.clone(),
             attempt_id: next.attempt_id.clone(),
-            effects: effects(SubmissionEffect::Unknown).into(),
+            effects: Some(effects(SubmissionEffect::Unknown).into()),
             result: DeliveryResult::Unknown {
                 reason: "response lost".into(),
+                receipt: None,
             },
             now_ms: 100000,
         })
@@ -310,7 +313,7 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
         .complete_delivery(DeliveryCompletion {
             delivery_id: id,
             attempt_id: first.attempt_id,
-            effects: effects(SubmissionEffect::Accepted).into(),
+            effects: Some(effects(SubmissionEffect::Accepted).into()),
             result: DeliveryResult::Accepted {
                 receipt: "old receipt".to_owned(),
             },
@@ -380,10 +383,11 @@ async fn pause_during_dispatch_prevents_late_rejection_from_resurrecting_message
         .complete_delivery(DeliveryCompletion::<_, _, String> {
             delivery_id: id.clone(),
             attempt_id: claim.attempt_id,
-            effects: effects(SubmissionEffect::Rejected).into(),
+            effects: Some(effects(SubmissionEffect::Rejected).into()),
             result: DeliveryResult::KnownNotSubmitted {
                 reason: "late temporary rejection".into(),
                 retryable: true,
+                receipt: None,
             },
             now_ms: 63000,
         })
@@ -459,6 +463,7 @@ async fn pause_preserves_late_acceptance_and_unknown_effects()
                 SubmissionEffect::Unknown,
                 DeliveryResult::Unknown {
                     reason: "response lost".into(),
+                    receipt: None,
                 },
             )
         };
@@ -466,7 +471,7 @@ async fn pause_preserves_late_acceptance_and_unknown_effects()
             .complete_delivery(DeliveryCompletion {
                 delivery_id: id.clone(),
                 attempt_id: claim.attempt_id,
-                effects: effects(effect).into(),
+                effects: Some(effects(effect).into()),
                 result,
                 now_ms: 62000,
             })

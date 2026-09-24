@@ -7,10 +7,10 @@ use collaboration_client::{
 };
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
-    ApprovalListResult, EndpointInventory, JournalPage, JournalReadParams, JournalStatus,
-    NativeInspectParams, NativeInspectResult, NativeInterruptParams, NativeInterruptResult,
-    NativeRenameParams, NativeRenameResult, NativeSendReceipt, NativeSessionListParams,
-    NativeSessionListResult,
+    ApprovalListResult, DeliveryOutcome, DeliveryReceipt, EndpointInventory, JournalPage,
+    JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
+    NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
+    NativeSessionListParams, NativeSessionListResult,
 };
 use rmcp::{
     ServerHandler,
@@ -272,7 +272,7 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::Unknown)
     }
 
-    #[tool(name = "message_send", description = "Submits one agent-authored or explicit human message with exact auto, queue, or steer semantics and their loaded/active prerequisites. A returned receipt proves native input was accepted or queued as stated; it does not prove turn completion, assignment success or an agent reply. Router-authored content is not a public caller input, and uncertain dispatch is never replayed automatically.", output_schema = rmcp::handler::server::tool::schema_for_type::<NativeSendReceipt>())]
+    #[tool(name = "message_send", description = "Submits one agent-authored or explicit human message with exact auto, queue, or steer semantics. The receipt reports the selected route and strongest observed outcome; accepted input or a peer write does not prove completion or an agent reply. Router-authored content is not a public caller input, and uncertain dispatch is never replayed automatically.", output_schema = rmcp::handler::server::tool::schema_for_type::<DeliveryReceipt>())]
     async fn message_send(
         &self,
         Parameters(request): Parameters<MessageSendRequest>,
@@ -538,8 +538,20 @@ fn operation_error_result(
         .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))
 }
 
-fn message_tool_result(result: Result<NativeSendReceipt, MessageSendError>) -> CallToolResult {
+fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> CallToolResult {
     match result {
+        Ok(receipt)
+            if matches!(
+                receipt.outcome,
+                DeliveryOutcome::Rejected(_)
+                    | DeliveryOutcome::NotSubmitted { .. }
+                    | DeliveryOutcome::Unknown
+            ) =>
+        {
+            serde_json::to_value(receipt)
+                .map(CallToolResult::structured_error)
+                .unwrap_or_else(|_| validation_failure("delivery receipt encoding failed"))
+        }
         Ok(receipt) => structured_result(Ok(receipt), OperationEffect::None),
         Err(error) => {
             let (failure, target) = error.into_operation_failure_and_target();

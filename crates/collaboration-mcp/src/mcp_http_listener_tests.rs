@@ -968,7 +968,7 @@ async fn initialized_http_message_response_loss_retains_known_target() {
         let (stream, _) = control.accept().await.expect("Control accept");
         let (read, mut write) = stream.into_split();
         let mut lines = BufReader::new(read).lines();
-        for method in ["control/initialize", "endpoint/list", "codex/messageSend"] {
+        for method in ["control/initialize", "message/send"] {
             let request: Value = serde_json::from_str(
                 &lines
                     .next_line()
@@ -978,19 +978,11 @@ async fn initialized_http_message_response_loss_retains_known_target() {
             )
             .expect("Control JSON");
             assert_eq!(request["method"], method);
-            if method == "codex/messageSend" {
+            if method == "message/send" {
                 assert_eq!(request["params"]["target"]["sessionId"], "http-thread");
                 break;
             }
-            let result = if method == "control/initialize" {
-                json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"controlSchemaDigest":digest})
-            } else {
-                json!({"serviceEpoch":epoch,"sequence":0,"endpoints":[{
-                    "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"HTTP fixture",
-                    "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
-                    "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":{"serviceEpoch":epoch,"generation":1}}]
-                }]})
-            };
+            let result = json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"controlSchemaDigest":digest});
             write
                 .write_all(
                     format!(
@@ -1044,7 +1036,7 @@ async fn initialized_http_message_response_loss_retains_known_target() {
             .header("mcp-protocol-version", "2025-11-25")
             .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"message_send","arguments":{
                 "target":{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"http-thread"},
-                "message":{"kind":"humanUser","text":"proof"},"delivery":"auto","generationGuard":null,"clientUserMessageId":null
+                "message":{"kind":"humanUser","text":"proof"},"delivery":"auto","generationGuard":null,"correlation":null
             }}}))
             .send()
             .await

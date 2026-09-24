@@ -2,10 +2,10 @@
 use super::proof_context::{ProofContext, ProofResult};
 use codex_native_integration::NativeOperation;
 use collaboration_client::protocol::{
-    DestinationPreparation, ExecutionDestination, InstructionCreateParams, MessageContent,
-    MessageDelivery, NativeSendAcceptance, NativeSendParams, NativeSendReceipt, OperationId,
+    DeliveryClientReceipt, DeliveryReceipt, DestinationPreparation, ExecutionDestination,
+    InstructionCreateParams, MessageContent, MessageDelivery, NativeSendAcceptance, OperationId,
     RunListRequest, RunState, ScheduleCreateRequest, ScheduleDefinition, ScheduleEnableRequest,
-    SchedulePrepareRequest, SessionRef, TimingRequest,
+    SchedulePrepareRequest, SessionMessageSendParams, SessionRef, TimingRequest,
 };
 use collaboration_client::{ClientError, ControlClient};
 use serde_json::{Value, json};
@@ -27,7 +27,10 @@ pub async fn exercise() -> ProofResult<()> {
         proof: &proof, target: &target, delivery: MessageDelivery::Auto,
         text: "Run exactly /bin/sleep 20 through the shell tool. Wait for that command to finish, then output exactly BUSY_COMPLETE. Do not start other work or spawn agents.",
     }).await?;
-    let NativeSendAcceptance::NativeInputAccepted { turn_id, .. } = &initial.acceptance else {
+    let Some(DeliveryClientReceipt::CodexAppServer(native)) = &initial.client else {
+        return Err("Auto on the fresh idle thread lacked native client evidence".into());
+    };
+    let NativeSendAcceptance::NativeInputAccepted { turn_id, .. } = &native.acceptance else {
         return Err("Auto on the fresh idle thread did not start a native turn".into());
     };
     let initial_turn_id = String::from(turn_id.clone());
@@ -126,9 +129,10 @@ pub async fn exercise() -> ProofResult<()> {
                                 proof: &proof, target: &target, delivery: MessageDelivery::Auto,
                                 text: "Informational agent input: this adds no new task. Continue the current task unless it is interrupted. Do not start any additional work.",
                             }).await?;
-                            if !matches!(&note.acceptance, NativeSendAcceptance::SteerAccepted { turn_id, .. }
-                                if String::from(turn_id.clone()) == initial_turn_id)
-                            {
+                            if !matches!(&note.client, Some(DeliveryClientReceipt::CodexAppServer(native))
+                            if matches!(&native.acceptance, NativeSendAcceptance::SteerAccepted { turn_id, .. }
+                            if String::from(turn_id.clone()) == initial_turn_id)
+                            ) {
                                 proof.record("busyNoteUnexpectedReceipt", json!(note))?;
                                 return Err("Auto message did not steer the exact active turn while the schedule waited".into());
                             }
@@ -245,14 +249,14 @@ struct MessageProbeInput<'a> {
     text: &'a str,
 }
 
-async fn send_agent_probe(input: MessageProbeInput<'_>) -> Result<NativeSendReceipt, ClientError> {
+async fn send_agent_probe(input: MessageProbeInput<'_>) -> Result<DeliveryReceipt, ClientError> {
     // Server rejections retire a Control connection; each independent send has its own.
     let mut client =
         ControlClient::connect(&input.proof.service_directory, "busy-proof", "1").await?;
     let result = client
-        .send_agent_message(NativeSendParams {
+        .send_agent_message(SessionMessageSendParams {
             target: input.target.clone(),
-            generation: input.proof.generation.clone(),
+            generation_guard: Some(input.proof.generation.clone()),
             message: MessageContent::Agent {
                 sender: input.target.clone(),
                 text: input
@@ -261,30 +265,26 @@ async fn send_agent_probe(input: MessageProbeInput<'_>) -> Result<NativeSendRece
                     .try_into()
                     .map_err(|_| ClientError::Protocol("invalid proof text"))?,
             },
-            delivery: input.delivery,
-            client_user_message_id: None,
+            mode: input.delivery,
+            correlation: None,
         })
         .await;
     let _closed = client.close().await;
     result
 }
 
-fn require_rejection(
-    result: Result<NativeSendReceipt, ClientError>,
-    kind: &str,
-) -> ProofResult<()> {
+fn require_rejection(result: Result<DeliveryReceipt, ClientError>, kind: &str) -> ProofResult<()> {
     match result {
-        Err(ClientError::Rejected {
-            data: Some(data), ..
-        }) if data.get("kind").and_then(Value::as_str) == Some(kind)
-            && data.pointer("/effects/resume").and_then(Value::as_str) == Some("notRequested")
-            && data.pointer("/effects/submission").and_then(Value::as_str)
-                == Some("notDispatched") =>
+        Ok(receipt)
+            if matches!(&receipt.outcome,
+                collaboration_client::protocol::DeliveryOutcome::NotSubmitted { reason, .. }
+                if reason == kind)
+                && receipt.client.is_none() =>
         {
             Ok(())
         }
         result => {
-            Err(format!("Expected {kind} with no resume/submission; observed {result:?}").into())
+            Err(format!("Expected {kind} without a client receipt; observed {result:?}").into())
         }
     }
 }

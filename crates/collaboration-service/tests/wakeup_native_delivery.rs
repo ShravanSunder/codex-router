@@ -4,7 +4,10 @@ use automation_storage::{AutomationStore, WakeCreate};
 use collaboration_protocol::{
     CodexGeneration, EndpointDescription, OperationId, SavedMessage, SessionRef,
 };
-use collaboration_service::{NativeControlBackend, NativeGenerationGate, ServiceIdentity};
+use collaboration_service::{
+    CodexAppServerDeliveryRoute, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
+    SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sqlx::Connection;
@@ -91,6 +94,11 @@ async fn exercise_delivery(
     )?;
     let gate = NativeGenerationGate::default();
     gate.activate(generation, path.clone(), Some(schemas))?;
+    let native_backend = NativeControlBackend {
+        endpoint: target.endpoint.clone(),
+        gate,
+        codex_home: root.clone(),
+    };
     let identity = ServiceIdentity::new(
         service_id,
         service_id,
@@ -98,11 +106,15 @@ async fn exercise_delivery(
     )?
     .with_endpoints(vec![description])?
     .with_automation_store(store.clone())
-    .with_native_backend(NativeControlBackend {
-        endpoint: target.endpoint.clone(),
-        gate,
-        codex_home: root.clone(),
-    })?;
+    .with_native_backend(native_backend.clone())?;
+    let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
+        service_id.to_owned().try_into()?,
+        identity.endpoint_directory(),
+        native_backend,
+    ));
+    let delivery: Arc<dyn SessionMessageDelivery> =
+        Arc::new(SessionDeliveryRouter::new(vec![route]));
+    let identity = identity.with_session_delivery(delivery);
     let message: SavedMessage = serde_json::from_value(
         json!({"target":target,"content":{"kind":"agent","sender":target,"text":"A durable finding"},"delivery":"queue","generationGuard":null}),
     )?;
@@ -255,7 +267,7 @@ async fn exercise_delivery(
         let mut poll=tokio::time::interval(Duration::from_millis(20));
         loop {
             poll.tick().await;
-            let record:Option<(String,Option<String>)>=sqlx::query_as("SELECT delivery_status,accepted_receipt_json FROM mailbox_deliveries WHERE wakeup_id=? AND delivery_status IN ('accepted','uncertain')").bind(wake.definition.wakeup_id.as_str()).fetch_optional(&mut connection).await?;
+            let record:Option<(String,Option<String>)>=sqlx::query_as("SELECT delivery_status,outcome_receipt_json FROM mailbox_deliveries WHERE wakeup_id=? AND delivery_status IN ('accepted','uncertain')").bind(wake.definition.wakeup_id.as_str()).fetch_optional(&mut connection).await?;
             if let Some(record)=record{return Ok::<_,sqlx::Error>(record);}
         }
     }).await??;
@@ -264,11 +276,15 @@ async fn exercise_delivery(
         NativeOutcome::Accepted => {
             let receipt: Value = serde_json::from_str(&receipt.ok_or("missing accepted receipt")?)?;
             if status != "accepted"
+                || receipt.pointer("/outcome/kind").and_then(Value::as_str) != Some("queued")
+                || receipt.pointer("/reachability").and_then(Value::as_str)
+                    != Some("codexAppServer")
+                || receipt.pointer("/client/kind").and_then(Value::as_str) != Some("codexAppServer")
                 || receipt
-                    .pointer("/acceptance/submissionId")
+                    .pointer("/client/acceptance/submissionId")
                     .and_then(Value::as_str)
                     != Some("native-queue-receipt")
-                || receipt.pointer("/clientUserMessageId")
+                || receipt.pointer("/client/clientUserMessageId")
                     != request.pointer("/params/clientUserMessageId")
             {
                 return Err("actual receipt or correlation lost".into());
@@ -278,7 +294,11 @@ async fn exercise_delivery(
         | NativeOutcome::ReconcileFound
         | NativeOutcome::ReconcileAbsent
         | NativeOutcome::ReconcileMismatch => {
-            if status != "uncertain" || receipt.is_some() {
+            let receipt: Value = serde_json::from_str(&receipt.ok_or("missing unknown receipt")?)?;
+            if status != "uncertain"
+                || receipt.pointer("/outcome/kind").and_then(Value::as_str) != Some("unknown")
+                || receipt.get("client") != Some(&Value::Null)
+            {
                 return Err("lost response fabricated acceptance".into());
             }
             if !store
@@ -320,8 +340,13 @@ async fn exercise_delivery(
             else {
                 return Err("matching queue evidence did not reconcile acceptance".into());
             };
+            let Some(collaboration_protocol::DeliveryClientReceipt::CodexAppServer(native)) =
+                receipt.client
+            else {
+                return Err("reconciliation lost the native client receipt".into());
+            };
             let collaboration_protocol::NativeSendAcceptance::QueueAccepted { submission_id } =
-                receipt.acceptance
+                native.acceptance
             else {
                 return Err("reconciliation changed queue semantics".into());
             };

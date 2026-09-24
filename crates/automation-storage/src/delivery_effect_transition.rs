@@ -9,17 +9,19 @@ pub(crate) enum DeliveryEvidenceResult {
 
 pub(crate) fn allows_completion<TTarget: PartialEq, TGeneration: PartialEq>(
     recorded: Option<&RouteEffectEvidence<TTarget, TGeneration>>,
-    reported: &RouteEffectEvidence<TTarget, TGeneration>,
+    reported: Option<&RouteEffectEvidence<TTarget, TGeneration>>,
     result: DeliveryEvidenceResult,
 ) -> bool {
     let route_matches = match (recorded, reported) {
-        (None, _) => matches!(result, DeliveryEvidenceResult::KnownNotSubmitted),
-        (Some(RouteEffectEvidence::CodexAppServer(_)), RouteEffectEvidence::CodexAppServer(_)) => {
-            true
-        }
+        (None, None) => return matches!(result, DeliveryEvidenceResult::KnownNotSubmitted),
+        (None, Some(_)) => matches!(result, DeliveryEvidenceResult::KnownNotSubmitted),
+        (
+            Some(RouteEffectEvidence::CodexAppServer(_)),
+            Some(RouteEffectEvidence::CodexAppServer(_)),
+        ) => true,
         (
             Some(RouteEffectEvidence::ProviderAcp(before)),
-            RouteEffectEvidence::ProviderAcp(after),
+            Some(RouteEffectEvidence::ProviderAcp(after)),
         ) => {
             before.target == after.target
                 && before.generation == after.generation
@@ -28,7 +30,7 @@ pub(crate) fn allows_completion<TTarget: PartialEq, TGeneration: PartialEq>(
         }
         (
             Some(RouteEffectEvidence::ClaudeCodePeer(before)),
-            RouteEffectEvidence::ClaudeCodePeer(after),
+            Some(RouteEffectEvidence::ClaudeCodePeer(after)),
         ) => before.session_id == after.session_id && before.process_id == after.process_id,
         _ => false,
     };
@@ -36,41 +38,47 @@ pub(crate) fn allows_completion<TTarget: PartialEq, TGeneration: PartialEq>(
         return false;
     }
     match (reported, result) {
-        (RouteEffectEvidence::CodexAppServer(native), DeliveryEvidenceResult::Accepted) => {
+        (Some(RouteEffectEvidence::CodexAppServer(native)), DeliveryEvidenceResult::Accepted) => {
             native.submission == SubmissionEffect::Accepted
         }
         (
-            RouteEffectEvidence::CodexAppServer(native),
+            Some(RouteEffectEvidence::CodexAppServer(native)),
             DeliveryEvidenceResult::KnownNotSubmitted,
         ) => matches!(
             native.submission,
             SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
         ),
-        (RouteEffectEvidence::CodexAppServer(native), DeliveryEvidenceResult::Unknown) => {
+        (Some(RouteEffectEvidence::CodexAppServer(native)), DeliveryEvidenceResult::Unknown) => {
             native.submission == SubmissionEffect::Unknown
                 || native.resume == PreparationEffect::Unknown
                 || native.allocation == PreparationEffect::Unknown
         }
-        (RouteEffectEvidence::ProviderAcp(provider), DeliveryEvidenceResult::Accepted) => {
+        (Some(RouteEffectEvidence::ProviderAcp(provider)), DeliveryEvidenceResult::Accepted) => {
             provider.submission == SubmissionEffect::Accepted
         }
-        (RouteEffectEvidence::ProviderAcp(provider), DeliveryEvidenceResult::KnownNotSubmitted) => {
+        (
+            Some(RouteEffectEvidence::ProviderAcp(provider)),
+            DeliveryEvidenceResult::KnownNotSubmitted,
+        ) => {
             matches!(
                 provider.submission,
                 SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
             )
         }
-        (RouteEffectEvidence::ProviderAcp(provider), DeliveryEvidenceResult::Unknown) => {
+        (Some(RouteEffectEvidence::ProviderAcp(provider)), DeliveryEvidenceResult::Unknown) => {
             provider.submission == SubmissionEffect::Unknown
         }
-        (RouteEffectEvidence::ClaudeCodePeer(peer), DeliveryEvidenceResult::Accepted) => {
+        (Some(RouteEffectEvidence::ClaudeCodePeer(peer)), DeliveryEvidenceResult::Accepted) => {
             peer.write == PeerWriteEffect::Written
         }
-        (RouteEffectEvidence::ClaudeCodePeer(peer), DeliveryEvidenceResult::KnownNotSubmitted) => {
-            peer.write == PeerWriteEffect::NotDispatched
-        }
-        (RouteEffectEvidence::ClaudeCodePeer(peer), DeliveryEvidenceResult::Unknown) => {
+        (
+            Some(RouteEffectEvidence::ClaudeCodePeer(peer)),
+            DeliveryEvidenceResult::KnownNotSubmitted,
+        ) => peer.write == PeerWriteEffect::NotDispatched,
+        (Some(RouteEffectEvidence::ClaudeCodePeer(peer)), DeliveryEvidenceResult::Unknown) => {
             peer.write == PeerWriteEffect::Unknown
         }
+        (None, DeliveryEvidenceResult::KnownNotSubmitted) => true,
+        (None, _) => false,
     }
 }

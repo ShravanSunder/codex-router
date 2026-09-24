@@ -1,10 +1,10 @@
 //! A scheduled fork retains native context and executes independently of its source.
 use super::proof_context::{ProofContext, ProofResult, agent_text};
 use collaboration_client::protocol::{
-    DestinationPreparation, ExecutionDestination, InstructionCreateParams, MessageContent,
-    MessageDelivery, NativeSendAcceptance, NativeSendParams, OperationId, RunState,
+    DeliveryClientReceipt, DestinationPreparation, ExecutionDestination, InstructionCreateParams,
+    MessageContent, MessageDelivery, NativeSendAcceptance, OperationId, RunState,
     ScheduleCreateRequest, ScheduleDefinition, SchedulePrepareRequest, ScheduleUpdateRequest,
-    TimingRequest, WorkerOutcome,
+    SessionMessageSendParams, TimingRequest, WorkerOutcome,
 };
 use serde_json::json;
 
@@ -12,12 +12,15 @@ pub async fn exercise() -> ProofResult<()> {
     let mut proof = ProofContext::connect().await?;
     let source = proof.start_thread("Luna fork source").await?;
     let token = format!("FORK_CONTEXT_{}", OperationId::generate().as_str());
-    let receipt = proof.client.send_agent_message(NativeSendParams {
-        target: source.clone(), generation: proof.generation.clone(),
+    let receipt = proof.client.send_agent_message(SessionMessageSendParams {
+        target: source.clone(), generation_guard: Some(proof.generation.clone()),
         message: MessageContent::Agent { sender: source.clone(), text: format!("Remember this context token: {token}. Output exactly {token}. Do not call tools or spawn agents.").try_into()? },
-        delivery: MessageDelivery::Auto, client_user_message_id: None,
+        mode: MessageDelivery::Auto, correlation: None,
     }).await?;
-    let NativeSendAcceptance::NativeInputAccepted { turn_id, .. } = receipt.acceptance else {
+    let Some(DeliveryClientReceipt::CodexAppServer(native)) = receipt.client else {
+        return Err("Fresh source lacked the native client receipt".into());
+    };
+    let NativeSendAcceptance::NativeInputAccepted { turn_id, .. } = native.acceptance else {
         return Err("Fresh source did not accept a native turn".into());
     };
     proof.wait_for_text(&source, &token).await?;

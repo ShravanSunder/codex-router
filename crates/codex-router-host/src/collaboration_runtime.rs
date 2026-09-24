@@ -402,18 +402,31 @@ impl CollaborationRuntime {
         };
         let approval_broker = collaboration_service::ServiceApprovalBroker::load(
             service_id.clone(),
-            identity.endpoint_directory(),
             native_backend.clone(),
             inputs.directory.join("approval-routes.json"),
         )
         .await
         .map_err(io::Error::other)?;
+        let codex_route: std::sync::Arc<dyn collaboration_service::SessionDeliveryRoute> =
+            std::sync::Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(
+                service_id.clone(),
+                identity.endpoint_directory(),
+                native_backend.clone(),
+            ));
+        let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
+            std::sync::Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
+                codex_route,
+            ]));
+        approval_broker
+            .install_session_delivery(std::sync::Arc::clone(&session_delivery))
+            .map_err(io::Error::other)?;
         if let Some(supervisor) = &external_provider_supervisor {
             supervisor
                 .install_approval_broker(std::sync::Arc::clone(&approval_broker))
                 .await;
         }
         let identity = identity
+            .with_session_delivery(session_delivery)
             .with_native_backend(native_backend)
             .map_err(io::Error::other)?;
         let identity = identity.with_approval_broker(std::sync::Arc::clone(&approval_broker));

@@ -1,6 +1,71 @@
 use super::*;
 use collaboration_protocol::{CodexGeneration, EndpointId, EndpointRef};
 
+struct FakeApprovalDelivery(DeliveryOutcome);
+
+impl crate::SessionMessageDelivery for FakeApprovalDelivery {
+    fn deliver<'a>(
+        &'a self,
+        _: crate::DeliveryRequest,
+        _: &'a dyn crate::AttemptEvidenceSink,
+    ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
+        Box::pin(async move {
+            Ok(collaboration_protocol::DeliveryReceipt {
+                outcome: self.0.clone(),
+                reachability: Some(collaboration_protocol::SessionReachability::CodexAppServer),
+                client: None,
+            })
+        })
+    }
+
+    fn reconcile_attempt(
+        &self,
+        _: crate::AttemptReconciliationContext,
+    ) -> crate::DeliveryFuture<'_, crate::AttemptReconciliation> {
+        Box::pin(async { Ok(crate::AttemptReconciliation::StillUnknown) })
+    }
+}
+
+#[tokio::test]
+async fn approval_notice_uses_selected_delivery_outcome() {
+    for (outcome, delivered) in [
+        (DeliveryOutcome::Started, true),
+        (DeliveryOutcome::Unknown, true),
+        (
+            DeliveryOutcome::NotSubmitted {
+                retryable: true,
+                reason: "starting".into(),
+            },
+            false,
+        ),
+        (
+            DeliveryOutcome::Rejected(collaboration_protocol::DeliveryRejection {
+                reason: collaboration_protocol::DeliveryRejectionReason::Busy,
+                next_action: collaboration_protocol::DeliveryNextAction::InspectTarget,
+                client_code: None,
+                detail: None,
+            }),
+            false,
+        ),
+    ] {
+        let (broker, generation, _) = fixture_broker().await;
+        let expiry = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+        let (params, _receiver) = insert_pending(&broker, generation, expiry).await;
+        let record = broker
+            .pending
+            .lock()
+            .await
+            .get(&params.request_id)
+            .expect("pending fixture")
+            .record
+            .clone();
+        broker
+            .install_session_delivery(Arc::new(FakeApprovalDelivery(outcome)))
+            .expect("delivery injection");
+        assert_eq!(broker.deliver(&record).await.is_ok(), delivered);
+    }
+}
+
 fn session(service_id: &UuidIdentity, id: &str) -> SessionRef {
     SessionRef {
         endpoint: EndpointRef {
@@ -44,7 +109,6 @@ async fn fixture_broker() -> (Arc<ServiceApprovalBroker>, CodexGeneration, PathB
         .unwrap_or_else(|error| panic!("directory: {error}"));
     let broker = ServiceApprovalBroker::load(
         service_id,
-        EndpointDirectory::new(endpoint.service_id.clone()),
         NativeControlBackend {
             endpoint,
             gate,
@@ -393,7 +457,6 @@ async fn malformed_persisted_routes_fail_closed() {
     std::fs::write(&routes, br#"[{"threadId":"thread","access":"invalid"}]"#).unwrap();
     let loaded = ServiceApprovalBroker::load(
         service_id.clone(),
-        EndpointDirectory::new(service_id),
         NativeControlBackend {
             endpoint,
             gate,
@@ -440,7 +503,6 @@ async fn malformed_persisted_history_fails_closed_while_absence_stays_empty() {
     // Act: a missing history file is an empty history.
     let absent = ServiceApprovalBroker::load(
         service_id.clone(),
-        EndpointDirectory::new(service_id.clone()),
         backend(directory.clone()),
         routes.clone(),
     )
@@ -451,13 +513,7 @@ async fn malformed_persisted_history_fails_closed_while_absence_stays_empty() {
 
     // Act: a malformed history file refuses to load.
     std::fs::write(directory.join("approval-history.json"), b"{not json").unwrap();
-    let corrupt = ServiceApprovalBroker::load(
-        service_id.clone(),
-        EndpointDirectory::new(service_id),
-        backend(directory),
-        routes,
-    )
-    .await;
+    let corrupt = ServiceApprovalBroker::load(service_id.clone(), backend(directory), routes).await;
 
     // Assert.
     assert!(matches!(corrupt, Err(ApprovalBrokerError::Unavailable)));

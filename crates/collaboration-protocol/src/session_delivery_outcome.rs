@@ -1,49 +1,45 @@
 //! Client-neutral identities and observed delivery results.
+use crate::DeliveryRejection;
+use crate::NonEmptyText;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use uuid::{Uuid, Variant};
+use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
-#[error("delivery identity must be a canonical lowercase RFC UUIDv7")]
+#[error("delivery correlation must contain 1 to 4096 UTF-8 bytes without NUL")]
 pub struct DeliveryIdentityError;
 
-macro_rules! delivery_identity {
-    ($($name:ident),+ $(,)?) => {$ (
-        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-        #[serde(try_from = "String", into = "String")]
-        pub struct $name(String);
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct DeliveryCorrelationId(String);
 
-        impl TryFrom<String> for $name {
-            type Error = DeliveryIdentityError;
+impl TryFrom<String> for DeliveryCorrelationId {
+    type Error = DeliveryIdentityError;
 
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                let parsed = Uuid::parse_str(&value).map_err(|_| DeliveryIdentityError)?;
-                if parsed.get_version_num() != 7
-                    || parsed.get_variant() != Variant::RFC4122
-                    || parsed.hyphenated().to_string() != value
-                {
-                    return Err(DeliveryIdentityError);
-                }
-                Ok(Self(value))
-            }
-        }
-
-        impl From<$name> for String {
-            fn from(value: $name) -> Self { value.0 }
-        }
-
-        impl $name {
-            #[must_use]
-            pub fn generate() -> Self { Self(Uuid::now_v7().hyphenated().to_string()) }
-
-            #[must_use]
-            pub fn as_str(&self) -> &str { &self.0 }
-        }
-    )+};
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        NonEmptyText::try_from(value.clone()).map_err(|_| DeliveryIdentityError)?;
+        Ok(Self(value))
+    }
 }
 
-delivery_identity!(DeliveryCorrelationId);
+impl From<DeliveryCorrelationId> for String {
+    fn from(value: DeliveryCorrelationId) -> Self {
+        value.0
+    }
+}
+
+impl DeliveryCorrelationId {
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(Uuid::now_v7().hyphenated().to_string())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 impl JsonSchema for DeliveryCorrelationId {
     fn schema_name() -> Cow<'static, str> {
@@ -52,8 +48,7 @@ impl JsonSchema for DeliveryCorrelationId {
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "type":"string", "minLength":36, "maxLength":36,
-            "pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            "type":"string", "minLength":1, "maxLength":4096
         })
     }
 }
@@ -68,7 +63,7 @@ pub enum DeliveryOutcome {
     Queued,
     PeerMessageWritten,
     NotSubmitted { retryable: bool, reason: String },
-    Rejected { reason: String },
+    Rejected(DeliveryRejection),
     Unknown,
 }
 
@@ -78,5 +73,4 @@ pub enum SessionReachability {
     CodexAppServer,
     ProviderAcp,
     ClaudeCodePeer,
-    None,
 }

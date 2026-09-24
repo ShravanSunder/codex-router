@@ -1,65 +1,77 @@
 //! Native message composition with explicit delivery and retained partial effects.
-use crate::{message_effect_state::MessageEffects, native_control_dispatch::NativeControlRequest};
+use crate::{NativeControlBackend, message_effect_state::MessageEffects};
 use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
 use collaboration_protocol::{
-    AcceptedResumeEffect, ChannelDescription, MessageDelivery, NativeInputDisposition,
-    NativeInputOperation, NativeSendAcceptance, NativeSendParams, NativeSendReceipt, NonEmptyText,
+    AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageDelivery,
+    NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,
+    NativeSendReceipt, NonEmptyText, UuidIdentity,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) async fn dispatch_message(request: NativeControlRequest<'_>) -> Value {
+pub(crate) struct NativeMessageRequest<'a> {
+    pub params: NativeSendParams,
+    pub id: Value,
+    pub service_id: &'a UuidIdentity,
+    pub backend: &'a NativeControlBackend,
+    pub endpoints: &'a [EndpointDescription],
+}
+
+pub(crate) enum NativeMessageOutcome {
+    Accepted(NativeSendReceipt),
+    Failed(Value),
+}
+
+pub(crate) async fn dispatch_message(request: NativeMessageRequest<'_>) -> NativeMessageOutcome {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut effects = MessageEffects::new(request.id);
-    let Ok(params) = serde_json::from_value::<NativeSendParams>(request.params) else {
-        return json!({"jsonrpc":"2.0","id":effects.id,"error":{"code":-32602,"message":"Invalid message parameters"}});
-    };
+    let params = request.params;
     if &params.target.endpoint.service_id != request.service_id {
-        return effects.failure("wrongService", "inspect");
+        return NativeMessageOutcome::Failed(effects.failure("wrongService", "inspect"));
     }
     let Some(endpoint) = request
         .endpoints
         .iter()
         .find(|e| e.endpoint == params.target.endpoint)
     else {
-        return effects.failure("endpointNotFound", "inspect");
+        return NativeMessageOutcome::Failed(effects.failure("endpointNotFound", "inspect"));
     };
-    let Some(backend) = request
-        .backend
-        .filter(|b| b.endpoint == params.target.endpoint)
-    else {
-        return effects.failure("unsupportedCapability", "inspect");
-    };
+    let backend = request.backend;
+    if backend.endpoint != params.target.endpoint {
+        return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "inspect"));
+    }
     let Ok(admission) = backend.gate.acquire() else {
-        return effects.failure("unavailable", "inspect");
+        return NativeMessageOutcome::Failed(effects.failure("unavailable", "inspect"));
     };
     if admission.generation() != &params.generation {
-        return effects.failure("staleGeneration", "inspect");
+        return NativeMessageOutcome::Failed(effects.failure("staleGeneration", "inspect"));
     }
     let Some(schemas) = admission.schemas() else {
-        return effects.failure("unsupportedCapability", "inspect");
+        return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "inspect"));
     };
     let advertised = endpoint.channels.iter().any(|c| matches!(c, ChannelDescription::NativeCodex { schema_digest: Some(d), generation: Some(g), .. } if g == admission.generation() && String::from(d.clone()) == schemas.schema_digest()));
     if !advertised {
-        return effects.failure("unsupportedCapability", "inspect");
+        return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "inspect"));
     }
     if params.delivery == MessageDelivery::Queue
         && !schemas.supports_operation(NativeOperation::QueueAdd)
     {
-        return effects.failure("unsupportedCapability", "queue");
+        return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "queue"));
     }
     let Ok(rendered) = collaboration_protocol::render_message(&params.target, &params.message)
     else {
-        return effects.failure("overloaded", "inspect");
+        return NativeMessageOutcome::Failed(effects.failure("overloaded", "inspect"));
     };
     let correlation = match &params.client_user_message_id {
         Some(id) => String::from(id.clone()),
         None => match crate::new_service_uuid() {
             Ok(id) => String::from(id),
-            Err(_) => return effects.failure("unavailable", "inspect"),
+            Err(_) => {
+                return NativeMessageOutcome::Failed(effects.failure("unavailable", "inspect"));
+            }
         },
     };
     effects.correlation = Some(correlation.clone());
@@ -74,7 +86,7 @@ pub(crate) async fn dispatch_message(request: NativeControlRequest<'_>) -> Value
     .await
     .unwrap_or(Err(NativeConnectionError::Unavailable));
     let Ok(connection) = connection else {
-        return effects.failure("unavailable", "inspect");
+        return NativeMessageOutcome::Failed(effects.failure("unavailable", "inspect"));
     };
     let mut session = MessageSession {
         deadline,
@@ -89,10 +101,10 @@ pub(crate) async fn dispatch_message(request: NativeControlRequest<'_>) -> Value
         .await;
     let acceptance = match result {
         Ok(value) => value,
-        Err(value) => return value,
+        Err(value) => return NativeMessageOutcome::Failed(value),
     };
     let Ok(correlation) = NonEmptyText::try_from(correlation) else {
-        return session.effects.failure("outcomeUnknown", "start");
+        return NativeMessageOutcome::Failed(session.effects.failure("outcomeUnknown", "start"));
     };
     let receipt = NativeSendReceipt {
         target: params.target,
@@ -107,7 +119,7 @@ pub(crate) async fn dispatch_message(request: NativeControlRequest<'_>) -> Value
         },
         acceptance,
     };
-    json!({"jsonrpc":"2.0","id":session.effects.id,"result":receipt})
+    NativeMessageOutcome::Accepted(receipt)
 }
 
 struct MessageSession {

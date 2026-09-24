@@ -1,15 +1,27 @@
 //! Historical attempt output preserves exact identity; only the current safely stopped summary can retry.
 use automation_storage::{AutomationStore, StorageError};
 use collaboration_protocol::{
-    AttemptInspection, CodexGeneration, DeliveryEvidence, NativeSendReceipt, SessionRef,
-    SummaryInspection,
+    AttemptInspection, CodexGeneration, DeliveryEvidence, SessionRef, SummaryInspection,
 };
 
 pub(crate) async fn delivery(
     store: &mut AutomationStore,
     delivery_id: &agent_automation::DeliveryId,
     attempt: agent_automation::DeliveryAttempt<SessionRef, CodexGeneration>,
+    archived_receipt: Option<crate::stored_delivery_receipt::StoredDeliveryReceipt>,
 ) -> Result<AttemptInspection, StorageError> {
+    let current = store
+        .read_delivery::<SessionRef, CodexGeneration, crate::stored_delivery_receipt::StoredDeliveryReceipt>(delivery_id)
+        .await?;
+    let receipt = archived_receipt
+        .or_else(|| {
+            current
+                .attempt
+                .as_ref()
+                .filter(|latest| latest.attempt_id == attempt.attempt_id)
+                .and(current.receipt)
+        })
+        .map(crate::stored_delivery_receipt::StoredDeliveryReceipt::into_public);
     if attempt.effects.is_none() {
         let evidence = match attempt.outcome {
             agent_automation::AttemptOutcome::InProgress => DeliveryEvidence::Dispatching {
@@ -21,6 +33,7 @@ pub(crate) async fn delivery(
                     attempt_id: attempt.attempt_id.clone(),
                     reason,
                     effects: None,
+                    receipt,
                 }
             }
             _ => return Err(StorageError::InvalidRecord),
@@ -34,13 +47,11 @@ pub(crate) async fn delivery(
             evidence,
         });
     }
-    let native = attempt
-        .effects
-        .as_ref()
-        .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
-        .ok_or(StorageError::InvalidRecord)?;
-    let effects = serde_json::from_value(
-        serde_json::to_value(native).map_err(|_| StorageError::InvalidRecord)?,
+    let effects = crate::delivery_route_projection::project(
+        attempt
+            .effects
+            .as_ref()
+            .ok_or(StorageError::InvalidRecord)?,
     )
     .map_err(|_| StorageError::InvalidRecord)?;
     let evidence = match attempt.outcome {
@@ -53,29 +64,19 @@ pub(crate) async fn delivery(
                 attempt_id: attempt.attempt_id.clone(),
                 reason,
                 effects: Some(effects),
+                receipt,
             }
         }
         agent_automation::AttemptOutcome::Unknown { reason } => DeliveryEvidence::OutcomeUnknown {
             attempt_id: attempt.attempt_id.clone(),
             effects,
             explanation: reason,
+            receipt,
         },
-        agent_automation::AttemptOutcome::Accepted => {
-            let current = store
-                .read_delivery::<SessionRef, CodexGeneration, NativeSendReceipt>(delivery_id)
-                .await?;
-            if current
-                .attempt
-                .as_ref()
-                .is_none_or(|current| current.attempt_id != attempt.attempt_id)
-            {
-                return Err(StorageError::InvalidRecord);
-            }
-            DeliveryEvidence::Accepted {
-                attempt_id: attempt.attempt_id.clone(),
-                receipt: current.receipt.ok_or(StorageError::InvalidRecord)?,
-            }
-        }
+        agent_automation::AttemptOutcome::Accepted => DeliveryEvidence::Accepted {
+            attempt_id: attempt.attempt_id.clone(),
+            receipt: receipt.ok_or(StorageError::InvalidRecord)?,
+        },
     };
     Ok(AttemptInspection {
         attempt_id: attempt.attempt_id,

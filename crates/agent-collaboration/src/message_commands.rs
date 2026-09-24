@@ -1,7 +1,7 @@
 //! Descriptive message submission through the public Rust client.
 use crate::message_input_arguments::{SendArguments, prepare};
 use clap::{Parser, Subcommand};
-use collaboration_client::protocol::NativeSendReceipt;
+use collaboration_client::protocol::{DeliveryOutcome, DeliveryReceipt};
 use collaboration_client::{
     ClientError, ControlClient, MessageSendError, MessageSendRequest, OperationEffect,
     OperationFailure, OperationFailureKind,
@@ -75,7 +75,7 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
                 .map_err(|error| MessageSendError::Preparation(Box::new(error)))?,
             delivery: saved.delivery,
             generation_guard: saved.generation_guard,
-            client_user_message_id: None,
+            correlation: None,
         };
         let result = client.send_message(request).await;
         let _closed = client.close().await;
@@ -84,7 +84,7 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
     report(outcome, machine)
 }
 
-fn report(result: Result<NativeSendReceipt, MessageSendError>, machine: bool) -> i32 {
+fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i32 {
     if let Err(MessageSendError::Preparation(error)) = &result
         && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
             error,
@@ -95,11 +95,28 @@ fn report(result: Result<NativeSendReceipt, MessageSendError>, machine: bool) ->
         return code;
     }
     let (record, code, write_failure_code) = match result {
-        Ok(receipt) => (
-            crate::endpoint_commands::result_envelope(json!(receipt)),
-            0,
-            5,
-        ),
+        Ok(receipt) => {
+            let exit = match receipt.outcome {
+                DeliveryOutcome::NotSubmitted {
+                    retryable: true, ..
+                } => 3,
+                DeliveryOutcome::NotSubmitted {
+                    retryable: false, ..
+                }
+                | DeliveryOutcome::Rejected(_) => 4,
+                DeliveryOutcome::Unknown => 5,
+                DeliveryOutcome::Started
+                | DeliveryOutcome::Steered
+                | DeliveryOutcome::StartedOrSteered
+                | DeliveryOutcome::Queued
+                | DeliveryOutcome::PeerMessageWritten => 0,
+            };
+            (
+                crate::endpoint_commands::result_envelope(json!(receipt)),
+                exit,
+                5,
+            )
+        }
         Err(error) => {
             let (failure, target) = error.into_operation_failure_and_target();
             let exit = operation_failure_exit(&failure);

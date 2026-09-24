@@ -22,22 +22,24 @@ pub(crate) async fn delivery(id: Value, params: Value, identity: &ServiceIdentit
     let record = match store
         .lock()
         .await
-        .read_delivery::<SessionRef, CodexGeneration, NativeSendReceipt>(&params.delivery_id)
+        .read_delivery::<SessionRef, CodexGeneration, crate::stored_delivery_receipt::StoredDeliveryReceipt>(&params.delivery_id)
         .await
     {
         Ok(record) => record,
         Err(error) => return failure::response(id, failure::storage(error)),
     };
+    let Some(session_delivery) = identity.session_delivery.as_ref() else {
+        return failure::response(id, failure::unavailable());
+    };
     if let Err(error) =
-        crate::delivery_reconciliation::reconcile(store, identity.native_backend.as_ref(), record)
-            .await
+        crate::delivery_reconciliation::reconcile(store, session_delivery.as_ref(), record).await
     {
         return failure::response(id, failure::storage(error));
     }
     let record = match store
         .lock()
         .await
-        .read_delivery::<SessionRef, CodexGeneration, NativeSendReceipt>(&params.delivery_id)
+        .read_delivery::<SessionRef, CodexGeneration, crate::stored_delivery_receipt::StoredDeliveryReceipt>(&params.delivery_id)
         .await
     {
         Ok(record) => record,

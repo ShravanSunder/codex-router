@@ -1,17 +1,27 @@
 //! Service-owned routing for client-exposed Codex approval callbacks.
-use crate::{EndpointDirectory, NativeControlBackend};
+use crate::{
+    DeliveryPrecondition, DeliveryRequest, NativeControlBackend, SessionMessageDelivery,
+    session_delivery_contract::UnstoredAttemptEvidenceSink,
+};
 use codex_acp_adapter::{
     ApprovalBroker, ApprovalBrokerError, ApprovalRoute, BrokeredApprovalOutcome,
     BrokeredApprovalRequest,
 };
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListResult,
-    ApprovalRequestRecord, ApprovalState, MessageContent, MessageDelivery, NativeSendParams,
+    ApprovalRequestRecord, ApprovalState, DeliveryOutcome, MessageContent, MessageDelivery,
     SessionRef, UuidIdentity,
 };
 use serde::Serialize;
-use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 use tokio::sync::{Mutex, oneshot};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -93,8 +103,8 @@ enum ApprovalGenerationAuthority {
 
 pub struct ServiceApprovalBroker {
     service_id: UuidIdentity,
-    endpoints: EndpointDirectory,
     backend: NativeControlBackend,
+    session_delivery: OnceLock<Arc<dyn SessionMessageDelivery>>,
     routes_path: PathBuf,
     routes: Mutex<BTreeMap<String, ApprovalRoute>>,
     pending: Arc<Mutex<BTreeMap<String, PendingApproval>>>,
@@ -185,7 +195,6 @@ impl ServiceApprovalBroker {
 
     pub async fn load(
         service_id: UuidIdentity,
-        endpoints: EndpointDirectory,
         backend: NativeControlBackend,
         routes_path: PathBuf,
     ) -> Result<Arc<Self>, ApprovalBrokerError> {
@@ -209,14 +218,23 @@ impl ServiceApprovalBroker {
         };
         Ok(Arc::new(Self {
             service_id,
-            endpoints,
             backend,
+            session_delivery: OnceLock::new(),
             routes_path,
             routes: Mutex::new(routes),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             history_path,
             history: Arc::new(Mutex::new(history)),
         }))
+    }
+
+    pub fn install_session_delivery(
+        &self,
+        delivery: Arc<dyn SessionMessageDelivery>,
+    ) -> Result<(), ApprovalBrokerError> {
+        self.session_delivery
+            .set(delivery)
+            .map_err(|_| ApprovalBrokerError::Unavailable)
     }
 
     async fn persist_routes(&self) -> Result<(), ApprovalBrokerError> {
@@ -438,9 +456,6 @@ impl ServiceApprovalBroker {
         record: &ApprovalRequestRecord,
         transient_presentation: Option<&Value>,
     ) -> Result<(), ApprovalBrokerError> {
-        if String::from(record.approver.endpoint.endpoint_id.clone()) != "codex-local" {
-            return Err(ApprovalBrokerError::RouteUnavailable);
-        }
         let mut delivered_record = record.clone();
         if let Some(presentation) = transient_presentation
             && let Value::Object(operation) = &mut delivered_record.operation
@@ -449,48 +464,38 @@ impl ServiceApprovalBroker {
         }
         let text = serde_json::to_string(&delivered_record)
             .map_err(|_| ApprovalBrokerError::Unavailable)?;
-        let params = NativeSendParams {
+        let request = DeliveryRequest {
             target: record.approver.clone(),
-            generation: self
-                .backend
-                .gate
-                .acquire()
-                .map_err(|_| ApprovalBrokerError::Unavailable)?
-                .generation()
-                .clone(),
             message: MessageContent::Agent {
                 sender: record.requester.clone(),
                 text: text
                     .try_into()
                     .map_err(|_| ApprovalBrokerError::Unavailable)?,
             },
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            precondition: DeliveryPrecondition::Unpinned,
+            correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
+            attempt: agent_automation::AttemptId::generate(),
         };
-        let endpoints = self
-            .endpoints
-            .subscribe()
-            .and_then(|subscription| subscription.snapshot())
-            .map_err(|_| ApprovalBrokerError::Unavailable)?
-            .endpoints;
-        let response = crate::native_message_dispatch::dispatch_message(
-            crate::native_control_dispatch::NativeControlRequest {
-                method: "codex/messageSend",
-                params: serde_json::to_value(params)
-                    .map_err(|_| ApprovalBrokerError::Unavailable)?,
-                id: json!(record.request_id),
-                service_id: &self.service_id,
-                backend: Some(&self.backend),
-                endpoints: &endpoints,
-                stored_observation: None,
-                access_routes: None,
-            },
-        )
-        .await;
-        response
-            .get("result")
-            .ok_or(ApprovalBrokerError::RouteUnavailable)
-            .map(|_| ())
+        let delivery = self
+            .session_delivery
+            .get()
+            .ok_or(ApprovalBrokerError::Unavailable)?;
+        let receipt = delivery
+            .deliver(request, &UnstoredAttemptEvidenceSink)
+            .await
+            .map_err(|_| ApprovalBrokerError::Unavailable)?;
+        match receipt.outcome {
+            DeliveryOutcome::Started
+            | DeliveryOutcome::Steered
+            | DeliveryOutcome::StartedOrSteered
+            | DeliveryOutcome::Queued
+            | DeliveryOutcome::PeerMessageWritten
+            | DeliveryOutcome::Unknown => Ok(()),
+            DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
+                Err(ApprovalBrokerError::RouteUnavailable)
+            }
+        }
     }
 }
 

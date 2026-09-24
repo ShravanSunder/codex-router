@@ -122,8 +122,8 @@ impl ControlClient {
     /// Agent-originated communication; delivery defaults are carried by the typed request.
     pub async fn send_agent_message(
         &mut self,
-        params: collaboration_protocol::NativeSendParams,
-    ) -> Result<collaboration_protocol::NativeSendReceipt, ClientError> {
+        params: collaboration_protocol::SessionMessageSendParams,
+    ) -> Result<collaboration_protocol::DeliveryReceipt, ClientError> {
         if !matches!(
             params.message,
             collaboration_protocol::MessageContent::Agent { .. }
@@ -135,8 +135,8 @@ impl ControlClient {
     /// Explicit human input; does not manufacture an authenticated human identity.
     pub async fn send_human_input(
         &mut self,
-        params: collaboration_protocol::NativeSendParams,
-    ) -> Result<collaboration_protocol::NativeSendReceipt, ClientError> {
+        params: collaboration_protocol::SessionMessageSendParams,
+    ) -> Result<collaboration_protocol::DeliveryReceipt, ClientError> {
         if !matches!(
             params.message,
             collaboration_protocol::MessageContent::HumanUser { .. }
@@ -147,17 +147,15 @@ impl ControlClient {
     }
     async fn submit_message(
         &mut self,
-        params: collaboration_protocol::NativeSendParams,
-    ) -> Result<collaboration_protocol::NativeSendReceipt, ClientError> {
+        params: collaboration_protocol::SessionMessageSendParams,
+    ) -> Result<collaboration_protocol::DeliveryReceipt, ClientError> {
         use collaboration_protocol::{
-            AcceptedResumeEffect, MessageContent, MessageDelivery, MessageInputKind,
-            MessageRepresentation, NativeSendAcceptance,
+            AcceptedResumeEffect, DeliveryClientReceipt, DeliveryOutcome, MessageContent,
+            MessageDelivery, MessageInputKind, MessageRepresentation, NativeSendAcceptance,
+            SessionReachability,
         };
-        let value = self
-            .connection
-            .call("codex/messageSend", json!(params))
-            .await?;
-        let decoded = serde_json::from_value::<collaboration_protocol::NativeSendReceipt>(value);
+        let value = self.connection.call("message/send", json!(params)).await?;
+        let decoded = serde_json::from_value::<collaboration_protocol::DeliveryReceipt>(value);
         let Ok(receipt) = decoded else {
             self.connection.failed = true;
             return Err(ClientError::Protocol(
@@ -174,32 +172,70 @@ impl ControlClient {
                 MessageRepresentation::HumanUserText,
             ),
         };
-        let delivery_matches = matches!(
-            (&params.delivery, &receipt.acceptance),
+        let consistent = match (&receipt.reachability, &receipt.client) {
+            (None, None) => true,
             (
-                MessageDelivery::Auto,
-                NativeSendAcceptance::NativeInputAccepted { .. }
-                    | NativeSendAcceptance::SteerAccepted { .. }
-            ) | (
-                MessageDelivery::Queue,
-                NativeSendAcceptance::QueueAccepted { .. }
-            ) | (
-                MessageDelivery::Steer,
-                NativeSendAcceptance::SteerAccepted { .. }
-            )
-        );
-        if receipt.target != params.target
-            || receipt.generation != params.generation
-            || receipt.input_kind != kind
-            || receipt.representation != representation
-            || !delivery_matches
-            || (params.delivery != MessageDelivery::Auto
-                && receipt.resume_effect != AcceptedResumeEffect::NotRequested)
-            || params
-                .client_user_message_id
-                .as_ref()
-                .is_some_and(|id| id != &receipt.client_user_message_id)
-        {
+                Some(SessionReachability::CodexAppServer),
+                Some(DeliveryClientReceipt::CodexAppServer(native)),
+            ) => {
+                let acceptance_matches = matches!(
+                    (&params.mode, &receipt.outcome, &native.acceptance),
+                    (
+                        MessageDelivery::Auto,
+                        DeliveryOutcome::StartedOrSteered,
+                        NativeSendAcceptance::NativeInputAccepted { .. }
+                    ) | (
+                        MessageDelivery::Auto,
+                        DeliveryOutcome::Steered,
+                        NativeSendAcceptance::SteerAccepted { .. }
+                    ) | (
+                        MessageDelivery::Queue,
+                        DeliveryOutcome::Queued,
+                        NativeSendAcceptance::QueueAccepted { .. }
+                    ) | (
+                        MessageDelivery::Steer,
+                        DeliveryOutcome::Steered,
+                        NativeSendAcceptance::SteerAccepted { .. }
+                    )
+                );
+                native.target == params.target
+                    && params
+                        .generation_guard
+                        .as_ref()
+                        .is_none_or(|guard| guard == &native.generation)
+                    && native.input_kind == kind
+                    && native.representation == representation
+                    && acceptance_matches
+                    && (params.mode == MessageDelivery::Auto
+                        || native.resume_effect == AcceptedResumeEffect::NotRequested)
+                    && params.correlation.as_ref().is_none_or(|correlation| {
+                        correlation.as_str() == String::from(native.client_user_message_id.clone())
+                    })
+            }
+            (
+                Some(SessionReachability::ProviderAcp),
+                Some(DeliveryClientReceipt::ProviderAcp { .. }),
+            ) => {
+                matches!(
+                    receipt.outcome,
+                    DeliveryOutcome::Started | DeliveryOutcome::Steered | DeliveryOutcome::Queued
+                )
+            }
+            (
+                Some(SessionReachability::ClaudeCodePeer),
+                Some(DeliveryClientReceipt::ClaudeCodePeer),
+            ) => {
+                matches!(receipt.outcome, DeliveryOutcome::PeerMessageWritten)
+            }
+            (Some(_), None) => matches!(
+                receipt.outcome,
+                DeliveryOutcome::NotSubmitted { .. }
+                    | DeliveryOutcome::Rejected(_)
+                    | DeliveryOutcome::Unknown
+            ),
+            _ => false,
+        };
+        if !consistent {
             self.connection.failed = true;
             return Err(ClientError::Protocol(
                 "inconsistent message receipt; acceptance unknown",

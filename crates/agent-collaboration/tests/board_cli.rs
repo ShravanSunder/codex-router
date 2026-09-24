@@ -389,7 +389,7 @@ fn thread_listen_uses_fixed_bounds_and_requires_acknowledgement_choice() {
 }
 
 #[test]
-fn thread_listen_exposes_topic_fixed_lifetime_and_codex_only_session_delivery() {
+fn thread_listen_exposes_topic_fixed_lifetime_and_session_delivery() {
     let topic = "018f6f67-64d2-7a21-bf9a-8f193f987002";
     for (arguments, expected) in [
         (
@@ -442,7 +442,7 @@ fn thread_listen_exposes_topic_fixed_lifetime_and_codex_only_session_delivery() 
                 "--no-acknowledge",
                 "--json",
             ],
-            "requires the calling codex-local session identity",
+            "requires the calling session identity",
         ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))

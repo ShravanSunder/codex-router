@@ -124,6 +124,20 @@ pub async fn serve_control_connection(
                         }
                     }
                 }
+                Ok(request) if request.method == "message/send" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::session_message_dispatch::dispatch(
+                            json!(id),
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request)
                     if matches!(
                         request.method.as_str(),
@@ -480,7 +494,6 @@ pub async fn serve_control_connection(
                         "codex/sessionInspect"
                             | "codex/sessionRename"
                             | "codex/turnInterrupt"
-                            | "codex/messageSend"
                             | "codex/sessionList"
                     ) =>
                 {
@@ -489,7 +502,7 @@ pub async fn serve_control_connection(
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::native_control_dispatch::dispatch_native(
-                            crate::native_control_dispatch::NativeControlRequest {
+                            crate::native_control_request::NativeControlRequest {
                                 method: &request.method,
                                 params: request.params,
                                 id: json!(id),
@@ -692,7 +705,7 @@ mod admission_error_tests {
     }
 
     #[test]
-    fn saturated_message_admission_reports_that_no_native_effect_was_dispatched() {
+    fn saturated_message_admission_stops_before_any_route_dispatch() {
         // Arrange: existing admitted work occupies every pending slot.
         let mut admission = ControlAdmission::default();
         admission.admit("init", "control/initialize").unwrap();
@@ -705,7 +718,7 @@ mod admission_error_tests {
         }
         // Act: this request is rejected by the real admission path before native dispatch.
         let result = admit_request(
-            json!({"jsonrpc":"2.0","id":"rejected-message","method":"codex/messageSend","params":{}}),
+            json!({"jsonrpc":"2.0","id":"rejected-message","method":"message/send","params":{}}),
             &mut admission,
         );
         let error = match result {
@@ -714,13 +727,9 @@ mod admission_error_tests {
         };
         // Assert: clients can distinguish overload from unknown or partial native submission.
         assert_eq!(error["error"]["data"]["kind"], "overloaded");
-        assert_eq!(
-            error["error"]["data"]["effects"],
-            json!({"resume":"notRequested","submission":"notDispatched"})
-        );
-        assert!(error["error"]["data"].get("clientUserMessageId").is_none());
+        assert!(error["error"]["data"].get("client").is_none());
         assert!(collaboration_protocol::control_error_is_valid(
-            "codex/messageSend",
+            "message/send",
             &error
         ));
         let initialization = admit_request(

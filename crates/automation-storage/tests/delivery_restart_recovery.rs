@@ -101,7 +101,7 @@ async fn explicit_host_recovery_preserves_identity_without_replaying_dispatch()
         .complete_delivery(DeliveryCompletion {
             delivery_id: id,
             attempt_id: claim.attempt_id,
-            effects: effects(SubmissionEffect::Accepted).into(),
+            effects: Some(effects(SubmissionEffect::Accepted).into()),
             result: DeliveryResult::Accepted {
                 receipt: "verified native receipt".to_owned(),
             },

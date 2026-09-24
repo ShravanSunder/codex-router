@@ -101,7 +101,14 @@ impl AutomationStore {
             .map_or(Some(1), |attempt| attempt.attempt_number.checked_add(1))
             .ok_or(StorageError::InvalidRecord)?;
         if let Some(prior) = prior {
-            let event = serde_json::json!({"kind":"deliveryAttempt","attempt":prior});
+            let receipt = row
+                .try_get::<Option<String>, _>("outcome_receipt_json")?
+                .as_deref()
+                .map(serde_json::from_str::<serde_json::Value>)
+                .transpose()
+                .map_err(|_| StorageError::InvalidRecord)?;
+            let event =
+                serde_json::json!({"kind":"deliveryAttempt","attempt":prior,"receipt":receipt});
             sqlx::query("INSERT INTO automation_events(event_id,subject_kind,subject_id,event_kind,event_body_json,recorded_at_ms) VALUES (?,'delivery',?,'attemptArchived',?,?)")
             .bind(EventId::generate().as_str()).bind(id.as_str()).bind(event.to_string()).bind(now_ms).execute(&mut *transaction).await?;
         }
@@ -116,7 +123,7 @@ impl AutomationStore {
             outcome: AttemptOutcome::InProgress,
         };
         let encoded = serde_json::to_string(&attempt).map_err(|_| StorageError::InvalidRecord)?;
-        let affected=sqlx::query("UPDATE mailbox_deliveries SET delivery_status='dispatching',latest_attempt_json=? WHERE delivery_id=? AND delivery_status IN ('pending','retryable')")
+        let affected=sqlx::query("UPDATE mailbox_deliveries SET delivery_status='dispatching',latest_attempt_json=?,outcome_receipt_json=NULL WHERE delivery_id=? AND delivery_status IN ('pending','retryable')")
         .bind(encoded).bind(id.as_str()).execute(&mut *transaction).await?.rows_affected();
         if affected != 1 {
             return Err(StorageError::InvalidRecord);

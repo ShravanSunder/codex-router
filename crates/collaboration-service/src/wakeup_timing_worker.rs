@@ -7,12 +7,12 @@ use tokio_util::sync::CancellationToken;
 
 pub struct WakeTimingWorker {
     store: Arc<Mutex<AutomationStore>>,
-    native: crate::wakeup_native_sender::WakeNativeSender,
+    native: crate::wakeup_delivery_sender::WakeDeliverySender,
 }
 impl WakeTimingWorker {
     pub(crate) fn new(
         store: Arc<Mutex<AutomationStore>>,
-        native: crate::wakeup_native_sender::WakeNativeSender,
+        native: crate::wakeup_delivery_sender::WakeDeliverySender,
     ) -> Self {
         Self { store, native }
     }

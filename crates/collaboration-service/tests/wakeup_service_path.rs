@@ -189,7 +189,7 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
         .complete_delivery(automation_storage::DeliveryCompletion {
             delivery_id: delivery.clone(),
             attempt_id: claimed.attempt_id,
-            effects: effects.into(),
+            effects: Some(effects.into()),
             result: automation_storage::DeliveryResult::Accepted {
                 receipt: receipt.clone(),
             },
@@ -208,8 +208,9 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
         return Err("SDK cancellation lost cleared-pointer delivery identity".into());
     }
     let evidence = serde_json::to_value(&retained.evidence)?;
-    if evidence.get("receipt") != Some(&serde_json::to_value(receipt)?) {
-        return Err("SDK cancellation changed native acceptance receipt".into());
+    let expected: collaboration_protocol::DeliveryReceipt = receipt.into();
+    if evidence.get("receipt") != Some(&serde_json::to_value(expected)?) {
+        return Err("SDK cancellation changed old stored native receipt meaning".into());
     }
     let replayed = client.cancel_wakeup(cancellation_request).await?;
     if serde_json::to_value(&cancelled)? != serde_json::to_value(replayed)? {

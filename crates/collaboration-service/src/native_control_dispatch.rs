@@ -1,9 +1,8 @@
 //! Generation-scoped Control calls; no provider policy or native process ownership.
-use crate::NativeGenerationGate;
+use crate::{NativeGenerationGate, native_control_request::NativeControlRequest};
 use codex_native_integration::{NativeConnectionError, NativeOperation, NativeProtocolConnection};
 use collaboration_protocol::{
-    CodexGeneration, EndpointDescription, EndpointRef, NativeInspectParams, NativeInterruptParams,
-    SessionRef, UuidIdentity,
+    CodexGeneration, EndpointRef, NativeInspectParams, NativeInterruptParams, SessionRef,
 };
 use serde_json::{Value, json};
 
@@ -14,25 +13,9 @@ pub struct NativeControlBackend {
     pub codex_home: std::path::PathBuf,
 }
 
-pub(crate) struct NativeControlRequest<'a> {
-    pub method: &'a str,
-    pub params: Value,
-    pub id: Value,
-    pub service_id: &'a UuidIdentity,
-    pub backend: Option<&'a NativeControlBackend>,
-    pub endpoints: &'a [EndpointDescription],
-    pub stored_observation:
-        Option<crate::stored_inventory_observation::StoredInventoryObservation<'a>>,
-    /// Recorded Router access routes. `session inspect` reports the access the
-    /// broker holds for a thread; a thread without a route has none to report.
-    pub access_routes: Option<&'a crate::ServiceApprovalBroker>,
-}
 pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value {
     if request.method == "codex/sessionList" {
         return crate::session_inventory_dispatch::dispatch_inventory(request).await;
-    }
-    if request.method == "codex/messageSend" {
-        return crate::native_message_dispatch::dispatch_message(request).await;
     }
     if request.method == "codex/sessionRename" {
         return dispatch_rename(request).await;

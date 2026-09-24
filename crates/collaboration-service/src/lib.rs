@@ -26,9 +26,13 @@ pub use provider_operation_store::{
     ProviderOperationAdmission, ProviderOperationAdmissionResult, ProviderOperationRecord,
     ProviderOperationStore, ProviderOperationStoreError,
 };
+mod delivery_route_projection;
 mod provider_conversation_backend;
 mod scheduled_run_contract;
 mod session_delivery_contract;
+mod session_delivery_router;
+mod stored_delivery_receipt;
+pub use collaboration_protocol::{DeliveryClientReceipt, DeliveryReceipt};
 pub use provider_conversation_backend::{ProviderConversationBackend, ProviderConversationFuture};
 pub use scheduled_run_contract::{
     FreshSessionRequest, NativeTurnRef, PreparedTarget, RunEvidenceSink, RunReconciliation,
@@ -38,10 +42,10 @@ pub use scheduled_run_contract::{
 };
 pub use session_delivery_contract::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryClientReceipt, DeliveryContractError, DeliveryFuture, DeliveryPrecondition,
-    DeliveryReceipt, DeliveryRequest, RouteClaim, RouteUnavailableReason, SessionDeliveryRoute,
-    SessionMessageDelivery,
+    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, RouteClaim,
+    RouteUnavailableReason, SessionDeliveryRoute, SessionMessageDelivery,
 };
+pub use session_delivery_router::SessionDeliveryRouter;
 mod provider_conversation_dispatch;
 mod service_identity_storage;
 pub use service_identity_storage::{load_service_identity, new_service_uuid};
@@ -51,11 +55,16 @@ mod control_schema_publication;
 mod journal_dispatch;
 pub use control_schema_publication::publish_control_schema;
 mod native_control_dispatch;
+mod native_control_request;
+mod session_message_dispatch;
 pub use native_control_dispatch::NativeControlBackend;
 
 mod approval_broker;
+mod codex_app_server_delivery_route;
+mod codex_queue_reconciliation;
 mod message_effect_state;
 mod native_message_dispatch;
+pub use codex_app_server_delivery_route::CodexAppServerDeliveryRoute;
 mod session_delivery_sink;
 pub use approval_broker::{
     ExternalApprovalOperationMetadata, ExternalApprovalOption, ExternalApprovalOptionScope,
@@ -77,7 +86,7 @@ mod wakeup_timing_worker;
 pub use wakeup_timing_worker::WakeTimingWorker;
 
 mod delivery_projection;
-mod wakeup_native_sender;
+mod wakeup_delivery_sender;
 
 mod wakeup_lifecycle_dispatch;
 

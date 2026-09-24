@@ -125,11 +125,11 @@ async fn run(mut pending: PendingThreadListen, directory: std::path::PathBuf) ->
     let request = match board_preparation::finalize_actor(&pending.actor, &client) {
         Ok(reader) => {
             if pending.request.delivery == ThreadListenDelivery::Session
-                && !board_preparation::is_codex_session_identity(&reader)
+                && !board_preparation::is_session_identity(&reader)
             {
                 return crate::endpoint_commands::report_failure(
                     "invalidField",
-                    "--deliver session requires the calling codex-local session identity",
+                    "--deliver session requires the calling session identity",
                     2,
                     true,
                 );

@@ -1,22 +1,23 @@
-//! Positive queue evidence can recover acceptance; missing entries never authorize retransmission.
-use crate::{NativeAdmission, NativeControlBackend};
-use agent_automation::{DeliveryStatus, PreparationEffect, SubmissionEffect};
+//! Reconcile an uncertain wake only through the client named by its stored evidence.
+use crate::{
+    AttemptReconciliation, AttemptReconciliationContext, SessionMessageDelivery,
+    stored_delivery_receipt::StoredDeliveryReceipt,
+};
+use agent_automation::{DeliveryStatus, RouteEffectEvidence, SubmissionEffect};
 use automation_storage::{
     AutomationStore, DeliveryCompletion, DeliveryRecord, DeliveryResult, StorageError,
 };
-use codex_native_integration::{NativeConnectionError, NativeOperation, NativeProtocolConnection};
 use collaboration_protocol::{
-    AcceptedResumeEffect, CodexGeneration, MessageContent, NativeSendAcceptance, NativeSendReceipt,
-    SessionRef,
+    CodexGeneration, DeliveryClientReceipt, DeliveryOutcome, MessageContent, MessageDelivery,
+    NativeSendAcceptance, SessionReachability, SessionRef,
 };
-use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub(crate) async fn reconcile(
     store: &Arc<Mutex<AutomationStore>>,
-    backend: Option<&NativeControlBackend>,
-    record: DeliveryRecord<SessionRef, CodexGeneration, NativeSendReceipt>,
+    delivery: &dyn SessionMessageDelivery,
+    record: DeliveryRecord<SessionRef, CodexGeneration, StoredDeliveryReceipt>,
 ) -> Result<(), StorageError> {
     if record.status != DeliveryStatus::Uncertain {
         return Ok(());
@@ -24,152 +25,113 @@ pub(crate) async fn reconcile(
     let Some(attempt) = record.attempt else {
         return Err(StorageError::InvalidRecord);
     };
-    let Some(native) = attempt
-        .effects
-        .as_ref()
-        .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
-    else {
-        return Ok(());
+    let Some(mut effects) = attempt.effects else {
+        return Err(StorageError::InvalidRecord);
     };
-    // Auto dispatch does not durably record whether start or steer won its state check.
-    // A queue receipt requires both the original operation and its server submission ID.
-    if record.mode != "queue"
-        || native.resume != PreparationEffect::NotRequested
-        || native.allocation != PreparationEffect::NotRequested
-        || native.target.as_ref() != Some(&record.target)
-    {
-        return Ok(());
-    }
-    let (Some(generation), Some(correlation)) =
-        (&native.generation, &native.client_user_message_id)
-    else {
-        return Ok(());
-    };
-    let Some(backend) = backend.filter(|backend| backend.endpoint == record.target.endpoint) else {
-        return Ok(());
-    };
-    let Ok(admission) = backend.gate.acquire() else {
-        return Ok(());
+    let mode = match record.mode.as_str() {
+        "auto" => MessageDelivery::Auto,
+        "queue" => MessageDelivery::Queue,
+        "steer" => MessageDelivery::Steer,
+        _ => return Err(StorageError::InvalidRecord),
     };
     let content = store
         .lock()
         .await
         .read_delivery_content::<MessageContent>(&record.delivery_id)
         .await?;
-    let rendered = collaboration_protocol::render_message(&record.target, &content)
-        .map_err(|_| StorageError::InvalidRecord)?;
-    let retirement = admission.retirement();
-    let observed = tokio::select! {
-        biased;
-        _ = retirement.cancelled() => return Ok(()),
-        observed = tokio::time::timeout(std::time::Duration::from_secs(20), find_queued_input(&admission, &record.target, correlation, &rendered.text)) => observed,
-    };
-    let Ok(Ok(Some(submission_id))) = observed else {
-        return Ok(());
-    };
-    if retirement.is_cancelled() {
-        return Ok(());
-    }
-    let receipt = NativeSendReceipt {
+    let context = AttemptReconciliationContext {
         target: record.target,
-        generation: generation.clone(),
-        input_kind: rendered.kind,
-        representation: rendered.representation,
-        client_user_message_id: correlation
-            .clone()
-            .try_into()
-            .map_err(|_| StorageError::InvalidRecord)?,
-        resume_effect: AcceptedResumeEffect::NotRequested,
-        acceptance: NativeSendAcceptance::QueueAccepted {
-            submission_id: submission_id
-                .clone()
-                .try_into()
-                .map_err(|_| StorageError::InvalidRecord)?,
-        },
+        message: content,
+        mode,
+        recorded: effects.clone(),
     };
-    let mut effects = native.clone();
-    effects.submission = SubmissionEffect::Accepted;
-    effects.native_submission_id = Some(submission_id);
+    let result = delivery
+        .reconcile_attempt(context)
+        .await
+        .map_err(|_| StorageError::InvalidRecord)?;
+    let completion = match result {
+        AttemptReconciliation::Accepted(receipt) => {
+            if !apply_accepted_evidence(&mut effects, &receipt) {
+                return Ok(());
+            }
+            DeliveryResult::Accepted { receipt: *receipt }
+        }
+        AttemptReconciliation::KnownNotSubmitted => {
+            let reachability = match &effects {
+                RouteEffectEvidence::CodexAppServer(_) => SessionReachability::CodexAppServer,
+                RouteEffectEvidence::ProviderAcp(_) => SessionReachability::ProviderAcp,
+                RouteEffectEvidence::ClaudeCodePeer(_) => SessionReachability::ClaudeCodePeer,
+            };
+            match &mut effects {
+                RouteEffectEvidence::CodexAppServer(native) => {
+                    native.submission = SubmissionEffect::NotDispatched;
+                }
+                RouteEffectEvidence::ProviderAcp(provider) => {
+                    provider.submission = SubmissionEffect::NotDispatched;
+                }
+                RouteEffectEvidence::ClaudeCodePeer(_) => return Ok(()),
+            }
+            DeliveryResult::KnownNotSubmitted {
+                reason: "Owning client proved the attempt was not submitted.".into(),
+                retryable: true,
+                receipt: Some(collaboration_protocol::DeliveryReceipt {
+                    outcome: DeliveryOutcome::NotSubmitted {
+                        retryable: true,
+                        reason: "Owning client proved the attempt was not submitted.".into(),
+                    },
+                    reachability: Some(reachability),
+                    client: None,
+                }),
+            }
+        }
+        AttemptReconciliation::StillUnknown => return Ok(()),
+    };
     store
         .lock()
         .await
         .complete_delivery(DeliveryCompletion {
             delivery_id: record.delivery_id,
             attempt_id: attempt.attempt_id,
-            effects: effects.into(),
-            result: DeliveryResult::Accepted { receipt },
+            effects: Some(effects),
+            result: completion,
             now_ms: chrono::Utc::now().timestamp_millis(),
         })
         .await?;
     Ok(())
 }
 
-async fn find_queued_input(
-    admission: &NativeAdmission,
-    target: &SessionRef,
-    correlation: &str,
-    text: &str,
-) -> Result<Option<String>, NativeConnectionError> {
-    let schemas = admission
-        .schemas()
-        .ok_or(NativeConnectionError::InvalidInput)?;
-    if !schemas.supports_operation(NativeOperation::QueueList) {
-        return Ok(None);
-    }
-    let mut connection = NativeProtocolConnection::connect(admission.backend_path()).await?;
-    let mut cursor: Option<String> = None;
-    let mut cursors = std::collections::HashSet::new();
-    let mut matched = None;
-    for _ in 0..100 {
-        let page = connection.request_validated(&schemas, NativeOperation::QueueList,
-            json!({"threadId":String::from(target.session_id.clone()),"cursor":cursor,"limit":100})).await?;
-        let records = page
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or(NativeConnectionError::Protocol)?;
-        for record in records {
-            if record.get("clientUserMessageId").and_then(Value::as_str) != Some(correlation) {
-                continue;
-            }
-            // Correlation is client supplied. Require the full ordinary-text input and uniqueness.
-            let input = record
-                .get("input")
-                .and_then(Value::as_array)
-                .ok_or(NativeConnectionError::Protocol)?;
-            let [input] = input.as_slice() else {
-                return Ok(None);
+fn apply_accepted_evidence(
+    evidence: &mut RouteEffectEvidence<SessionRef, CodexGeneration>,
+    receipt: &collaboration_protocol::DeliveryReceipt,
+) -> bool {
+    match (evidence, &receipt.outcome, &receipt.client) {
+        (
+            RouteEffectEvidence::CodexAppServer(native),
+            DeliveryOutcome::Queued,
+            Some(DeliveryClientReceipt::CodexAppServer(client)),
+        ) => {
+            let NativeSendAcceptance::QueueAccepted { submission_id } = &client.acceptance else {
+                return false;
             };
-            if matched.is_some()
-                || input.get("type").and_then(Value::as_str) != Some("text")
-                || input.get("text").and_then(Value::as_str) != Some(text)
-                || input
-                    .get("text_elements")
-                    .or_else(|| input.get("textElements"))
-                    .is_some_and(|elements| {
-                        elements
-                            .as_array()
-                            .is_none_or(|elements| !elements.is_empty())
-                    })
+            if native.target.as_ref() != Some(&client.target)
+                || native.generation.as_ref() != Some(&client.generation)
+                || native.client_user_message_id.as_deref()
+                    != Some(String::from(client.client_user_message_id.clone()).as_str())
             {
-                return Ok(None);
+                return false;
             }
-            matched = Some(
-                record
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .ok_or(NativeConnectionError::Protocol)?
-                    .to_owned(),
-            );
+            native.submission = SubmissionEffect::Accepted;
+            native.native_submission_id = Some(String::from(submission_id.clone()));
+            true
         }
-        match page.get("nextCursor") {
-            Some(Value::Null) => return Ok(matched),
-            Some(Value::String(next)) if cursors.insert(next.clone()) => {
-                cursor = Some(next.clone())
-            }
-            _ => return Err(NativeConnectionError::Protocol),
+        (
+            RouteEffectEvidence::ProviderAcp(provider),
+            DeliveryOutcome::Started | DeliveryOutcome::Steered | DeliveryOutcome::Queued,
+            Some(DeliveryClientReceipt::ProviderAcp { operation_id }),
+        ) if provider.attempt_id.as_str() == operation_id.as_str() => {
+            provider.submission = SubmissionEffect::Accepted;
+            true
         }
+        _ => false,
     }
-    // Bounded partial scans cannot establish uniqueness.
-    Ok(None)
 }

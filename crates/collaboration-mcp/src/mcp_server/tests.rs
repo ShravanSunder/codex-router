@@ -878,7 +878,7 @@ fn expected_tool_name(method: &str) -> String {
         "codex/sessionList" => return "sessions_list".to_owned(),
         "codex/sessionInspect" => return "session_inspect".to_owned(),
         "codex/sessionRename" => return "session_rename".to_owned(),
-        "codex/messageSend" => return "message_send".to_owned(),
+        "message/send" => return "message_send".to_owned(),
         "codex/turnInterrupt" => return "turn_interrupt".to_owned(),
         "lifecycleJournal/status" => return "journal_status".to_owned(),
         "lifecycleJournal/read" => return "journal_read".to_owned(),

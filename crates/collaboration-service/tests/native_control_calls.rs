@@ -1,7 +1,8 @@
 use collaboration_client::{ClientError, ControlClient};
 use collaboration_protocol::{CodexGeneration, EndpointDescription, SessionRef};
 use collaboration_service::{
-    NativeControlBackend, NativeGenerationGate, ServiceIdentity, serve_control_connection,
+    CodexAppServerDeliveryRoute, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
+    SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery, serve_control_connection,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -94,12 +95,6 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             .to_owned()
             .try_into()
             .unwrap_or_else(|error| panic!("service id: {error}")),
-        collaboration_service::EndpointDirectory::new(
-            service_id
-                .to_owned()
-                .try_into()
-                .unwrap_or_else(|error| panic!("service id: {error}")),
-        ),
         NativeControlBackend {
             codex_home: root.clone(),
             endpoint: target.endpoint.clone(),
@@ -109,17 +104,29 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     )
     .await
     .unwrap_or_else(|error| panic!("broker: {error}"));
+    let native_backend = NativeControlBackend {
+        codex_home: root.clone(),
+        endpoint: target.endpoint.clone(),
+        gate,
+    };
     let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
         .unwrap_or_else(|error| panic!("identity: {error}"))
         .with_endpoints(vec![description.clone()])
         .unwrap_or_else(|error| panic!("endpoints: {error}"))
-        .with_native_backend(NativeControlBackend {
-            codex_home: root.clone(),
-            endpoint: target.endpoint.clone(),
-            gate,
-        })
+        .with_native_backend(native_backend.clone())
         .unwrap_or_else(|error| panic!("binding: {error}"))
         .with_approval_broker(broker);
+    let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
+        service_id
+            .to_owned()
+            .try_into()
+            .unwrap_or_else(|error| panic!("service id: {error}")),
+        identity.endpoint_directory(),
+        native_backend,
+    ));
+    let delivery: Arc<dyn SessionMessageDelivery> =
+        Arc::new(SessionDeliveryRouter::new(vec![route]));
+    let identity = identity.with_session_delivery(delivery);
     let (client, server) =
         tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("pair: {error}"));
     let service = tokio::spawn(serve_control_connection(server, identity.clone()));
@@ -264,40 +271,48 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         }
     ));
     let message = client
-        .send_agent_message(collaboration_protocol::NativeSendParams {
+        .send_agent_message(collaboration_protocol::SessionMessageSendParams {
             target: target.clone(),
-            generation: generation.clone(),
+            generation_guard: Some(generation.clone()),
             message: collaboration_protocol::MessageContent::Agent {
                 sender: target.clone(),
                 text: "A checked finding".to_owned().try_into().unwrap(),
             },
-            delivery: collaboration_protocol::MessageDelivery::Auto,
-            client_user_message_id: Some("caller-correlation".to_owned().try_into().unwrap()),
+            mode: collaboration_protocol::MessageDelivery::Auto,
+            correlation: Some("caller-correlation".to_owned().try_into().unwrap()),
         })
         .await
         .unwrap();
     assert!(matches!(
-        message.acceptance,
-        collaboration_protocol::NativeSendAcceptance::NativeInputAccepted {
-            disposition: collaboration_protocol::NativeInputDisposition::StartedOrSteered,
-            ..
-        }
+        message.client,
+        Some(
+            collaboration_protocol::DeliveryClientReceipt::CodexAppServer(
+                collaboration_protocol::NativeSendReceipt {
+                    acceptance: collaboration_protocol::NativeSendAcceptance::NativeInputAccepted {
+                        disposition:
+                            collaboration_protocol::NativeInputDisposition::StartedOrSteered,
+                        ..
+                    },
+                    ..
+                }
+            )
+        )
     ));
     let queued = client
-        .send_agent_message(collaboration_protocol::NativeSendParams {
+        .send_agent_message(collaboration_protocol::SessionMessageSendParams {
             target: target.clone(),
-            generation: generation.clone(),
+            generation_guard: Some(generation.clone()),
             message: collaboration_protocol::MessageContent::Agent {
                 sender: target.clone(),
                 text: "A checked finding".to_owned().try_into().unwrap(),
             },
-            delivery: collaboration_protocol::MessageDelivery::Queue,
-            client_user_message_id: Some("caller-correlation".to_owned().try_into().unwrap()),
+            mode: collaboration_protocol::MessageDelivery::Queue,
+            correlation: Some("caller-correlation".to_owned().try_into().unwrap()),
         })
         .await
         .unwrap();
     assert!(
-        matches!(queued.acceptance, collaboration_protocol::NativeSendAcceptance::QueueAccepted { submission_id } if String::from(submission_id.clone()) == "queued-item")
+        matches!(queued.client, Some(collaboration_protocol::DeliveryClientReceipt::CodexAppServer(collaboration_protocol::NativeSendReceipt { acceptance: collaboration_protocol::NativeSendAcceptance::QueueAccepted { submission_id }, .. })) if String::from(submission_id.clone()) == "queued-item")
     );
     let inventory = client
         .list_sessions(collaboration_protocol::NativeSessionListParams {
