@@ -156,6 +156,43 @@ for line in sys.stdin:
     }
 }
 
+pub(super) fn first_prompt_refusal_fixture(event_socket: &Path) -> ExternalProviderLaunch {
+    let script = format!(
+        r#"
+import json,socket,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{}},'agentInfo':{{'name':'cursor-fixture','version':'1'}}}}}})); sys.stdout.flush()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='session/new'
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'sessionId':'fixture-session'}}}})); sys.stdout.flush()
+active=json.loads(sys.stdin.readline())
+assert active['method']=='session/prompt'
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
+ event.connect({:?})
+ event.sendall(b'active')
+ event.recv(1)
+print(json.dumps({{'jsonrpc':'2.0','id':active['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
+first=json.loads(sys.stdin.readline())
+assert first['method']=='session/prompt'
+print(json.dumps({{'jsonrpc':'2.0','id':first['id'],'error':{{'code':-32000,'message':'provider requires authentication'}}}})); sys.stdout.flush()
+second=json.loads(sys.stdin.readline())
+assert second['method']=='session/prompt'
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
+ event.connect({:?})
+ event.sendall(b'second')
+print(json.dumps({{'jsonrpc':'2.0','id':second['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
+sys.stdin.read()
+"#,
+        event_socket.display().to_string(),
+        event_socket.display().to_string()
+    );
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), script],
+        environment: Vec::new(),
+    }
+}
+
 pub(super) fn request(target: SessionRef, text: &str) -> DeliveryRequest {
     DeliveryRequest {
         target,

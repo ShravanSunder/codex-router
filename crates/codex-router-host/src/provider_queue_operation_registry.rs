@@ -100,6 +100,7 @@ impl ProviderQueueOperationRegistry {
             } else {
                 ProviderReconciliationState::Unresolved
             },
+            terminal_stop_reason: None,
             queue_state: Some(operation.state),
             admitted_at,
             terminal_at,

@@ -392,12 +392,19 @@ impl SupervisorInner {
                 target,
                 session_record,
             } => {
+                let terminal_stop_reason = match &settlement {
+                    ConversationOperationSettlement::PromptCompleted { stop_reason, .. } => {
+                        Some(*stop_reason)
+                    }
+                    _ => None,
+                };
                 let mut store = self.store.lock().await;
                 if crate::provider_operation_settlement::persist_provider_success(
                     &mut store,
                     &operation_id,
                     target.as_ref(),
                     session_record.as_deref(),
+                    terminal_stop_reason,
                 )
                 .await
                 .is_err()
@@ -422,6 +429,7 @@ impl SupervisorInner {
                         &operation_id,
                         operation_failure.effect,
                         reconciliation,
+                        None,
                         now_ms(),
                     )
                     .await;

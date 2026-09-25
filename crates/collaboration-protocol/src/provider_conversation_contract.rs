@@ -346,6 +346,8 @@ pub struct ConversationOperationSnapshot {
     pub effect: ProviderOperationEffect,
     pub reconciliation: ProviderReconciliationState,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_stop_reason: Option<ProviderPromptStopReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_state: Option<ConversationOperationQueueState>,
     pub admitted_at: ObservationTimestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
