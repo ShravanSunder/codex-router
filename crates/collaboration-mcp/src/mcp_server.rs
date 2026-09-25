@@ -12,7 +12,6 @@ use collaboration_protocol::{
     NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
     NativeSessionListResult, OperationId,
 };
-use futures_util::FutureExt;
 use rmcp::{
     ServerHandler,
     handler::server::router::tool::ToolRoute,
@@ -24,6 +23,7 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
+use std::os::unix::fs::MetadataExt;
 use std::{
     path::PathBuf,
     sync::{
@@ -67,9 +67,7 @@ pub(crate) struct CollaborationMcpServer {
 pub(crate) struct McpExecutableObservation {
     launch_path: Option<PathBuf>,
     running_version: String,
-    running_identity: Option<codex_native_integration::ExecutableIdentity>,
-    pending_identity: Option<codex_native_integration::ExecutableIdentityTask>,
-    file_stamp: Option<McpExecutableFileStamp>,
+    startup_identity: Option<McpExecutableFileIdentity>,
 }
 
 impl std::fmt::Debug for McpExecutableObservation {
@@ -78,20 +76,18 @@ impl std::fmt::Debug for McpExecutableObservation {
             .debug_struct("McpExecutableObservation")
             .field("launch_path", &self.launch_path)
             .field("running_version", &self.running_version)
-            .field(
-                "running_identity_captured",
-                &self.running_identity.is_some(),
-            )
-            .field("identity_capture_pending", &self.pending_identity.is_some())
-            .field("file_stamp", &self.file_stamp)
+            .field("startup_identity", &self.startup_identity)
             .finish()
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct McpExecutableFileStamp {
-    length: u64,
-    modified: Option<std::time::SystemTime>,
+struct McpExecutableFileIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
 }
 
 impl McpExecutableObservation {
@@ -101,103 +97,110 @@ impl McpExecutableObservation {
             .filter(|_| cfg!(debug_assertions))
             .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
         let launch_path = std::env::current_exe().ok();
-        let has_runtime = tokio::runtime::Handle::try_current().is_ok();
-        let pending_identity = has_runtime
-            .then(|| {
-                launch_path
-                    .as_deref()
-                    .map(codex_native_integration::start_executable_identity)
-            })
-            .flatten();
-        let running_identity = if has_runtime {
-            None
-        } else {
-            launch_path
-                .as_deref()
-                .and_then(|path| codex_native_integration::executable_identity_sync(path).ok())
-        };
-        let file_stamp = launch_path
+        let startup_identity = launch_path
             .as_deref()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| McpExecutableFileStamp {
-                length: metadata.len(),
-                modified: metadata.modified().ok(),
-            });
+            .and_then(|path| mcp_executable_file_identity(path).ok());
         Self {
             launch_path,
             running_version,
-            running_identity,
-            pending_identity,
-            file_stamp,
+            startup_identity,
         }
     }
 
     #[cfg(test)]
     fn capture_from(launch_path: Option<PathBuf>, running_version: String) -> Self {
-        let running_identity = launch_path
+        let startup_identity = launch_path
             .as_deref()
-            .and_then(|path| codex_native_integration::executable_identity_sync(path).ok());
-        let file_stamp = launch_path
-            .as_deref()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| McpExecutableFileStamp {
-                length: metadata.len(),
-                modified: metadata.modified().ok(),
-            });
+            .and_then(|path| mcp_executable_file_identity(path).ok());
         Self {
             launch_path,
             running_version,
-            running_identity,
-            pending_identity: None,
-            file_stamp,
-        }
-    }
-
-    fn resolve_pending_identity(&mut self) -> bool {
-        let Some(mut pending_identity) = self.pending_identity.take() else {
-            return self.running_identity.is_some();
-        };
-        match pending_identity.wait().now_or_never() {
-            Some(Ok(identity)) => {
-                self.running_identity = Some(identity);
-                true
-            }
-            Some(Err(_error)) => false,
-            None => {
-                self.pending_identity = Some(pending_identity);
-                false
-            }
+            startup_identity,
         }
     }
 
     fn drift_warning(&mut self) -> Option<String> {
-        let path = self.launch_path.clone()?;
-        if !self.resolve_pending_identity() && self.pending_identity.is_some() {
+        let path = self.launch_path.as_deref()?;
+        let current_identity = match mcp_executable_file_identity(path) {
+            Ok(identity) => Some(identity),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_error) => return None,
+        };
+        if current_identity.is_some() && current_identity == self.startup_identity {
             return None;
         }
-        let metadata = std::fs::metadata(&path).ok();
-        let current_stamp = metadata.map(|metadata| McpExecutableFileStamp {
-            length: metadata.len(),
-            modified: metadata.modified().ok(),
-        });
-        if current_stamp == self.file_stamp && self.running_identity.is_some() {
-            return None;
-        }
-        self.file_stamp = current_stamp;
-        let installed_identity = codex_native_integration::executable_identity_sync(&path).ok();
-        if installed_identity.is_some() && installed_identity == self.running_identity {
-            return None;
-        }
-        let running_version = std::env::var("CODEX_ROUTER_DEBUG_RUNNING_VERSION")
-            .ok()
-            .filter(|_| cfg!(debug_assertions))
-            .unwrap_or_else(|| self.running_version.clone());
-        let installed_version = codex_native_integration::executable_version_sync(&path)
-            .ok()
-            .unwrap_or_else(|| "unknown".to_owned());
+        let installed_version = match current_identity {
+            Some(_) => match mcp_installed_version(path) {
+                Some(version) if version == self.running_version => {
+                    self.startup_identity = current_identity;
+                    return None;
+                }
+                Some(version) => version,
+                None => return None,
+            },
+            None => "unknown".to_owned(),
+        };
         Some(format!(
-            "⚠ Router Host is stale (running {running_version}, installed {installed_version}); run `codex-router host restart`"
+            "⚠ Router Host is stale (running {}, installed {installed_version}); run `codex-router host restart`",
+            self.running_version
         ))
+    }
+}
+
+fn mcp_executable_file_identity(
+    path: &std::path::Path,
+) -> std::io::Result<McpExecutableFileIdentity> {
+    let metadata = std::fs::metadata(path)?;
+    Ok(McpExecutableFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.size(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+    })
+}
+
+fn mcp_installed_version(path: &std::path::Path) -> Option<String> {
+    let executable_path = path.to_owned();
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let _task = tokio::task::spawn_blocking(move || {
+            let result = run_bounded_version_command(&executable_path);
+            let _sent = sender.send(result);
+        });
+        return receiver
+            .recv_timeout(Duration::from_millis(850))
+            .ok()
+            .flatten();
+    }
+    run_bounded_version_command(&executable_path)
+}
+
+fn run_bounded_version_command(path: &std::path::Path) -> Option<String> {
+    let mut child = std::process::Command::new(path)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + Duration::from_millis(750);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let output = child.wait_with_output().ok()?;
+                return codex_native_integration::parse_executable_version(&output.stdout).ok();
+            }
+            Ok(Some(_status)) => return None,
+            Err(_error) => return None,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _killed = child.kill();
+                let _reaped = child.wait();
+                return None;
+            }
+        }
     }
 }
 
@@ -1033,8 +1036,8 @@ mod executable_observation_tests {
     use rmcp::ServerHandler;
     use std::os::unix::fs::PermissionsExt;
 
-    #[test]
-    fn initialize_instructions_report_running_and_installed_router_versions() {
+    #[tokio::test]
+    async fn initialize_instructions_report_running_and_installed_router_versions() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("codex-router");
         write_version_script(&path, "0.1.36");

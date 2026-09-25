@@ -1,18 +1,19 @@
-//! Running Router executable identity and bounded installed-file observations.
+//! Running Router executable version and bounded launch-path observations.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::Duration;
 
-use codex_native_integration::ExecutableIdentity;
 use serde::{Deserialize, Serialize};
+
+const INSTALLED_VERSION_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Router Host build compared with the executable still present at its launch path.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouterExecutableRelation {
-    /// The launch path still resolves to the exact content captured at startup.
+    /// The launch path still has its startup file identity or reports the same version.
     Match,
-    /// The launch path now resolves to different executable content or is missing.
+    /// The launch path now resolves to a different Router version or is missing.
     Drift {
         /// Version of the executable captured when this Host started.
         running_version: String,
@@ -30,41 +31,37 @@ pub enum RouterExecutableRelation {
 pub struct RouterExecutableObserver {
     launch_path: Option<PathBuf>,
     running_version: String,
-    running_identity: Option<ExecutableIdentity>,
-    pending_identity: Option<codex_native_integration::ExecutableIdentityTask>,
-    observed_stamp: Option<ExecutableFileStamp>,
+    startup_identity: Option<ExecutableFileIdentity>,
     relation: RouterExecutableRelation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ExecutableFileStamp {
-    length: u64,
-    modified: Option<SystemTime>,
+struct ExecutableFileIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
 }
 
 impl RouterExecutableObserver {
-    /// Captures the Host's startup executable identity and launch-path metadata.
+    /// Captures only the startup file's stat identity; it does no file reads or hashing.
     pub fn capture(launch_path: Result<PathBuf, std::io::Error>, running_version: String) -> Self {
         let launch_path = launch_path.ok();
-        let pending_identity = launch_path
+        let startup_identity = launch_path
             .as_deref()
-            .map(codex_native_integration::start_executable_identity);
-        let observed_stamp = launch_path
-            .as_deref()
-            .and_then(|path| executable_file_stamp(path).ok());
+            .and_then(|path| executable_file_identity(path).ok());
         Self {
             launch_path,
             running_version,
-            running_identity: None,
-            pending_identity,
-            observed_stamp,
+            startup_identity,
             relation: RouterExecutableRelation::Unknown {
-                reason: "the Router startup executable identity is being captured".to_owned(),
+                reason: "the Router launch path has not been observed yet".to_owned(),
             },
         }
     }
 
-    /// Rechecks the launch path and hashes only after its size or modification time changes.
+    /// Compares the launch path's stat identity and probes its version only after drift.
     pub async fn observe(&mut self) -> RouterExecutableRelation {
         let Some(path) = self.launch_path.as_deref() else {
             self.relation = RouterExecutableRelation::Unknown {
@@ -72,8 +69,8 @@ impl RouterExecutableObserver {
             };
             return self.relation.clone();
         };
-        let current_stamp = match executable_file_stamp(path) {
-            Ok(stamp) => stamp,
+        let current_identity = match executable_file_identity(path) {
+            Ok(identity) => identity,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.relation = RouterExecutableRelation::Drift {
                     running_version: self.running_version.clone(),
@@ -88,68 +85,63 @@ impl RouterExecutableObserver {
                 return self.relation.clone();
             }
         };
-        if let Some(mut pending_identity) = self.pending_identity.take() {
-            match pending_identity.wait().await {
-                Ok(identity) => self.running_identity = Some(identity),
-                Err(_error) => {
-                    self.relation = RouterExecutableRelation::Unknown {
-                        reason: "the Router executable identity could not be captured at startup"
-                            .to_owned(),
-                    };
-                    return self.relation.clone();
-                }
-            }
-            if self.observed_stamp == Some(current_stamp) {
-                self.relation = RouterExecutableRelation::Match;
-                return self.relation.clone();
-            }
-        }
-        if self.observed_stamp == Some(current_stamp) {
-            return self.relation.clone();
-        }
-        self.observed_stamp = Some(current_stamp);
-        if self.running_identity.is_none() {
-            self.relation = RouterExecutableRelation::Unknown {
-                reason: "the Router startup executable identity is unavailable".to_owned(),
-            };
-            return self.relation.clone();
-        }
-        let (installed_identity, installed_version) = tokio::join!(
-            codex_native_integration::executable_identity(path),
-            codex_native_integration::executable_version(path),
-        );
-        let (Ok(installed_identity), installed_version) = (installed_identity, installed_version)
-        else {
-            self.relation = RouterExecutableRelation::Unknown {
-                reason: "the Router launch path changed but its identity could not be read"
-                    .to_owned(),
-            };
-            return self.relation.clone();
-        };
-        if self.running_identity.as_ref() == Some(&installed_identity) {
+        if self.startup_identity == Some(current_identity) {
             self.relation = RouterExecutableRelation::Match;
-        } else {
-            self.relation = RouterExecutableRelation::Drift {
-                running_version: self.running_version.clone(),
-                installed_version: installed_version.ok(),
-            };
+            return self.relation.clone();
+        }
+
+        match installed_version(path).await {
+            Ok(installed_version) if installed_version == self.running_version => {
+                self.startup_identity = Some(current_identity);
+                self.relation = RouterExecutableRelation::Match;
+            }
+            Ok(installed_version) => {
+                self.relation = RouterExecutableRelation::Drift {
+                    running_version: self.running_version.clone(),
+                    installed_version: Some(installed_version),
+                };
+            }
+            Err(()) => {
+                self.relation = RouterExecutableRelation::Unknown {
+                    reason: "the changed Router launch path could not report its version"
+                        .to_owned(),
+                };
+            }
         }
         self.relation.clone()
     }
 
-    /// Returns the latest relation without waiting for an in-flight startup hash.
+    /// Returns the latest relation without performing filesystem work.
     #[must_use]
     pub fn relation(&self) -> RouterExecutableRelation {
         self.relation.clone()
     }
 }
 
-fn executable_file_stamp(path: &std::path::Path) -> std::io::Result<ExecutableFileStamp> {
+fn executable_file_identity(path: &std::path::Path) -> std::io::Result<ExecutableFileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
     let metadata = std::fs::metadata(path)?;
-    Ok(ExecutableFileStamp {
-        length: metadata.len(),
-        modified: metadata.modified().ok(),
+    Ok(ExecutableFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.size(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
     })
+}
+
+async fn installed_version(path: &std::path::Path) -> Result<String, ()> {
+    let mut command = tokio::process::Command::new(path);
+    command.arg("--version").kill_on_drop(true);
+    let output = tokio::time::timeout(INSTALLED_VERSION_TIMEOUT, command.output())
+        .await
+        .map_err(|_elapsed| ())?
+        .map_err(|_error| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    codex_native_integration::parse_executable_version(&output.stdout).map_err(|_error| ())
 }
 
 #[cfg(test)]
@@ -158,7 +150,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
-    async fn same_file_remains_a_match() {
+    async fn same_file_is_a_match() {
         let path = std::env::current_exe().expect("test executable");
         let mut observer = RouterExecutableObserver::capture(Ok(path), "test-running".to_owned());
         assert_eq!(observer.observe().await, RouterExecutableRelation::Match);
@@ -183,6 +175,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacement_with_the_same_version_remains_a_match() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let launch_path = directory.path().join("codex-router");
+        write_version_script(&launch_path, "0.1.36");
+        let mut observer =
+            RouterExecutableObserver::capture(Ok(launch_path.clone()), "0.1.36".to_owned());
+        assert_eq!(observer.observe().await, RouterExecutableRelation::Match);
+        write_version_script(&launch_path, "0.1.36");
+        assert_eq!(observer.observe().await, RouterExecutableRelation::Match);
+    }
+
+    #[tokio::test]
     async fn missing_launch_path_is_drift() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("router");
@@ -204,7 +208,7 @@ mod tests {
         let path = directory.path().join("router");
         std::fs::create_dir(&path).expect("create unreadable executable directory");
         let mut observer = RouterExecutableObserver::capture(Ok(path.clone()), "0.1.36".to_owned());
-        std::fs::write(path.join("changed"), b"changed").expect("change launch path stamp");
+        std::fs::write(path.join("changed"), b"changed").expect("change launch path identity");
         assert!(matches!(
             observer.observe().await,
             RouterExecutableRelation::Unknown { .. }
@@ -218,6 +222,6 @@ mod tests {
         )
         .expect("write version script");
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .expect("make version script executable");
+            .expect("make script executable");
     }
 }
