@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-const INSTALLED_VERSION_TIMEOUT: Duration = Duration::from_millis(750);
+const INSTALLED_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Router Host build compared with the executable still present at its launch path.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

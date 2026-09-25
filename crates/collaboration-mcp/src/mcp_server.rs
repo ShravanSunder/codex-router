@@ -33,6 +33,8 @@ use std::{
     time::Duration,
 };
 
+const MCP_INSTALLED_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+
 mod catalog_descriptions;
 mod catalog_tools;
 mod conversation_operation_tools;
@@ -169,7 +171,7 @@ fn mcp_installed_version(path: &std::path::Path) -> Option<String> {
             let _sent = sender.send(result);
         });
         return receiver
-            .recv_timeout(Duration::from_millis(850))
+            .recv_timeout(MCP_INSTALLED_VERSION_TIMEOUT + Duration::from_millis(100))
             .ok()
             .flatten();
     }
@@ -183,7 +185,7 @@ fn run_bounded_version_command(path: &std::path::Path) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = std::time::Instant::now() + Duration::from_millis(750);
+    let deadline = std::time::Instant::now() + MCP_INSTALLED_VERSION_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
