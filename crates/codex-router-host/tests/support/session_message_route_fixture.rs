@@ -50,6 +50,7 @@ for line in sys.stdin:
  else:
   raise RuntimeError(method)
  print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result})); sys.stdout.flush()
+ open(prompt_log,'a').write(json.dumps({'fixturePromptCompleted':request['id']})+'\n')
 "#,
     )
     .expect("provider fixture");
@@ -82,6 +83,29 @@ pub(super) async fn wait_for_prompt_text(path: &Path, text: &str) {
     .unwrap_or_else(|_| {
         panic!(
             "provider prompt log deadline; log: {}",
+            std::fs::read_to_string(path).unwrap_or_default()
+        )
+    });
+}
+
+pub(super) async fn wait_for_completed_provider_prompts(path: &Path, expected_count: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let completed_count = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("fixturePromptCompleted"))
+                .count();
+            if completed_count >= expected_count {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "provider fixture completion deadline; log: {}",
             std::fs::read_to_string(path).unwrap_or_default()
         )
     });
