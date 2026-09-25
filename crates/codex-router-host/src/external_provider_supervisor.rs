@@ -392,12 +392,19 @@ impl SupervisorInner {
                 target,
                 session_record,
             } => {
+                let terminal_stop_reason = match &settlement {
+                    ConversationOperationSettlement::PromptCompleted { stop_reason, .. } => {
+                        Some(*stop_reason)
+                    }
+                    _ => None,
+                };
                 let mut store = self.store.lock().await;
                 if crate::provider_operation_settlement::persist_provider_success(
                     &mut store,
                     &operation_id,
                     target.as_ref(),
                     session_record.as_deref(),
+                    terminal_stop_reason,
                 )
                 .await
                 .is_err()
@@ -422,6 +429,7 @@ impl SupervisorInner {
                         &operation_id,
                         operation_failure.effect,
                         reconciliation,
+                        None,
                         now_ms(),
                     )
                     .await;
@@ -1074,6 +1082,30 @@ fn runtime_failure(
             ConversationOperationFailureStage::Settlement,
             ProviderOperationEffect::Unknown,
             "provider rejected the operation after dispatch",
+            operation_id,
+            target,
+        ),
+        ExternalProviderRuntimeError::PromptOutputLimitExceeded => failure(
+            ConversationOperationFailureKind::OutcomeUnknown,
+            ConversationOperationFailureStage::Settlement,
+            ProviderOperationEffect::Unknown,
+            "provider prompt output exceeded the retained output limit; cancellation was requested and settled",
+            operation_id,
+            target,
+        ),
+        ExternalProviderRuntimeError::FrameLimitExceeded => failure(
+            ConversationOperationFailureKind::OutcomeUnknown,
+            ConversationOperationFailureStage::Settlement,
+            ProviderOperationEffect::Unknown,
+            "provider frame exceeded the configured transport limit",
+            operation_id,
+            target,
+        ),
+        ExternalProviderRuntimeError::FrameDecodeFailure => failure(
+            ConversationOperationFailureKind::OutcomeUnknown,
+            ConversationOperationFailureStage::Settlement,
+            ProviderOperationEffect::Unknown,
+            "provider frame could not be decoded or classified",
             operation_id,
             target,
         ),

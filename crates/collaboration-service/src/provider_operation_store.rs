@@ -4,7 +4,8 @@
 
 use collaboration_protocol::{
     ConversationBindingIdentity, OperationId, ProviderBindingIdentity, ProviderOperationEffect,
-    ProviderOperationKind, ProviderOperationStage, ProviderReconciliationState, SessionRef,
+    ProviderOperationKind, ProviderOperationStage, ProviderPromptStopReason,
+    ProviderReconciliationState, SessionRef,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{
@@ -16,7 +17,7 @@ use std::{collections::HashSet, path::Path, time::Duration};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const RETENTION_BATCH_LIMIT: i64 = 1_000;
-const EXPECTED_COLUMNS: [&str; 13] = [
+const EXPECTED_COLUMNS: [&str; 14] = [
     "operation_id",
     "operation_kind",
     "binding_json",
@@ -30,6 +31,7 @@ const EXPECTED_COLUMNS: [&str; 13] = [
     "dispatched_at_ms",
     "terminal_at_ms",
     "updated_at_ms",
+    "terminal_stop_reason",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +70,7 @@ pub struct ProviderOperationRecord {
     pub admitted_at_ms: i64,
     pub dispatched_at_ms: Option<i64>,
     pub terminal_at_ms: Option<i64>,
+    pub terminal_stop_reason: Option<ProviderPromptStopReason>,
     pub updated_at_ms: i64,
 }
 
@@ -94,6 +97,7 @@ struct StoredProviderOperationRow {
     admitted_at_ms: i64,
     dispatched_at_ms: Option<i64>,
     terminal_at_ms: Option<i64>,
+    terminal_stop_reason: Option<String>,
     updated_at_ms: i64,
 }
 
@@ -161,7 +165,7 @@ impl ProviderOperationStore {
             "SELECT operation_id,operation_kind,binding_json,
                     target_service_id,target_endpoint_id,target_session_id,
                     stage,effect,reconciliation_state,admitted_at_ms,dispatched_at_ms,
-                    terminal_at_ms,updated_at_ms
+                    terminal_at_ms,terminal_stop_reason,updated_at_ms
              FROM provider_operations WHERE operation_id=?",
             operation_id.as_str(),
         )
@@ -274,14 +278,16 @@ impl ProviderOperationStore {
         operation_id: &OperationId,
         effect: ProviderOperationEffect,
         reconciliation_state: ProviderReconciliationState,
+        terminal_stop_reason: Option<ProviderPromptStopReason>,
         terminal_at_ms: i64,
     ) -> Result<ProviderOperationRecord, ProviderOperationStoreError> {
+        let encoded_stop_reason = terminal_stop_reason.map(encode_enum).transpose()?;
         let result = sqlx::query!(
             "UPDATE provider_operations
-             SET stage=?,effect=?,reconciliation_state=?,terminal_at_ms=MAX(admitted_at_ms,?),updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)
+             SET stage=?,effect=?,reconciliation_state=?,terminal_stop_reason=?,terminal_at_ms=MAX(admitted_at_ms,?),updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)
              WHERE operation_id=? AND stage!=?",
              encode_enum(ProviderOperationStage::Terminal)?, encode_enum(effect)?,
-             encode_enum(reconciliation_state)?, terminal_at_ms, terminal_at_ms,
+             encode_enum(reconciliation_state)?, encoded_stop_reason, terminal_at_ms, terminal_at_ms,
              operation_id.as_str(), encode_enum(ProviderOperationStage::Terminal)?,
         )
         .execute(&mut self.connection)
@@ -290,6 +296,7 @@ impl ProviderOperationStore {
             record.stage == ProviderOperationStage::Terminal
                 && record.effect == effect
                 && record.reconciliation_state == reconciliation_state
+                && record.terminal_stop_reason == terminal_stop_reason
                 && record.terminal_at_ms.is_some()
         })
         .await
@@ -447,6 +454,7 @@ fn decode_record(
         admitted_at_ms: row.admitted_at_ms,
         dispatched_at_ms: row.dispatched_at_ms,
         terminal_at_ms: row.terminal_at_ms,
+        terminal_stop_reason: row.terminal_stop_reason.map(decode_enum).transpose()?,
         updated_at_ms: row.updated_at_ms,
     };
     validate_record(&record)?;
@@ -504,7 +512,12 @@ fn validate_record(record: &ProviderOperationRecord) -> Result<(), ProviderOpera
         }
         ProviderOperationStage::Terminal => record.terminal_at_ms.is_some(),
     };
-    if timestamps_valid && state_valid {
+    let outcome_valid = record.terminal_stop_reason.is_none_or(|_| {
+        record.operation_kind == ProviderOperationKind::ConversationPrompt
+            && record.stage == ProviderOperationStage::Terminal
+            && record.effect == ProviderOperationEffect::Applied
+    });
+    if timestamps_valid && state_valid && outcome_valid {
         Ok(())
     } else {
         Err(ProviderOperationStoreError::InvalidRecord)

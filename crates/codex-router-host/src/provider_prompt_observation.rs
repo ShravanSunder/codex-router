@@ -1,7 +1,7 @@
 //! Bounded ACP prompt output and settlement observation.
 use crate::external_provider_runtime::{
     ExternalProviderPromptOutcome, ExternalProviderRuntimeError, MAX_PROMPT_OUTPUT_BYTES,
-    MAX_PROMPT_UPDATES, acp_operation_error,
+    ProviderFrameObservation, acp_operation_error, provider_frame_decode_error,
 };
 #[cfg(test)]
 use crate::external_provider_runtime::{
@@ -19,6 +19,8 @@ use std::{collections::HashMap, sync::Arc};
 pub(crate) async fn read_bounded_prompt(
     session: &mut ActiveSession<'_, Agent>,
     mut terminal: tokio::sync::oneshot::Receiver<Result<StopReason, agent_client_protocol::Error>>,
+    output_limit_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    frame_observation: std::sync::Arc<ProviderFrameObservation>,
     #[cfg(test)] test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
 ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
     use futures_util::FutureExt as _;
@@ -26,16 +28,16 @@ pub(crate) async fn read_bounded_prompt(
     let mut output = String::new();
     #[cfg(test)]
     let mut tool_calls = HashMap::<String, ExternalProviderToolCall>::new();
-    let mut updates = 0_usize;
+    let mut output_limit_tx = Some(output_limit_tx);
     let stop_reason = loop {
         tokio::select! {
             biased;
             update = session.read_update() => {
-                let update = update.map_err(|error| ExternalProviderRuntimeError::Operation(error.to_string()))?;
+                let update = update.map_err(provider_frame_decode_error)?;
                 if let Some(reason) = record_prompt_update(
                     update,
                     &mut output,
-                    &mut updates,
+                    &mut output_limit_tx,
                     #[cfg(test)] &mut tool_calls,
                     #[cfg(test)] &test_tool_calls,
                 ).await? {
@@ -43,14 +45,26 @@ pub(crate) async fn read_bounded_prompt(
                 }
             }
             result = &mut terminal => {
-                let result = result.map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+                let result = match result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        if !frame_observation.limit_was_exceeded() {
+                            let frame_limit_observed =
+                                frame_observation.wait_for_limit_exceeded().await;
+                            if !frame_limit_observed {
+                                return Err(ExternalProviderRuntimeError::TransportFailure);
+                            }
+                        }
+                        return Err(ExternalProviderRuntimeError::FrameLimitExceeded);
+                    }
+                };
                 let reason = result.map_err(acp_operation_error)?;
                 while let Some(update) = session.read_update().now_or_never() {
-                    let update = update.map_err(|error| ExternalProviderRuntimeError::Operation(error.to_string()))?;
+                    let update = update.map_err(provider_frame_decode_error)?;
                     let _legacy_reason = record_prompt_update(
                         update,
                         &mut output,
-                        &mut updates,
+                        &mut output_limit_tx,
                         #[cfg(test)] &mut tool_calls,
                         #[cfg(test)] &test_tool_calls,
                     ).await?;
@@ -73,16 +87,10 @@ pub(crate) async fn read_bounded_prompt(
 async fn record_prompt_update(
     update: SessionMessage,
     output: &mut String,
-    updates: &mut usize,
+    output_limit_tx: &mut Option<tokio::sync::mpsc::UnboundedSender<()>>,
     #[cfg(test)] tool_calls: &mut HashMap<String, ExternalProviderToolCall>,
     #[cfg(test)] test_tool_calls: &Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
 ) -> Result<Option<StopReason>, ExternalProviderRuntimeError> {
-    *updates = updates.saturating_add(1);
-    if *updates > MAX_PROMPT_UPDATES {
-        return Err(ExternalProviderRuntimeError::Operation(
-            "provider prompt exceeded the update limit".to_owned(),
-        ));
-    }
     match update {
         SessionMessage::SessionMessage(dispatch) => MatchDispatch::new(dispatch)
             .if_notification(async |notification: SessionNotification| {
@@ -92,10 +100,12 @@ async fn record_prompt_update(
                         ..
                     }) => {
                         if output.len().saturating_add(text.text.len()) > MAX_PROMPT_OUTPUT_BYTES {
-                            return Err(agent_client_protocol::Error::internal_error()
-                                .data("provider prompt exceeded the output byte limit"));
+                            if let Some(limit_tx) = output_limit_tx.take() {
+                                let _result = limit_tx.send(());
+                            }
+                        } else {
+                            output.push_str(&text.text);
                         }
-                        output.push_str(&text.text);
                     }
                     SessionUpdate::ToolCall(tool_call) => {
                         #[cfg(not(test))]
@@ -148,8 +158,16 @@ async fn record_prompt_update(
                 Ok(())
             })
             .await
-            .otherwise_ignore()
-            .map_err(|error| ExternalProviderRuntimeError::Operation(error.to_string()))?,
+            .otherwise(|message| async move {
+                match message {
+                    agent_client_protocol::Dispatch::Request(_, responder) => responder
+                        .respond_with_error(agent_client_protocol::Error::method_not_found()),
+                    agent_client_protocol::Dispatch::Notification(_)
+                    | agent_client_protocol::Dispatch::Response(_, _) => Ok(()),
+                }
+            })
+            .await
+            .map_err(provider_frame_decode_error)?,
         SessionMessage::StopReason(reason) => return Ok(Some(reason)),
         _ => {}
     }

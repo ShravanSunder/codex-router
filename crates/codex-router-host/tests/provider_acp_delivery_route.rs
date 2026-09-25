@@ -431,6 +431,7 @@ async fn router_queued_reconciliation_uses_only_the_operation_store() {
             &operation_id,
             ProviderOperationEffect::Applied,
             ProviderReconciliationState::Confirmed,
+            None,
             4,
         )
         .await

@@ -26,15 +26,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_ACP_FRAME_BYTES: usize = 1024 * 1024;
+/// ACP JSON-RPC frames are capped at 64 MiB to allow large tool results while
+/// keeping each provider connection's transport memory bounded.
+const MAX_ACP_FRAME_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_PROMPT_OUTPUT_BYTES: usize = 1024 * 1024;
-pub(crate) const MAX_PROMPT_UPDATES: usize = 4096;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderLaunch {
@@ -292,6 +296,14 @@ pub enum ExternalProviderRuntimeError {
     ProviderFailure,
     #[error("provider operation response was unavailable")]
     TransportFailure,
+    #[error(
+        "provider prompt output exceeded the retained output limit; cancellation was requested and settled"
+    )]
+    PromptOutputLimitExceeded,
+    #[error("provider ACP frame exceeded the configured transport limit")]
+    FrameLimitExceeded,
+    #[error("provider ACP message could not be decoded or classified")]
+    FrameDecodeFailure,
     #[error("provider ACP operation failed: {0}")]
     Operation(String),
 }
@@ -303,6 +315,28 @@ pub(crate) fn acp_operation_error(
         ExternalProviderRuntimeError::AuthenticationRequired
     } else {
         ExternalProviderRuntimeError::ProviderFailure
+    }
+}
+
+pub(crate) fn sanitized_initialization_error(error: &agent_client_protocol::Error) -> String {
+    sanitized_acp_error(error, "initialize", "initialize")
+}
+
+fn sanitized_acp_error(error: &agent_client_protocol::Error, method: &str, stage: &str) -> String {
+    let error_data_bytes = error.data.as_ref().map_or(0, |data| data.to_string().len());
+    format!(
+        "ACP request failed (method={method}, stage={stage}, code={}, error_data_bytes={error_data_bytes})",
+        i32::from(error.code),
+    )
+}
+
+pub(crate) fn provider_frame_decode_error(
+    error: agent_client_protocol::Error,
+) -> ExternalProviderRuntimeError {
+    if error.to_string().contains("max line length exceeded") {
+        ExternalProviderRuntimeError::FrameLimitExceeded
+    } else {
+        ExternalProviderRuntimeError::FrameDecodeFailure
     }
 }
 
@@ -368,6 +402,32 @@ struct ProviderSessionRegistration {
     commands: tokio::sync::mpsc::Sender<ProviderSessionCommand>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct ProviderFrameObservation {
+    limit_exceeded: AtomicBool,
+    limit_notification: tokio::sync::Notify,
+}
+
+impl ProviderFrameObservation {
+    fn record_limit_exceeded(&self) {
+        self.limit_exceeded.store(true, Ordering::Relaxed);
+        self.limit_notification.notify_one();
+    }
+
+    pub(crate) fn limit_was_exceeded(&self) -> bool {
+        self.limit_exceeded.load(Ordering::Relaxed)
+    }
+
+    pub(crate) async fn wait_for_limit_exceeded(&self) -> bool {
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            self.limit_notification.notified(),
+        )
+        .await
+        .is_ok()
+    }
+}
+
 /// Owns the provider process and ACP connection independently of caller tasks.
 pub struct ExternalProviderRuntime {
     admission: ExternalProviderAdmission,
@@ -375,6 +435,7 @@ pub struct ExternalProviderRuntime {
     retirement: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     shutdown_failed: Arc<std::sync::atomic::AtomicBool>,
+    frame_observation: Arc<ProviderFrameObservation>,
     commands: tokio::sync::mpsc::Sender<ProviderCommand>,
     #[cfg(test)]
     permission_request_count: Arc<AtomicU64>,
@@ -441,6 +502,8 @@ impl ExternalProviderRuntime {
             .map_err(|error| ExternalProviderRuntimeError::Launch(error.to_string()))?;
         let shutdown = CancellationToken::new();
         let retirement = CancellationToken::new();
+        let frame_observation = Arc::new(ProviderFrameObservation::default());
+        let task_frame_observation = Arc::clone(&frame_observation);
         let shutdown_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let task_shutdown_failed = Arc::clone(&shutdown_failed);
         let task_shutdown = shutdown.clone();
@@ -494,11 +557,22 @@ impl ExternalProviderRuntime {
                 FramedWrite::new(stdin.compat_write(), LinesCodec::new()),
                 std::io::Error::other,
             );
+            let incoming_frame_observation = Arc::clone(&task_frame_observation);
             let incoming = FramedRead::new(
                 stdout.compat(),
                 LinesCodec::new_with_max_length(MAX_ACP_FRAME_BYTES),
             )
-            .map(|line| line.map_err(std::io::Error::other));
+            .map(move |line| {
+                line.map_err(|error| {
+                    if matches!(
+                        error,
+                        tokio_util::codec::LinesCodecError::MaxLineLengthExceeded
+                    ) {
+                        incoming_frame_observation.record_limit_exceeded();
+                    }
+                    std::io::Error::other(error)
+                })
+            });
             let connection = Client.builder().name("codex-router-host")
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, connection| {
@@ -598,7 +672,9 @@ impl ExternalProviderRuntime {
                             actual: response.protocol_version,
                         }),
                         Err(error) => {
-                            Err(ExternalProviderRuntimeError::Initialize(error.to_string()))
+                            Err(ExternalProviderRuntimeError::Initialize(
+                                sanitized_initialization_error(&error),
+                            ))
                         }
                     };
                     let admitted = admission.is_ok();
@@ -641,6 +717,7 @@ impl ExternalProviderRuntime {
                                                     &mut sessions,
                                                     &mut session_tasks,
                                                     task_shutdown.clone(),
+                                                    Arc::clone(&task_frame_observation),
                                                     #[cfg(test)] Arc::clone(&session_test_tool_calls),
                                                 )
                                             }).map(|_| ());
@@ -663,6 +740,7 @@ impl ExternalProviderRuntime {
                                             let pending_connection = connection.clone();
                                             let pending_shutdown = task_shutdown.clone();
                                             let pending_admission_tx = admission_tx.clone();
+                                            let pending_frame_observation = Arc::clone(&task_frame_observation);
                                             #[cfg(test)]
                                             let pending_test_tool_calls = Arc::clone(&session_test_tool_calls);
                                             admission_tasks.spawn(async move {
@@ -672,6 +750,7 @@ impl ExternalProviderRuntime {
                                                     pending_shutdown,
                                                     pending_admission_tx,
                                                     reply,
+                                                    pending_frame_observation,
                                                     #[cfg(test)] pending_test_tool_calls,
                                                 )
                                                 .await;
@@ -819,6 +898,7 @@ impl ExternalProviderRuntime {
             retirement,
             task: tokio::sync::Mutex::new(Some(task)),
             shutdown_failed,
+            frame_observation,
             commands: command_tx,
             #[cfg(test)]
             permission_request_count,
@@ -1027,11 +1107,17 @@ impl ExternalProviderRuntime {
                 {
                     let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
                 }
-                ExternalProviderRuntimeError::TransportFailure
+                self.prompt_transport_failure()
             })?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+        result.await.map_err(|_| self.prompt_transport_failure())?
+    }
+
+    fn prompt_transport_failure(&self) -> ExternalProviderRuntimeError {
+        if self.frame_observation.limit_was_exceeded() {
+            ExternalProviderRuntimeError::FrameLimitExceeded
+        } else {
+            ExternalProviderRuntimeError::TransportFailure
+        }
     }
 
     #[cfg(test)]
@@ -1111,6 +1197,7 @@ fn register_static_provider_session(
     sessions: &mut HashMap<String, tokio::sync::mpsc::Sender<ProviderSessionCommand>>,
     session_tasks: &mut tokio::task::JoinSet<()>,
     shutdown: CancellationToken,
+    frame_observation: Arc<ProviderFrameObservation>,
     #[cfg(test)] test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
 ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
     let provider_session_id = session.session_id().to_string();
@@ -1125,6 +1212,7 @@ fn register_static_provider_session(
         session,
         command_rx,
         shutdown,
+        frame_observation,
         #[cfg(test)]
         test_tool_calls,
     ));
@@ -1141,10 +1229,12 @@ async fn run_create_admission(
     reply: tokio::sync::oneshot::Sender<
         Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
     >,
+    frame_observation: Arc<ProviderFrameObservation>,
     #[cfg(test)] test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
 ) {
     let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
     let session_shutdown = shutdown.clone();
+    let session_frame_observation = Arc::clone(&frame_observation);
     let session_future = connection
         .build_session_from(request)
         .block_task()
@@ -1161,6 +1251,7 @@ async fn run_create_admission(
                 session,
                 command_rx,
                 session_shutdown,
+                session_frame_observation,
                 #[cfg(test)]
                 test_tool_calls,
             )
@@ -1223,27 +1314,28 @@ fn discard_queued_session_updates(
 ) -> Result<(), ExternalProviderRuntimeError> {
     use futures_util::FutureExt as _;
 
-    for _ in 0..MAX_PROMPT_UPDATES {
+    loop {
         match session.read_update().now_or_never() {
             Some(Ok(_update)) => continue,
             Some(Err(error)) => {
-                return Err(ExternalProviderRuntimeError::Operation(error.to_string()));
+                return Err(provider_frame_decode_error(error));
             }
             None => return Ok(()),
         }
     }
-    Err(ExternalProviderRuntimeError::Operation(
-        "provider load replay exceeded the update limit".to_owned(),
-    ))
 }
 
 impl Drop for ExternalProviderRuntime {
     fn drop(&mut self) {
+        self.retirement.cancel();
         self.shutdown.cancel();
     }
 }
 
 #[cfg(test)]
 mod live_tests;
+#[cfg(test)]
+#[path = "external_provider_runtime/robustness_tests.rs"]
+mod robustness_tests;
 #[cfg(test)]
 mod tests;

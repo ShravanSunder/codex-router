@@ -3,8 +3,8 @@ use collaboration_protocol::{
     NonEmptyText, OperationId, ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities,
     ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationKind,
-    ProviderOperationStage, ProviderReconciliationState, ProviderRuntimeIdentity,
-    ProviderTransport, SessionId, SessionRef, UuidIdentity,
+    ProviderOperationStage, ProviderPromptStopReason, ProviderReconciliationState,
+    ProviderRuntimeIdentity, ProviderTransport, SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     CodexConversationOperationRecorder, ConversationOperationRecorder, ProviderOperationAdmission,
@@ -39,6 +39,7 @@ fn store_operation_futures_are_send<'a>(
         operation_id,
         ProviderOperationEffect::Unknown,
         ProviderReconciliationState::Unresolved,
+        None,
         1,
     ));
     assert_send(store.prune_terminal_before(1, protected));
@@ -212,6 +213,7 @@ async fn admission_dispatch_and_terminal_states_survive_reopen() -> TestResult {
             &admitted.operation_id,
             ProviderOperationEffect::Applied,
             ProviderReconciliationState::Confirmed,
+            Some(ProviderPromptStopReason::Cancelled),
             1_300,
         )
         .await?;
@@ -228,6 +230,10 @@ async fn admission_dispatch_and_terminal_states_survive_reopen() -> TestResult {
     ensure_eq!(
         terminal.reconciliation_state,
         ProviderReconciliationState::Confirmed
+    );
+    ensure_eq!(
+        terminal.terminal_stop_reason,
+        Some(ProviderPromptStopReason::Cancelled)
     );
     Ok(())
 }
@@ -251,6 +257,7 @@ async fn backwards_clock_transitions_remain_readable_and_monotonic() -> TestResu
             &operation_id,
             ProviderOperationEffect::Unknown,
             ProviderReconciliationState::Unresolved,
+            None,
             8_000,
         )
         .await?;
@@ -405,7 +412,13 @@ async fn terminal_record_with_effect(
         .mark_may_have_dispatched(&record.operation_id, 2)
         .await?;
     store
-        .record_terminal(&record.operation_id, effect, reconciliation, terminal_at_ms)
+        .record_terminal(
+            &record.operation_id,
+            effect,
+            reconciliation,
+            None,
+            terminal_at_ms,
+        )
         .await?;
     Ok(record.operation_id)
 }
@@ -475,6 +488,7 @@ async fn migration_reopens_populated_database_and_schema_is_metadata_only() -> T
             "dispatched_at_ms",
             "terminal_at_ms",
             "updated_at_ms",
+            "terminal_stop_reason",
         ]
     );
     let forbidden = [
@@ -501,6 +515,56 @@ async fn migration_reopens_populated_database_and_schema_is_metadata_only() -> T
         ProviderOperationStore::open(&database.path).await,
         Err(ProviderOperationStoreError::InvalidRecord)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_stop_reason_migration_preserves_existing_operation_records() -> TestResult {
+    let database = TestDatabase::new("stop-reason-migration")?;
+    let mut store = ProviderOperationStore::open(&database.path).await?;
+    let operation_id = operation_id("018f1f62-6571-7ef0-8f0c-001122334478")?;
+    admitted_record(
+        store
+            .admit(admission(operation_id.as_str(), 1_000)?)
+            .await?,
+    )?;
+    store.mark_may_have_dispatched(&operation_id, 1_100).await?;
+    store
+        .record_target(&operation_id, &target()?, 1_200)
+        .await?;
+    store
+        .record_terminal(
+            &operation_id,
+            ProviderOperationEffect::Applied,
+            ProviderReconciliationState::Confirmed,
+            None,
+            1_300,
+        )
+        .await?;
+    store.close().await?;
+
+    let mut connection =
+        SqliteConnection::connect(&format!("sqlite:{}", database.path.display())).await?;
+    sqlx::query("ALTER TABLE provider_operations DROP COLUMN terminal_stop_reason")
+        .execute(&mut connection)
+        .await?;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=202609250001")
+        .execute(&mut connection)
+        .await?;
+    connection.close().await?;
+
+    let mut store = ProviderOperationStore::open(&database.path).await?;
+    let migrated = store
+        .inspect(&operation_id)
+        .await?
+        .ok_or("migration lost terminal operation")?;
+    ensure_eq!(migrated.target, Some(target()?));
+    ensure_eq!(migrated.stage, ProviderOperationStage::Terminal);
+    ensure_eq!(migrated.effect, ProviderOperationEffect::Applied);
+    ensure_eq!(migrated.terminal_stop_reason, None);
+    ensure_eq!(migrated.admitted_at_ms, 1_000);
+    ensure_eq!(migrated.dispatched_at_ms, Some(1_100));
+    ensure_eq!(migrated.terminal_at_ms, Some(1_300));
     Ok(())
 }
 
