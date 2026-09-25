@@ -1,0 +1,24 @@
+{
+  "pid": 0,
+  "sessionId": "fixture-session",
+  "cwd": "/private/tmp/claude-fixture",
+  "startedAt": 1789990000,
+  "procStart": "fixture-process-start",
+  "version": "2.1.280",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "messagingSocketPath": "/private/tmp/claude-fixture/peer.sock",
+  "name": "Fixture session",
+  "nameSource": "derived",
+  "nameSince": 1789990000,
+  "status": "idle",
+  "updatedAt": 1789990001,
+  "statusUpdatedAt": 1789990001
+}

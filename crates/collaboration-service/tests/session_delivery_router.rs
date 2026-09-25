@@ -154,13 +154,19 @@ async fn held_route_wins_before_peer_and_loadable_provider()
 async fn live_elsewhere_vetoes_provider_load() -> Result<(), Box<dyn std::error::Error>> {
     let (provider, provider_calls) = fake(RouteClaim::CanLoad, SessionReachability::ProviderAcp);
     let (peer, peer_calls) = fake(
-        RouteClaim::LiveElsewhere { writable: false },
+        RouteClaim::LiveElsewhere {
+            writable: false,
+            detail: Some("registry protocol 2 is unsupported".into()),
+        },
         SessionReachability::ClaudeCodePeer,
     );
     let router = SessionDeliveryRouter::new(vec![provider, peer]);
     let receipt = router.deliver(request()?, &NoopEvidenceSink).await?;
-    if !matches!(receipt.outcome, DeliveryOutcome::Rejected(_))
-        || provider_calls.load(Ordering::SeqCst) != 0
+    if !matches!(
+        receipt.outcome,
+        DeliveryOutcome::Rejected(rejection)
+            if rejection.detail.as_deref() == Some("registry protocol 2 is unsupported")
+    ) || provider_calls.load(Ordering::SeqCst) != 0
         || peer_calls.load(Ordering::SeqCst) != 0
     {
         return Err("live external owner did not veto provider load".into());

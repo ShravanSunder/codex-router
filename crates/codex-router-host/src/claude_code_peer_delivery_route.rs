@@ -50,8 +50,11 @@ impl ClaudeCodePeerDeliveryRoute {
         let session_id = target.session_id.clone();
         match tokio::task::spawn_blocking(move || registry.lookup(&session_id)).await {
             Ok(Ok(lookup)) => lookup,
-            Ok(Err(_)) | Err(_) => PeerSessionLookup::LiveUnsupported {
-                reason: "Claude Code live-session registry is unreadable".to_owned(),
+            Ok(Err(error)) => PeerSessionLookup::LiveUnsupported {
+                reason: error.to_string(),
+            },
+            Err(error) => PeerSessionLookup::LiveUnsupported {
+                reason: format!("Claude Code registry lookup task failed: {error}"),
             },
         }
     }
@@ -165,9 +168,10 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
             Ok(match self.lookup(&target).await {
                 PeerSessionLookup::Absent => RouteClaim::NotMine,
                 PeerSessionLookup::Writable(_) => RouteClaim::Holds,
-                PeerSessionLookup::LiveUnsupported { .. } => {
-                    RouteClaim::LiveElsewhere { writable: false }
-                }
+                PeerSessionLookup::LiveUnsupported { reason } => RouteClaim::LiveElsewhere {
+                    writable: false,
+                    detail: Some(reason),
+                },
             })
         })
     }

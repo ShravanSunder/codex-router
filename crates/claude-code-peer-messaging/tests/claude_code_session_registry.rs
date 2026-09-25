@@ -3,7 +3,19 @@
 
 use claude_code_peer_messaging::{ClaudeCodeSessionRegistry, PeerSessionLookup, PeerSessionStatus};
 use collaboration_protocol::SessionId;
-use serde_json::json;
+use serde_json::{Value, json};
+
+fn live_record_fixture(process_id: u32, session_id: &str) -> Value {
+    let mut record: Value =
+        serde_json::from_str(include_str!("fixtures/claude_code_session_record.json"))
+            .expect("Claude Code registry fixture");
+    let object = record
+        .as_object_mut()
+        .expect("registry fixture is an object");
+    object.insert("pid".to_owned(), json!(process_id));
+    object.insert("sessionId".to_owned(), json!(session_id));
+    record
+}
 
 #[test]
 fn live_registry_entry_is_writable_only_for_supported_protocol_and_status() {
@@ -117,7 +129,7 @@ fn dead_or_missing_registry_entry_is_absent() {
 }
 
 #[test]
-fn malformed_live_registry_record_fails_closed() {
+fn malformed_live_registry_record_fails_closed_when_no_target_is_readable() {
     let root = tempfile::tempdir().expect("registry directory");
     let pid = std::process::id();
     std::fs::write(root.path().join(format!("{pid}.json")), b"{malformed")
@@ -126,4 +138,81 @@ fn malformed_live_registry_record_fails_closed() {
     let session_id = SessionId::try_from("fixture-session".to_owned()).expect("session ID");
 
     assert!(registry.lookup(&session_id).is_err());
+}
+
+#[test]
+fn sanitized_claude_code_record_fixture_is_writable() {
+    let root = tempfile::tempdir().expect("registry directory");
+    let process_id = std::process::id();
+    let session_id = SessionId::try_from("fixture-session".to_owned()).expect("session ID");
+    let record = live_record_fixture(process_id, "fixture-session");
+    std::fs::write(
+        root.path().join(format!("{process_id}.json")),
+        record.to_string(),
+    )
+    .expect("registry record");
+
+    let lookup = ClaudeCodeSessionRegistry::new(root.path().to_owned())
+        .lookup(&session_id)
+        .expect("lookup");
+
+    assert!(matches!(lookup, PeerSessionLookup::Writable(_)));
+}
+
+#[test]
+fn unrelated_corrupt_live_record_does_not_hide_valid_target() {
+    let root = tempfile::tempdir().expect("registry directory");
+    let mut unrelated_process = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("unrelated live process");
+    let unrelated_pid = unrelated_process.id();
+    let target_pid = std::process::id();
+    let target = SessionId::try_from("fixture-target".to_owned()).expect("target session ID");
+    std::fs::write(
+        root.path().join(format!("{unrelated_pid}.json")),
+        b"{corrupt unrelated record",
+    )
+    .expect("unrelated corrupt registry record");
+    std::fs::write(
+        root.path().join(format!("{target_pid}.json")),
+        live_record_fixture(target_pid, "fixture-target").to_string(),
+    )
+    .expect("target registry record");
+    let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+
+    let lookup = registry
+        .lookup(&target)
+        .expect("valid target survives corrupt record");
+    unrelated_process.kill().expect("stop fixture process");
+    unrelated_process.wait().expect("reap fixture process");
+
+    assert!(matches!(lookup, PeerSessionLookup::Writable(_)));
+}
+
+#[test]
+fn unsupported_target_protocol_reports_its_version() {
+    let root = tempfile::tempdir().expect("registry directory");
+    let process_id = std::process::id();
+    let session_id = SessionId::try_from("fixture-session".to_owned()).expect("session ID");
+    let mut record = live_record_fixture(process_id, "fixture-session");
+    record
+        .as_object_mut()
+        .expect("registry fixture is an object")
+        .insert("peerProtocol".to_owned(), json!(2));
+    std::fs::write(
+        root.path().join(format!("{process_id}.json")),
+        record.to_string(),
+    )
+    .expect("unsupported target registry record");
+
+    let lookup = ClaudeCodeSessionRegistry::new(root.path().to_owned())
+        .lookup(&session_id)
+        .expect("unsupported records remain readable");
+
+    assert!(matches!(
+        lookup,
+        PeerSessionLookup::LiveUnsupported { reason }
+            if reason.contains("protocol 2")
+    ));
 }

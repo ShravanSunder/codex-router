@@ -209,7 +209,10 @@ async fn live_unknown_peer_protocol_reports_live_elsewhere() {
 
     assert!(matches!(
         claim,
-        RouteClaim::LiveElsewhere { writable: false }
+        RouteClaim::LiveElsewhere {
+            writable: false,
+            detail: Some(reason)
+        } if reason.contains("protocol 99")
     ));
     assert!(
         matches!(receipt.outcome, DeliveryOutcome::Rejected(rejection)

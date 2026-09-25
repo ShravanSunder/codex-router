@@ -37,6 +37,21 @@ impl SessionDeliveryRouter {
         {
             return self.deliver_through(index, request, evidence).await;
         }
+        if let Some(detail) = claims.iter().find_map(|claim| match claim {
+            RouteClaim::LiveElsewhere { detail, .. } => detail.as_deref(),
+            _ => None,
+        }) {
+            return Ok(DeliveryReceipt {
+                outcome: DeliveryOutcome::Rejected(DeliveryRejection {
+                    reason: DeliveryRejectionReason::LiveElsewhere,
+                    next_action: DeliveryNextAction::InspectTarget,
+                    client_code: None,
+                    detail: Some(detail.to_owned()),
+                }),
+                reachability: None,
+                client: None,
+            });
+        }
         if claims
             .iter()
             .any(|claim| matches!(claim, RouteClaim::LiveElsewhere { .. }))

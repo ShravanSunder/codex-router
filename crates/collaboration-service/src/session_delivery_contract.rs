@@ -69,6 +69,7 @@ pub enum RouteClaim {
     CanLoad,
     LiveElsewhere {
         writable: bool,
+        detail: Option<String>,
     },
     Unavailable {
         reason: RouteUnavailableReason,
