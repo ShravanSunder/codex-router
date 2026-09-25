@@ -11,15 +11,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 )]
 pub enum SummarySourceReference {
     NativeTurn { turn_id: String },
-    ProviderOperation { attempt_id: crate::AttemptId },
 }
 
 impl SummarySourceReference {
     #[must_use]
-    pub fn native_turn_id(&self) -> Option<&str> {
+    pub fn native_turn_id(&self) -> &str {
         match self {
-            Self::NativeTurn { turn_id } => Some(turn_id),
-            Self::ProviderOperation { .. } => None,
+            Self::NativeTurn { turn_id } => turn_id,
         }
     }
 }

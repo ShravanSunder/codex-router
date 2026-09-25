@@ -409,6 +409,8 @@ fn operation_settlement_failure(
         message,
         operation_id,
         target: Some(target),
+        endpoint: None,
+        availability: None,
     }))
 }
 

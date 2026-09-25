@@ -8,7 +8,6 @@ use agent_automation::{
 use automation_storage::{
     AutomationStore, RunAdmission, RunCompletion, RunDispatchIntent, RunPreparationIntent,
     RunStopIdentity, RunSubmissionOutcome, RunSubmissionResult, ScheduleCreate, SummaryAdmission,
-    SummaryCompletion, SummaryProgress,
 };
 use sqlx::Connection;
 
@@ -423,8 +422,10 @@ async fn peer_written_evidence_finishes_after_uncertain_submission()
 }
 
 #[tokio::test]
-async fn provider_summary_reference_feeds_the_next_fresh_run()
+async fn provider_fresh_run_cannot_admit_or_retry_native_summary()
 -> Result<(), Box<dyn std::error::Error>> {
+    // Activation rejects fresh provider destinations; direct storage setup proves
+    // an impossible provider run cannot acquire native summary provenance.
     let path = std::env::temp_dir().join(format!(
         "provider-summary-{}.sqlite",
         OperationId::generate().as_str()
@@ -511,79 +512,55 @@ async fn provider_summary_reference_feeds_the_next_fresh_run()
     {
         return Err("provider operation did not settle its exact run".into());
     }
-    let attempt = store
-        .begin_required_summary::<String, String, String, String>(&SummaryAdmission {
-            run_id: first_run.clone(),
-            timeout_seconds: 900,
-            now_ms: 64000,
-        })
-        .await?;
-    if attempt.source_reference
-        != (agent_automation::SummarySourceReference::ProviderOperation {
-            attempt_id: provider_attempt.clone(),
-        })
-    {
-        return Err("summary admission invented a native turn source".into());
+    if !matches!(
+        store
+            .begin_required_summary::<String, String, String, String>(&SummaryAdmission {
+                run_id: first_run.clone(),
+                timeout_seconds: 900,
+                now_ms: 64000,
+            })
+            .await,
+        Err(automation_storage::StorageError::InvalidRecord)
+    ) {
+        return Err("provider operation admitted a native summary".into());
     }
-    let summary_turn = "summary-turn".to_owned();
-    let summary_target = "summary-worker".to_owned();
-    store
-        .record_summary_progress::<String, String>(SummaryProgress {
-            run_id: first_run.clone(),
-            attempt_id: attempt.attempt_id.clone(),
-            phase: agent_automation::SummaryPhase::Running,
-            effects: NativeEffectEvidence {
-                target: Some(summary_target.clone()),
-                generation: Some("summary-generation".into()),
-                client_user_message_id: Some(attempt.attempt_id.as_str().into()),
-                native_turn_id: Some(summary_turn.clone()),
-                native_submission_id: None,
-                allocation: PreparationEffect::Accepted,
-                resume: PreparationEffect::NotRequested,
-                submission: SubmissionEffect::Accepted,
-                cessation: CessationEvidence::Unconfirmed,
-            },
-            target: Some(summary_target),
-            native_turn_id: Some(summary_turn.clone()),
-            explanation: None,
-        })
-        .await?;
-    if !store
-        .complete_summary::<String, String>(SummaryCompletion {
-            run_id: first_run.clone(),
-            attempt_id: attempt.attempt_id,
-            native_turn_id: summary_turn,
-            text: InstructionText::try_from("Provider work completed".to_owned())?,
-            now_ms: 65000,
-        })
-        .await?
-    {
-        return Err("provider summary did not complete".into());
+    if !matches!(
+        store
+            .recover_summary::<String, String, String, String>(
+                &automation_storage::SummaryRecoveryRequest {
+                    operation_id: OperationId::generate(),
+                    run_id: first_run.clone(),
+                    action: automation_storage::SummaryRecoveryAction::Retry {
+                        timeout_seconds: 900
+                    },
+                    now_ms: 65000,
+                }
+            )
+            .await,
+        Err(automation_storage::StorageError::InvalidRecord)
+    ) {
+        return Err("provider summary retry invented native turn provenance".into());
     }
-    let next_run = store
-        .enqueue_due_run::<String, String>(&schedule.schedule_id, 120000)
-        .await?
-        .ok_or("successor run missing")?;
-    let next = store
-        .admit_waiting_run::<String, String>(&schedule.schedule_id, 121000)
-        .await?;
-    let RunAdmission::Admitted { inputs, .. } = next else {
-        return Err("successor run was not admitted".into());
-    };
-    match inputs.continuity {
-        ContinuityInput::LocalSummary {
-            source_run_id,
-            source_reference:
-                agent_automation::SummarySourceReference::ProviderOperation { attempt_id },
-            text,
-            ..
-        } if source_run_id == first_run
-            && attempt_id == provider_attempt
-            && text == "Provider work completed" => {}
-        _ => return Err("successor did not inherit exact provider summary provenance".into()),
+    if !matches!(
+        store
+            .recover_summary::<String, String, String, String>(
+                &automation_storage::SummaryRecoveryRequest {
+                    operation_id: OperationId::generate(),
+                    run_id: first_run.clone(),
+                    action: automation_storage::SummaryRecoveryAction::Skip,
+                    now_ms: 66000,
+                }
+            )
+            .await,
+        Err(automation_storage::StorageError::InvalidRecord)
+    ) {
+        return Err("provider summary skip fabricated a summary outcome".into());
     }
-    if next_run == first_run {
-        return Err("summary reused the prior run identity".into());
+    let record = store
+        .read_run::<String, String, String, String>(&first_run)
+        .await?;
+    if record.phase != RunPhase::SummaryRequired || record.summary_attempt.is_some() {
+        return Err("rejected provider summary changed the run".into());
     }
     store.close().await?;
     std::fs::remove_file(path)?;

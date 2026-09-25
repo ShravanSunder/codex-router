@@ -467,6 +467,8 @@ impl ConversationClient {
                                 message,
                                 operation_id: operation_id.clone(),
                                 target: None,
+                                endpoint: None,
+                                availability: None,
                             },
                         )));
                     }

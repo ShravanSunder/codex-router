@@ -294,7 +294,7 @@ pub(crate) async fn step(input: SummaryStep<'_>) -> Result<(), StorageError> {
         Some(crate::RunSummarySource::NativeTurn { turn }) => {
             let source_turn_id = String::from(turn.turn_id);
             if turn.target != attempt.source_target
-                || attempt.source_reference.native_turn_id() != Some(source_turn_id.as_str())
+                || attempt.source_reference.native_turn_id() != source_turn_id
             {
                 return Err(StorageError::InvalidRecord);
             }

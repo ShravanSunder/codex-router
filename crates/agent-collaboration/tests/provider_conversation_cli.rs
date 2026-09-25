@@ -506,6 +506,38 @@ async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read
 }
 
 #[tokio::test]
+async fn unavailable_provider_prompt_prints_catalog_reason_and_fix() {
+    let root = fixture_directory("unavailable-provider");
+    let listener = publish_fixture(&root);
+    let availability = json!({
+        "state":"unavailable","observedAt":"2026-09-24T00:00:00Z",
+        "reason":"provider executable is missing","fix":"install the provider binary"
+    });
+    let expected_availability = availability.clone();
+    let fixture = tokio::spawn(async move {
+        serve_one_error(&listener, "conversation/prompt", json!({
+            "kind":"unavailable","stage":"binding","effect":"none",
+            "message":"provider conversation endpoint claude-local unavailable: provider executable is missing",
+            "operationId":PROMPT_OPERATION,"target":target(),
+            "endpoint":endpoint(),"availability":availability
+        })).await;
+    });
+    let output = run_cli(&root, prompt_arguments(PROMPT_OPERATION)).await;
+    assert_eq!(output.status.code(), Some(3));
+    let result = common_result(&output.stdout);
+    assert_eq!(result["error"]["kind"], "unavailable");
+    assert_eq!(result["error"]["endpoint"], endpoint());
+    assert_eq!(result["error"]["availability"], expected_availability);
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("claude-local"))
+    );
+    fixture.await.expect("fixture");
+    cleanup_fixture(&root);
+}
+
+#[tokio::test]
 #[ignore = "requires an explicitly selected authenticated Cursor ACP runtime"]
 async fn live_cursor_create_wait_prompt_wait_through_compiled_cli() {
     use codex_router_host::{

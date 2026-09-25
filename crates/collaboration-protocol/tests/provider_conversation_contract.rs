@@ -1,6 +1,6 @@
 use collaboration_protocol::{
-    ConversationBindingIdentity, ConversationCreateOutcome, control_error_is_valid,
-    control_schema_document,
+    ConversationBindingIdentity, ConversationCreateOutcome, ConversationOperationFailure,
+    control_error_is_valid, control_schema_document,
 };
 use serde_json::{Value, json};
 
@@ -212,6 +212,46 @@ fn failures_preserve_known_target_and_operation_effect_evidence() {
         .unwrap_or_else(|| panic!("failure data"))
         .remove("effect");
     assert!(!validator.is_valid(&failure));
+}
+
+#[test]
+fn unavailable_conversation_failure_carries_catalog_recovery_and_legacy_errors_decode() {
+    let schema = control_schema_document(None).expect("schema");
+    let validator =
+        method_validator(&schema, "conversation/create", "error").expect("create error validator");
+    let availability = json!({
+        "state":"unavailable","observedAt":"2026-09-24T00:00:00Z",
+        "reason":"provider executable is missing","fix":"install the provider binary"
+    });
+    let data = json!({
+        "kind":"unavailable","stage":"binding","effect":"none",
+        "message":"provider conversation endpoint claude-code unavailable",
+        "operationId":"019f0000-0000-7000-8000-000000000011",
+        "endpoint":endpoint(),"availability":availability
+    });
+    let failure: ConversationOperationFailure =
+        serde_json::from_value(data.clone()).expect("typed failure");
+    assert_eq!(serde_json::to_value(failure).expect("round trip"), data);
+    let response = json!({"jsonrpc":"2.0","id":"create-1","error":{
+        "code":-32050,"message":data["message"],"data":data
+    }});
+    assert!(validator.is_valid(&response));
+
+    let mut legacy = response["error"]["data"].clone();
+    legacy
+        .as_object_mut()
+        .expect("legacy error")
+        .remove("endpoint");
+    legacy
+        .as_object_mut()
+        .expect("legacy error")
+        .remove("availability");
+    let decoded: ConversationOperationFailure =
+        serde_json::from_value(legacy.clone()).expect("legacy failure remains readable");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("legacy round trip"),
+        legacy
+    );
 }
 
 #[test]

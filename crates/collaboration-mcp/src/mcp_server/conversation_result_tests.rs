@@ -2,6 +2,36 @@
 use collaboration_protocol::OperationId;
 
 #[test]
+fn unavailable_provider_error_keeps_catalog_endpoint_reason_and_fix() {
+    let operation_id = OperationId::generate();
+    let endpoint = serde_json::json!({
+        "serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"
+    });
+    let availability = serde_json::json!({
+        "state":"unavailable","observedAt":"2026-09-24T00:00:00Z",
+        "reason":"provider executable is missing","fix":"install the provider binary"
+    });
+    let result = super::conversation_tool_result::<collaboration_client::ConversationOperationResult>(
+        Err(collaboration_client::ConversationClientError::Client(
+            collaboration_client::ClientError::Rejected {
+                code: -32050,
+                data: Some(serde_json::json!({
+                    "kind":"unavailable","stage":"binding","effect":"none",
+                    "message":"provider conversation endpoint claude-local unavailable",
+                    "operationId":operation_id,"endpoint":endpoint,"availability":availability
+                })),
+            },
+        )),
+        Some(operation_id),
+    );
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured error");
+    assert_eq!(structured["kind"], "unavailable");
+    assert_eq!(structured["endpoint"], endpoint);
+    assert_eq!(structured["availability"], availability);
+}
+
+#[test]
 fn create_and_prompt_failure_retains_created_target_and_unknown_effect() {
     let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
         "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},

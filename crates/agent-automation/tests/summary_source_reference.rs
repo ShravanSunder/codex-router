@@ -1,5 +1,5 @@
 use agent_automation::{ContinuityInput, SummaryAttempt, SummarySource, SummarySourceReference};
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[test]
 fn old_stored_summary_shapes_decode_as_native_turn() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,19 +42,24 @@ fn old_stored_summary_shapes_decode_as_native_turn() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn provider_operation_reference_round_trips_without_turn_id()
--> Result<(), Box<dyn std::error::Error>> {
-    let reference = SummarySourceReference::ProviderOperation {
-        attempt_id: agent_automation::AttemptId::generate(),
+fn summary_source_reference_accepts_only_native_turns() -> Result<(), Box<dyn std::error::Error>> {
+    let reference = SummarySourceReference::NativeTurn {
+        turn_id: "turn-one".to_owned(),
     };
     let encoded = serde_json::to_value(&reference)?;
-    if encoded["kind"] != "providerOperation" || encoded.get("turnId").is_some() {
-        return Err("provider source invented a native turn".into());
+    if encoded != json!({"kind":"nativeTurn","turnId":"turn-one"}) {
+        return Err("native summary source changed wire shape".into());
     }
-    let decoded: SummarySourceReference = serde_json::from_value(encoded.clone())?;
-    if serde_json::to_value(decoded)? != encoded {
-        return Err("provider source changed during round trip".into());
+    let decoded: SummarySourceReference = serde_json::from_value(encoded)?;
+    if decoded != reference {
+        return Err("native summary source changed during round trip".into());
     }
-    let _: Value = encoded;
+    if serde_json::from_value::<SummarySourceReference>(json!({
+        "kind":"providerOperation","attemptId":agent_automation::AttemptId::generate()
+    }))
+    .is_ok()
+    {
+        return Err("unused provider summary source was admitted".into());
+    }
     Ok(())
 }

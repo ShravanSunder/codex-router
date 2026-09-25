@@ -262,16 +262,6 @@ fn validate_summary(
             Some(RunExecution::CodexAppServer(native)),
             SummarySourceReference::NativeTurn { turn_id },
         ) if summary.source_target == native.target && turn_id == &native.turn_id => Ok(()),
-        (
-            Some(RunExecution::ProviderAcp {
-                target,
-                operation_id,
-                ..
-            }),
-            SummarySourceReference::ProviderOperation { attempt_id },
-        ) if &summary.source_target == target && attempt_id.as_str() == operation_id.as_str() => {
-            Ok(())
-        }
         _ => Err("summary source disagrees with its producing Run execution"),
     }
 }

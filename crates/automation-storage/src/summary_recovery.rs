@@ -67,6 +67,15 @@ impl AutomationStore {
         if inventory.occupying.as_ref() != Some(&request.run_id) {
             return Err(StorageError::InvalidRecord);
         }
+        if record
+            .evidence
+            .route
+            .as_ref()
+            .map(agent_automation::RouteEffectEvidence::settlement_state)
+            != Some(agent_automation::RouteSettlementState::NativeTurnConfirmed)
+        {
+            return Err(StorageError::InvalidRecord);
+        }
         if let Some(attempt) = &record.summary_attempt {
             let not_submitted = matches!(
                 attempt.effects.submission,
@@ -100,13 +109,8 @@ impl AutomationStore {
                                 .ok_or(StorageError::InvalidRecord)?,
                         },
                     ),
-                    agent_automation::RouteEffectEvidence::ProviderAcp(provider) => (
-                        provider.target.clone(),
-                        agent_automation::SummarySourceReference::ProviderOperation {
-                            attempt_id: provider.attempt_id.clone(),
-                        },
-                    ),
-                    agent_automation::RouteEffectEvidence::ClaudeCodePeer(_) => {
+                    agent_automation::RouteEffectEvidence::ProviderAcp(_)
+                    | agent_automation::RouteEffectEvidence::ClaudeCodePeer(_) => {
                         return Err(StorageError::InvalidRecord);
                     }
                 };

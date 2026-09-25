@@ -37,11 +37,7 @@ impl AutomationStore {
             .route
             .as_ref()
             .ok_or(StorageError::InvalidRecord)?;
-        if !matches!(
-            route.settlement_state(),
-            RouteSettlementState::NativeTurnConfirmed
-                | RouteSettlementState::ProviderOperationConfirmed
-        ) {
+        if route.settlement_state() != RouteSettlementState::NativeTurnConfirmed {
             return Err(StorageError::InvalidRecord);
         }
         let inventory = crate::run_inventory::load(&mut transaction, &record.schedule_id).await?;
@@ -55,13 +51,9 @@ impl AutomationStore {
                     turn_id: record.native_turn_id.ok_or(StorageError::InvalidRecord)?,
                 },
             ),
-            RouteEffectEvidence::ProviderAcp(provider) => (
-                provider.target.clone(),
-                SummarySourceReference::ProviderOperation {
-                    attempt_id: provider.attempt_id.clone(),
-                },
-            ),
-            RouteEffectEvidence::ClaudeCodePeer(_) => return Err(StorageError::InvalidRecord),
+            RouteEffectEvidence::ProviderAcp(_) | RouteEffectEvidence::ClaudeCodePeer(_) => {
+                return Err(StorageError::InvalidRecord);
+            }
         };
         let attempt = make_attempt(SummaryAttemptSeed {
             source_target,

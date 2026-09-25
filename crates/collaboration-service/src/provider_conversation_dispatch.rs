@@ -9,7 +9,8 @@ use collaboration_protocol::{
     ConversationOperationFailure, ConversationOperationFailureKind,
     ConversationOperationFailureStage, ConversationOperationReconcileRequest,
     ConversationOperationShowRequest, ConversationOperationWaitRequest, ConversationPromptRequest,
-    NonEmptyText, OperationId, ProviderBindingIdentity, ProviderOperationEffect, SessionRef,
+    EndpointAvailability, EndpointRef, NonEmptyText, OperationId, ProviderBindingIdentity,
+    ProviderOperationEffect, SessionRef,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -133,7 +134,13 @@ async fn dispatch_create(
     };
     let target = None;
     let Some(backend) = identity.provider_conversations.as_deref() else {
-        return local_failure_response(id, LocalFailure::Unavailable, request.operation_id, target);
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.endpoint,
+            identity,
+        );
     };
     if request.endpoint.service_id != identity.service_id
         || !actor_matches(&request.created_by, identity)
@@ -148,6 +155,18 @@ async fn dispatch_create(
     }
     if let Some(response) = duplicate_submission(&id, backend, &request.operation_id).await {
         return response;
+    }
+    if !matches!(
+        provider_unavailability(&request.endpoint, identity),
+        Ok(None)
+    ) {
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.endpoint,
+            identity,
+        );
     }
     let Some(binding) = backend.binding(&request.endpoint) else {
         return local_failure_response(
@@ -191,7 +210,13 @@ async fn dispatch_load(
     };
     let target = Some(request.target.clone());
     let Some(backend) = identity.provider_conversations.as_deref() else {
-        return local_failure_response(id, LocalFailure::Unavailable, request.operation_id, target);
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
     };
     if request.target.endpoint.service_id != identity.service_id
         || !actor_matches(&request.requested_by, identity)
@@ -206,6 +231,18 @@ async fn dispatch_load(
     }
     if let Some(response) = duplicate_submission(&id, backend, &request.operation_id).await {
         return response;
+    }
+    if !matches!(
+        provider_unavailability(&request.target.endpoint, identity),
+        Ok(None)
+    ) {
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
     }
     let Some(binding) = backend.binding(&request.target.endpoint) else {
         return local_failure_response(
@@ -249,7 +286,13 @@ async fn dispatch_prompt(
     };
     let target = Some(request.target.clone());
     let Some(backend) = identity.provider_conversations.as_deref() else {
-        return local_failure_response(id, LocalFailure::Unavailable, request.operation_id, target);
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
     };
     if request.target.endpoint.service_id != identity.service_id
         || !actor_matches(&request.requested_by, identity)
@@ -264,6 +307,18 @@ async fn dispatch_prompt(
     }
     if let Some(response) = duplicate_submission(&id, backend, &request.operation_id).await {
         return response;
+    }
+    if !matches!(
+        provider_unavailability(&request.target.endpoint, identity),
+        Ok(None)
+    ) {
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
     }
     let Some(binding) = backend.binding(&request.target.endpoint) else {
         return local_failure_response(
@@ -307,7 +362,13 @@ async fn dispatch_cancel(
     };
     let target = Some(request.target.clone());
     let Some(backend) = identity.provider_conversations.as_deref() else {
-        return local_failure_response(id, LocalFailure::Unavailable, request.operation_id, target);
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
     };
     if request.target.endpoint.service_id != identity.service_id
         || !actor_matches(&request.requested_by, identity)
@@ -322,6 +383,18 @@ async fn dispatch_cancel(
     }
     if let Some(response) = duplicate_submission(&id, backend, &request.operation_id).await {
         return response;
+    }
+    if !matches!(
+        provider_unavailability(&request.target.endpoint, identity),
+        Ok(None)
+    ) {
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
     }
     let Some(binding) = backend.binding(&request.target.endpoint) else {
         return local_failure_response(
@@ -431,6 +504,58 @@ fn target_matches(
     target.endpoint == binding.endpoint && target.endpoint.service_id == identity.service_id
 }
 
+fn provider_unavailability(
+    endpoint: &EndpointRef,
+    identity: &ServiceIdentity,
+) -> Result<Option<EndpointAvailability>, std::io::Error> {
+    let description = identity.endpoint_directory().read_endpoint(endpoint)?;
+    Ok(
+        description.and_then(|description| match description.availability {
+            unavailable @ EndpointAvailability::Unavailable { .. } => Some(unavailable),
+            EndpointAvailability::Available { .. } | EndpointAvailability::Unprobed => None,
+        }),
+    )
+}
+
+fn unavailable_provider_response(
+    id: Value,
+    operation_id: OperationId,
+    target: Option<SessionRef>,
+    endpoint: &EndpointRef,
+    identity: &ServiceIdentity,
+) -> Value {
+    let availability = provider_unavailability(endpoint, identity).ok().flatten();
+    let endpoint_id = String::from(endpoint.endpoint_id.clone());
+    let message = match &availability {
+        Some(EndpointAvailability::Unavailable { reason, .. }) => {
+            format!(
+                "provider conversation endpoint {endpoint_id} unavailable: {}",
+                String::from(reason.clone())
+            )
+        }
+        _ => format!("provider conversation endpoint {endpoint_id} unavailable"),
+    };
+    let message = NonEmptyText::try_from(message).or_else(|_| {
+        NonEmptyText::try_from(format!("provider endpoint {endpoint_id} unavailable"))
+    });
+    let Ok(message) = message else {
+        return json_rpc_error(id, -32603, "Internal error");
+    };
+    failure_response(
+        id,
+        ConversationOperationFailure {
+            kind: ConversationOperationFailureKind::Unavailable,
+            stage: ConversationOperationFailureStage::Binding,
+            effect: ProviderOperationEffect::None,
+            message,
+            operation_id,
+            target,
+            endpoint: Some(endpoint.clone()),
+            availability,
+        },
+    )
+}
+
 fn local_failure_response(
     id: Value,
     failure: LocalFailure,
@@ -476,6 +601,8 @@ fn local_failure_response(
             message,
             operation_id,
             target,
+            endpoint: None,
+            availability: None,
         },
     )
 }

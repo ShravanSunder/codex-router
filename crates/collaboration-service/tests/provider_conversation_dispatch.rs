@@ -3,7 +3,7 @@ use collaboration_protocol::{
     ConversationOperationFailure, ConversationOperationReconcileRequest,
     ConversationOperationShowRequest, ConversationOperationSnapshot,
     ConversationOperationSubmission, ConversationOperationWaitRequest,
-    ConversationOperationWaitResult, ConversationPromptRequest, EndpointRef,
+    ConversationOperationWaitResult, ConversationPromptRequest, EndpointDescription, EndpointRef,
     ProviderBindingIdentity,
 };
 use collaboration_service::{
@@ -176,6 +176,16 @@ async fn initialized_fixture() -> TestResult<(
     BufReader<tokio::net::unix::OwnedReadHalf>,
     RecordingBackend,
 )> {
+    initialized_fixture_with_endpoint(None).await
+}
+
+async fn initialized_fixture_with_endpoint(
+    endpoint_description: Option<EndpointDescription>,
+) -> TestResult<(
+    tokio::net::unix::OwnedWriteHalf,
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    RecordingBackend,
+)> {
     let claude_binding = binding(endpoint(), "claudeCode", "claude-agent-acp")?;
     let cursor_binding = binding(cursor_endpoint(), "cursor", "cursor-agent-acp")?;
     let snapshot = snapshot(claude_binding.clone())?;
@@ -194,6 +204,10 @@ async fn initialized_fixture() -> TestResult<(
     };
     let identity = ServiceIdentity::new(SERVICE, EPOCH, &format!("sha256:{}", "a".repeat(64)))?
         .with_provider_conversation_backend(Arc::new(backend.clone()));
+    let identity = match endpoint_description {
+        Some(description) => identity.with_endpoints(vec![description])?,
+        None => identity,
+    };
     let (client, server) = tokio::net::UnixStream::pair()?;
     tokio::spawn(serve_control_connection(server, identity));
     let (read, mut write) = client.into_split();
@@ -439,6 +453,136 @@ async fn malformed_and_foreign_identity_requests_never_reach_backend() -> TestRe
     ensure(
         backend.calls.lock().await.is_empty(),
         "foreign request reached backend".to_owned(),
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_provider_conversation_names_endpoint_and_catalog_recovery() -> TestResult {
+    let availability = json!({
+        "state":"unavailable",
+        "observedAt":"2026-09-24T00:00:00Z",
+        "reason":"provider executable is missing",
+        "fix":"install the provider binary and restart the Host"
+    });
+    let endpoint_description = serde_json::from_value(json!({
+        "endpoint":endpoint(),
+        "label":"Fixture Claude",
+        "availability":availability,
+        "channels":[]
+    }))?;
+    let identity = ServiceIdentity::new(SERVICE, EPOCH, &format!("sha256:{}", "a".repeat(64)))?
+        .with_endpoints(vec![endpoint_description])?;
+    let (client, server) = tokio::net::UnixStream::pair()?;
+    let serving = tokio::spawn(serve_control_connection(server, identity));
+    let (read, mut write) = client.into_split();
+    let mut read = BufReader::new(read);
+    let initialized = call(&mut write, &mut read, "init", "control/initialize", json!({
+        "version":{"major":1,"minor":0},"client":{"name":"unavailable-provider-test","version":"1"}
+    })).await?;
+    ensure(
+        initialized.get("result").is_some(),
+        format!("initialize: {initialized}"),
+    )?;
+    for (method, params) in [
+        (
+            "conversation/create",
+            json!({
+                "operationId":operation_id(),"endpoint":endpoint(),"workingDirectory":"/tmp/provider-work",
+                "createdBy":actor("caller"),"approver":actor("approver"),
+                "requestedPolicy":{"access":"workspace-write"}
+            }),
+        ),
+        (
+            "conversation/load",
+            json!({
+                "operationId":operation_id(),"target":session("provider-conversation"),
+                "workingDirectory":"/tmp/provider-work","requestedBy":actor("caller"),
+                "approver":actor("approver"),"requestedPolicy":{"access":"workspace-write"}
+            }),
+        ),
+        (
+            "conversation/prompt",
+            json!({
+                "operationId":operation_id(),"target":session("provider-conversation"),
+                "requestedBy":actor("caller"),"approver":actor("approver"),
+                "prompt":{"kind":"humanUser","text":"hello"}
+            }),
+        ),
+        (
+            "conversation/cancel",
+            json!({
+                "operationId":operation_id(),"targetOperationId":operation_id(),
+                "target":session("provider-conversation"),"requestedBy":actor("caller"),
+                "approver":actor("approver")
+            }),
+        ),
+    ] {
+        let response = call(&mut write, &mut read, method, method, params).await?;
+        let data = &response["error"]["data"];
+        ensure(
+            data["kind"] == "unavailable",
+            format!("{method}: {response}"),
+        )?;
+        ensure(
+            data["endpoint"] == endpoint(),
+            format!("{method}: {response}"),
+        )?;
+        ensure(
+            data["availability"] == availability,
+            format!("{method}: {response}"),
+        )?;
+        ensure(
+            data["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("claude-code")),
+            format!("{method}: {response}"),
+        )?;
+    }
+    drop(write);
+    drop(read);
+    serving.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_catalog_vetoes_a_still_present_provider_binding() -> TestResult {
+    let availability = json!({
+        "state":"unavailable", "observedAt":"2026-09-24T00:00:00Z",
+        "reason":"provider process retired", "fix":"restart the Host to relaunch the provider"
+    });
+    let description: EndpointDescription = serde_json::from_value(json!({
+        "endpoint":endpoint(),"label":"Fixture Claude","availability":availability,"channels":[]
+    }))?;
+    let (mut writer, mut reader, backend) =
+        initialized_fixture_with_endpoint(Some(description)).await?;
+    let response = call(
+        &mut writer,
+        &mut reader,
+        "unavailable",
+        "conversation/prompt",
+        json!({
+            "operationId":operation_id(),"target":session("provider-conversation"),
+            "requestedBy":actor("caller"),"approver":actor("approver"),
+            "prompt":{"kind":"humanUser","text":"must not dispatch"}
+        }),
+    )
+    .await?;
+    ensure(
+        response["error"]["data"]["kind"] == "unavailable",
+        format!("{response}"),
+    )?;
+    ensure(
+        response["error"]["data"]["endpoint"] == endpoint(),
+        format!("{response}"),
+    )?;
+    ensure(
+        response["error"]["data"]["availability"] == availability,
+        format!("{response}"),
+    )?;
+    ensure(
+        backend.calls.lock().await.is_empty(),
+        "unavailable binding reached provider I/O".to_owned(),
     )?;
     Ok(())
 }

@@ -247,7 +247,7 @@ Stored records stay owned by `automation-storage`; the feature decides when to a
 - Public run inspection (`run/show`, collections, events) is cut over the same way as wakes, in one change:
   - `RunExecutionEvidence` carries `route: Option<DeliveryRouteEvidence>` and `acceptance: Option<DeliveryReceipt>` instead of the native-only fields.
   - `RunState.execution` becomes a tagged `RunExecution` with three variants. `codexAppServer` has today's `NativeExecution` fields unchanged: target, `nativeTurnId`, start, deadline, timeout. `providerAcp` has target, `operationId`, start, deadline, timeout. `claudeCodePeer` has target and written-at.
-  - Validation is per variant. A native summary source must match the native turn. A provider summary source must be the run's own operation. A peer run has no summary.
+  - Validation is per variant. A native summary source must match the native turn. Provider and peer runs have no summary (existing-session destinations); a summary on either is rejected.
   - Old stored native records decode at the storage boundary as `codexAppServer`. `NativeTurn` keeps today's summary worker input (`summary_native_worker.rs:286`). A peer run finalizes as `peerMessageWritten`.
 
 ## Route selection (E7)

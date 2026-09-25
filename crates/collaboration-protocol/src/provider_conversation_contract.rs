@@ -521,4 +521,8 @@ pub struct ConversationOperationFailure {
     pub operation_id: OperationId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<SessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<EndpointRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<crate::EndpointAvailability>,
 }

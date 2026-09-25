@@ -1118,6 +1118,8 @@ fn failure(
             .expect("static provider failure message is valid"),
         operation_id,
         target,
+        endpoint: None,
+        availability: None,
     }
 }
 

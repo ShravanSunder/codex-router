@@ -37,6 +37,14 @@ pub struct EndpointSubscription {
     overflow: Arc<AtomicBool>,
 }
 impl EndpointDirectory {
+    pub fn read_endpoint(&self, endpoint: &EndpointRef) -> io::Result<Option<EndpointDescription>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("endpoint directory unavailable"))?;
+        Ok(state.endpoints.get(endpoint).cloned())
+    }
+
     #[must_use]
     pub fn new(service_id: UuidIdentity) -> Self {
         Self {
