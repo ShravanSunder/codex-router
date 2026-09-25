@@ -15,6 +15,7 @@ impl ExternalProviderRuntime {
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
         let operation_id = context.operation_id.clone();
+        let binding_retirement = context.binding_retirement.clone();
         {
             let mut contexts = self.approval_contexts.lock().map_err(|_| {
                 ExternalProviderRuntimeError::Operation(
@@ -31,7 +32,22 @@ impl ExternalProviderRuntime {
             provider_session_id: provider_session_id.clone(),
             operation_id: operation_id.clone(),
         };
-        self.prompt_for_operation(provider_session_id, Some(operation_id), prompt, dispatch)
-            .await
+        let mut outcome = self
+            .prompt_for_operation(
+                provider_session_id,
+                Some(operation_id.clone()),
+                prompt,
+                dispatch,
+            )
+            .await?;
+        if binding_retirement.is_cancelled() {
+            return Err(ExternalProviderRuntimeError::TransportFailure);
+        }
+        outcome.permission_refusal_reason = self
+            .permission_refusal_reasons
+            .lock()
+            .ok()
+            .and_then(|mut refusals| refusals.remove(&operation_id));
+        Ok(outcome)
     }
 }

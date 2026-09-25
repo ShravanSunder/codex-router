@@ -82,6 +82,9 @@ pub(crate) async fn compose_provider_startup(
                 .await;
                 match runtime {
                     Ok(runtime) => {
+                        runtime
+                            .set_endpoint_id(String::from(binding.endpoint_id.clone()))
+                            .await;
                         let endpoint = EndpointRef {
                             service_id: service_id.clone(),
                             endpoint_id: binding.endpoint_id,

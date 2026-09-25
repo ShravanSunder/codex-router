@@ -875,13 +875,14 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await
+    .map_err(|_| "approval did not enter pending state")?;
     let native_requests = native_backend
         .await?
         .map_err(|error| format!("native approver fixture failed: {error}"))?;
     ensure_eq!(native_requests.len(), 4);
     binding_retirement.cancel();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let retirement_settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             if broker.list(true).await.approvals.is_empty() {
                 break;
@@ -889,7 +890,14 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await;
+    if retirement_settled.is_err() {
+        return Err(format!(
+            "retired approval remained pending: {:?}",
+            broker.list(false).await.approvals
+        )
+        .into());
+    }
     ensure!(matches!(
         broker
             .decide(ApprovalDecideParams {
@@ -912,6 +920,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
         failure.kind,
         ConversationOperationFailureKind::OutcomeUnknown
     );
+    backend.shutdown().await?;
     Ok(())
 }
 

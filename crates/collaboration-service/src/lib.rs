@@ -86,7 +86,7 @@ pub use codex_app_server_scheduled_runs::CodexAppServerScheduledRuns;
 mod session_delivery_sink;
 pub use approval_broker::{
     ExternalApprovalOperationMetadata, ExternalApprovalOption, ExternalApprovalOptionScope,
-    ExternalApprovalRequest, ServiceApprovalBroker,
+    ExternalApprovalRefusal, ExternalApprovalRequest, ServiceApprovalBroker,
 };
 pub use codex_acp_adapter::BrokeredApprovalOutcome;
 

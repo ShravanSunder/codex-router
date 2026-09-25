@@ -274,24 +274,53 @@ async fn approval_broker_fixture(
     Ok((broker, approver_task))
 }
 
-fn fixture_acp_permission_request_agent() -> ExternalProviderLaunch {
+fn fixture_acp_permission_request_agent(provider_name: &str) -> ExternalProviderLaunch {
+    let fixture = r#"
+import json,sys
+provider=sys.argv[1]
+def send(value):
+    print(json.dumps(value)); sys.stdout.flush()
+initialize=json.loads(sys.stdin.readline())
+send({'jsonrpc':'2.0','id':initialize['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':provider+'-permission-fixture','version':'1'}}})
+create=json.loads(sys.stdin.readline())
+send({'jsonrpc':'2.0','id':create['id'],'result':{'sessionId':'fixture-'+provider+'-session'}})
+prompt=json.loads(sys.stdin.readline())
+assert prompt['method']=='session/prompt'
+send({'jsonrpc':'2.0','id':91,'method':'session/request_permission','params':{'sessionId':'fixture-'+provider+'-session','toolCall':{'toolCallId':'echo-command','title':'Run echo cursor-ok','kind':'execute'},'options':[{'optionId':'allow','name':'Allow once','kind':'allow_once'}]}})
+permission=json.loads(sys.stdin.readline())
+assert permission['id']==91
+assert permission['result']['outcome']['outcome']=='selected'
+assert permission['result']['outcome']['optionId']=='allow'
+send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-'+provider+'-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'cursor-ok'}}}})
+send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec![
+            "-c".to_owned(),
+            fixture.to_owned(),
+            provider_name.to_owned(),
+        ],
+        environment: Vec::new(),
+    }
+}
+
+fn fixture_acp_permission_without_allow_agent() -> ExternalProviderLaunch {
     let fixture = r#"
 import json,sys
 def send(value):
     print(json.dumps(value)); sys.stdout.flush()
 initialize=json.loads(sys.stdin.readline())
-send({'jsonrpc':'2.0','id':initialize['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'permission-fixture','version':'1'}}})
+send({'jsonrpc':'2.0','id':initialize['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'permission-refusal-fixture','version':'1'}}})
 create=json.loads(sys.stdin.readline())
-send({'jsonrpc':'2.0','id':create['id'],'result':{'sessionId':'fixture-cursor-session'}})
+send({'jsonrpc':'2.0','id':create['id'],'result':{'sessionId':'fixture-refusal-session'}})
 prompt=json.loads(sys.stdin.readline())
-assert prompt['method']=='session/prompt'
-send({'jsonrpc':'2.0','id':91,'method':'session/request_permission','params':{'sessionId':'fixture-cursor-session','toolCall':{'toolCallId':'echo-command','title':'Run echo cursor-ok','kind':'execute'},'options':[{'optionId':'allow','name':'Allow once','kind':'allow_once'}]}})
+send({'jsonrpc':'2.0','id':92,'method':'session/request_permission','params':{'sessionId':'fixture-refusal-session','toolCall':{'toolCallId':'refused-command','title':'Run an unapproved command','kind':'execute'},'options':[{'optionId':'reject','name':'Reject once','kind':'reject_once'}]}})
 permission=json.loads(sys.stdin.readline())
-assert permission['id']==91
-assert permission['result']['outcome']['outcome']=='selected'
-assert permission['result']['outcome']['optionId']=='allow'
-send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-cursor-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'cursor-ok'}}}})
-send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+assert permission['id']==92
+assert permission['result']['outcome']['outcome']=='cancelled'
+send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
@@ -304,69 +333,139 @@ sys.stdin.read()
 #[cfg(unix)]
 #[tokio::test]
 async fn fixture_acp_permission_notice_reaches_approver_and_allow_executes_command() -> TestResult {
+    let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
+    let approver = session_ref(&service_id, "codex-local", "approver")?;
+    let generation = CodexGeneration {
+        service_epoch: service_id.clone(),
+        generation: GenerationNumber::try_from(1)?,
+    };
+    for endpoint_id in ["cursor-local", "claude-local"] {
+        let root = tempfile::tempdir()?;
+        let runtime =
+            ExternalProviderRuntime::initialize(fixture_acp_permission_request_agent(endpoint_id))
+                .await?;
+        let (broker, mut approver_task) =
+            approval_broker_fixture(&root, &service_id, &approver).await?;
+        runtime.install_approval_broker(Arc::clone(&broker)).await;
+
+        let provider_session_id = runtime.create_session(root.path().to_owned()).await?;
+        let target = session_ref(&service_id, endpoint_id, &provider_session_id)?;
+        let prompt = runtime.prompt_with_approval_context(
+            provider_session_id,
+            format!("Run `echo {endpoint_id}-ok` and report its output."),
+            ExternalProviderApprovalContext {
+                // The creator is also the prompt sender and default approver.
+                requester: approver.clone(),
+                approver: approver.clone(),
+                target,
+                operation_id: OperationId::generate(),
+                binding_generation: generation.clone(),
+                binding_retirement: CancellationToken::new(),
+            },
+        );
+        tokio::pin!(prompt);
+        tokio::select! {
+            biased;
+            result = &mut prompt => return Err(format!("{endpoint_id} fixture prompt settled before approval notice: {result:?}").into()),
+            result = &mut approver_task => result.map_err(|error| format!("approver fixture task: {error}"))??,
+        }
+        let pending = broker
+            .list(true)
+            .await
+            .approvals
+            .into_iter()
+            .next()
+            .ok_or("delivered approval missing from approval list")?;
+        if pending.approver != approver {
+            return Err("approval notice delivery did not reach the configured approver".into());
+        }
+        broker
+            .decide(ApprovalDecideParams {
+                request_id: pending.request_id.clone(),
+                decision: ApprovalDecision::Allow,
+                actor: approver.clone(),
+            })
+            .await
+            .map_err(|error| format!("approval decide: {error}"))?;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), prompt)
+            .await
+            .map_err(|_| "fixture ACP permission prompt timed out")??;
+
+        if outcome.output != "cursor-ok" {
+            return Err(format!("fixture command output differed: {:?}", outcome.output).into());
+        }
+        if runtime.permission_observation().last_outcome
+            != Some(ExternalProviderPermissionOutcome::Selected)
+        {
+            return Err(format!("{endpoint_id} fixture ACP permission was not selected").into());
+        }
+        let history = broker.list(false).await.approvals;
+        if history.len() != 1 || history[0].state != collaboration_protocol::ApprovalState::Decided
+        {
+            return Err(format!(
+                "{endpoint_id} approval history did not record the decision: {history:?}"
+            )
+            .into());
+        }
+        runtime.shutdown().await;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fixture_acp_permission_without_allow_records_visible_refusal_reason() -> TestResult {
     let root = tempfile::tempdir()?;
     let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
-    let requester = session_ref(&service_id, "cursor-local", "fixture-cursor")?;
     let approver = session_ref(&service_id, "codex-local", "approver")?;
     let generation = CodexGeneration {
         service_epoch: service_id.clone(),
         generation: GenerationNumber::try_from(1)?,
     };
     let runtime =
-        ExternalProviderRuntime::initialize(fixture_acp_permission_request_agent()).await?;
-    let (broker, mut approver_task) =
-        approval_broker_fixture(&root, &service_id, &approver).await?;
+        ExternalProviderRuntime::initialize(fixture_acp_permission_without_allow_agent()).await?;
+    let (broker, _approver_task) = approval_broker_fixture(&root, &service_id, &approver).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
 
     let provider_session_id = runtime.create_session(root.path().to_owned()).await?;
     let target = session_ref(&service_id, "cursor-local", &provider_session_id)?;
-    let prompt = runtime.prompt_with_approval_context(
-        provider_session_id,
-        "Run `echo cursor-ok` and report its output.".to_owned(),
-        ExternalProviderApprovalContext {
-            requester,
-            approver: approver.clone(),
-            target,
-            operation_id: OperationId::generate(),
-            binding_generation: generation,
-            binding_retirement: CancellationToken::new(),
-        },
-    );
-    tokio::pin!(prompt);
-    tokio::select! {
-        biased;
-        result = &mut prompt => return Err(format!("fixture prompt settled before approval notice: {result:?}").into()),
-        result = &mut approver_task => result.map_err(|error| format!("approver fixture task: {error}"))??,
-    }
-    let pending = broker
-        .list(true)
-        .await
-        .approvals
-        .into_iter()
-        .next()
-        .ok_or("delivered approval missing from approval list")?;
-    if pending.approver != approver {
-        return Err("approval notice delivery did not reach the configured approver".into());
-    }
-    broker
-        .decide(ApprovalDecideParams {
-            request_id: pending.request_id.clone(),
-            decision: ApprovalDecision::Allow,
-            actor: approver,
-        })
-        .await
-        .map_err(|error| format!("approval decide: {error}"))?;
-    let outcome = tokio::time::timeout(Duration::from_secs(5), prompt)
-        .await
-        .map_err(|_| "fixture ACP permission prompt timed out")??;
+    let outcome = runtime
+        .prompt_with_approval_context(
+            provider_session_id,
+            "Run a command requiring permission.".to_owned(),
+            ExternalProviderApprovalContext {
+                requester: approver.clone(),
+                approver,
+                target,
+                operation_id: OperationId::generate(),
+                binding_generation: generation,
+                binding_retirement: CancellationToken::new(),
+            },
+        )
+        .await?;
 
-    if outcome.output != "cursor-ok" {
-        return Err(format!("fixture command output differed: {:?}", outcome.output).into());
-    }
-    if runtime.permission_observation().last_outcome
-        != Some(ExternalProviderPermissionOutcome::Selected)
+    let history = broker.list(false).await.approvals;
+    if history.len() != 1
+        || history[0].state != collaboration_protocol::ApprovalState::Cancelled
+        || history[0].reason.as_deref() != Some("no one-time allow option is available")
     {
-        return Err("fixture ACP permission was not selected".into());
+        return Err(
+            format!("permission refusal was not recorded with its reason: {history:?}").into(),
+        );
+    }
+    if history[0].offered_options.len() != 1
+        || history[0].offered_options[0].option_id != "reject"
+        || history[0].offered_options[0].scope
+            != collaboration_protocol::ApprovalOptionScope::RejectOnce
+    {
+        return Err(
+            format!("refusal history did not preserve the offered option: {history:?}").into(),
+        );
+    }
+    if outcome.stop_reason != ProviderPromptStopReason::Cancelled {
+        return Err(
+            format!("provider did not observe permission cancellation: {outcome:?}").into(),
+        );
     }
     runtime.shutdown().await;
     Ok(())
