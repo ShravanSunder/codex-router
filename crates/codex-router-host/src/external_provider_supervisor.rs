@@ -3,6 +3,7 @@
 use crate::provider_operation_settlement::{
     ProviderOperationCompletion, effective_settings, optional_message_text, provider_session_record,
 };
+use crate::provider_queue_operation_registry::ProviderQueueOperationRegistry;
 use crate::{ExternalProviderRuntime, ExternalProviderRuntimeError};
 use collaboration_protocol::{
     ConversationAdmissionState, ConversationBindingIdentity, ConversationCancelRequest,
@@ -45,6 +46,7 @@ struct SupervisorInner {
     bindings: HashMap<EndpointRef, RuntimeBinding>,
     store: Arc<Mutex<ProviderOperationStore>>,
     live_operations: StdMutex<LiveOperations>,
+    queued_operations: ProviderQueueOperationRegistry,
     started_at_ms: i64,
     #[cfg(test)]
     admission_test_pause: StdMutex<Option<AdmissionTestPause>>,
@@ -82,6 +84,10 @@ impl LiveOperation {
 }
 
 impl ExternalProviderSupervisor {
+    pub(crate) fn queued_operation_registry(&self) -> &ProviderQueueOperationRegistry {
+        &self.inner.queued_operations
+    }
+
     pub(crate) fn runtime_for(
         &self,
         endpoint: &EndpointRef,
@@ -133,6 +139,7 @@ impl ExternalProviderSupervisor {
                 bindings: runtimes,
                 store,
                 live_operations: StdMutex::new(LiveOperations::default()),
+                queued_operations: ProviderQueueOperationRegistry::default(),
                 started_at_ms: now_ms(),
                 #[cfg(test)]
                 admission_test_pause: StdMutex::new(None),
@@ -833,8 +840,34 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
         request: ConversationOperationShowRequest,
     ) -> ProviderConversationFuture<'_, ConversationOperationSnapshot> {
         Box::pin(async move {
-            snapshot_from_record(self.inspect_record(&request.operation_id).await?)
-                .map_err(|message| snapshot_failure(request.operation_id, message))
+            let stored_record = self
+                .inner
+                .store
+                .lock()
+                .await
+                .inspect(&request.operation_id)
+                .await
+                .map_err(|_| unavailable_failure(request.operation_id.clone(), None))?;
+            if let Some(record) = stored_record {
+                return snapshot_from_record(record)
+                    .map_err(|message| snapshot_failure(request.operation_id, message));
+            }
+            if let Some(snapshot) = self
+                .inner
+                .queued_operations
+                .snapshot(&request.operation_id)
+                .map_err(|message| snapshot_failure(request.operation_id.clone(), message))?
+            {
+                return Ok(snapshot);
+            }
+            Err(failure(
+                ConversationOperationFailureKind::NotFound,
+                ConversationOperationFailureStage::Settlement,
+                ProviderOperationEffect::None,
+                "provider operation was not found",
+                request.operation_id,
+                None,
+            ))
         })
     }
 

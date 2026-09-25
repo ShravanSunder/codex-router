@@ -40,6 +40,7 @@ fn prepare_thread_list_at(
                     .map(|value| parse_identity(value, "--reader"))
                     .transpose()?,
                 page: prepare_page(arguments)?,
+                default_repository_path: None,
             })
         }
         (None, None) if !arguments.watched_only => Ok(PreparedBoardCommand::RepositoryThreadList {
@@ -51,6 +52,7 @@ fn prepare_thread_list_at(
                 .map(|value| parse_identity(value, "--reader"))
                 .transpose()?,
             page: prepare_page(arguments)?,
+            default_repository_path: Some(working_directory.display().to_string()),
         }),
         _ => Err(thread_list_selector_error()),
     }

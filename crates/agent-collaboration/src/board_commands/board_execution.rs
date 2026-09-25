@@ -251,7 +251,8 @@ async fn dispatch(
             repository,
             reader,
             page,
-        } => repository_threads(client, repository, reader, page).await,
+            default_repository_path,
+        } => repository_threads(client, repository, reader, page, default_repository_path).await,
         PreparedBoardCommand::ThreadCreate(pending) => {
             serialize_result(client.board_thread_create(pending.request).await?)
         }
@@ -291,6 +292,7 @@ async fn repository_threads(
     repository: collaboration_client::BoardRepositoryLocation,
     reader: Option<Identity>,
     page: PageRequest,
+    default_repository_path: Option<String>,
 ) -> Result<Value, BoardClientError> {
     if page.cursor.is_some() {
         return Err(BoardClientError::Connection(ClientError::Protocol(
@@ -309,6 +311,10 @@ async fn repository_threads(
             },
         })
         .await?;
+    let no_project_hint = repository_thread_list_hint(
+        default_repository_path.as_deref(),
+        projects.page.records.is_empty(),
+    );
     let fallback_reader: Identity =
         serde_json::from_value(json!({"kind":"human","humanId":"repository-thread-reader"}))
             .map_err(|_| ClientError::Protocol("reader identity"))?;
@@ -381,7 +387,46 @@ async fn repository_threads(
             .cmp(&left.get("lastActivity").and_then(Value::as_u64))
     });
     records.truncate(page.limit.get() as usize);
-    Ok(json!({"page":{"records":records,"nextCursor":null}}))
+    Ok(match no_project_hint {
+        Some(message) => json!({
+            "page":{"records":records,"nextCursor":null},
+            "message":message
+        }),
+        None => json!({"page":{"records":records,"nextCursor":null}}),
+    })
+}
+
+fn repository_thread_list_hint(
+    default_repository_path: Option<&str>,
+    no_associated_projects: bool,
+) -> Option<String> {
+    if !no_associated_projects {
+        return None;
+    }
+    default_repository_path.map(|repository_path| format!(
+        "No project is associated with repository {repository_path}. Attach one with `agent-collaboration board repository attach --project-id <project-id> --repository-path {} --actor self`, or list a known project with `agent-collaboration board thread list --project-id <project-id> --reader self`.",
+        shell_single_quoted_argument(repository_path)
+    ))
+}
+
+#[cfg(test)]
+mod repository_thread_list_hint_tests {
+    use super::repository_thread_list_hint;
+
+    #[test]
+    fn empty_default_repository_result_names_attach_and_project_fixes() {
+        let hint = repository_thread_list_hint(Some("/work/sample-repo"), true)
+            .expect("empty default result gets a hint");
+        assert!(hint.contains("/work/sample-repo"));
+        assert!(hint.contains("board repository attach --project-id <project-id> --repository-path '/work/sample-repo'"));
+        assert!(hint.contains("board thread list --project-id <project-id>"));
+    }
+
+    #[test]
+    fn explicit_repository_and_nonempty_default_results_keep_listing_semantics() {
+        assert!(repository_thread_list_hint(None, true).is_none());
+        assert!(repository_thread_list_hint(Some("/work/sample-repo"), false).is_none());
+    }
 }
 
 fn serialize_result<TValue: Serialize>(value: TValue) -> Result<Value, BoardClientError> {

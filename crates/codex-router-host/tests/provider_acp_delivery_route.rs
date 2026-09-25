@@ -165,14 +165,12 @@ fn refusing_load_fixture(load_marker: &Path) -> ExternalProviderLaunch {
 import json,sys
 request=json.loads(sys.stdin.readline())
 print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{'loadSession':True}},'agentInfo':{{'name':'load-fixture','version':'1'}}}}}})); sys.stdout.flush()
-line=sys.stdin.readline()
-if line:
+for line in sys.stdin:
  request=json.loads(line)
  assert request['method']=='session/load', request['method']
  assert request['params']['sessionId']=='fixture-session'
- open({:?},'w').write('session/load')
+ with open({:?},'a') as marker: marker.write('session/load\n')
  print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'error':{{'code':-32001,'message':'refused load'}}}})); sys.stdout.flush()
-sys.stdin.read()
 "#,
         load_marker.display().to_string()
     );
@@ -504,7 +502,7 @@ async fn failed_load_returns_not_submitted_without_session_new() {
         DeliveryOutcome::NotSubmitted { .. }
     ));
     assert_eq!(
-        std::fs::read_to_string(load_marker).expect("method"),
+        std::fs::read_to_string(load_marker).expect("method").trim(),
         "session/load"
     );
     assert!(matches!(evidence.0.lock().await.as_slice(),

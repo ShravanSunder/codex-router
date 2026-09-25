@@ -5,8 +5,9 @@ use crate::{
     provider_acp_session_loading::{ProviderSessionLoadOutcome, ensure_provider_session_loaded},
 };
 use collaboration_protocol::{
-    ConversationOperationWaitOutput, ConversationOperationWaitRequest, ConversationPromptRequest,
-    PositiveSeconds, ProviderOperationStage, SessionRef,
+    ConversationOperationFailureKind, ConversationOperationWaitOutput,
+    ConversationOperationWaitRequest, ConversationPromptRequest, PositiveSeconds,
+    ProviderOperationStage, SessionRef,
 };
 use collaboration_service::{ProviderConversationBackend, ProviderOperationStore};
 use std::{
@@ -22,6 +23,8 @@ use tokio_util::sync::CancellationToken;
 const QUEUE_CAPACITY: usize = 128;
 const MAX_SESSION_QUEUES: usize = 1024;
 const SETTLEMENT_WAIT_SECONDS: u32 = 10;
+const MIN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(crate) struct ProviderAcpMessageFifo {
     supervisor: Arc<ExternalProviderSupervisor>,
@@ -120,40 +123,165 @@ async fn run_provider_message_fifo(
 ) {
     loop {
         let request = tokio::select! {
-            () = shutdown.cancelled() => return,
-            request = receiver.recv() => match request { Some(request) => request, None => return },
+            () = shutdown.cancelled() => {
+                mark_remaining_not_submitted(&supervisor, &mut receiver, "Router shutdown before provider submission");
+                return;
+            },
+            request = receiver.recv() => match request {
+                Some(request) => request,
+                None => return,
+            },
         };
         let operation_id = request.operation_id.clone();
-        let loaded = tokio::select! {
-            () = shutdown.cancelled() => return,
-            loaded = ensure_provider_session_loaded(&supervisor, &store, ownership.as_ref(), &target) => loaded,
-        };
-        if !matches!(loaded, ProviderSessionLoadOutcome::Ready) {
-            return;
-        }
         let Some(runtime) = supervisor.runtime_for(&target.endpoint) else {
+            drop_current_and_remaining(
+                &supervisor,
+                &operation_id,
+                &mut receiver,
+                "provider retired before queued prompt submission",
+            );
             return;
         };
-        let idle = tokio::select! {
-            () = shutdown.cancelled() => return,
-            idle = runtime.wait_session_idle(String::from(target.session_id.clone())) => idle,
-        };
-        if idle.is_err() || runtime.retirement().is_cancelled() {
-            return;
+        let retirement = runtime.retirement();
+        let mut retry_delay = MIN_RETRY_DELAY;
+        let mut loaded = false;
+        let mut operation_submitted = false;
+        loop {
+            if shutdown.is_cancelled() {
+                drop_current_and_remaining(
+                    &supervisor,
+                    &operation_id,
+                    &mut receiver,
+                    "Router shutdown before provider submission",
+                );
+                return;
+            }
+            if retirement.is_cancelled() {
+                drop_current_and_remaining(
+                    &supervisor,
+                    &operation_id,
+                    &mut receiver,
+                    "provider retired before queued prompt submission",
+                );
+                return;
+            }
+            if !loaded {
+                let load_outcome = tokio::select! {
+                    () = shutdown.cancelled() => {
+                        drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "Router shutdown before provider submission");
+                        return;
+                    },
+                    () = retirement.cancelled() => {
+                        drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "provider retired before queued prompt submission");
+                        return;
+                    },
+                    outcome = ensure_provider_session_loaded(&supervisor, &store, ownership.as_ref(), &target) => outcome,
+                };
+                match load_outcome {
+                    ProviderSessionLoadOutcome::Ready => loaded = true,
+                    ProviderSessionLoadOutcome::MissingRecord => {
+                        supervisor.queued_operation_registry().mark_not_submitted(
+                            &operation_id,
+                            "provider session record is missing",
+                        );
+                        break;
+                    }
+                    ProviderSessionLoadOutcome::LiveElsewhere => {
+                        supervisor
+                            .queued_operation_registry()
+                            .mark_not_submitted(&operation_id, "session is live elsewhere");
+                        break;
+                    }
+                    ProviderSessionLoadOutcome::Unavailable { reason } => {
+                        supervisor
+                            .queued_operation_registry()
+                            .mark_not_submitted(&operation_id, reason);
+                        break;
+                    }
+                }
+            }
+            let idle = tokio::select! {
+                () = shutdown.cancelled() => {
+                    drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "Router shutdown before provider submission");
+                    return;
+                },
+                () = retirement.cancelled() => {
+                    drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "provider retired before queued prompt submission");
+                    return;
+                },
+                idle = runtime.wait_session_idle(String::from(target.session_id.clone())) => idle,
+            };
+            if idle.is_err() {
+                if !wait_before_retry(&shutdown, &retirement, retry_delay).await {
+                    drop_current_and_remaining(
+                        &supervisor,
+                        &operation_id,
+                        &mut receiver,
+                        "provider retired or Router shut down before queued prompt submission",
+                    );
+                    return;
+                }
+                retry_delay = next_retry_delay(retry_delay);
+                continue;
+            }
+            let submitted = tokio::select! {
+                () = shutdown.cancelled() => {
+                    drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "Router shutdown before provider submission");
+                    return;
+                },
+                () = retirement.cancelled() => {
+                    drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "provider retired before queued prompt submission");
+                    return;
+                },
+                submitted = supervisor.submit_delivery_prompt(request.clone()) => submitted,
+            };
+            match submitted {
+                Ok(ProviderPromptDispatch::Submitted) => {
+                    supervisor.queued_operation_registry().clear(&operation_id);
+                    operation_submitted = true;
+                    break;
+                }
+                Ok(ProviderPromptDispatch::Existing | ProviderPromptDispatch::Uncertain) => {
+                    supervisor.queued_operation_registry().clear(&operation_id);
+                    operation_submitted = true;
+                    break;
+                }
+                Ok(ProviderPromptDispatch::NotSubmitted) => {}
+                Err(failure) if failure.kind == ConversationOperationFailureKind::Busy => {}
+                Err(failure) => {
+                    supervisor
+                        .queued_operation_registry()
+                        .mark_not_submitted(&operation_id, String::from(failure.message));
+                    break;
+                }
+            }
+            if !wait_before_retry(&shutdown, &retirement, retry_delay).await {
+                drop_current_and_remaining(
+                    &supervisor,
+                    &operation_id,
+                    &mut receiver,
+                    "provider retired or Router shut down before queued prompt submission",
+                );
+                return;
+            }
+            retry_delay = next_retry_delay(retry_delay);
         }
-        let submitted = tokio::select! {
-            () = shutdown.cancelled() => return,
-            submitted = supervisor.submit_delivery_prompt(request) => submitted,
-        };
-        if !matches!(submitted, Ok(ProviderPromptDispatch::Submitted)) {
-            return;
+        if !operation_submitted {
+            continue;
         }
         let Ok(wait_seconds) = PositiveSeconds::try_from(SETTLEMENT_WAIT_SECONDS) else {
-            return;
+            continue;
         };
         loop {
             let settled = tokio::select! {
-                () = shutdown.cancelled() => return,
+                () = shutdown.cancelled() => {
+                    mark_remaining_not_submitted(&supervisor, &mut receiver, "Router shutdown before queued prompt settlement");
+                    return;
+                },
+                () = retirement.cancelled() => {
+                    mark_remaining_not_submitted(&supervisor, &mut receiver, "provider retired before queued prompt settlement");
+                    return;
+                },
                 result = supervisor.wait(ConversationOperationWaitRequest {
                     operation_id: operation_id.clone(), timeout_seconds: wait_seconds,
                 }) => result,
@@ -166,8 +294,57 @@ async fn run_provider_message_fifo(
                     break;
                 }
                 Ok(_) => {}
-                Err(_) => return,
+                Err(_) => {
+                    if !wait_before_retry(&shutdown, &retirement, MIN_RETRY_DELAY).await {
+                        mark_remaining_not_submitted(
+                            &supervisor,
+                            &mut receiver,
+                            "provider retired or Router shut down before queued prompt settlement",
+                        );
+                        return;
+                    }
+                }
             }
         }
+    }
+}
+
+async fn wait_before_retry(
+    shutdown: &CancellationToken,
+    retirement: &CancellationToken,
+    delay: std::time::Duration,
+) -> bool {
+    tokio::select! {
+        () = shutdown.cancelled() => false,
+        () = retirement.cancelled() => false,
+        () = tokio::time::sleep(delay) => true,
+    }
+}
+
+fn next_retry_delay(current: std::time::Duration) -> std::time::Duration {
+    current.saturating_mul(2).min(MAX_RETRY_DELAY)
+}
+
+fn drop_current_and_remaining(
+    supervisor: &ExternalProviderSupervisor,
+    current: &collaboration_protocol::OperationId,
+    receiver: &mut mpsc::Receiver<ConversationPromptRequest>,
+    reason: &str,
+) {
+    supervisor
+        .queued_operation_registry()
+        .mark_not_submitted(current, reason);
+    mark_remaining_not_submitted(supervisor, receiver, reason);
+}
+
+fn mark_remaining_not_submitted(
+    supervisor: &ExternalProviderSupervisor,
+    receiver: &mut mpsc::Receiver<ConversationPromptRequest>,
+    reason: &str,
+) {
+    while let Ok(request) = receiver.try_recv() {
+        supervisor
+            .queued_operation_registry()
+            .mark_not_submitted(&request.operation_id, reason);
     }
 }

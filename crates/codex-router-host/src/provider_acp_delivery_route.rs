@@ -254,6 +254,11 @@ impl ProviderAcpDeliveryRoute {
             };
             let effect = Self::effect(&request, &binding, SubmissionEffect::RouterQueued)?;
             sink.record(effect).await?;
+            self.supervisor.queued_operation_registry().record_queued(
+                operation_id.clone(),
+                request.target.clone(),
+                binding.clone(),
+            );
             permit.send(ConversationPromptRequest {
                 operation_id: operation_id.clone(),
                 target: request.target.clone(),

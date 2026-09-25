@@ -327,6 +327,13 @@ pub enum ProviderReconciliationState {
     NotReconcilable,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ConversationOperationQueueState {
+    RouterQueued,
+    NotSubmitted { reason: String },
+}
+
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationOperationSnapshot {
@@ -338,6 +345,8 @@ pub struct ConversationOperationSnapshot {
     pub stage: ProviderOperationStage,
     pub effect: ProviderOperationEffect,
     pub reconciliation: ProviderReconciliationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_state: Option<ConversationOperationQueueState>,
     pub admitted_at: ObservationTimestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_at: Option<ObservationTimestamp>,

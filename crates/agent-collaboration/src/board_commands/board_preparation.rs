@@ -56,6 +56,7 @@ pub(super) enum PreparedBoardCommand {
         repository: BoardRepositoryLocation,
         reader: Option<Identity>,
         page: PageRequest,
+        default_repository_path: Option<String>,
     },
     ThreadCreate(Box<PendingThreadCreate>),
     ThreadJoin(Box<PendingThreadJoin>),
