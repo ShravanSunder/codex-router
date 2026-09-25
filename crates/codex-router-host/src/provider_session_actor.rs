@@ -2,14 +2,14 @@
 #[cfg(test)]
 use crate::external_provider_runtime::ExternalProviderToolCall;
 use crate::external_provider_runtime::{
-    ExternalProviderPromptOutcome, ExternalProviderRuntimeError, acp_operation_error,
+    ExternalProviderPromptOutcome, ExternalProviderRuntimeError, ProviderFrameObservation,
+    acp_operation_error,
 };
 use crate::provider_prompt_observation::read_bounded_prompt;
 use agent_client_protocol::schema::v1::{CancelNotification, PromptRequest};
 use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, UntypedMessage};
 use collaboration_protocol::OperationId;
 use serde_json::json;
-#[cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -68,11 +68,18 @@ pub(crate) async fn run_provider_session(
     mut session: ActiveSession<'_, Agent>,
     mut commands: tokio::sync::mpsc::Receiver<ProviderSessionCommand>,
     shutdown: CancellationToken,
+    frame_observation: Arc<ProviderFrameObservation>,
     #[cfg(test)] test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
 ) {
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
+            update = session.read_update() => {
+                let Ok(update) = update else { break; };
+                if reject_unhandled_session_request(update).await.is_err() {
+                    break;
+                }
+            }
             command = commands.recv() => {
                 let Some(command) = command else { break; };
                 match command {
@@ -101,24 +108,42 @@ pub(crate) async fn run_provider_session(
                         if let Some(dispatch) = dispatch {
                             let _result = dispatch.send(ProviderPromptDispatchObservation::Submitted);
                         }
+                        let (output_limit_tx, mut output_limit_rx) =
+                            tokio::sync::mpsc::unbounded_channel();
                         let provider_session_id = session.session_id().clone();
                         let provider_connection = session.connection().clone();
                         let mut idle_waiters = Vec::<tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>>::new();
                         let mut prompt_result = Box::pin(read_bounded_prompt(
                             &mut session,
                             terminal_rx,
+                            output_limit_tx,
+                            Arc::clone(&frame_observation),
                             #[cfg(test)]
                             Arc::clone(&test_tool_calls),
                         ));
+                        let mut output_limit_cancelled = false;
                         loop {
                             tokio::select! {
+                                biased;
                                 () = shutdown.cancelled() => {
                                     let _result = reply.send(Err(ExternalProviderRuntimeError::Operation(
                                         "provider runtime shut down while prompt was active".to_owned(),
                                     )));
                                     return;
                                 }
+                                limit_notice = output_limit_rx.recv(), if !output_limit_cancelled => {
+                                    if limit_notice.is_some() {
+                                        output_limit_cancelled = true;
+                                        let _result = provider_connection
+                                            .send_notification(CancelNotification::new(provider_session_id.clone()));
+                                    }
+                                }
                                 result = &mut prompt_result => {
+                                    let result = if output_limit_cancelled {
+                                        Err(ExternalProviderRuntimeError::PromptOutputLimitExceeded)
+                                    } else {
+                                        result
+                                    };
                                     let _result = reply.send(result);
                                     for waiter in idle_waiters.drain(..) {
                                         let _result = waiter.send(Ok(()));
@@ -170,6 +195,27 @@ pub(crate) async fn run_provider_session(
                 }
             }
         }
+    }
+}
+
+async fn reject_unhandled_session_request(
+    message: agent_client_protocol::SessionMessage,
+) -> Result<(), agent_client_protocol::Error> {
+    match message {
+        agent_client_protocol::SessionMessage::SessionMessage(dispatch) => {
+            agent_client_protocol::util::MatchDispatch::new(dispatch)
+                .otherwise(|message| async move {
+                    match message {
+                        agent_client_protocol::Dispatch::Request(_, responder) => responder
+                            .respond_with_error(agent_client_protocol::Error::method_not_found()),
+                        agent_client_protocol::Dispatch::Notification(_)
+                        | agent_client_protocol::Dispatch::Response(_, _) => Ok(()),
+                    }
+                })
+                .await
+        }
+        agent_client_protocol::SessionMessage::StopReason(_) => Ok(()),
+        _ => Ok(()),
     }
 }
 
