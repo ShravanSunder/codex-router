@@ -362,6 +362,23 @@ stateDiagram-v2
 - Steered messages are not provider operations. `_session/steering` injects into the running prompt, which already is an operation, so no new public operation kind or settlement is added.
   - Evidence: the route records `providerAcp` evidence (`Dispatching`, keyed by the attempt's `AttemptId`) before the steering request. On `injected` it returns `steered`, with receipt `providerAcp { operation_id }` naming the running prompt's operation.
   - A crash between the request and the reply leaves the attempt `unknown`, and it is never replayed. Reconciliation of steer evidence reports still-unknown, because there is no store record to consult.
+- Approvals (R31), for all approvals:
+  - The provider runtime's `session/request_permission` handler forwards every request to the approval broker.
+  - `request_external` (Claude and Cursor) routes requester == approver like any other approver: notice, history record, `approval decide`.
+  - The native `request` path refuses a thread that is its own approver, with a recorded `approverIsRequester` state.
+  - No refusal is a silent `Cancelled`.
+    - Refusals with known identities go into approval history with their reason: an unmappable or reject-only option set, an unreachable approver, a provider session that is its own approver ("set a different approver"), a timeout on either path, and retirement.
+    - Refusals before an approver can be identified (no approval context, no broker, no native route) are recorded as a typed reason on the provider operation when one exists, and always as one structured, payload-free warning (endpoint, provider session, method, reason code). The approval history format is unchanged, and no identities are invented.
+  - Decision details (tool title, options with their IDs and scopes) are a bounded presentation carried in the `approval list` record; there is no separate `approval show`.
+- ACP runtime robustness (from the 2026-09-25 ACP inventory, reviewed by Astra):
+  - **Permission handling must not block the connection.** It releases the SDK's incoming dispatcher: approval waits are owned by a spawned task holding the responder, so other sessions' replies and updates keep flowing.
+  - **Output and update limits bound retained data, not observation.** Router keeps ownership of an active turn until it genuinely settles. If it must stop retaining data, it sends `session/cancel` and waits for settlement, and it reports a typed limit reason; it never labels a running turn idle.
+  - **Loading replays history without an event cap.** Replayed updates are drained and discarded, and never mixed into the next prompt's output.
+  - **Unknown session-scoped requests from the agent get an explicit method-not-found.** They are never silently consumed.
+  - **Transport frame policy:** ordinary large provider frames (large tool output) must not retire the provider. Retirement is reserved for frames that cannot be parsed or classified.
+  - **Terminal outcome evidence** (completed, cancelled, refused) is kept in the small durable operation record, so eviction or restart never turns a cancelled or refused run into completed.
+  - **Queue:** a terminal failure of the head item publishes that item's outcome and advances. Only real uncertainty waits.
+  - **Privacy:** payload-bearing ACP diagnostics (SDK trace lines, error data from malformed frames, initialization errors) never reach exported logs or user-facing reasons. Only method, code, stage, and size are kept.
 - Capabilities: the runtime keeps `InitializeResponse._meta.steering.supported` in the admission record. Steer is an untyped `_session/steering` request (`UntypedMessage::new`) with `_meta.steering.idleBehavior = "promptRequired"`, handled inside `run_provider_session` like the existing prompt (`runtime.rs:989-1060`). The existing `LocalBusy` rejection of a second prompt (`runtime.rs:800, 1047`) is replaced by the table.
 - Provider session records (target, cwd, access policy, creator, approver) are written when a create or load settles. They make `CanLoad` claims possible (R16) and supply the approver. They live in the provider operation store (SQLite, metadata only) under a new migration.
 - Scheduled runs (`provider_acp_scheduled_runs.rs`):
@@ -374,12 +391,21 @@ stateDiagram-v2
 
 ## Claude Code peer route (U8)
 
-- Lookup: `claude-local/<id>` → the registry record with that `sessionId`, through `claude_code_session_registry`. Live with peer protocol 1 is `Holds`; live with anything else is `LiveElsewhere { writable: false }`; no live record is `NotMine` (R27, R28).
+- Lookup: `claude-local/<id>` → the registry record with that `sessionId`, through `claude_code_session_registry`. The record's status is a typed, advisory enum (`Busy`, `Idle`, `Waiting`, `Shell`, `Unreported`, `Other`) and never decides reachability. Live with peer protocol 1 is `Holds`; live with anything else is `LiveElsewhere { writable: false }`; no live record is `NotMine` (R27, R28).
 - Message: the route renders the existing origin framing (`render_message`) plus a reply line naming the sender SessionRef and `message_send` (R30). It then writes an auth line using the published key and `{"type":"user","message":{"role":"user","content":<text>}}` through `claude_code_peer_socket` (C5).
 - Modes: `auto` writes. `steer` writes only when the registry status is `busy`, otherwise `notSubmitted` "no running turn". `queue` is `rejected` "queue unsupported for Claude Code sessions". A full write is `peerMessageWritten`. A connection refused before any byte is written is `notSubmitted { retryable: true }`; a write interrupted after bytes were sent is `unknown` (never replayed). There is no acknowledgement, and the receiver's own controls may hold or drop the message (R29).
 - Scheduled runs: support is `WriteOnly` with no create and no stop; activation accepts only an existing live `claude-local` target. `submit_run` writes like `auto`, and settlement is `WrittenWithoutCompletion`: the run finalizes as `peerMessageWritten` with a summary stating that no completion evidence exists.
 - Evidence: on 2026-09-24 a script's write of that line to this session's own socket (Claude Code 2.1.281) arrived mid-turn between tool calls. This is an unreviewed observation; the cross-session delivery and reply gate in the Specification's proof table remains required.
 - Open fact to check in implementation: whether the Claude Code process that `claude-agent-acp` runs also appears in the registry. Selection makes either answer safe, because a provider-held session is claimed by the provider route in tier 1.
+
+## Stale Host detection (R32)
+
+- `RouterExecutableObserver` (`codex-router-host/src/router_executable_observation.rs`) is the only observer.
+  - At start it records the launch path's stat identity (device, inode, size, mtime) and the running version. It does no hashing.
+  - On `host status` and every 120 s, it compares the stat identity. Only after a change does it run the installed executable's `--version` (bounded). The same version counts as a match; a different version or a missing file is `drift`; an unreadable file is `unknown`.
+- It publishes each observation on a `tokio::sync::watch` channel. Host composition passes the receiver to the MCP server, which reads only the latest value at `initialize`.
+- `RouterExecutableRelation` and the one-line warning formatter live in `collaboration-protocol`. The status line, the MCP instructions, and the single Host warning share that formatter.
+- The CLI's warning is separate: `agent-collaboration` compares its own version with the `serviceVersion` the Host reports.
 
 ## Composition at Host start
 
