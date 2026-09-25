@@ -1,4 +1,5 @@
 use crate::mcp_server::CollaborationMcpServer;
+use crate::mcp_server::McpExecutableObservation;
 use bytes::Bytes;
 use http::Request;
 use http_body_util::{BodyExt, Empty};
@@ -90,12 +91,16 @@ impl CollaborationMcpListener {
         let session_manager = Arc::new(LocalSessionManager::default());
         let active_services = Arc::new(AtomicUsize::new(0));
         let service_lifecycle = Arc::clone(&active_services);
+        let router_executable_observation =
+            Arc::new(std::sync::Mutex::new(McpExecutableObservation::capture()));
+        let executable_observation = Arc::clone(&router_executable_observation);
         let service: StreamableHttpService<CollaborationMcpServer, LocalSessionManager> =
             StreamableHttpService::new(
                 move || {
                     Ok(CollaborationMcpServer::with_lifecycle(
                         config.service_directory.clone(),
                         Arc::clone(&service_lifecycle),
+                        Arc::clone(&executable_observation),
                     ))
                 },
                 Arc::clone(&session_manager),

@@ -49,6 +49,7 @@ mod provider_prompt_observation;
 mod provider_session_actor;
 pub use provider_session_actor::{ProviderSessionActivity, ProviderSteeringOutcome};
 mod router_compatibility;
+mod router_executable_observation;
 mod session_message_route_composition;
 
 pub use app_server_endpoint_guard::AppServerEndpointError;
@@ -121,6 +122,7 @@ pub use process_group_child::ProcessGroupError;
 pub use router_compatibility::RouterProbeError;
 pub use router_compatibility::RouterProbeResult;
 pub use router_compatibility::probe_router;
+pub use router_executable_observation::{RouterExecutableObserver, RouterExecutableRelation};
 mod backend_publication;
 pub use backend_publication::BackendPublication;
 mod collaboration_runtime;

@@ -174,6 +174,7 @@ fn hosted_readiness_is_derived_from_orthogonal_dimensions() {
         remote_control: RemoteControlCondition::Connecting,
         remote_control_identity: None,
         executable_relation: ExecutableRelation::Match,
+        router_executable_relation: codex_router_host::RouterExecutableRelation::Match,
         recovery_budget: RecoveryBudget::Available,
         last_lifecycle_outcome: None,
     });
@@ -192,6 +193,9 @@ fn hosted_readiness_is_derived_from_orthogonal_dimensions() {
         remote_control: RemoteControlCondition::Connected,
         remote_control_identity: None,
         executable_relation: ExecutableRelation::Unknown,
+        router_executable_relation: codex_router_host::RouterExecutableRelation::Unknown {
+            reason: "not observed".to_owned(),
+        },
         recovery_budget: RecoveryBudget::Consumed,
         last_lifecycle_outcome: None,
     });
@@ -262,6 +266,7 @@ fn ready_snapshot() -> HostSnapshot {
         remote_control: RemoteControlCondition::Connected,
         remote_control_identity: None,
         executable_relation: ExecutableRelation::Match,
+        router_executable_relation: codex_router_host::RouterExecutableRelation::Match,
         recovery_budget: RecoveryBudget::Available,
         last_lifecycle_outcome: None,
     })

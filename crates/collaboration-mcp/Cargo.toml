@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 collaboration-client = { path = "../collaboration-client", version = "0.1.30" }
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.30" }
+codex-native-integration.workspace = true
 bytes.workspace = true
 http.workspace = true
 http-body-util.workspace = true

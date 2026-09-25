@@ -261,9 +261,26 @@ fn render_snapshot<W: Write>(stdout: &mut W, snapshot: &HostSnapshot) -> std::io
     )?;
     writeln!(
         stdout,
-        "executable_relation: {}",
+        "codex_executable_relation: {}",
         executable_relation_label(snapshot.executable_relation())
     )?;
+    let router_relation = snapshot.router_executable_relation();
+    writeln!(
+        stdout,
+        "router_executable_relation: {}",
+        router_executable_relation_label(router_relation)
+    )?;
+    if let codex_router_host::RouterExecutableRelation::Drift {
+        running_version,
+        installed_version,
+    } = router_relation
+    {
+        writeln!(
+            stdout,
+            "⚠ Router Host is stale (running {running_version}, installed {}); run `codex-router host restart`",
+            installed_version.as_deref().unwrap_or("unknown")
+        )?;
+    }
     writeln!(
         stdout,
         "recovery_budget: {}",
@@ -348,6 +365,16 @@ fn executable_relation_label(relation: codex_router_host::ExecutableRelation) ->
     }
 }
 
+fn router_executable_relation_label(
+    relation: &codex_router_host::RouterExecutableRelation,
+) -> &'static str {
+    match relation {
+        codex_router_host::RouterExecutableRelation::Match => "match",
+        codex_router_host::RouterExecutableRelation::Drift { .. } => "drift",
+        codex_router_host::RouterExecutableRelation::Unknown { .. } => "unknown",
+    }
+}
+
 fn recovery_budget_label(budget: codex_router_host::RecoveryBudget) -> &'static str {
     match budget {
         codex_router_host::RecoveryBudget::Available => "available",
@@ -397,6 +424,7 @@ mod tests {
             remote_control: RemoteControlCondition::Connected,
             remote_control_identity: None,
             executable_relation: ExecutableRelation::Match,
+            router_executable_relation: codex_router_host::RouterExecutableRelation::Match,
             recovery_budget: RecoveryBudget::Available,
             last_lifecycle_outcome: Some(LifecycleOutcome {
                 operation: HostOperation::Start,
@@ -420,13 +448,45 @@ mod tests {
             "router:",
             "app_server:",
             "remote_control:",
-            "executable_relation:",
+            "codex_executable_relation:",
+            "router_executable_relation:",
             "recovery_budget:",
             "last_lifecycle_outcome:",
         ] {
             assert!(rendered.contains(field), "missing {field}");
         }
         assert!(!rendered.contains("PROMPT_CANARY"));
+        Ok(())
+    }
+
+    #[test]
+    fn router_drift_status_names_both_versions_and_restart_action() -> std::io::Result<()> {
+        let snapshot = HostSnapshot::new(HostSnapshotDimensions {
+            phase: HostPhase::Steady,
+            router: RouterCondition::ExternalReachable,
+            app_server: AppServerCondition::Absent,
+            remote_control: RemoteControlCondition::Unavailable,
+            remote_control_identity: None,
+            executable_relation: ExecutableRelation::Match,
+            router_executable_relation: codex_router_host::RouterExecutableRelation::Drift {
+                running_version: "0.1.36".to_owned(),
+                installed_version: Some("0.1.37".to_owned()),
+            },
+            recovery_budget: RecoveryBudget::Available,
+            last_lifecycle_outcome: None,
+        });
+        let mut output = Vec::new();
+        render_snapshot(&mut output, &snapshot)?;
+        let rendered = String::from_utf8(output).map_err(std::io::Error::other)?;
+        assert!(rendered.contains("router_executable_relation: drift"));
+        assert!(rendered.contains("⚠ Router Host is stale (running 0.1.36, installed 0.1.37)"));
+        assert!(rendered.contains("codex-router host restart"));
+        let encoded = serde_json::to_value(snapshot).map_err(std::io::Error::other)?;
+        assert_eq!(encoded["router_executable_relation"]["kind"], "drift");
+        assert_eq!(
+            encoded["router_executable_relation"]["running_version"],
+            "0.1.36"
+        );
         Ok(())
     }
 
@@ -536,6 +596,9 @@ mod tests {
             remote_control: RemoteControlCondition::Unavailable,
             remote_control_identity: None,
             executable_relation: ExecutableRelation::Unknown,
+            router_executable_relation: codex_router_host::RouterExecutableRelation::Unknown {
+                reason: "not observed".to_owned(),
+            },
             recovery_budget: RecoveryBudget::Available,
             last_lifecycle_outcome: None,
         })

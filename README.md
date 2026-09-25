@@ -127,3 +127,32 @@ and CLI. [Debug testing instructions](docs/testing/automation-debug-testing.md)
 cover the opt-in Luna acceptance runner and its isolated Host. Shared message boards use the same client and service; see the
 [agent collaboration skill](agent-skills/agent-collaboration/SKILL.md). Other language
 SDK implementations and remote transport follow separately.
+
+## Install and upgrade
+
+Install `codex-router` from the Homebrew tap:
+
+```shell
+brew tap shravansunder/taps
+brew trust shravansunder/taps  # Homebrew 7+
+brew install shravansunder/taps/codex-router
+```
+
+Upgrade the installed binaries and restart a running Host:
+
+```shell
+brew update && brew upgrade codex-router
+codex-router host restart
+```
+
+A running Host continues using the build it started with until restarted. `codex-router host status` and the `agent-collaboration` CLI warn when the installed or connected Router version is newer.
+
+If Homebrew reports conflicts in its tap clone, inspect and restore only the formula file, then fast-forward the tap:
+
+```shell
+git -C "$(brew --repository)/Library/Taps/shravansunder/homebrew-taps" status
+git -C "$(brew --repository)/Library/Taps/shravansunder/homebrew-taps" checkout -- Formula/codex-router.rb
+git -C "$(brew --repository)/Library/Taps/shravansunder/homebrew-taps" pull --ff-only
+```
+
+Do not edit the installed tap clone; formula changes go through the release workflow.

@@ -60,6 +60,77 @@ pub(crate) struct CollaborationMcpServer {
     service_directory: PathBuf,
     tool_router: ToolRouter<Self>,
     _lifecycle: ActiveServiceGuard,
+    router_executable_observation: Arc<std::sync::Mutex<McpExecutableObservation>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct McpExecutableObservation {
+    launch_path: Option<PathBuf>,
+    running_version: String,
+    running_identity: Option<codex_native_integration::ExecutableIdentity>,
+    file_stamp: Option<McpExecutableFileStamp>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct McpExecutableFileStamp {
+    length: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl McpExecutableObservation {
+    pub(crate) fn capture() -> Self {
+        let running_version = std::env::var("CODEX_ROUTER_DEBUG_RUNNING_VERSION")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+        Self::capture_from(std::env::current_exe().ok(), running_version)
+    }
+
+    fn capture_from(launch_path: Option<PathBuf>, running_version: String) -> Self {
+        let running_identity = launch_path
+            .as_deref()
+            .and_then(|path| codex_native_integration::executable_identity_sync(path).ok());
+        let file_stamp = launch_path
+            .as_deref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| McpExecutableFileStamp {
+                length: metadata.len(),
+                modified: metadata.modified().ok(),
+            });
+        Self {
+            launch_path,
+            running_version,
+            running_identity,
+            file_stamp,
+        }
+    }
+
+    fn drift_warning(&mut self) -> Option<String> {
+        let path = self.launch_path.as_deref()?;
+        let metadata = std::fs::metadata(path).ok();
+        let current_stamp = metadata.map(|metadata| McpExecutableFileStamp {
+            length: metadata.len(),
+            modified: metadata.modified().ok(),
+        });
+        if current_stamp == self.file_stamp {
+            return None;
+        }
+        self.file_stamp = current_stamp;
+        let installed_identity = codex_native_integration::executable_identity_sync(path).ok();
+        if installed_identity.is_some() && installed_identity == self.running_identity {
+            return None;
+        }
+        let running_version = std::env::var("CODEX_ROUTER_DEBUG_RUNNING_VERSION")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .unwrap_or_else(|| self.running_version.clone());
+        let installed_version = codex_native_integration::executable_version_sync(path)
+            .ok()
+            .unwrap_or_else(|| "unknown".to_owned());
+        Some(format!(
+            "⚠ Router Host is stale (running {running_version}, installed {installed_version}); run `codex-router host restart`"
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -87,12 +158,17 @@ impl Drop for ActiveServiceGuard {
 impl CollaborationMcpServer {
     #[cfg(test)]
     pub(crate) fn new(service_directory: PathBuf) -> Self {
-        Self::with_lifecycle(service_directory, Arc::new(AtomicUsize::new(0)))
+        Self::with_lifecycle(
+            service_directory,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(std::sync::Mutex::new(McpExecutableObservation::capture())),
+        )
     }
 
     pub(crate) fn with_lifecycle(
         service_directory: PathBuf,
         active_services: Arc<AtomicUsize>,
+        router_executable_observation: Arc<std::sync::Mutex<McpExecutableObservation>>,
     ) -> Self {
         let mut tool_router = Self::tool_router();
         register_board_tools(&mut tool_router);
@@ -103,6 +179,7 @@ impl CollaborationMcpServer {
             service_directory,
             tool_router,
             _lifecycle: ActiveServiceGuard::new(active_services),
+            router_executable_observation,
         }
     }
 
@@ -840,9 +917,17 @@ fn validation_failure(message: &str) -> CallToolResult {
 
 impl ServerHandler for CollaborationMcpServer {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            Implementation::new("codex-router-collaboration", env!("CARGO_PKG_VERSION")),
-        )
+        let mut config = ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "codex-router-collaboration",
+                env!("CARGO_PKG_VERSION"),
+            ));
+        if let Ok(mut observation) = self.router_executable_observation.lock()
+            && let Some(warning) = observation.drift_warning()
+        {
+            config = config.with_instructions(warning);
+        }
+        config
     }
 
     async fn call_tool(
@@ -870,6 +955,46 @@ impl ServerHandler for CollaborationMcpServer {
         self.resolved_tools()
             .into_iter()
             .find(|tool| tool.name == name)
+    }
+}
+
+#[cfg(test)]
+mod executable_observation_tests {
+    use super::CollaborationMcpServer;
+    use super::McpExecutableObservation;
+    use rmcp::ServerHandler;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn initialize_instructions_report_running_and_installed_router_versions() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("codex-router");
+        write_version_script(&path, "0.1.36");
+        let server = CollaborationMcpServer::new(directory.path().to_owned());
+        let observation =
+            McpExecutableObservation::capture_from(Some(path.clone()), "0.1.36".to_owned());
+        *server
+            .router_executable_observation
+            .lock()
+            .expect("executable observer lock") = observation;
+        write_version_script(&path, "0.1.37");
+        let initialize = serde_json::to_value(server.get_info()).expect("initialize response");
+        assert_eq!(
+            initialize["instructions"].as_str(),
+            Some(
+                "⚠ Router Host is stale (running 0.1.36, installed 0.1.37); run `codex-router host restart`"
+            )
+        );
+    }
+
+    fn write_version_script(path: &std::path::Path, version: &str) {
+        std::fs::write(
+            path,
+            format!("#!/bin/sh\nprintf 'codex-router {version}\\n'\n"),
+        )
+        .expect("write version script");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("make version script executable");
     }
 }
 

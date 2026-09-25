@@ -298,6 +298,15 @@ jobs:
           ln -s "${GITHUB_WORKSPACE}/homebrew-taps" "${tap_path}"
           echo "path=${tap_path}" >> "${GITHUB_OUTPUT}"
 
+      - name: Trust local Homebrew tap when supported
+        run: |
+          set -euo pipefail
+          if brew help trust >/dev/null 2>&1; then
+            brew trust shravansunder/taps
+          else
+            echo "Homebrew trust command is unavailable; skipping tap trust"
+          fi
+
       - name: Validate Homebrew formula and installation
         env:
           RELEASE_VERSION: ${{ needs.release.outputs.version }}

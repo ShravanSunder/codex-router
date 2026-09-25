@@ -105,6 +105,7 @@ impl ControlClient {
             .await?;
         let identity: ControlInitializationResult = serde_json::from_value(value)
             .map_err(|_| ClientError::Protocol("invalid initialization result"))?;
+        crate::warn_on_router_version_mismatch(name, version, &identity.service_version);
         if identity.version.major != 1 || identity.version.minor != 0 {
             return Err(ClientError::Protocol("unsupported negotiated version"));
         }
