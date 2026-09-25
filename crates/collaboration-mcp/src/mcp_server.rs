@@ -452,7 +452,7 @@ impl CollaborationMcpServer {
         }
     }
 
-    #[tool(name = "conversation_create", description = "Creates one conversation through its advertised client. Requires a caller UUIDv7 operationId and exact endpoint, working directory, access, and creator; approver defaults to creator. Codex ACP also requires model and effort (for example, endpoint codex-local with model gpt-5.6 and effort medium); provider endpoints omit them. Returns created with target or pending with the inspectable operation ID; fork is Codex-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreateOutcome>())]
+    #[tool(name = "conversation_create", description = "Creates one conversation through its advertised client. Requires a caller UUIDv7 operationId and exact endpoint, working directory, access, and creator; approver defaults to creator. model and effort are required for Codex endpoints and rejected for provider endpoints. Returns created with target or pending with the inspectable operation ID; fork is Codex-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreateOutcome>())]
     async fn conversation_create(
         &self,
         Parameters(mut request): Parameters<ConversationCreateToolRequest>,
@@ -617,7 +617,7 @@ impl CollaborationMcpServer {
         conversation_tool_result(result, Some(operation_id))
     }
 
-    #[tool(name = "conversation_create_and_prompt", description = "Creates a fresh conversation and prompts it through the advertised client. The create operation ID is inspectable; provider prompt requires a second caller UUIDv7 ID, while Codex prompt omits it because it is not inspectable. The result names a pending create or the prompt settlement. A completed turn is not an assignment verdict or peer reply; cancellation never silently replays a submission.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreatePromptOutcome>())]
+    #[tool(name = "conversation_create_and_prompt", description = "Creates a fresh conversation and prompts it through the advertised client. model and effort are required for Codex endpoints and rejected for provider endpoints. The create operation ID is inspectable; provider prompt requires a second caller UUIDv7 ID, while Codex prompt omits it because it is not inspectable. The result names a pending create or the prompt settlement. A completed turn is not an assignment verdict or peer reply; cancellation never silently replays a submission.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreatePromptOutcome>())]
     async fn conversation_create_and_prompt(
         &self,
         Parameters(mut request): Parameters<ConversationCreatePromptToolRequest>,

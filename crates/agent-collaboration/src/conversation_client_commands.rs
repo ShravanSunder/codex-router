@@ -1,4 +1,5 @@
 //! Shared client routing for create, target prompt, load, and cancel CLI commands.
+use super::create_input_validation::validate_create_endpoint_options;
 use super::*;
 
 #[path = "conversation_client_command_reporting.rs"]
@@ -6,6 +7,14 @@ mod reporting;
 use reporting::*;
 
 pub(super) fn run_create(args: CreateArguments) -> i32 {
+    if let Err(failure) = validate_create_endpoint_options(&args) {
+        return crate::endpoint_commands::report_failure(
+            failure.kind,
+            &failure.message,
+            failure.exit_code,
+            args.json,
+        );
+    }
     let directory = match crate::endpoint_commands::resolve_directory(args.service_directory) {
         Ok(value) => value,
         Err(error) => {
@@ -78,9 +87,6 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
             2,
             args.json,
         );
-    }
-    if emit_create_start(&operation_id, args.json).is_err() {
-        return 3;
     }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -155,6 +161,9 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
         };
         if let Err(error) = ConversationClient::validate_create_input(&request, timeout) {
             return report_create_client_error(error, &operation_id, args.json);
+        }
+        if emit_create_start(&operation_id, args.json).is_err() {
+            return 3;
         }
         let client = match ConversationClient::connect(&directory, &endpoint).await {
             Ok(value) => value,

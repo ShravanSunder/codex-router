@@ -8,10 +8,16 @@ use serde::Deserialize;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[schemars(extend("allOf" = [{
-    "if": {"properties": {"endpoint": {"properties": {"endpointId": {"const": "codex-local"}}}}},
-    "then": {"required": ["model", "effort"]}
-}]))]
+#[schemars(extend("allOf" = [
+    {
+        "if": {"properties": {"endpoint": {"properties": {"endpointId": {"const": "codex-local"}}}}},
+        "then": {"required": ["model", "effort"]}
+    },
+    {
+        "if": {"properties": {"endpoint": {"properties": {"endpointId": {"enum": ["claude-local", "cursor-local"]}}}}},
+        "then": {"not": {"anyOf": [{"required": ["model"]}, {"required": ["effort"]}]}}
+    }
+]))]
 pub(super) struct ConversationCreateToolRequest {
     #[serde(flatten)]
     pub(super) create: ConversationCreateInput,
@@ -39,10 +45,16 @@ pub(super) struct ConversationPromptToolRequest {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[schemars(extend("allOf" = [{
-    "if": {"properties": {"create": {"properties": {"endpoint": {"properties": {"endpointId": {"const": "codex-local"}}}}}}},
-    "then": {"properties": {"create": {"required": ["model", "effort"]}}}
-}]))]
+#[schemars(extend("allOf" = [
+    {
+        "if": {"properties": {"create": {"properties": {"endpoint": {"properties": {"endpointId": {"const": "codex-local"}}}}}}},
+        "then": {"properties": {"create": {"required": ["model", "effort"]}}}
+    },
+    {
+        "if": {"properties": {"create": {"properties": {"endpoint": {"properties": {"endpointId": {"enum": ["claude-local", "cursor-local"]}}}}}}},
+        "then": {"properties": {"create": {"not": {"anyOf": [{"required": ["model"]}, {"required": ["effort"]}]}}}}
+    }
+]))]
 pub(super) struct ConversationCreatePromptToolRequest {
     #[serde(flatten)]
     pub(super) input: ConversationCreatePromptInput,

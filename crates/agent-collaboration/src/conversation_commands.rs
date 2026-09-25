@@ -21,6 +21,9 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[path = "conversation_create_input_validation.rs"]
+mod create_input_validation;
+
 #[path = "conversation_client_commands.rs"]
 mod client_commands;
 
@@ -37,7 +40,7 @@ struct ConversationArguments {
 enum ConversationCommand {
     /// Create a conversation and return its stable SessionRef without submitting a prompt.
     #[command(
-        long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. Codex ACP requires both --model and --effort; provider endpoints omit them. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
+        long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. --model and --effort are required for Codex endpoints and rejected for provider endpoints. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
     )]
     Create(CreateArguments),
     /// Run an ACP prompt and wait for settlement. For an empty conversation returned by
@@ -58,10 +61,10 @@ enum ConversationCommand {
 struct CreateArguments {
     #[arg(long)]
     endpoint: String,
-    /// Required with --endpoint codex-local; provider endpoints must omit it.
+    /// Required for Codex endpoints; rejected for provider endpoints.
     #[arg(long)]
     model: Option<String>,
-    /// Required with --endpoint codex-local; provider endpoints must omit it.
+    /// Required for Codex endpoints; rejected for provider endpoints.
     #[arg(long)]
     effort: Option<String>,
     #[arg(long)]

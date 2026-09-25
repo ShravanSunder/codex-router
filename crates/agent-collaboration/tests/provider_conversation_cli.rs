@@ -325,6 +325,88 @@ async fn common_create_waits_for_provider_target_and_prints_operation_first() {
 }
 
 #[tokio::test]
+async fn codex_create_missing_model_and_effort_fails_before_start_record() {
+    let root = fixture_directory("codex-create-missing-inputs");
+    let output = run_cli(
+        &root,
+        vec![
+            "conversation",
+            "create",
+            "--endpoint",
+            "codex-local",
+            "--cwd",
+            "/tmp/project",
+            "--access",
+            "workspace-write",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let rendered = format!("{stdout}{stderr}");
+    assert!(
+        !rendered.contains("conversationCreateStarted"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("--model"), "{rendered}");
+    assert!(rendered.contains("--effort"), "{rendered}");
+    assert!(
+        rendered.contains("'--endpoint' 'codex-local'"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("'--cwd' '/tmp/project'"), "{rendered}");
+    assert!(rendered.contains("<model>"), "{rendered}");
+    assert!(rendered.contains("<low|medium|high>"), "{rendered}");
+    cleanup_unpublished_fixture(&root);
+}
+
+#[tokio::test]
+async fn provider_create_rejects_model_and_effort_before_start_record() {
+    let root = fixture_directory("provider-create-codex-inputs");
+    let output = run_cli(
+        &root,
+        vec![
+            "conversation",
+            "create",
+            "--endpoint",
+            "claude-local",
+            "--cwd",
+            "/tmp/project",
+            "--access",
+            "workspace-write",
+            "--model",
+            "gpt-5.6",
+            "--effort",
+            "medium",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(4));
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !rendered.contains("conversationCreateStarted"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("claude-local"), "{rendered}");
+    assert!(rendered.contains("--model"), "{rendered}");
+    assert!(rendered.contains("--effort"), "{rendered}");
+    cleanup_unpublished_fixture(&root);
+}
+
+#[tokio::test]
 async fn external_provider_create_then_prompt_preserves_target_and_supplied_operations() {
     let root = fixture_directory("create-prompt");
     let listener = publish_fixture(&root);
@@ -1054,5 +1136,9 @@ async fn run_cli(root: &std::path::Path, arguments: Vec<String>) -> std::process
 fn cleanup_fixture(root: &std::path::Path) {
     std::fs::remove_file(root.join("control.sock")).expect("socket cleanup");
     std::fs::remove_file(root.join("service.json")).expect("manifest cleanup");
+    std::fs::remove_dir(root).expect("directory cleanup");
+}
+
+fn cleanup_unpublished_fixture(root: &std::path::Path) {
     std::fs::remove_dir(root).expect("directory cleanup");
 }

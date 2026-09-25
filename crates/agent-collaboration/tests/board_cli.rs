@@ -79,6 +79,59 @@ fn thread_listen_help_exposes_exact_process_owned_contract() {
 }
 
 #[test]
+fn thread_list_help_documents_repository_default_and_project_selector() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["board", "thread", "list", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("current Git repository"), "{help}");
+    assert!(help.contains("--repository-path"), "{help}");
+    assert!(help.contains("--project-id"), "{help}");
+}
+
+#[test]
+fn thread_list_outside_repository_shows_corrected_example() {
+    let directory =
+        std::env::temp_dir().join(format!("board-thread-list-outside-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["board", "thread", "list", "--json"])
+        .current_dir(&directory)
+        .output()
+        .unwrap();
+    std::fs::remove_dir(&directory).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(rendered.contains("Choose exactly one"), "{rendered}");
+    assert!(
+        rendered.contains("agent-collaboration board thread list"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("--repository-path"), "{rendered}");
+    assert!(rendered.contains("--project-id"), "{rendered}");
+}
+
+#[test]
+fn conversation_create_help_explains_codex_and_provider_model_rules() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["conversation", "create", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("required for Codex endpoints"), "{help}");
+    assert!(help.contains("rejected for provider endpoints"), "{help}");
+    assert!(help.contains("--model <MODEL>"), "{help}");
+    assert!(help.contains("--effort <EFFORT>"), "{help}");
+}
+
+#[test]
 fn thread_wait_help_exposes_only_the_once_listen_contract() {
     let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["board", "thread", "wait", "--help"])

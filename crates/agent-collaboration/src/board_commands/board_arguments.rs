@@ -127,6 +127,9 @@ pub(super) enum ThreadCommand {
     /// Stop watching a thread. Existing message history remains readable.
     Unwatch(ThreadWatchArguments),
     /// List project threads and reader watch status.
+    #[command(
+        long_about = "List project threads and reader watch status. With neither --project-id nor --repository-path, use the current Git repository when available. Example outside a repository: agent-collaboration board thread list --repository-path '<path-in-repository>' (or --project-id <project-id>). --watched-only requires --project-id."
+    )]
     List(ThreadListArguments),
     /// Wait for Thread Activity. Delivery marks it seen; acknowledgement remains separate.
     Listen(ThreadListenArguments),

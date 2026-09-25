@@ -252,12 +252,29 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
     });
     let create_validator = jsonschema::validator_for(&create_schema).expect("create schema");
     assert!(create_validator.is_valid(&provider_create));
-    let mut empty_codex_create = provider_create;
+    let mut provider_with_model = provider_create.clone();
+    provider_with_model["model"] = serde_json::json!("gpt-5.6-sol");
+    assert!(!create_validator.is_valid(&provider_with_model));
+    let mut provider_with_effort = provider_create.clone();
+    provider_with_effort["effort"] = serde_json::json!("medium");
+    assert!(!create_validator.is_valid(&provider_with_effort));
+    let mut empty_codex_create = provider_create.clone();
     empty_codex_create["endpoint"]["endpointId"] = serde_json::json!("codex-local");
     assert!(!create_validator.is_valid(&empty_codex_create));
     empty_codex_create["model"] = serde_json::json!("gpt-5.6-sol");
     empty_codex_create["effort"] = serde_json::json!("medium");
     assert!(create_validator.is_valid(&empty_codex_create));
+
+    let create_and_prompt_validator =
+        jsonschema::validator_for(&create_and_prompt_schema).expect("create-and-prompt schema");
+    let provider_create_and_prompt = serde_json::json!({
+        "create":provider_create,
+        "message":{"kind":"humanUser","text":"hello"}
+    });
+    assert!(create_and_prompt_validator.is_valid(&provider_create_and_prompt));
+    let mut provider_create_and_prompt_with_effort = provider_create_and_prompt;
+    provider_create_and_prompt_with_effort["create"]["effort"] = serde_json::json!("medium");
+    assert!(!create_and_prompt_validator.is_valid(&provider_create_and_prompt_with_effort));
 
     let schedule_schema = schema_for("schedule_create");
     let schedule_definition = &schedule_schema["$defs"]["ScheduleDefinition"];
@@ -305,6 +322,20 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
         .get("board_thread_join")
         .expect("join description");
     assert!(join_description.contains("--role participant"));
+
+    for tool in ["conversation_create", "conversation_create_and_prompt"] {
+        let description = descriptions
+            .get(tool)
+            .expect("conversation create description");
+        assert!(
+            description.contains("required for Codex endpoints"),
+            "{description}"
+        );
+        assert!(
+            description.contains("rejected for provider endpoints"),
+            "{description}"
+        );
+    }
 }
 
 #[test]

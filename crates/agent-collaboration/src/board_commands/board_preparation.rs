@@ -590,20 +590,7 @@ fn prepare_thread(
         ThreadCommand::Watch(arguments) => prepare_watch(arguments, true),
         ThreadCommand::Unwatch(arguments) => prepare_watch(arguments, false),
         ThreadCommand::List(arguments) => Ok((
-            match (arguments.project_id, arguments.repository_path) {
-                (Some(project_id), None) => PreparedBoardCommand::ThreadList(ThreadListRequest {
-                    project_id: parse_uuid_v7(project_id, "--project-id")?,
-                    reader: parse_identity(arguments.reader.as_deref().ok_or("--reader is required with --project-id")?, "--reader")?,
-                    watched_only: arguments.watched_only,
-                    page: prepare_page_request(arguments.page)?,
-                }),
-                (None, Some(path)) if !arguments.watched_only => PreparedBoardCommand::RepositoryThreadList {
-                    repository: BoardRepositoryLocation::discover(&path).map_err(|error| error.to_string())?,
-                    reader: arguments.reader.as_deref().map(|value| parse_identity(value, "--reader")).transpose()?,
-                    page: prepare_page_request(arguments.page)?,
-                },
-                _ => return Err("Choose exactly one of --project-id or --repository-path; --watched-only requires --project-id".into()),
-            },
+            super::board_thread_list_preparation::prepare_thread_list(&arguments)?,
             command_context(arguments.common),
         )),
         ThreadCommand::Listen(arguments) => prepare_thread_listen(arguments),

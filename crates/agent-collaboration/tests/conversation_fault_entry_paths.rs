@@ -24,6 +24,19 @@ fn create_result_line(stdout: &[u8]) -> Value {
     serde_json::from_str(&lines[1]).expect("create result JSON")
 }
 
+fn preflight_create_error_line(stdout: &[u8]) -> Value {
+    let lines = String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines.len(),
+        1,
+        "preflight validation failures must not emit a create-start record"
+    );
+    serde_json::from_str(&lines[0]).expect("preflight error JSON")
+}
+
 fn create_prompt_result_line(stdout: &[u8]) -> Value {
     let lines: Vec<_> = String::from_utf8_lossy(stdout)
         .lines()
@@ -87,7 +100,7 @@ async fn standalone_create_manifest_preflight_reports_no_effect_without_acp_disp
     // about a conversation that might have been created.
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stderr.is_empty());
-    let record: Value = create_result_line(&output.stdout);
+    let record: Value = preflight_create_error_line(&output.stdout);
     let typed_record: collaboration_client::protocol::ConversationRecord =
         serde_json::from_value(record.clone()).expect("published ConversationRecord");
     assert_eq!(record["kind"], "conversationError");
@@ -881,7 +894,7 @@ async fn conversation_create_without_identity_or_from_reports_unavailable() {
     drop(publication);
     std::fs::remove_dir(&root).expect("fixture cleanup");
     assert_eq!(output.status.code(), Some(2));
-    let record: Value = create_result_line(&output.stdout);
+    let record: Value = preflight_create_error_line(&output.stdout);
     assert_eq!(record["kind"], "conversationError");
     assert_eq!(
         record["error"]["message"],
