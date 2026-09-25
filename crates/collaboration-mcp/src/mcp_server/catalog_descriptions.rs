@@ -52,10 +52,10 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Exports one stored schedule as a portable typed package. Read-only and does not enable, prepare or run the schedule."
         }
         "schedule_create" => {
-            "Creates a durable schedule from a validated definition. Creation stores configuration only; it does not allocate a conversation or execute work."
+            "Creates a durable schedule from a validated definition. Supply effort for every destination; freshEachRun also requires model. Creation stores configuration only; it does not allocate a conversation or execute work."
         }
         "schedule_update" => {
-            "Updates a schedule using its identity and expected change guard. The returned snapshot reflects stored configuration; no run is started."
+            "Updates a schedule using its identity and expected change guard. Supply effort for every destination; freshEachRun also requires model. The returned snapshot reflects stored configuration; no run is started."
         }
         "schedule_show" => {
             "Reads one schedule snapshot by identity without changing timing or execution state."
@@ -191,7 +191,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Creates a new root thread in an active topic as the supplied actor. It records discussion context, not a Router task or conversation."
         }
         "board_thread_join" => {
-            "Joins the supplied session to an existing thread in its requested participant role. Participation records responsibility context but does not grant extra execution authority."
+            "Joins the supplied session to an existing thread in its requested participant role. For session-delivered listening, join first with --role participant (CLI: board thread join --root-message-id <thread-id> --actor self --role participant --no-watch --json). Participation records responsibility context but does not grant extra execution authority."
         }
         "board_thread_leave" => {
             "Removes the supplied session's eligible participation from a thread. It does not delete messages or terminate the session."
@@ -200,7 +200,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Lists current participants and roles for one thread. Read-only and not an authentication result."
         }
         "board_thread_listen" => {
-            "Creates a bounded board-activity listener for explicit thread/topic selections and reader identity. Listener readiness/delivery observes board activity only; it does not prove model activation, turn completion or reply."
+            "Creates a bounded board-activity listener for explicit thread/topic selections and reader identity. Session delivery requires an existing thread participant and a fixed lifetime: CLI --lifetime short (25 minutes) or long (75 minutes), or --once (25 minutes); MCP mode must use once.maxWaitSeconds=1500 or repeating.lifetimeSeconds=1500|4500. Join first with board_thread_join as role participant. Listener readiness/delivery observes board activity only; it does not prove model activation, turn completion or reply."
         }
         "board_thread_listen_show" => {
             "Reads the supplied reader's active board-listener state. Read-only and does not wait for activity."

@@ -41,6 +41,13 @@ pub struct ConversationCreateInput {
     pub root_message_id: Option<UuidIdentity>,
 }
 
+impl ConversationCreateInput {
+    /// Uses the caller as approval authority when the caller leaves it unspecified.
+    pub fn default_approver(&mut self) {
+        self.approver.get_or_insert_with(|| self.created_by.clone());
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationLoadInput {
@@ -112,6 +119,12 @@ pub enum ConversationClientError {
     },
     #[error("invalid conversation create input: {0}")]
     InvalidInput(&'static str),
+    #[error("conversation endpoint {endpoint:?} is unavailable: {reason}; {fix}")]
+    UnavailableEndpoint {
+        endpoint: EndpointRef,
+        reason: String,
+        fix: String,
+    },
     #[error("{operation} on {endpoint:?} requires a caller UUIDv7 operation ID")]
     MissingOperationId {
         endpoint: EndpointRef,
@@ -288,6 +301,18 @@ impl ConversationClient {
             .into_iter()
             .find(|endpoint| endpoint.endpoint == *target)
             .ok_or(ClientError::Protocol("conversation endpoint not found"))?;
+        if let collaboration_protocol::EndpointAvailability::Unavailable { reason, fix, .. } =
+            &endpoint.availability
+        {
+            return Err(ConversationClientError::UnavailableEndpoint {
+                endpoint: target.clone(),
+                reason: String::from(reason.clone()),
+                fix: fix.as_ref().map_or_else(
+                    || "no fix is published by the endpoint catalog".to_owned(),
+                    |fix| String::from(fix.clone()),
+                ),
+            });
+        }
         match advertised_conversation_transport(&endpoint)? {
             ConversationTransport::CodexAcp => {
                 control.close().await?;

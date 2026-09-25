@@ -1495,6 +1495,113 @@ async fn initialize_mcp_session(
 }
 
 #[tokio::test]
+async fn schema_required_fields_reach_each_tool_without_missing_field_errors() {
+    let temporary = tempfile::tempdir().expect("temporary service directory");
+    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
+        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
+        service_directory: temporary.path().to_owned(),
+        allowed_origins: Vec::new(),
+    })
+    .await
+    .expect("MCP listener starts");
+    let client = reqwest::Client::new();
+    let session = initialize_mcp_session(&client, &listener, "schema-required-inputs").await;
+    let server = crate::mcp_server::CollaborationMcpServer::new(temporary.path().to_owned());
+    let definitions = server
+        .resolved_tools()
+        .into_iter()
+        .map(|tool| {
+            let schema =
+                serde_json::to_value(tool.input_schema.as_ref()).expect("input schema JSON");
+            (tool.name.into_owned(), schema)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for (index, (name, schema)) in definitions.iter().enumerate() {
+        let arguments = schema_required_object(schema, &schema["$defs"]);
+        let response = client
+            .post(listener.local_url())
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header("mcp-session-id", session.clone())
+            .header("mcp-protocol-version", "2025-11-25")
+            .json(&json!({
+                "jsonrpc":"2.0","id":index + 2,"method":"tools/call",
+                "params":{"name":name,"arguments":arguments}
+            }))
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("{name} HTTP call: {error}"));
+        let response = protocol_response_json(response).await;
+        let encoded = response.to_string();
+        assert!(
+            !encoded.contains("missing field") && !encoded.contains("requires "),
+            "{name} rejected the schema-required input as incomplete: {encoded}"
+        );
+    }
+}
+
+fn schema_required_object(schema: &Value, definitions: &Value) -> Value {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let name = reference.strip_prefix("#/$defs/").unwrap_or_default();
+        return schema_required_object(&definitions[name], definitions);
+    }
+    if let Some(constant) = schema.get("const") {
+        return constant.clone();
+    }
+    if let Some(variants) = schema.get("enum").and_then(Value::as_array) {
+        return variants.first().cloned().unwrap_or(Value::Null);
+    }
+    for keyword in ["oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(keyword).and_then(Value::as_array) {
+            return variants
+                .first()
+                .map(|variant| schema_required_object(variant, definitions))
+                .unwrap_or(Value::Null);
+        }
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            let mut object = serde_json::Map::new();
+            for field in required.iter().filter_map(Value::as_str) {
+                object.insert(
+                    field.to_owned(),
+                    schema_required_object(&schema["properties"][field], definitions),
+                );
+            }
+            Value::Object(object)
+        }
+        Some("array") => Value::Array(Vec::new()),
+        Some("integer") => schema.get("minimum").cloned().unwrap_or(json!(1)),
+        Some("number") => schema.get("minimum").cloned().unwrap_or(json!(1)),
+        Some("boolean") => Value::Bool(false),
+        Some("string") => {
+            if schema.get("format").and_then(Value::as_str) == Some("date-time") {
+                json!("2026-09-24T00:00:00Z")
+            } else if schema
+                .get("pattern")
+                .and_then(Value::as_str)
+                .is_some_and(|pattern| pattern.contains("7[0-9a-f]{3}"))
+            {
+                json!("019f0000-0000-7000-8000-000000000001")
+            } else if schema
+                .get("pattern")
+                .and_then(Value::as_str)
+                .is_some_and(|pattern| pattern.contains("[a-z]"))
+            {
+                json!("fixture")
+            } else if schema.get("minLength").and_then(Value::as_u64).unwrap_or(0) > 0 {
+                json!("x")
+            } else {
+                json!("")
+            }
+        }
+        _ => Value::Null,
+    }
+}
+
+#[tokio::test]
 async fn invalid_origin_is_rejected_before_protocol_dispatch() {
     let temporary = tempfile::tempdir().expect("temporary service directory");
     let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {

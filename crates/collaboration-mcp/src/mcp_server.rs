@@ -115,7 +115,7 @@ impl CollaborationMcpServer {
         .await
     }
 
-    fn resolved_tools(&self) -> Vec<Tool> {
+    pub(crate) fn resolved_tools(&self) -> Vec<Tool> {
         let native_definitions = load_advertised_native_definitions(&self.service_directory);
         self.tool_router
             .list_all()
@@ -452,12 +452,13 @@ impl CollaborationMcpServer {
         }
     }
 
-    #[tool(name = "conversation_create", description = "Creates one conversation through its advertised client. Requires a caller UUIDv7 operationId and exact endpoint, working directory, access, and creator. Returns created with target or pending with the inspectable operation ID; optional model, effort, and fork are Codex-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreateOutcome>())]
+    #[tool(name = "conversation_create", description = "Creates one conversation through its advertised client. Requires a caller UUIDv7 operationId and exact endpoint, working directory, access, and creator; approver defaults to creator. Codex ACP also requires model and effort (for example, endpoint codex-local with model gpt-5.6 and effort medium); provider endpoints omit them. Returns created with target or pending with the inspectable operation ID; fork is Codex-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreateOutcome>())]
     async fn conversation_create(
         &self,
-        Parameters(request): Parameters<ConversationCreateToolRequest>,
+        Parameters(mut request): Parameters<ConversationCreateToolRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
+        request.create.default_approver();
         let operation_id = request.create.operation_id.clone();
         let endpoint = request.create.endpoint.clone();
         let timeout_seconds = request.timeout_seconds.map_or(300, u32::from);
@@ -619,9 +620,10 @@ impl CollaborationMcpServer {
     #[tool(name = "conversation_create_and_prompt", description = "Creates a fresh conversation and prompts it through the advertised client. The create operation ID is inspectable; provider prompt requires a second caller UUIDv7 ID, while Codex prompt omits it because it is not inspectable. The result names a pending create or the prompt settlement. A completed turn is not an assignment verdict or peer reply; cancellation never silently replays a submission.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreatePromptOutcome>())]
     async fn conversation_create_and_prompt(
         &self,
-        Parameters(request): Parameters<ConversationCreatePromptToolRequest>,
+        Parameters(mut request): Parameters<ConversationCreatePromptToolRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
+        request.input.create.default_approver();
         let operation_id = request.input.create.operation_id.clone();
         let timeout =
             Duration::from_secs(u64::from(request.timeout_seconds.map_or(300, u32::from)));

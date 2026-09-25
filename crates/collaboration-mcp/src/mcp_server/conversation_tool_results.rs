@@ -59,6 +59,15 @@ pub(super) fn conversation_tool_result<TValue: Serialize>(
             "message":format!("{field} is unsupported by {}", String::from(endpoint.endpoint_id)),
             "fix":fix
         })),
+        Err(ConversationClientError::UnavailableEndpoint {
+            endpoint,
+            reason,
+            fix,
+        }) => CallToolResult::structured_error(serde_json::json!({
+            "kind":"unavailable","stage":"discovery","effect":"none",
+            "operationId":operation_id,"endpoint":endpoint,"reason":reason,"fix":fix,
+            "message":format!("{} is unavailable: {reason}", String::from(endpoint.endpoint_id))
+        })),
         Err(ConversationClientError::OperationFailure(failure)) => serde_json::to_value(failure)
             .map(CallToolResult::structured_error)
             .unwrap_or_else(|_| validation_failure("conversation failure encoding failed")),

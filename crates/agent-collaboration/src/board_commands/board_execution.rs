@@ -481,7 +481,7 @@ fn refusal_command(
         }
         (BoardNextAction::JoinThread, BoardErrorDetails::ParticipantRefusal { refusal }) => {
             format!(
-                "agent-collaboration board thread join --root-message-id {} --actor {} --role <role> (--watch | --no-watch) --json",
+                "agent-collaboration board thread join --root-message-id {} --actor {} --role participant --no-watch --json",
                 refusal.root_message_id.as_str(),
                 actor(&refusal.actor)
             )
@@ -752,5 +752,23 @@ mod tests {
             "agent-collaboration board thread create --topic-id 018f6f67-64d2-7a21-bf9a-8f193f987091 --actor '{\"kind\":\"human\",\"humanId\":\"owner\"}' --role <role> (--watch | --no-watch) --text-file '/tmp/root message.txt' --json"
         );
         assert_eq!(output["error"]["details"]["topicId"], topic_id.as_str());
+    }
+
+    #[test]
+    fn participant_refusal_names_an_executable_join_command_with_the_required_role() {
+        let root_message_id =
+            MessageId::try_from("019f0000-0000-7000-8000-000000000104".to_owned())
+                .expect("root message ID");
+        let actor = Identity::Human {
+            human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+        };
+        let refusal = BoardError::participant_required(root_message_id, actor);
+
+        let command = refusal_command(&refusal, None);
+
+        assert_eq!(
+            command,
+            "agent-collaboration board thread join --root-message-id 019f0000-0000-7000-8000-000000000104 --actor '{\"kind\":\"human\",\"humanId\":\"owner\"}' --role participant --no-watch --json"
+        );
     }
 }

@@ -272,7 +272,7 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
             "mode":"auto","generationGuard":null,"correlation":null}),
     )
     .await?;
-    if sent["result"]["outcome"]["kind"] != "startedOrSteered"
+    if sent["result"]["outcome"]["kind"] != "started"
         || sent["result"]["client"]["kind"] != "codexAppServer"
         || holder.contains("detached-thread")
     {

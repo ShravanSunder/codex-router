@@ -885,7 +885,7 @@ async fn conversation_create_without_identity_or_from_reports_unavailable() {
     assert_eq!(record["kind"], "conversationError");
     assert_eq!(
         record["error"]["message"],
-        "Control protocol violation: current session identity unavailable"
+        "Control protocol violation: current session identity unavailable; run agent-collaboration whoami --json or pass --from SessionRef JSON"
     );
 }
 

@@ -32,6 +32,39 @@ fn unavailable_provider_error_keeps_catalog_endpoint_reason_and_fix() {
 }
 
 #[test]
+fn unavailable_conversation_selection_reports_catalog_reason_and_fix() {
+    let operation_id = OperationId::generate();
+    let endpoint = serde_json::from_value(serde_json::json!({
+        "serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"cursor-local"
+    }))
+    .expect("endpoint");
+    let result = super::conversation_tool_result::<collaboration_client::ConversationOperationResult>(
+        Err(
+            collaboration_client::ConversationClientError::UnavailableEndpoint {
+                endpoint,
+                reason: "disabled in providers.json".to_owned(),
+                fix:
+                    "enable this provider in providers.json at the router root and restart the Host"
+                        .to_owned(),
+            },
+        ),
+        Some(operation_id.clone()),
+    );
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured failure");
+    assert_eq!(structured["kind"], "unavailable");
+    assert_eq!(structured["stage"], "discovery");
+    assert_eq!(structured["effect"], "none");
+    assert_eq!(structured["operationId"], serde_json::json!(operation_id));
+    assert_eq!(structured["endpoint"]["endpointId"], "cursor-local");
+    assert_eq!(structured["reason"], "disabled in providers.json");
+    assert_eq!(
+        structured["fix"],
+        "enable this provider in providers.json at the router root and restart the Host"
+    );
+}
+
+#[test]
 fn create_and_prompt_failure_retains_created_target_and_unknown_effect() {
     let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
         "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},

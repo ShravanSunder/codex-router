@@ -210,6 +210,104 @@ fn conversation_catalog_defers_operation_id_requirement_until_route_selection() 
 }
 
 #[test]
+fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let tools = server.resolved_tools();
+    let schema_for = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("missing tool {name}"))
+            .input_schema
+            .as_ref()
+            .clone()
+            .into()
+    };
+    fn required_for(schema: &Value) -> &[Value] {
+        schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("schema has no required list: {schema}"))
+    }
+
+    let create_schema = schema_for("conversation_create");
+    assert!(!required_for(&create_schema).contains(&serde_json::json!("approver")));
+    assert!(
+        create_schema["allOf"].is_array(),
+        "Codex create requirements must be conditional"
+    );
+    let create_and_prompt_schema = schema_for("conversation_create_and_prompt");
+    assert!(
+        create_and_prompt_schema["allOf"].is_array(),
+        "Codex create-and-prompt requirements must be conditional"
+    );
+    let service_id = "00000000-0000-4000-8000-000000000001";
+    let caller = serde_json::json!({
+        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"schema-caller"
+    });
+    let provider_create = serde_json::json!({
+        "operationId":"019f0000-0000-7000-8000-000000000201",
+        "endpoint":{"serviceId":service_id,"endpointId":"cursor-local"},
+        "workingDirectory":"/tmp/project","access":"workspace-write","createdBy":caller
+    });
+    let create_validator = jsonschema::validator_for(&create_schema).expect("create schema");
+    assert!(create_validator.is_valid(&provider_create));
+    let mut empty_codex_create = provider_create;
+    empty_codex_create["endpoint"]["endpointId"] = serde_json::json!("codex-local");
+    assert!(!create_validator.is_valid(&empty_codex_create));
+    empty_codex_create["model"] = serde_json::json!("gpt-5.6-sol");
+    empty_codex_create["effort"] = serde_json::json!("medium");
+    assert!(create_validator.is_valid(&empty_codex_create));
+
+    let schedule_schema = schema_for("schedule_create");
+    let schedule_definition = &schedule_schema["$defs"]["ScheduleDefinition"];
+    assert!(
+        schedule_definition["required"]
+            .as_array()
+            .is_some_and(|fields| fields.contains(&serde_json::json!("effort"))),
+        "{schedule_schema}"
+    );
+    assert!(schedule_definition["allOf"].is_array());
+    let mut fresh_schedule = serde_json::json!({
+        "operationId":"019f0000-0000-7000-8000-000000000202",
+        "definition":{
+            "instructionId":"019f0000-0000-7000-8000-000000000203",
+            "timing":{"kind":"after","seconds":60},"enabled":false,
+            "destination":{"kind":"freshEachRun","endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"cwd":"/tmp/project"},
+            "effort":"medium"
+        }
+    });
+    let schedule_validator = jsonschema::validator_for(&schedule_schema).expect("schedule schema");
+    assert!(!schedule_validator.is_valid(&fresh_schedule));
+    fresh_schedule["definition"]["model"] = serde_json::json!("gpt-5.6-sol");
+    assert!(schedule_validator.is_valid(&fresh_schedule));
+
+    let run_schema = schema_for("run_list");
+    assert!(!required_for(&run_schema).contains(&serde_json::json!("cursor")));
+
+    let listen = schema_for("board_thread_listen");
+    assert!(listen["required"].is_array());
+    let descriptions = tools
+        .iter()
+        .map(|tool| {
+            (
+                tool.name.as_ref(),
+                tool.description.as_deref().unwrap_or_default(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let listen_description = descriptions
+        .get("board_thread_listen")
+        .expect("listen description");
+    assert!(listen_description.contains("--lifetime short"));
+    assert!(listen_description.contains("board_thread_join"));
+    let join_description = descriptions
+        .get("board_thread_join")
+        .expect("join description");
+    assert!(join_description.contains("--role participant"));
+}
+
+#[test]
 fn sdk_only_operations_are_advertised_by_both_cli_and_mcp_catalogs() {
     let help = agent_collaboration::command_help();
     for (tool, cli_command) in [

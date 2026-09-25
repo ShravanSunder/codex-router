@@ -36,6 +36,9 @@ struct ConversationArguments {
 #[derive(Subcommand)]
 enum ConversationCommand {
     /// Create a conversation and return its stable SessionRef without submitting a prompt.
+    #[command(
+        long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. Codex ACP requires both --model and --effort; provider endpoints omit them. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
+    )]
     Create(CreateArguments),
     /// Run an ACP prompt and wait for settlement. For an empty conversation returned by
     /// `conversation create`, submit its first input with `message send`; alternatively use
@@ -55,8 +58,10 @@ enum ConversationCommand {
 struct CreateArguments {
     #[arg(long)]
     endpoint: String,
+    /// Required with --endpoint codex-local; provider endpoints must omit it.
     #[arg(long)]
     model: Option<String>,
+    /// Required with --endpoint codex-local; provider endpoints must omit it.
     #[arg(long)]
     effort: Option<String>,
     #[arg(long)]
@@ -67,7 +72,7 @@ struct CreateArguments {
     operation_id: Option<String>,
     #[arg(long)]
     access: ConversationAccess,
-    /// Exact SessionRef JSON for this caller. Overrides CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID.
+    /// Exact SessionRef JSON for this caller. Defaults to the unique active Codex, Claude Code, or Cursor harness.
     #[arg(long)]
     from: Option<String>,
     /// Exact SessionRef JSON for the client approval authority. Defaults to this caller.
@@ -108,7 +113,7 @@ struct PromptArguments {
     prompt_operation_id: Option<String>,
     #[arg(long)]
     access: Option<ConversationAccess>,
-    /// Exact SessionRef JSON for this caller. Overrides CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID.
+    /// Exact SessionRef JSON for this caller. Defaults to the unique active Codex, Claude Code, or Cursor harness.
     #[arg(long)]
     from: Option<String>,
     /// Exact SessionRef JSON for the client approval authority. Defaults to this caller.
@@ -278,7 +283,7 @@ fn run_prompt(args: PromptArguments) -> i32 {
                 }
             };
             let creator = if args.new_session || args.fork.is_some() {
-                Some(current_session_ref(&client.endpoint().service_id, args.from.as_deref()).map_err(|_| ClientError::Protocol("current session identity unavailable"))?)
+                Some(current_session_ref(&client.endpoint().service_id, args.from.as_deref()).map_err(|_| ClientError::Protocol("current session identity unavailable; run agent-collaboration whoami --json or pass --from SessionRef JSON"))?)
             } else { None };
             let approver = if let Some(value) = args.approver.as_deref() {
                 Some(serde_json::from_str::<collaboration_client::protocol::SessionRef>(value).map_err(|_| ClientError::Protocol("invalid --approver SessionRef"))?)
@@ -318,7 +323,7 @@ fn run_prompt(args: PromptArguments) -> i32 {
                     .map_err(|_| ClientError::Protocol("invalid root message ID"))?,
             };
             let sender = current_session_ref(&client.endpoint().service_id, args.from.as_deref())
-                .map_err(|_| ClientError::Protocol("current sender identity unavailable"))?;
+                .map_err(|_| ClientError::Protocol("current sender identity unavailable; run agent-collaboration whoami --json or pass --from SessionRef JSON"))?;
             let message = PublicPromptContent::Agent {
                 sender,
                 text: text

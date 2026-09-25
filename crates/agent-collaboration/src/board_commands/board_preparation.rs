@@ -942,7 +942,7 @@ fn prepare_thread_listen(
                 return Err("--for applies only with --lifetime short|long".into());
             }
             if delivery == ThreadListenDelivery::Session && arguments.max_wait.is_some() {
-                return Err("--deliver session uses the fixed 25 minute Once lifetime and forbids --max-wait".into());
+                return Err("--deliver session with --once uses the fixed 25 minute lifetime and forbids --max-wait".into());
             }
             let seconds = arguments
                 .max_wait
@@ -965,7 +965,7 @@ fn prepare_thread_listen(
                 ThreadListenLifetimeKind::Long => ThreadListenLifetime::Long,
             };
             if delivery == ThreadListenDelivery::Session && arguments.shorten_for.is_some() {
-                return Err("--deliver session uses its fixed lifetime and forbids --for".into());
+                return Err("--deliver session uses its fixed lifetime and forbids --for; choose --lifetime short (25 minutes) or --lifetime long (75 minutes)".into());
             }
             let seconds = arguments
                 .shorten_for
@@ -980,13 +980,11 @@ fn prepare_thread_listen(
                 lifetime_seconds: seconds,
             }
         }
-        _ => return Err("Choose exactly one Listen mode: --once or --lifetime short|long".into()),
+        _ => return Err("Choose exactly one Listen mode: --once (25 minutes) or --lifetime short (25 minutes) or --lifetime long (75 minutes)".into()),
     };
-    let actor = arguments
-        .actor
-        .as_deref()
-        .ok_or_else(|| "Thread Listen requires --actor".to_owned())
-        .and_then(parse_actor_input)?;
+    let actor = arguments.actor.as_deref().ok_or_else(|| {
+        "Thread Listen requires --actor; use --actor self or pass an explicit Reader Identity JSON".to_owned()
+    }).and_then(parse_actor_input)?;
     if delivery == ThreadListenDelivery::Session
         && let ActorInput::Explicit(identity) = &actor
         && !is_session_identity(identity)

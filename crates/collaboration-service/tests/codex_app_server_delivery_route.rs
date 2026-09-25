@@ -514,7 +514,7 @@ async fn held_empty_codex_thread_rejects_steer_then_starts_first_message_on_its_
             correlation: None,
         })
         .await?;
-    if !matches!(started.outcome, DeliveryOutcome::StartedOrSteered)
+    if !matches!(started.outcome, DeliveryOutcome::Started)
         || !matches!(
             started.client,
             Some(DeliveryClientReceipt::CodexAppServer(_))

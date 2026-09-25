@@ -117,7 +117,7 @@ async fn register_thread_listen(
         if !valid_lifetime {
             return Err(BoardError::invalid_field(
                 "mode",
-                "session delivery requires the fixed short or long lifetime",
+                "session delivery requires --lifetime short (25 minutes), --lifetime long (75 minutes), or --once (25 minutes); MCP mode must be once.maxWaitSeconds=1500 or repeating.lifetimeSeconds=1500|4500",
             ));
         }
     }
