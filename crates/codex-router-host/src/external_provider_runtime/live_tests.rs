@@ -2,7 +2,7 @@ use super::*;
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecision, EndpointDescription, EndpointId, EndpointRef,
-    GenerationNumber, SessionId, UuidIdentity,
+    GenerationNumber, OperationId, SessionId, UuidIdentity,
 };
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, NativeGenerationGate, ServiceApprovalBroker,
@@ -239,6 +239,20 @@ async fn approval_broker_fixture(
             if request.get("method").and_then(Value::as_str) != Some(expected_method) {
                 return Err(format!("unexpected native method: {expected_method}").into());
             }
+            if expected_method == "turn/start" {
+                let delivered_text = request
+                    .pointer("/params/input/0/text")
+                    .and_then(Value::as_str)
+                    .ok_or("approval notice text missing")?;
+                if !delivered_text.contains("session/request_permission")
+                    || !delivered_text.contains("externalProviderPermission")
+                {
+                    return Err(
+                        "approval notice did not reach the approver with its request details"
+                            .into(),
+                    );
+                }
+            }
             if expected_method == "initialized" {
                 continue;
             }
@@ -258,6 +272,104 @@ async fn approval_broker_fixture(
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     });
     Ok((broker, approver_task))
+}
+
+fn fixture_acp_permission_request_agent() -> ExternalProviderLaunch {
+    let fixture = r#"
+import json,sys
+def send(value):
+    print(json.dumps(value)); sys.stdout.flush()
+initialize=json.loads(sys.stdin.readline())
+send({'jsonrpc':'2.0','id':initialize['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'permission-fixture','version':'1'}}})
+create=json.loads(sys.stdin.readline())
+send({'jsonrpc':'2.0','id':create['id'],'result':{'sessionId':'fixture-cursor-session'}})
+prompt=json.loads(sys.stdin.readline())
+assert prompt['method']=='session/prompt'
+send({'jsonrpc':'2.0','id':91,'method':'session/request_permission','params':{'sessionId':'fixture-cursor-session','toolCall':{'toolCallId':'echo-command','title':'Run echo cursor-ok','kind':'execute'},'options':[{'optionId':'allow','name':'Allow once','kind':'allow_once'}]}})
+permission=json.loads(sys.stdin.readline())
+assert permission['id']==91
+assert permission['result']['outcome']['outcome']=='selected'
+assert permission['result']['outcome']['optionId']=='allow'
+send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-cursor-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'cursor-ok'}}}})
+send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), fixture.to_owned()],
+        environment: Vec::new(),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fixture_acp_permission_notice_reaches_approver_and_allow_executes_command() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
+    let requester = session_ref(&service_id, "cursor-local", "fixture-cursor")?;
+    let approver = session_ref(&service_id, "codex-local", "approver")?;
+    let generation = CodexGeneration {
+        service_epoch: service_id.clone(),
+        generation: GenerationNumber::try_from(1)?,
+    };
+    let runtime =
+        ExternalProviderRuntime::initialize(fixture_acp_permission_request_agent()).await?;
+    let (broker, mut approver_task) =
+        approval_broker_fixture(&root, &service_id, &approver).await?;
+    runtime.install_approval_broker(Arc::clone(&broker)).await;
+
+    let provider_session_id = runtime.create_session(root.path().to_owned()).await?;
+    let target = session_ref(&service_id, "cursor-local", &provider_session_id)?;
+    let prompt = runtime.prompt_with_approval_context(
+        provider_session_id,
+        "Run `echo cursor-ok` and report its output.".to_owned(),
+        ExternalProviderApprovalContext {
+            requester,
+            approver: approver.clone(),
+            target,
+            operation_id: OperationId::generate(),
+            binding_generation: generation,
+            binding_retirement: CancellationToken::new(),
+        },
+    );
+    tokio::pin!(prompt);
+    tokio::select! {
+        biased;
+        result = &mut prompt => return Err(format!("fixture prompt settled before approval notice: {result:?}").into()),
+        result = &mut approver_task => result.map_err(|error| format!("approver fixture task: {error}"))??,
+    }
+    let pending = broker
+        .list(true)
+        .await
+        .approvals
+        .into_iter()
+        .next()
+        .ok_or("delivered approval missing from approval list")?;
+    if pending.approver != approver {
+        return Err("approval notice delivery did not reach the configured approver".into());
+    }
+    broker
+        .decide(ApprovalDecideParams {
+            request_id: pending.request_id.clone(),
+            decision: ApprovalDecision::Allow,
+            actor: approver,
+        })
+        .await
+        .map_err(|error| format!("approval decide: {error}"))?;
+    let outcome = tokio::time::timeout(Duration::from_secs(5), prompt)
+        .await
+        .map_err(|_| "fixture ACP permission prompt timed out")??;
+
+    if outcome.output != "cursor-ok" {
+        return Err(format!("fixture command output differed: {:?}", outcome.output).into());
+    }
+    if runtime.permission_observation().last_outcome
+        != Some(ExternalProviderPermissionOutcome::Selected)
+    {
+        return Err("fixture ACP permission was not selected".into());
+    }
+    runtime.shutdown().await;
+    Ok(())
 }
 
 #[tokio::test]

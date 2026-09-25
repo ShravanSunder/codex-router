@@ -711,6 +711,7 @@ fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
 fn map_native_failure(error: NativeConnectionError) -> SessionSetupError {
     match error {
         NativeConnectionError::Unavailable => SessionSetupError::Unavailable,
+        NativeConnectionError::UnavailableWithCause(_) => SessionSetupError::Unavailable,
         NativeConnectionError::InvalidInput => SessionSetupError::InvalidParameters,
         NativeConnectionError::Rejected { .. } => SessionSetupError::NativeRejected,
         _ => SessionSetupError::OutcomeUnknown,

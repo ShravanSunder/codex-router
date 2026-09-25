@@ -19,6 +19,12 @@ pub enum NativeOperation {
     SetThreadName,
 }
 impl NativeOperation {
+    /// JSON-RPC method name implemented by this app-server operation.
+    #[must_use]
+    pub fn method_name(self) -> &'static str {
+        self.contract().0
+    }
+
     pub(crate) fn contract(self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::QueueList => (
@@ -34,8 +40,8 @@ impl NativeOperation {
             Self::ReadThread => ("thread/read", "ThreadReadParams", "ThreadReadResponse"),
             Self::SetThreadName => (
                 "thread/name/set",
-                "ThreadNameSetParams",
-                "ThreadNameSetResponse",
+                "ThreadSetNameParams",
+                "ThreadSetNameResponse",
             ),
             Self::ResumeThread => (
                 "thread/resume",

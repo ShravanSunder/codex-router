@@ -200,7 +200,9 @@ impl MessageSession<'_> {
                         }
                         return Err(self.effects.native_rejection(stage, code, native.as_ref()));
                     }
-                    NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable => {
+                    NativeConnectionError::InvalidInput
+                    | NativeConnectionError::Unavailable
+                    | NativeConnectionError::UnavailableWithCause(_) => {
                         if stage == "resume" {
                             self.effects.resume = "notRequested";
                         } else if mutation {
