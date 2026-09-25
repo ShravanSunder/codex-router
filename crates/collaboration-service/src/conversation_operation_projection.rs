@@ -13,6 +13,7 @@ pub fn conversation_operation_snapshot(
         stage: record.stage,
         effect: record.effect,
         reconciliation: record.reconciliation_state,
+        terminal_stop_reason: record.terminal_stop_reason,
         queue_state: None,
         admitted_at: timestamp_from_millis(record.admitted_at_ms)?,
         terminal_at: record

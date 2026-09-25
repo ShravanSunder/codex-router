@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn provider_initialize_errors_expose_only_safe_metadata() {
+    let account_sentinel = "synthetic-account-sentinel@example.invalid";
+    let token_sentinel = "synthetic-token-sentinel-7f4e";
+    let error = agent_client_protocol::Error::new(-32001, format!("denied {token_sentinel}"))
+        .data(serde_json::json!({"account": account_sentinel, "token": token_sentinel}));
+
+    let diagnostic = sanitized_initialization_error(&error);
+
+    assert!(diagnostic.contains("initialize"));
+    assert!(diagnostic.contains("stage=initialize"));
+    assert!(diagnostic.contains("-32001"));
+    assert!(diagnostic.contains("error_data_bytes="));
+    assert!(!diagnostic.contains(account_sentinel));
+    assert!(!diagnostic.contains(token_sentinel));
+
+    let operation_error = sanitized_acp_error(&error, "session/update", "load replay");
+    assert!(operation_error.contains("method=session/update"));
+    assert!(operation_error.contains("stage=load replay"));
+    assert!(operation_error.contains("-32001"));
+    assert!(!operation_error.contains(account_sentinel));
+    assert!(!operation_error.contains(token_sentinel));
+}
+
 #[cfg(unix)]
 fn python_fixture(
     response_version: u16,
@@ -405,7 +429,9 @@ prompt=json.loads(sys.stdin.readline())
 chunk='x'*(600*1024)
 update={'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':chunk}}}}
 print(json.dumps(update)); print(json.dumps(update)); sys.stdout.flush()
-print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})); sys.stdout.flush()
+cancel=json.loads(sys.stdin.readline())
+assert cancel['method']=='session/cancel'
+print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})); sys.stdout.flush()
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
@@ -1157,7 +1183,10 @@ async fn aggregate_prompt_output_is_bounded_across_valid_frames() {
         .prompt("fixture-session".to_owned(), "overflow".to_owned())
         .await
         .expect_err("aggregate output must be bounded");
-    assert!(error.to_string().contains("output byte limit"), "{error}");
+    assert!(matches!(
+        error,
+        ExternalProviderRuntimeError::PromptOutputLimitExceeded
+    ));
 
     runtime.shutdown().await;
 }

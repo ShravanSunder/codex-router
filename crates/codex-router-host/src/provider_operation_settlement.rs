@@ -2,8 +2,8 @@
 use collaboration_protocol::{
     ConversationOperationFailure, ConversationOperationSettlement, EffectiveProviderSettings,
     MessageText, OperationId, ProviderAuthenticationState, ProviderOperationEffect,
-    ProviderReconciliationState, ProviderRequestedPolicy, ProviderSettingsMappingStatus,
-    ProviderWorkingDirectory, SessionRef,
+    ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
+    ProviderSettingsMappingStatus, ProviderWorkingDirectory, SessionRef,
 };
 use collaboration_service::{
     ProviderOperationStore, ProviderOperationStoreError, ProviderSessionRecord,
@@ -23,6 +23,7 @@ pub(crate) async fn persist_provider_success(
     operation_id: &OperationId,
     target: Option<&SessionRef>,
     session_record: Option<&ProviderSessionRecord>,
+    terminal_stop_reason: Option<ProviderPromptStopReason>,
 ) -> Result<(), ProviderOperationStoreError> {
     if let Some(session_record) = session_record {
         return store
@@ -39,6 +40,7 @@ pub(crate) async fn persist_provider_success(
             operation_id,
             ProviderOperationEffect::Applied,
             ProviderReconciliationState::Confirmed,
+            terminal_stop_reason,
             chrono::Utc::now().timestamp_millis(),
         )
         .await?;

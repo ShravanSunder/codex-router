@@ -145,7 +145,7 @@ async fn run_provider_message_fifo(
         let retirement = runtime.retirement();
         let mut retry_delay = MIN_RETRY_DELAY;
         let mut loaded = false;
-        let mut operation_submitted = false;
+        let mut operation_admitted = false;
         loop {
             if shutdown.is_cancelled() {
                 drop_current_and_remaining(
@@ -236,17 +236,17 @@ async fn run_provider_message_fifo(
                 submitted = supervisor.submit_delivery_prompt(request.clone()) => submitted,
             };
             match submitted {
-                Ok(ProviderPromptDispatch::Submitted) => {
-                    supervisor.queued_operation_registry().clear(&operation_id);
-                    operation_submitted = true;
+                Ok(
+                    ProviderPromptDispatch::Submitted
+                    | ProviderPromptDispatch::NotSubmitted
+                    | ProviderPromptDispatch::Existing
+                    | ProviderPromptDispatch::Uncertain,
+                ) => {
+                    // This ID has been admitted. From here on, observe this exact
+                    // operation; never submit its logical message under the same ID again.
+                    operation_admitted = true;
                     break;
                 }
-                Ok(ProviderPromptDispatch::Existing | ProviderPromptDispatch::Uncertain) => {
-                    supervisor.queued_operation_registry().clear(&operation_id);
-                    operation_submitted = true;
-                    break;
-                }
-                Ok(ProviderPromptDispatch::NotSubmitted) => {}
                 Err(failure) if failure.kind == ConversationOperationFailureKind::Busy => {}
                 Err(failure) => {
                     supervisor
@@ -266,7 +266,7 @@ async fn run_provider_message_fifo(
             }
             retry_delay = next_retry_delay(retry_delay);
         }
-        if !operation_submitted {
+        if !operation_admitted {
             continue;
         }
         let Ok(wait_seconds) = PositiveSeconds::try_from(SETTLEMENT_WAIT_SECONDS) else {
@@ -291,10 +291,18 @@ async fn run_provider_message_fifo(
                     if result.operation.stage == ProviderOperationStage::Terminal
                         && !matches!(result.output, ConversationOperationWaitOutput::Pending) =>
                 {
+                    supervisor.queued_operation_registry().clear(&operation_id);
                     break;
                 }
                 Ok(_) => {}
-                Err(_) => {
+                Err(_failure) => {
+                    let terminal_record = store.lock().await.inspect(&operation_id).await;
+                    if let Ok(Some(record)) = terminal_record
+                        && record.stage == ProviderOperationStage::Terminal
+                    {
+                        supervisor.queued_operation_registry().clear(&operation_id);
+                        break;
+                    }
                     if !wait_before_retry(&shutdown, &retirement, MIN_RETRY_DELAY).await {
                         mark_remaining_not_submitted(
                             &supervisor,

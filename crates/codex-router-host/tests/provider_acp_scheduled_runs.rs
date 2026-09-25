@@ -127,6 +127,13 @@ assert cancelled['method']=='session/prompt'
 cancel=json.loads(sys.stdin.readline())
 assert cancel['method']=='session/cancel'
 print(json.dumps({{'jsonrpc':'2.0','id':cancelled['id'],'result':{{'stopReason':'cancelled'}}}})); sys.stdout.flush()
+refused=json.loads(sys.stdin.readline())
+assert refused['method']=='session/prompt'
+print(json.dumps({{'jsonrpc':'2.0','id':refused['id'],'result':{{'stopReason':'refusal'}}}})); sys.stdout.flush()
+for _ in range(256):
+ prompt=json.loads(sys.stdin.readline())
+ assert prompt['method']=='session/prompt'
+ print(json.dumps({{'jsonrpc':'2.0','id':prompt['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 pending=json.loads(sys.stdin.readline())
 assert pending['method']=='session/prompt'
 cancel=json.loads(sys.stdin.readline())
@@ -365,7 +372,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
         .prompt(ConversationPromptRequest {
             operation_id: active_id.clone(),
             target: target.clone(),
-            generation: Some(generation),
+            generation: Some(generation.clone()),
             requested_by: target.clone(),
             approver: target.clone(),
             prompt: MessageContent::HumanUser {
@@ -521,7 +528,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
             .last()
             .expect("stop run evidence")
             .clone(),
-        inputs: next_inputs,
+        inputs: next_inputs.clone(),
     };
     assert!(matches!(
         router
@@ -532,10 +539,102 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     ));
     assert!(matches!(
         router
-            .observe_settlement(stop_context)
+            .observe_settlement(stop_context.clone())
             .await
             .expect("cancelled settlement"),
         RunSettlement::Interrupted
+    ));
+    assert!(matches!(
+        restarted_router
+            .observe_settlement(stop_context)
+            .await
+            .expect("cancelled settlement after Host restart"),
+        RunSettlement::Interrupted
+    ));
+
+    let refused_sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
+    let prepared_refused = router
+        .prepare_existing_target(&target, &refused_sink)
+        .await
+        .expect("refused target prepared");
+    let refused_run_id = RunId::generate();
+    assert!(matches!(
+        router
+            .submit_run(
+                ScheduledRunSubmission {
+                    run_id: refused_run_id.clone(),
+                    target: target.clone(),
+                    message: MessageText::try_from("refuse scheduled input".to_owned())
+                        .expect("refusal input"),
+                    precondition: DeliveryPrecondition::Unpinned,
+                    inputs: next_inputs.clone(),
+                    recorded: prepared_refused.evidence,
+                },
+                &refused_sink,
+            )
+            .await
+            .expect("refused run started"),
+        RunSubmission::Started(_)
+    ));
+    let refused_context = RunObservationContext {
+        run_id: refused_run_id,
+        phase: RunPhase::Executing,
+        recorded: refused_sink
+            .0
+            .lock()
+            .await
+            .last()
+            .expect("refused run evidence")
+            .clone(),
+        inputs: next_inputs.clone(),
+    };
+    assert!(matches!(
+        router
+            .observe_settlement(refused_context.clone())
+            .await
+            .expect("refusal before live-result eviction"),
+        RunSettlement::Failed { .. }
+    ));
+
+    for _ in 0..256 {
+        let operation_id = OperationId::generate();
+        let prompt = collaboration_protocol::ConversationPromptRequest {
+            operation_id: operation_id.clone(),
+            target: target.clone(),
+            generation: Some(generation.clone()),
+            requested_by: target.clone(),
+            approver: target.clone(),
+            prompt: MessageContent::Router {
+                text: MessageText::try_from("evict completed live result".to_owned())
+                    .expect("eviction prompt"),
+            },
+        };
+        ProviderConversationBackend::prompt(supervisor.as_ref(), prompt)
+            .await
+            .expect("eviction prompt admitted");
+        ProviderConversationBackend::wait(
+            supervisor.as_ref(),
+            ConversationOperationWaitRequest {
+                operation_id,
+                timeout_seconds: PositiveSeconds::try_from(2).expect("wait seconds"),
+            },
+        )
+        .await
+        .expect("eviction prompt settled");
+    }
+    assert!(matches!(
+        router
+            .observe_settlement(refused_context.clone())
+            .await
+            .expect("refusal after live-result eviction"),
+        RunSettlement::Failed { .. }
+    ));
+    assert!(matches!(
+        restarted_router
+            .observe_settlement(refused_context)
+            .await
+            .expect("refusal after Host restart"),
+        RunSettlement::Failed { .. }
     ));
 
     let pending_sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));

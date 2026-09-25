@@ -88,9 +88,12 @@ impl ProviderAcpScheduledRuns {
                         if result.operation.stage == ProviderOperationStage::Terminal
                             && result.operation.effect == ProviderOperationEffect::Applied =>
                     {
-                        Ok(RunSettlement::Completed {
-                            summary_source: None,
-                        })
+                        Ok(result.operation.terminal_stop_reason.map_or_else(
+                            || RunSettlement::Failed {
+                                reason: "Provider terminal outcome is unavailable".into(),
+                            },
+                            settlement_from_stop_reason,
+                        ))
                     }
                     ConversationOperationWaitOutput::OutputUnavailable { .. }
                         if result.operation.stage == ProviderOperationStage::Terminal
@@ -162,5 +165,19 @@ impl ProviderAcpScheduledRuns {
             }
             _ => Ok(RunReconciliation::StillUnknown),
         }
+    }
+}
+
+fn settlement_from_stop_reason(reason: ProviderPromptStopReason) -> RunSettlement {
+    match reason {
+        ProviderPromptStopReason::Cancelled => RunSettlement::Interrupted,
+        ProviderPromptStopReason::Refusal => RunSettlement::Failed {
+            reason: "Provider refused the scheduled prompt".into(),
+        },
+        ProviderPromptStopReason::EndTurn
+        | ProviderPromptStopReason::MaxTokens
+        | ProviderPromptStopReason::MaxTurnRequests => RunSettlement::Completed {
+            summary_source: None,
+        },
     }
 }

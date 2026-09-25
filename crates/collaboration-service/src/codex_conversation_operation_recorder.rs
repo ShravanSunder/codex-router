@@ -172,6 +172,7 @@ impl ConversationOperationRecorder for CodexConversationOperationRecorder {
                     operation_id,
                     ProviderOperationEffect::Applied,
                     ProviderReconciliationState::Confirmed,
+                    None,
                     chrono::Utc::now().timestamp_millis(),
                 )
                 .await
@@ -219,6 +220,7 @@ impl ConversationOperationRecorder for CodexConversationOperationRecorder {
                     operation_id,
                     effect,
                     reconciliation,
+                    None,
                     chrono::Utc::now().timestamp_millis(),
                 )
                 .await
