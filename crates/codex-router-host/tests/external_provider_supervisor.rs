@@ -369,8 +369,22 @@ async fn approval_broker_fixture(
         let mut requests = Vec::new();
         for expected_method in ["initialize", "initialized", "thread/read", "turn/start"] {
             let frame = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
-                .await?
-                .ok_or("native approver connection closed")??;
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "native approver timed out waiting for {expected_method}: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "native approver connection closed while waiting for {expected_method}"
+                    ))
+                })?
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "native approver websocket failed while waiting for {expected_method}: {error}"
+                    ))
+                })?;
             let request: Value = serde_json::from_str(frame.to_text()?)?;
             ensure_eq!(
                 request.get("method").and_then(Value::as_str),
@@ -786,6 +800,10 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
         String::from(prompt_operation_id.clone())
     );
     ensure_eq!(pending.operation["method"], "session/request_permission");
+    let native_requests = native_backend
+        .await?
+        .map_err(|error| format!("native approver fixture failed: {error}"))?;
+    ensure_eq!(native_requests.len(), 4);
     let decision = broker
         .decide(ApprovalDecideParams {
             request_id: pending.request_id,
@@ -807,10 +825,6 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
         }
     ));
     ensure_eq!(broker.list(false).await.approvals.len(), 1);
-    let native_requests = native_backend
-        .await?
-        .map_err(|error| format!("native approver fixture failed: {error}"))?;
-    ensure_eq!(native_requests.len(), 4);
     Ok(())
 }
 
@@ -875,13 +889,14 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await
+    .map_err(|_| "approval did not enter pending state")?;
     let native_requests = native_backend
         .await?
         .map_err(|error| format!("native approver fixture failed: {error}"))?;
     ensure_eq!(native_requests.len(), 4);
     binding_retirement.cancel();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let retirement_settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             if broker.list(true).await.approvals.is_empty() {
                 break;
@@ -889,7 +904,14 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await;
+    if retirement_settled.is_err() {
+        return Err(format!(
+            "retired approval remained pending: {:?}",
+            broker.list(false).await.approvals
+        )
+        .into());
+    }
     ensure!(matches!(
         broker
             .decide(ApprovalDecideParams {
@@ -912,6 +934,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
         failure.kind,
         ConversationOperationFailureKind::OutcomeUnknown
     );
+    backend.shutdown().await?;
     Ok(())
 }
 

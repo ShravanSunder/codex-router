@@ -1,5 +1,10 @@
 //! Host-owned ACP provider process admission and connection lifetime.
 
+#[cfg(test)]
+mod approval_dispatch_tests;
+mod approval_presentation;
+mod external_approval_dispatch;
+mod external_permission_options;
 mod provider_approval_dispatch;
 
 use crate::provider_session_actor::{
@@ -9,15 +14,14 @@ use crate::provider_session_actor::{
 #[cfg(test)]
 use agent_client_protocol::schema::v1::ToolKind;
 use agent_client_protocol::schema::v1::{
-    LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, PermissionOptionKind,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome,
+    LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, RequestPermissionRequest,
 };
 use agent_client_protocol::schema::{ProtocolVersion, v1::InitializeRequest};
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines,
 };
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
+use external_approval_dispatch::spawn_external_approval_dispatch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -64,6 +68,31 @@ pub struct ExternalProviderAdmission {
 pub struct ExternalProviderPromptOutcome {
     pub output: String,
     pub stop_reason: ProviderPromptStopReason,
+    pub permission_refusal_reason: Option<ExternalProviderApprovalRefusalReason>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalProviderApprovalRefusalReason {
+    MissingPromptContext,
+    ApprovalBrokerUnavailable,
+}
+
+impl ExternalProviderApprovalRefusalReason {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::MissingPromptContext => "missingPromptContext",
+            Self::ApprovalBrokerUnavailable => "approvalBrokerUnavailable",
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalProviderApprovalRefusalWarning {
+    pub endpoint: String,
+    pub provider_session_id: String,
+    pub method: &'static str,
+    pub reason_code: ExternalProviderApprovalRefusalReason,
 }
 
 #[cfg(test)]
@@ -403,6 +432,7 @@ impl ProviderFrameObservation {
 pub struct ExternalProviderRuntime {
     admission: ExternalProviderAdmission,
     shutdown: CancellationToken,
+    retirement: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     shutdown_failed: Arc<std::sync::atomic::AtomicBool>,
     frame_observation: Arc<ProviderFrameObservation>,
@@ -415,6 +445,11 @@ pub struct ExternalProviderRuntime {
         tokio::sync::RwLock<Option<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>>,
     >,
     approval_contexts: Arc<std::sync::Mutex<HashMap<String, ExternalProviderApprovalContext>>>,
+    permission_refusal_reasons:
+        Arc<std::sync::Mutex<HashMap<OperationId, ExternalProviderApprovalRefusalReason>>>,
+    endpoint_id: Arc<tokio::sync::RwLock<Option<String>>>,
+    #[cfg(test)]
+    approval_refusal_warnings: Arc<std::sync::Mutex<Vec<ExternalProviderApprovalRefusalWarning>>>,
     #[cfg(test)]
     test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
 }
@@ -466,12 +501,13 @@ impl ExternalProviderRuntime {
             .spawn_process()
             .map_err(|error| ExternalProviderRuntimeError::Launch(error.to_string()))?;
         let shutdown = CancellationToken::new();
+        let retirement = CancellationToken::new();
         let frame_observation = Arc::new(ProviderFrameObservation::default());
         let task_frame_observation = Arc::clone(&frame_observation);
         let shutdown_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let task_shutdown_failed = Arc::clone(&shutdown_failed);
         let task_shutdown = shutdown.clone();
-        let connection_retirement = shutdown.clone();
+        let connection_retirement = retirement.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(32);
         #[cfg(test)]
@@ -491,6 +527,16 @@ impl ExternalProviderRuntime {
             ExternalProviderApprovalContext,
         >::new()));
         let callback_approval_contexts = Arc::clone(&approval_contexts);
+        let permission_refusal_reasons = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let callback_permission_refusal_reasons = Arc::clone(&permission_refusal_reasons);
+        let endpoint_id = Arc::new(tokio::sync::RwLock::new(None::<String>));
+        let callback_endpoint_id = Arc::clone(&endpoint_id);
+        #[cfg(test)]
+        let approval_refusal_warnings = Arc::new(std::sync::Mutex::new(Vec::<
+            ExternalProviderApprovalRefusalWarning,
+        >::new()));
+        #[cfg(test)]
+        let callback_approval_refusal_warnings = Arc::clone(&approval_refusal_warnings);
         #[cfg(test)]
         let test_tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         #[cfg(test)]
@@ -529,7 +575,7 @@ impl ExternalProviderRuntime {
             });
             let connection = Client.builder().name("codex-router-host")
                 .on_receive_request(
-                    async move |request: RequestPermissionRequest, responder, _connection| {
+                    async move |request: RequestPermissionRequest, responder, connection| {
                         #[cfg(test)]
                         callback_permission_request_count.fetch_add(1, Ordering::Relaxed);
                         let context = callback_approval_contexts.lock().ok().and_then(|contexts| {
@@ -540,60 +586,50 @@ impl ExternalProviderRuntime {
                             .await
                             .as_ref()
                             .and_then(std::sync::Weak::upgrade);
-                        let outcome = match (broker, context) {
-                            (Some(broker), Some(context)) => {
-                                let options = request
-                                    .options
-                                    .into_iter()
-                                    .map(|option| {
-                                        let scope = match option.kind {
-                                            PermissionOptionKind::AllowOnce => collaboration_service::ExternalApprovalOptionScope::AllowOnce,
-                                            PermissionOptionKind::AllowAlways => collaboration_service::ExternalApprovalOptionScope::AllowAlways,
-                                            PermissionOptionKind::RejectOnce => collaboration_service::ExternalApprovalOptionScope::RejectOnce,
-                                            PermissionOptionKind::RejectAlways => collaboration_service::ExternalApprovalOptionScope::RejectAlways,
-                                            _ => return None,
-                                        };
-                                        Some(collaboration_service::ExternalApprovalOption {
-                                            option_id: option.option_id.0.to_string(),
-                                            scope,
-                                        })
-                                    })
-                                    .collect::<Option<Vec<_>>>();
-                                let metadata = collaboration_service::ExternalApprovalOperationMetadata {
-                                    operation_id: context.operation_id,
-                                    target: context.target,
-                                    binding_generation: context.binding_generation.clone(),
+                        if context.is_none() || broker.is_none() {
+                            let reason = if context.is_none() {
+                                ExternalProviderApprovalRefusalReason::MissingPromptContext
+                            } else {
+                                ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable
+                            };
+                            let endpoint = callback_endpoint_id
+                                .read()
+                                .await
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_owned());
+                            let provider_session_id = request.session_id.0.to_string();
+                            tracing::warn!(
+                                endpoint = %endpoint,
+                                provider_session_id = %provider_session_id,
+                                method = "session/request_permission",
+                                reason_code = reason.code(),
+                                "provider permission request refused before approval broker",
+                            );
+                            #[cfg(test)]
+                            if let Ok(mut warnings) = callback_approval_refusal_warnings.lock() {
+                                warnings.push(ExternalProviderApprovalRefusalWarning {
+                                    endpoint,
+                                    provider_session_id,
                                     method: "session/request_permission",
-                                };
-                                if let Some(options) = options {
-                                    match broker.request_external(collaboration_service::ExternalApprovalRequest {
-                                        requester: context.requester,
-                                        approver: context.approver,
-                                        generation: context.binding_generation,
-                                        retirement: context.binding_retirement,
-                                        operation_metadata: metadata,
-                                        transient_presentation: Some(serde_json::json!({
-                                            "title": request.tool_call.fields.title,
-                                            "name": request.tool_call.fields.name,
-                                            "kind": request.tool_call.fields.kind,
-                                        })),
-                                        options,
-                                    }).await {
-                                        Ok(collaboration_service::BrokeredApprovalOutcome::Selected { option_id }) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
-                                        _ => RequestPermissionOutcome::Cancelled,
-                                    }
-                                } else {
-                                    RequestPermissionOutcome::Cancelled
-                                }
+                                    reason_code: reason,
+                                });
                             }
-                            _ => RequestPermissionOutcome::Cancelled,
-                        };
-                        #[cfg(test)]
-                        callback_permission_outcome.store(
-                            if matches!(outcome, RequestPermissionOutcome::Selected(_)) { 2 } else { 1 },
-                            Ordering::Relaxed,
-                        );
-                        responder.respond(RequestPermissionResponse::new(outcome))
+                            if let Some(context) = &context
+                                && let Ok(mut refusals) =
+                                    callback_permission_refusal_reasons.lock()
+                            {
+                                refusals.insert(context.operation_id.clone(), reason);
+                            }
+                        }
+                        spawn_external_approval_dispatch(
+                            request,
+                            responder,
+                            connection,
+                            broker,
+                            context,
+                            #[cfg(test)]
+                            Arc::clone(&callback_permission_outcome),
+                        )
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
@@ -859,6 +895,7 @@ impl ExternalProviderRuntime {
         Ok(Self {
             admission,
             shutdown,
+            retirement,
             task: tokio::sync::Mutex::new(Some(task)),
             shutdown_failed,
             frame_observation,
@@ -869,6 +906,10 @@ impl ExternalProviderRuntime {
             permission_outcome,
             approval_broker,
             approval_contexts,
+            permission_refusal_reasons,
+            endpoint_id,
+            #[cfg(test)]
+            approval_refusal_warnings,
             #[cfg(test)]
             test_tool_calls,
         })
@@ -902,7 +943,7 @@ impl ExternalProviderRuntime {
 
     #[must_use]
     pub fn retirement(&self) -> CancellationToken {
-        self.shutdown.clone()
+        self.retirement.clone()
     }
 
     pub async fn install_approval_broker(
@@ -910,6 +951,18 @@ impl ExternalProviderRuntime {
         broker: Arc<collaboration_service::ServiceApprovalBroker>,
     ) {
         *self.approval_broker.write().await = Some(Arc::downgrade(&broker));
+    }
+
+    pub async fn set_endpoint_id(&self, endpoint_id: String) {
+        *self.endpoint_id.write().await = Some(endpoint_id);
+    }
+
+    #[cfg(test)]
+    pub fn approval_refusal_warnings(&self) -> Vec<ExternalProviderApprovalRefusalWarning> {
+        self.approval_refusal_warnings
+            .lock()
+            .map(|warnings| warnings.clone())
+            .unwrap_or_default()
     }
 
     pub async fn prompt_with_approval_context(
@@ -1106,6 +1159,7 @@ impl ExternalProviderRuntime {
     }
 
     pub async fn shutdown(&self) {
+        self.retirement.cancel();
         self.shutdown.cancel();
         if let Some(task) = self.task.lock().await.take()
             && task.await.is_err()
@@ -1273,6 +1327,7 @@ fn discard_queued_session_updates(
 
 impl Drop for ExternalProviderRuntime {
     fn drop(&mut self) {
+        self.retirement.cancel();
         self.shutdown.cancel();
     }
 }

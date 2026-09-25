@@ -35,8 +35,9 @@ pub use access_contract::{
     RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,
 };
 pub use approval_contract::{
-    ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListParams,
-    ApprovalListResult, ApprovalRequestRecord, ApprovalState,
+    ApprovalArgument, ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision,
+    ApprovalListParams, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionScope,
+    ApprovalPresentation, ApprovalRequestRecord, ApprovalState,
 };
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,

@@ -80,6 +80,7 @@ pub(crate) async fn read_bounded_prompt(
     Ok(ExternalProviderPromptOutcome {
         output,
         stop_reason: provider_prompt_stop_reason(stop_reason)?,
+        permission_refusal_reason: None,
     })
 }
 

@@ -728,6 +728,7 @@ async fn permission_request_is_counted_once_and_cancelled_without_payload_retent
     let runtime = ExternalProviderRuntime::initialize(permission_request_fixture())
         .await
         .expect("fixture initializes");
+    runtime.set_endpoint_id("cursor-local".to_owned()).await;
     runtime
         .create_session(PathBuf::from("/tmp"))
         .await
@@ -741,6 +742,16 @@ async fn permission_request_is_counted_once_and_cancelled_without_payload_retent
         .await
         .expect("prompt settles after permission cancellation");
     assert_eq!(outcome.stop_reason, ProviderPromptStopReason::EndTurn);
+    assert_eq!(outcome.permission_refusal_reason, None);
+    assert_eq!(
+        runtime.approval_refusal_warnings(),
+        vec![ExternalProviderApprovalRefusalWarning {
+            endpoint: "cursor-local".to_owned(),
+            provider_session_id: "fixture-session".to_owned(),
+            method: "session/request_permission",
+            reason_code: ExternalProviderApprovalRefusalReason::MissingPromptContext,
+        }]
+    );
     assert_eq!(
         runtime.permission_observation(),
         ExternalProviderPermissionObservation {

@@ -719,6 +719,17 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                             )
                             .await
                         {
+                            Ok(crate::ExternalProviderPromptOutcome {
+                                permission_refusal_reason: Some(reason),
+                                ..
+                            }) => ProviderOperationCompletion::Failure(failure(
+                                ConversationOperationFailureKind::PermissionRejected,
+                                ConversationOperationFailureStage::Settlement,
+                                ProviderOperationEffect::Applied,
+                                reason.code(),
+                                operation_id,
+                                Some(completion_target),
+                            )),
                             Ok(outcome) => match optional_message_text(outcome.output) {
                                 Ok(response) => ProviderOperationCompletion::Success {
                                     settlement: ConversationOperationSettlement::PromptCompleted {
