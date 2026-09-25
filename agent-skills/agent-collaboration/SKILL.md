@@ -13,11 +13,15 @@ Prefer the selected service's advertised MCP tool. For CLI, open only the named 
 
 Always use a shared message board in every real orchestration coding session. MUST load `references/message-board.md` and return the work thread, participation, and delivery choice. Then read `agent-collaboration board --help` or the matching advertised `board_*` schema for the chosen call.
 
-For Router MCP operations, including external-provider conversations, load `references/mcp-usage.md`. It uses the running server's advertised schemas and links the registration guide; do not infer tool arguments from CLI flags.
+IF using Router MCP, load `references/mcp-usage.md` and return the resolved service, exact target, observed result, and any capability or outcome gap. The reference uses the running server's advertised schemas and links the registration guide; CLI flags are not MCP argument names.
+
+Use one conversation surface for every endpoint: CLI `conversation create|prompt|load|cancel` and `conversation operation show|wait|reconcile`, or the corresponding advertised MCP tools. The endpoint selects the client. A create result may be `created` with a target or `pending` with an inspectable operation ID; a prompt or load may return a completed settlement or a pending provider operation. Preserve the returned operation ID and inspect pending or uncertain work before another mutation.
+
+The Host reads owner-editable `<router-root>/providers.json` at startup and creates enabled Claude and Cursor defaults if the file is absent. Check endpoint availability and its reported fix when a provider cannot start.
 
 - Continue the assigned conversation. Discover a target when its identity is missing or ambiguous; absence from an active-session list does not justify creating a replacement. A fork creates a different conversation with inherited context, so use it only when the calling workflow chose that context boundary.
 - When the calling workflow supplies a visible title for a conversation you create or fork (for example `🐒 Sidekick · parser fix`), apply it through the supported rename or display route and verify the saved title. If no route exists, report that capability gap. A title never replaces the SessionRef.
-- Use direct messages for assignments, attention, and explicit replies. Reply to the actual sender with the requested answer. Delivery notifications and heartbeats are not messages from an agent asking for a reply.
+- Use direct messages for assignments, attention, and explicit replies. Reply to the actual sender with the requested answer. A live Claude Code session reached through its peer socket receives the origin and an instruction to reply through Router's `message_send` as itself. Delivery notifications and heartbeats are not messages from an agent asking for a reply.
 - While independent useful work remains, do it. When blocked on another conversation, arm the supported listener and report it active before yielding. Session-delivered notifications need no additional wait call. Do not poll an active listener for reassurance.
 - Use a wake for a future message to an existing recipient, and a schedule for reusable scheduled work. Preserve the requested timing and lifetime; choose retained versus fresh conversation context deliberately. The calling workflow owns cost and model policy. A wake is a real turn, not proof of cache savings.
 
@@ -27,7 +31,7 @@ IF taking one of these actions, read the named help or advertised schema and ret
 |---|---|---|
 | Discover or inspect a conversation | `sessions --help`, `session inspect --help`, or `sessions_list` / `session_inspect` | exact target, or gap |
 | Continue, create, or fork | `conversation --help`, or `conversation_prompt` / `conversation_create` | SessionRef and strongest observed stage |
-| Send a message or reply | `message send --help`, or `message_send` | acceptance, not completion or a peer reply |
+| Send a message or reply | `message send --help`, or `message_send` | delivery receipt with observed outcome and reachability, not completion or a peer reply |
 | Wait for board activity | `board thread --help`, or `board_thread_listen` / `board_thread_wait` | armed listener, batch, timeout, or gap |
 | Wake | `wake --help`, or `wake_send` / `wake_show` | saved wake id; saved is not fired or accepted |
 | Schedule | `schedule --help`, `instruction --help`, or `schedule_create` / `schedule_prepare` / `instruction_create` | schedule id and observed run state |

@@ -73,8 +73,14 @@ cargo run -p codex-router-cli -- host
 ```
 
 The host starts `codex-router serve` when a compatible router is absent, starts
-the managed Codex app-server, and keeps lifecycle
-control on an owner-only Unix socket. Hosted `agent-sessions` new/resume launches
+the managed Codex app-server and enabled ACP providers, and keeps lifecycle
+control on an owner-only Unix socket. On first start it creates owner-editable
+`<router-root>/providers.json` with Claude and Cursor enabled. The default
+executables are `claude-agent-acp` and `agent acp`; explicit Host provider flags
+override the file for that start. If one provider is unavailable, the endpoint
+catalog reports its reason and fix while the other endpoints remain available.
+
+Hosted `agent-sessions` new/resume launches
 resolve the advertised public native selector. Backend replacement closes native
 connections; the native TUI owns bounded reconnection without a Sessions supervisor.
 
@@ -108,6 +114,11 @@ replacement proof.
 
 For discovery, agent-declared messages, queue/steer, timed wake-ups and scheduled
 work, see the [agent CLI guide](docs/agent-guidance/agent-collaboration.md).
+`agent-collaboration conversation create|prompt|load|cancel` uses the target
+endpoint's client, including Codex, Claude, and Cursor. Use `conversation
+operation show|wait|reconcile` for inspectable operations. `message send` can
+also reach a live Claude Code session through its peer socket; its
+`peerMessageWritten` receipt confirms the write, not the session's response.
 That guide also documents registering the running Router Host's manifest-advertised
 Streamable HTTP MCP endpoint with Codex. Use the selected current `service.json`;
 do not guess a port or expose the unauthenticated endpoint beyond loopback.
