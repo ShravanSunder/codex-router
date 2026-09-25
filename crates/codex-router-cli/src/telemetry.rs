@@ -103,19 +103,10 @@ impl Drop for TelemetryGuard {
 }
 
 pub(crate) fn init_from_env(mode: TelemetryMode) -> TelemetryGuard {
-    let filter = env::var("RUST_LOG")
-        .map(|configured| {
-            if configured.contains("codex_router_host") {
-                configured
-            } else {
-                format!("{configured},codex_router_host=info")
-            }
-        })
-        .unwrap_or_else(|_error| DEFAULT_LOG_FILTER.to_owned());
+    let configured_filter = env::var("RUST_LOG").ok();
+    let filter = effective_log_filter(configured_filter.as_deref());
     let Some(endpoint) = otlp_endpoint(mode) else {
-        let _ = tracing_subscriber::registry()
-            .with(EnvFilter::new(filter))
-            .try_init();
+        let _ = tracing_subscriber::registry().with(filter).try_init();
         tracing::info!(
             service.name = SERVICE_NAME,
             service.version = env!("CARGO_PKG_VERSION"),
@@ -146,7 +137,7 @@ pub(crate) fn init_from_env(mode: TelemetryMode) -> TelemetryGuard {
         .as_ref()
         .map(OpenTelemetryTracingBridge::new);
     let _ = tracing_subscriber::registry()
-        .with(EnvFilter::new(filter))
+        .with(filter)
         .with(otel_layer)
         .with(log_layer)
         .try_init();
@@ -175,6 +166,22 @@ pub(crate) fn init_from_env(mode: TelemetryMode) -> TelemetryGuard {
         logger_provider,
         completed: Arc::new(AtomicBool::new(false)),
     }
+}
+
+fn effective_log_filter(configured: Option<&str>) -> EnvFilter {
+    let mut filter = configured.unwrap_or(DEFAULT_LOG_FILTER).to_owned();
+    if !filter.contains("codex_router_host") {
+        filter.push_str(",codex_router_host=info");
+    }
+
+    // ACP's JSON-RPC transport logs raw frames at trace, and its incoming actor
+    // formats malformed-frame error data at warn. Keep useful SDK warnings,
+    // while capping provider diagnostics and the payload-bearing actor at their
+    // safe levels even when RUST_LOG requests trace.
+    filter.push_str(
+        ",agent_client_protocol=warn,agent_client_protocol::jsonrpc::incoming_actor=error",
+    );
+    EnvFilter::new(filter)
 }
 
 fn record_exporter_initialization_failure(
@@ -459,6 +466,85 @@ mod tests {
         };
         assert!(effective.contains("codex_router_host=info"));
         assert!(effective.contains("codex_router_cli=info"));
+    }
+
+    #[test]
+    fn provider_acp_wire_diagnostics_are_suppressed_at_normal_and_trace_verbosity() {
+        for configured in [None, Some("trace")] {
+            let output = capture_provider_diagnostics(configured);
+            assert!(!output.contains("synthetic-account-sentinel@example.invalid"));
+            assert!(!output.contains("synthetic-token-sentinel-7f4e"));
+            assert!(output.contains("safe ACP diagnostic remains visible"));
+            assert!(output.contains("Host lifecycle diagnostic remains visible"));
+        }
+    }
+
+    fn capture_provider_diagnostics(configured: Option<&str>) -> String {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone)]
+        struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for BufferWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|_| io::Error::other("log buffer lock poisoned"))?
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'writer> MakeWriter<'writer> for BufferWriter {
+            type Writer = Self;
+
+            fn make_writer(&'writer self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = BufferWriter(Arc::clone(&bytes));
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(effective_log_filter(configured))
+            .with_writer(writer)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let malformed_frame = r#"{"method":"_auth/status_update","account":"synthetic-account-sentinel@example.invalid","token":"synthetic-token-sentinel-7f4e""#;
+            let malformed_error = serde_json::json!({
+                "code": -32700,
+                "message": "parse error",
+                "data": {"line": malformed_frame},
+            });
+            tracing::trace!(
+                target: "agent_client_protocol::jsonrpc::transport_actor",
+                message = %malformed_frame,
+                "Received JSON-RPC message"
+            );
+            tracing::warn!(
+                target: "agent_client_protocol::jsonrpc::incoming_actor",
+                error = ?malformed_error,
+                "Invalid transport input, sending error response"
+            );
+            tracing::warn!(
+                target: "agent_client_protocol::jsonrpc::handlers",
+                "safe ACP diagnostic remains visible"
+            );
+            tracing::info!(
+                target: "codex_router_host",
+                "Host lifecycle diagnostic remains visible"
+            );
+        });
+
+        String::from_utf8(bytes.lock().expect("captured logs lock").clone())
+            .expect("formatted logs are UTF-8")
     }
 
     #[test]
