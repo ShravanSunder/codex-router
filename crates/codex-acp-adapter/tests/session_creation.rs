@@ -11,6 +11,9 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, protocol::Role},
 };
+#[path = "support/conversation_operation_recorder.rs"]
+mod conversation_operation_recorder;
+use conversation_operation_recorder::AcceptingConversationRecorder;
 
 const TEST_SCRATCH: &str =
     "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
@@ -124,6 +127,8 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
             AcpSessionBinding::create(
                     &mut catalog,
                     SessionSetupInputs {
+                        operation_id: None,
+                        recorder: Arc::new(AcceptingConversationRecorder),
                         connection,
                         schemas,
                         generation: generation.clone(),
@@ -136,6 +141,8 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
             AcpSessionBinding::load_existing(
                 &mut catalog,
                 SessionSetupInputs {
+                    operation_id: None,
+                    recorder: Arc::new(AcceptingConversationRecorder),
                     connection,
                     schemas,
                     generation: generation.clone(),
@@ -320,6 +327,8 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
         let session = AcpSessionBinding::create(
         &mut catalog,
         SessionSetupInputs {
+            operation_id: None,
+            recorder: Arc::new(AcceptingConversationRecorder),
             connection,
             schemas,
             generation,

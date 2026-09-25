@@ -19,6 +19,7 @@ async fn acp_listener_rejects_unavailable_backend_and_cleans_its_owned_socket() 
         Arc::new(NativeStoredSessions::new(root.clone(), "fixture".into())),
         Arc::new(codex_acp_adapter::RejectingApprovalBroker),
         Arc::new(UnmaterializedThreadHolder::new()),
+        Arc::new(collaboration_service::UnavailableConversationOperationRecorder),
     )
     .unwrap();
     let stop = CancellationToken::new();
@@ -83,6 +84,7 @@ async fn published_acp_carrier_initializes_and_retires_with_native_generation() 
         Arc::new(NativeStoredSessions::new(root.clone(), "fixture".into())),
         Arc::new(codex_acp_adapter::RejectingApprovalBroker),
         Arc::new(UnmaterializedThreadHolder::new()),
+        Arc::new(collaboration_service::UnavailableConversationOperationRecorder),
     )
     .unwrap();
     let stop = CancellationToken::new();

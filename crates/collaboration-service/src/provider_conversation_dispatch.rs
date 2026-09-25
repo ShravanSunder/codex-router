@@ -1,5 +1,9 @@
 //! Typed Control dispatch for Host-owned external provider conversations.
+mod codex_conversation_inspection;
 use crate::{ProviderConversationBackend, ServiceIdentity};
+use codex_conversation_inspection::{
+    codex_reconcile, codex_record, codex_snapshot_response, codex_wait,
+};
 use collaboration_protocol::{
     ConversationCancelRequest, ConversationCreateRequest, ConversationLoadRequest,
     ConversationOperationFailure, ConversationOperationFailureKind,
@@ -23,6 +27,20 @@ pub(crate) async fn dispatch(
         "conversation/cancel" => dispatch_cancel(id, parse(params), identity).await,
         "conversation/operationShow" => {
             let request = parse::<ConversationOperationShowRequest>(params);
+            if let Ok(request) = &request {
+                match codex_record(&request.operation_id, identity).await {
+                    Ok(Some(record)) => return codex_snapshot_response(id, record),
+                    Err(()) => {
+                        return local_failure_response(
+                            id,
+                            LocalFailure::Unavailable,
+                            request.operation_id.clone(),
+                            None,
+                        );
+                    }
+                    Ok(None) => {}
+                }
+            }
             dispatch_read(id, request, identity, |backend, request| {
                 backend.show(request)
             })
@@ -30,6 +48,20 @@ pub(crate) async fn dispatch(
         }
         "conversation/operationWait" => {
             let request = parse::<ConversationOperationWaitRequest>(params);
+            if let Ok(request) = &request {
+                match codex_record(&request.operation_id, identity).await {
+                    Ok(Some(_)) => return codex_wait(id, request, identity).await,
+                    Err(()) => {
+                        return local_failure_response(
+                            id,
+                            LocalFailure::Unavailable,
+                            request.operation_id.clone(),
+                            None,
+                        );
+                    }
+                    Ok(None) => {}
+                }
+            }
             dispatch_read(id, request, identity, |backend, request| {
                 backend.wait(request)
             })
@@ -37,6 +69,22 @@ pub(crate) async fn dispatch(
         }
         "conversation/operationReconcile" => {
             let request = parse::<ConversationOperationReconcileRequest>(params);
+            if let Ok(request) = &request {
+                match codex_record(&request.operation_id, identity).await {
+                    Ok(Some(_)) => {
+                        return codex_reconcile(id, &request.operation_id, identity).await;
+                    }
+                    Err(()) => {
+                        return local_failure_response(
+                            id,
+                            LocalFailure::Unavailable,
+                            request.operation_id.clone(),
+                            None,
+                        );
+                    }
+                    Ok(None) => {}
+                }
+            }
             dispatch_read(id, request, identity, |backend, request| {
                 backend.reconcile(request)
             })
@@ -80,7 +128,7 @@ async fn dispatch_create(
     request: Result<ConversationCreateRequest, ()>,
     identity: &ServiceIdentity,
 ) -> Value {
-    let Ok(request) = request else {
+    let Ok(mut request) = request else {
         return invalid_params(id);
     };
     let target = None;
@@ -117,7 +165,11 @@ async fn dispatch_create(
             target,
         );
     }
-    if request.generation != binding.generation {
+    if request
+        .generation
+        .as_ref()
+        .is_some_and(|expected| expected != &binding.generation)
+    {
         return local_failure_response(
             id,
             LocalFailure::StaleGeneration,
@@ -125,6 +177,7 @@ async fn dispatch_create(
             target,
         );
     }
+    request.generation = Some(binding.generation.clone());
     result_response(id, backend.create(request).await)
 }
 
@@ -133,7 +186,7 @@ async fn dispatch_load(
     request: Result<ConversationLoadRequest, ()>,
     identity: &ServiceIdentity,
 ) -> Value {
-    let Ok(request) = request else {
+    let Ok(mut request) = request else {
         return invalid_params(id);
     };
     let target = Some(request.target.clone());
@@ -170,7 +223,11 @@ async fn dispatch_load(
             target,
         );
     }
-    if request.generation != binding.generation {
+    if request
+        .generation
+        .as_ref()
+        .is_some_and(|expected| expected != &binding.generation)
+    {
         return local_failure_response(
             id,
             LocalFailure::StaleGeneration,
@@ -178,6 +235,7 @@ async fn dispatch_load(
             target,
         );
     }
+    request.generation = Some(binding.generation.clone());
     result_response(id, backend.load(request).await)
 }
 
@@ -186,7 +244,7 @@ async fn dispatch_prompt(
     request: Result<ConversationPromptRequest, ()>,
     identity: &ServiceIdentity,
 ) -> Value {
-    let Ok(request) = request else {
+    let Ok(mut request) = request else {
         return invalid_params(id);
     };
     let target = Some(request.target.clone());
@@ -223,7 +281,11 @@ async fn dispatch_prompt(
             target,
         );
     }
-    if request.generation != binding.generation {
+    if request
+        .generation
+        .as_ref()
+        .is_some_and(|expected| expected != &binding.generation)
+    {
         return local_failure_response(
             id,
             LocalFailure::StaleGeneration,
@@ -231,6 +293,7 @@ async fn dispatch_prompt(
             target,
         );
     }
+    request.generation = Some(binding.generation.clone());
     result_response(id, backend.prompt(request).await)
 }
 
@@ -239,7 +302,7 @@ async fn dispatch_cancel(
     request: Result<ConversationCancelRequest, ()>,
     identity: &ServiceIdentity,
 ) -> Value {
-    let Ok(request) = request else {
+    let Ok(mut request) = request else {
         return invalid_params(id);
     };
     let target = Some(request.target.clone());
@@ -276,7 +339,11 @@ async fn dispatch_cancel(
             target,
         );
     }
-    if request.generation != binding.generation {
+    if request
+        .generation
+        .as_ref()
+        .is_some_and(|expected| expected != &binding.generation)
+    {
         return local_failure_response(
             id,
             LocalFailure::StaleGeneration,
@@ -284,6 +351,7 @@ async fn dispatch_cancel(
             target,
         );
     }
+    request.generation = Some(binding.generation.clone());
     result_response(id, backend.cancel(request).await)
 }
 

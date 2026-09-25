@@ -2,22 +2,23 @@
 
 use crate::{ExternalProviderRuntime, ExternalProviderRuntimeError};
 use collaboration_protocol::{
-    ConversationAdmissionState, ConversationCancelRequest, ConversationCreateRequest,
-    ConversationLoadRequest, ConversationOperationFailure, ConversationOperationFailureKind,
-    ConversationOperationFailureStage, ConversationOperationReconcileRequest,
-    ConversationOperationSettlement, ConversationOperationShowRequest,
-    ConversationOperationSnapshot, ConversationOperationSubmission,
-    ConversationOperationWaitOutput, ConversationOperationWaitRequest,
-    ConversationOperationWaitResult, ConversationOutputUnavailableReason,
-    ConversationPromptRequest, EffectiveProviderSettings, EndpointRef, MessageText, NonEmptyText,
-    ObservationTimestamp, OperationId, ProviderAuthenticationState, ProviderBindingIdentity,
-    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
-    ProviderReconciliationState, ProviderSettingsMappingStatus, SessionId, SessionRef,
-    render_message,
+    ConversationAdmissionState, ConversationBindingIdentity, ConversationCancelRequest,
+    ConversationCreateRequest, ConversationLoadRequest, ConversationOperationFailure,
+    ConversationOperationFailureKind, ConversationOperationFailureStage,
+    ConversationOperationReconcileRequest, ConversationOperationSettlement,
+    ConversationOperationShowRequest, ConversationOperationSnapshot,
+    ConversationOperationSubmission, ConversationOperationWaitOutput,
+    ConversationOperationWaitRequest, ConversationOperationWaitResult,
+    ConversationOutputUnavailableReason, ConversationPromptRequest, EffectiveProviderSettings,
+    EndpointRef, MessageText, NonEmptyText, OperationId, ProviderAuthenticationState,
+    ProviderBindingIdentity, ProviderOperationEffect, ProviderOperationKind,
+    ProviderOperationStage, ProviderReconciliationState, ProviderSettingsMappingStatus, SessionId,
+    SessionRef, render_message,
 };
 use collaboration_service::{
     ProviderConversationBackend, ProviderConversationFuture, ProviderOperationAdmission,
     ProviderOperationAdmissionResult, ProviderOperationRecord, ProviderOperationStore,
+    conversation_operation_snapshot as snapshot_from_record,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -226,7 +227,7 @@ impl ExternalProviderSupervisor {
             .admit(ProviderOperationAdmission {
                 operation_id: operation_id.clone(),
                 operation_kind,
-                binding,
+                binding: ConversationBindingIdentity::ExternalProvider { binding },
                 admitted_at_ms,
             })
             .await
@@ -742,7 +743,11 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
             let target_operation = backend.inspect_record(&request.target_operation_id).await?;
             if target_operation.operation_kind != ProviderOperationKind::ConversationPrompt
                 || target_operation.target.as_ref() != Some(&target)
-                || target_operation.binding.generation != request.generation
+                || !matches!(
+                    &target_operation.binding,
+                    ConversationBindingIdentity::ExternalProvider { binding }
+                        if request.generation.as_ref() == Some(&binding.generation)
+                )
                 || target_operation.stage == ProviderOperationStage::Terminal
             {
                 return Err(failure(
@@ -1108,32 +1113,6 @@ fn failure(
         operation_id,
         target,
     }
-}
-
-fn snapshot_from_record(
-    record: ProviderOperationRecord,
-) -> Result<ConversationOperationSnapshot, &'static str> {
-    Ok(ConversationOperationSnapshot {
-        operation_id: record.operation_id,
-        operation: record.operation_kind,
-        binding: record.binding,
-        target: record.target,
-        stage: record.stage,
-        effect: record.effect,
-        reconciliation: record.reconciliation_state,
-        admitted_at: timestamp_from_millis(record.admitted_at_ms)?,
-        terminal_at: record
-            .terminal_at_ms
-            .map(timestamp_from_millis)
-            .transpose()?,
-    })
-}
-
-fn timestamp_from_millis(milliseconds: i64) -> Result<ObservationTimestamp, &'static str> {
-    let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(milliseconds)
-        .ok_or("provider operation timestamp is outside the supported range")?
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    ObservationTimestamp::try_from(timestamp)
 }
 
 fn now_ms() -> i64 {

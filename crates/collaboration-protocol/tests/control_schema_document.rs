@@ -109,6 +109,84 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     assert!(!validator.is_valid(&error));
 }
 
+#[test]
+fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
+    let service_error = |data: Value| {
+        json!({"jsonrpc":"2.0","id":"request-1","error":{
+            "code":-32050,"message":"Native control operation failed","data":data
+        }})
+    };
+    for method in ["codex/sessionInspect", "codex/sessionRename"] {
+        let mut schema = control_schema_document(None).expect("control schema");
+        let error_ref = schema["x-methods"][method]["error"]["$ref"]
+            .as_str()
+            .expect("method error reference")
+            .to_owned();
+        schema["$ref"] = json!(error_ref);
+        let validator = jsonschema::validator_for(&schema).expect("error validator");
+        let stage = if method == "codex/sessionInspect" {
+            "inspect"
+        } else {
+            "rename"
+        };
+        let rejection = service_error(json!({
+            "kind":"nativeRejected","stage":stage,
+            "message":"Native control operation failed",
+            "reason":"busy","nextAction":"useDeliverySteer"
+        }));
+        assert!(
+            validator.is_valid(&rejection),
+            "{method} classified rejection"
+        );
+
+        let unknown = service_error(json!({
+            "kind":"nativeRejected","stage":stage,
+            "message":"Native control operation failed",
+            "reason":"unknown","nextAction":"retryLater","nativeCode":-32099
+        }));
+        assert!(validator.is_valid(&unknown), "{method} unknown native code");
+
+        let mut missing_action = rejection.clone();
+        missing_action["error"]["data"]
+            .as_object_mut()
+            .expect("error data")
+            .remove("nextAction");
+        assert!(
+            !validator.is_valid(&missing_action),
+            "{method} action required"
+        );
+    }
+
+    let mut schema = control_schema_document(None).expect("control schema");
+    schema["$ref"] = json!("#/$defs/codex-sessionRename-error");
+    let validator = jsonschema::validator_for(&schema).expect("rename error validator");
+    let unavailable = service_error(json!({
+        "kind":"unavailable","stage":"rename",
+        "message":"Native control operation failed"
+    }));
+    assert!(
+        validator.is_valid(&unavailable),
+        "rename connection unavailable"
+    );
+    let mismatch = service_error(json!({
+        "kind":"nameMismatch","stage":"rename",
+        "requested":"Review","effective":"Old name"
+    }));
+    assert!(
+        validator.is_valid(&mismatch),
+        "rename echoed a different name"
+    );
+    let mut missing_effective = mismatch;
+    missing_effective["error"]["data"]
+        .as_object_mut()
+        .expect("error data")
+        .remove("effective");
+    assert!(
+        !validator.is_valid(&missing_effective),
+        "echoed name required"
+    );
+}
+
 struct FixtureNativeSchemas {
     uri: String,
 }

@@ -24,6 +24,22 @@ async fn initialized_http_application_deadline_returns_timed_out_settlement() {
         let create = next_json_line(&mut lines, "create").await;
         assert_eq!(create["method"], "session/new");
         writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":create["id"],"result":{"sessionId":"deadline-thread"}})).as_bytes()).await.expect("create response");
+        drop(lines);
+        drop(writer);
+        let (stream, _) = acp.accept().await.expect("prompt ACP accept");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        let initialize = next_json_line(&mut lines, "prompt initialize").await;
+        writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}})).as_bytes()).await.expect("prompt initialize response");
+        let load = next_json_line(&mut lines, "load created conversation").await;
+        assert_eq!(load["method"], "session/load");
+        assert_eq!(load["params"]["sessionId"], "deadline-thread");
+        writer
+            .write_all(
+                format!("{}\n", json!({"jsonrpc":"2.0","id":load["id"],"result":{}})).as_bytes(),
+            )
+            .await
+            .expect("load response");
         let prompt = next_json_line(&mut lines, "prompt").await;
         assert_eq!(prompt["method"], "session/prompt");
         let cancel = next_json_line(&mut lines, "cancel").await;
@@ -45,18 +61,18 @@ async fn initialized_http_application_deadline_returns_timed_out_settlement() {
     let caller = json!({"endpoint":endpoint,"sessionId":"deadline-caller"});
     let response = client.post(fixture.listener.local_url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-session-id",session_id).header("mcp-protocol-version","2025-11-25").json(&json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"conversation_create_and_prompt","arguments":{
-            "create":{"endpoint":endpoint,"cwd":fixture.root.path(),"session":null,"fork":null,"model":"gpt-5.6-luna","effort":"low","access":"workspace-write","createdBy":caller,"approver":caller,"rootMessageId":null},
-            "prompt":{"message":{"kind":"humanUser","text":"deadline proof"},"effort":"low","timeoutSeconds":1}
+            "create":{"operationId":collaboration_protocol::OperationId::generate(),"endpoint":endpoint,"workingDirectory":fixture.root.path(),"fork":null,"model":"gpt-5.6-luna","effort":"low","access":"workspace-write","createdBy":caller,"approver":caller,"rootMessageId":null},
+            "message":{"kind":"humanUser","text":"deadline proof"},"promptEffort":"low","timeoutSeconds":1
         }}
     })).send().await.expect("deadline response");
     let body = protocol_response_json(response).await;
     assert_eq!(body.pointer("/result/isError"), Some(&json!(false)));
     assert_eq!(
-        body.pointer("/result/structuredContent/end"),
+        body.pointer("/result/structuredContent/prompt/settlement/stopReason"),
         Some(&json!("timedOut"))
     );
     assert_eq!(
-        body.pointer("/result/structuredContent/result/stopReason"),
+        body.pointer("/result/structuredContent/prompt/settlement/detail/result/stopReason"),
         Some(&json!("cancelled"))
     );
     peer.await.expect("ACP peer");

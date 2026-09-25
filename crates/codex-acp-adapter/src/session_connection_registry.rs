@@ -26,6 +26,8 @@ pub trait UnmaterializedBindingStore: Send + Sync {
     fn checkout(&self, session_id: &str) -> HeldBindingCheckout;
     fn restore(&self, binding: AcpSessionBinding);
     fn finish(&self, session_id: &str);
+    /// Host-lifetime tasks for creates that must outlive their ACP frontend.
+    fn create_tasks(&self) -> tokio_util::task::TaskTracker;
 }
 #[derive(Debug, thiserror::Error)]
 pub enum SessionRegistryError {
@@ -62,13 +64,16 @@ impl AcpSessionRegistry {
             holder,
         }
     }
-    pub fn insert(&mut self, session: AcpSessionBinding) -> Result<(), SessionRegistryError> {
+    pub fn insert(
+        &mut self,
+        session: AcpSessionBinding,
+    ) -> Result<(), (SessionRegistryError, Box<AcpSessionBinding>)> {
         let id = session.session_id().to_owned();
         if matches!(self.sessions.get(&id), Some(SessionSlot::Busy(_))) {
-            return Err(SessionRegistryError::Busy);
+            return Err((SessionRegistryError::Busy, Box::new(session)));
         }
         if !self.sessions.contains_key(&id) && self.sessions.len() >= 64 {
-            return Err(SessionRegistryError::Capacity);
+            return Err((SessionRegistryError::Capacity, Box::new(session)));
         }
         self.sessions
             .insert(id, SessionSlot::Ready(Box::new(session)));

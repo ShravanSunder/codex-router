@@ -21,7 +21,14 @@ pub use native_generation_gate::{NativeAdmission, NativeGenerationGate};
 mod native_relay_listener;
 mod private_socket_listener;
 pub use native_relay_listener::NativeRelayListener;
+mod conversation_operation_projection;
 mod provider_operation_store;
+pub use conversation_operation_projection::conversation_operation_snapshot;
+mod codex_conversation_operation_recorder;
+pub use codex_acp_adapter::ConversationOperationRecorder;
+pub use codex_conversation_operation_recorder::{
+    CodexConversationOperationRecorder, UnavailableConversationOperationRecorder,
+};
 pub use provider_operation_store::{
     ProviderOperationAdmission, ProviderOperationAdmissionResult, ProviderOperationRecord,
     ProviderOperationStore, ProviderOperationStoreError,

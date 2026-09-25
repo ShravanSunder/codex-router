@@ -102,26 +102,14 @@ pub(super) fn operation_description(name: &str) -> &'static str {
         "operation_reconcile" => {
             "Reconciles one stored operation from existing evidence. Requires its operation identity and never replays the mutation."
         }
-        "provider_conversation_create" => {
-            "Admits one external-provider conversation create operation using the caller-supplied operationId, exact endpoint, generation, working directory, creator, approver and requested policy. Admission is not settlement; an uncertain dispatch is never replayed automatically."
+        "conversation_operation_show" => {
+            "Reads durable metadata for one conversation operation by its caller-retained operationId. Read-only; it never dispatches, waits for or replays client work."
         }
-        "provider_conversation_load" => {
-            "Admits one external-provider conversation load operation for an exact target and generation using the caller-supplied operationId. Admission is not settlement; an uncertain dispatch is never replayed automatically."
+        "conversation_operation_wait" => {
+            "Waits boundedly for settlement of an already admitted conversation operation. The waiter is call-local: MCP cancellation detaches it without cancelling client work or replaying the operation."
         }
-        "provider_conversation_prompt" => {
-            "Admits one external-provider prompt operation for an exact target and generation using the caller-supplied operationId, requester, approver and typed prompt. Admission is not turn completion; caller cancellation only detaches this MCP call and never cancels provider work."
-        }
-        "provider_conversation_cancel" => {
-            "Admits an explicit cancellation operation using its own caller-supplied operationId and the exact target operation, conversation and generation. A cancellation request is distinct from observed cessation."
-        }
-        "provider_conversation_operation_show" => {
-            "Reads durable metadata for one external-provider operation by its caller-retained operationId. Read-only; it never dispatches, waits for or replays provider work."
-        }
-        "provider_conversation_operation_wait" => {
-            "Waits boundedly for ephemeral settlement of an already admitted external-provider operation. The waiter is call-local: MCP cancellation detaches it without cancelling provider work or replaying the operation."
-        }
-        "provider_conversation_operation_reconcile" => {
-            "Reconciles one external-provider operation from exact supported evidence using its caller-retained operationId. It is read-only with respect to provider work and never resubmits the operation."
+        "conversation_operation_reconcile" => {
+            "Reconciles one conversation operation from exact supported evidence using its caller-retained operationId. It is read-only with respect to client work and never resubmits the operation."
         }
         "board_discovery_search" => {
             "Searches discoverable projects/boards/topics using the supplied query and page bounds. Read-only; discovered board content is context, not authorization."

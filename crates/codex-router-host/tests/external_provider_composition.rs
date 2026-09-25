@@ -85,7 +85,7 @@ sys.stdin.read()
         .create_provider_conversation(ConversationCreateRequest {
             operation_id: create_operation.clone(),
             endpoint: provider_endpoint.endpoint.clone(),
-            generation: generation.clone(),
+            generation: Some(generation.clone()),
             working_directory: ProviderWorkingDirectory::try_from(
                 root.path().display().to_string(),
             )
@@ -117,7 +117,7 @@ sys.stdin.read()
         .prompt_provider_conversation(ConversationPromptRequest {
             operation_id: prompt_operation.clone(),
             target: target.clone(),
-            generation,
+            generation: Some(generation),
             requested_by: actor.clone(),
             approver: actor.clone(),
             prompt: MessageContent::Agent {
@@ -202,10 +202,10 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
         .create_provider_conversation(ConversationCreateRequest {
             operation_id: OperationId::generate(),
             endpoint: provider_endpoint.endpoint,
-            generation: CodexGeneration {
+            generation: Some(CodexGeneration {
                 service_epoch,
                 generation: 1_u64.try_into().expect("generation"),
-            },
+            }),
             working_directory: ProviderWorkingDirectory::try_from(
                 root.path().display().to_string(),
             )

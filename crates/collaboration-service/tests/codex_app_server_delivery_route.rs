@@ -21,6 +21,37 @@ use std::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
+struct AcceptingConversationRecorder;
+impl codex_acp_adapter::ConversationOperationRecorder for AcceptingConversationRecorder {
+    fn admit_create<'a>(
+        &'a self,
+        _: &'a collaboration_protocol::OperationId,
+        _: &'a CodexGeneration,
+    ) -> codex_acp_adapter::ConversationRecordFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+    fn before_native_dispatch<'a>(
+        &'a self,
+        _: &'a collaboration_protocol::OperationId,
+    ) -> codex_acp_adapter::ConversationRecordFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+    fn record_created<'a>(
+        &'a self,
+        _: &'a collaboration_protocol::OperationId,
+        _: &'a collaboration_protocol::SessionId,
+    ) -> codex_acp_adapter::ConversationRecordFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+    fn record_failure<'a>(
+        &'a self,
+        _: &'a collaboration_protocol::OperationId,
+        _: bool,
+    ) -> codex_acp_adapter::ConversationRecordFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 struct CountingEvidenceSink(AtomicUsize);
 
 impl AttemptEvidenceSink for CountingEvidenceSink {
@@ -390,6 +421,7 @@ async fn held_empty_codex_thread_rejects_steer_then_starts_first_message_on_its_
             stored_sessions: Arc::new(EmptyStoredSessions),
             approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
             holder: holder.clone(),
+            recorder: Arc::new(AcceptingConversationRecorder),
             retired: tokio_util::sync::CancellationToken::new(),
         },
     ));
@@ -404,6 +436,7 @@ async fn held_empty_codex_thread_rejects_steer_then_starts_first_message_on_its_
                 "{}\n",
                 json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{
                     "cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{
+                        "operationId":collaboration_protocol::OperationId::generate(),
                         "model":"gpt-5.6-sol","effort":"medium","access":"workspace-write",
                         "scratchScope":scratch_scope,"scratchPath":scratch,
                         "createdBy":target,"approver":target

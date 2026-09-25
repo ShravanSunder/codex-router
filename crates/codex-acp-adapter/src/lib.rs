@@ -5,6 +5,7 @@ mod acp_frame_transport;
 mod approval_broker;
 mod assistant_text_projection;
 mod connection_negotiation;
+mod conversation_operation_recorder;
 mod history_projection;
 mod mcp_configuration;
 mod native_prompt_execution;
@@ -40,6 +41,9 @@ pub use collaboration_protocol::{
     ACP_SCHEMA_BYTES, ACP_SCHEMA_DIGEST, AcpSchemaCatalog, AcpSchemaError,
 };
 pub use connection_negotiation::{AcpNegotiation, AcpNegotiationError};
+pub use conversation_operation_recorder::{
+    ConversationOperationRecorder, ConversationRecordFuture,
+};
 pub use history_projection::{HistoryProjectionError, project_history};
 pub use mcp_configuration::{McpConfiguration, McpConfigurationError};
 pub use native_prompt_execution::{PendingAcpPrompt, PromptEvent, PromptExecutionError};

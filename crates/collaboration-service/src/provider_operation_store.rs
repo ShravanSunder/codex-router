@@ -3,8 +3,8 @@
 //! This store intentionally has no request, prompt, reply, diagnostic, or transcript input.
 
 use collaboration_protocol::{
-    OperationId, ProviderBindingIdentity, ProviderOperationEffect, ProviderOperationKind,
-    ProviderOperationStage, ProviderReconciliationState, SessionRef,
+    ConversationBindingIdentity, OperationId, ProviderBindingIdentity, ProviderOperationEffect,
+    ProviderOperationKind, ProviderOperationStage, ProviderReconciliationState, SessionRef,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{
@@ -52,7 +52,7 @@ pub enum ProviderOperationStoreError {
 pub struct ProviderOperationAdmission {
     pub operation_id: OperationId,
     pub operation_kind: ProviderOperationKind,
-    pub binding: ProviderBindingIdentity,
+    pub binding: ConversationBindingIdentity,
     pub admitted_at_ms: i64,
 }
 
@@ -60,7 +60,7 @@ pub struct ProviderOperationAdmission {
 pub struct ProviderOperationRecord {
     pub operation_id: OperationId,
     pub operation_kind: ProviderOperationKind,
-    pub binding: ProviderBindingIdentity,
+    pub binding: ConversationBindingIdentity,
     pub target: Option<SessionRef>,
     pub stage: ProviderOperationStage,
     pub effect: ProviderOperationEffect,
@@ -185,9 +185,14 @@ impl ProviderOperationStore {
         .fetch_all(&mut self.connection)
         .await?;
         for candidate in candidates {
-            let stored_binding: ProviderBindingIdentity = decode_closed(&candidate.binding_json)?;
-            let same_scope = stored_binding.endpoint == binding.endpoint
-                && stored_binding.runtime.provider == binding.runtime.provider;
+            let stored_binding = decode_binding(&candidate.binding_json)?;
+            let same_scope = match stored_binding {
+                ConversationBindingIdentity::ExternalProvider { binding: stored } => {
+                    stored.endpoint == binding.endpoint
+                        && stored.runtime.provider == binding.runtime.provider
+                }
+                ConversationBindingIdentity::CodexAcp { .. } => false,
+            };
             if !same_scope {
                 continue;
             }
@@ -314,6 +319,38 @@ impl ProviderOperationStore {
         .await
     }
 
+    pub async fn confirm_recorded_target(
+        &mut self,
+        operation_id: &OperationId,
+        observed_at_ms: i64,
+    ) -> Result<ProviderOperationRecord, ProviderOperationStoreError> {
+        let result = sqlx::query!(
+            "UPDATE provider_operations
+             SET stage=?,effect=?,reconciliation_state=?,
+                 terminal_at_ms=COALESCE(terminal_at_ms,MAX(admitted_at_ms,?)),
+                 updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)
+             WHERE operation_id=? AND target_session_id IS NOT NULL
+               AND stage!=? AND reconciliation_state!=?",
+            encode_enum(ProviderOperationStage::Terminal)?,
+            encode_enum(ProviderOperationEffect::Applied)?,
+            encode_enum(ProviderReconciliationState::Confirmed)?,
+            observed_at_ms,
+            observed_at_ms,
+            operation_id.as_str(),
+            encode_enum(ProviderOperationStage::Admitted)?,
+            encode_enum(ProviderReconciliationState::Confirmed)?,
+        )
+        .execute(&mut self.connection)
+        .await?;
+        self.transition_result(operation_id, result.rows_affected(), |record| {
+            record.stage == ProviderOperationStage::Terminal
+                && record.effect == ProviderOperationEffect::Applied
+                && record.reconciliation_state == ProviderReconciliationState::Confirmed
+                && record.target.is_some()
+        })
+        .await
+    }
+
     pub async fn prune_terminal_before(
         &mut self,
         cutoff_ms: i64,
@@ -402,7 +439,7 @@ fn decode_record(
         operation_id: OperationId::try_from(row.operation_id)
             .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
         operation_kind: decode_enum(row.operation_kind)?,
-        binding: decode_closed(&row.binding_json)?,
+        binding: decode_binding(&row.binding_json)?,
         target,
         stage: decode_enum(row.stage)?,
         effect: decode_enum(row.effect)?,
@@ -436,6 +473,14 @@ fn encode_closed<T: Serialize>(value: &T) -> Result<String, ProviderOperationSto
 
 fn decode_closed<T: DeserializeOwned>(value: &str) -> Result<T, ProviderOperationStoreError> {
     serde_json::from_str(value).map_err(|_| ProviderOperationStoreError::InvalidRecord)
+}
+
+fn decode_binding(value: &str) -> Result<ConversationBindingIdentity, ProviderOperationStoreError> {
+    if let Ok(binding) = decode_closed(value) {
+        return Ok(binding);
+    }
+    let legacy: ProviderBindingIdentity = decode_closed(value)?;
+    Ok(ConversationBindingIdentity::ExternalProvider { binding: legacy })
 }
 
 fn validate_record(record: &ProviderOperationRecord) -> Result<(), ProviderOperationStoreError> {

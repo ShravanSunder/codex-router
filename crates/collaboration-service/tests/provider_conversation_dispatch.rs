@@ -145,7 +145,7 @@ fn binding(
 }
 fn snapshot(binding: ProviderBindingIdentity) -> TestResult<ConversationOperationSnapshot> {
     Ok(serde_json::from_value(json!({
-    "operationId":operation_id(),"operation":"conversationPrompt","binding":binding,"target":session("provider-conversation"),
+    "operationId":operation_id(),"operation":"conversationPrompt","binding":{"kind":"externalProvider","binding":binding},"target":session("provider-conversation"),
     "stage":"terminal","effect":"applied","reconciliation":"confirmed","admittedAt":"2026-09-20T12:00:00Z","terminalAt":"2026-09-20T12:00:01Z"
     }))?)
 }
@@ -277,6 +277,47 @@ async fn initialized_control_forwards_all_provider_conversation_methods() -> Tes
             .iter()
             .all(|(_, request)| request["operationId"] == operation_id()),
         "operation identity changed during forwarding".to_owned(),
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn omitted_generation_uses_current_binding_for_each_mutation() -> TestResult {
+    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    for (method, params) in [
+        (
+            "conversation/create",
+            json!({"operationId":operation_id(),"endpoint":endpoint(),"workingDirectory":"/tmp/provider-work","createdBy":actor("caller"),"approver":actor("approver"),"requestedPolicy":{"access":"workspace-write"}}),
+        ),
+        (
+            "conversation/load",
+            json!({"operationId":operation_id(),"target":session("provider-conversation"),"workingDirectory":"/tmp/provider-work","requestedBy":actor("caller"),"approver":actor("approver"),"requestedPolicy":{"access":"workspace-write"}}),
+        ),
+        (
+            "conversation/prompt",
+            json!({"operationId":operation_id(),"target":session("provider-conversation"),"requestedBy":actor("caller"),"approver":actor("approver"),"prompt":{"kind":"humanUser","text":"hello"}}),
+        ),
+        (
+            "conversation/cancel",
+            json!({"operationId":operation_id(),"targetOperationId":operation_id(),"target":session("provider-conversation"),"requestedBy":actor("caller"),"approver":actor("approver")}),
+        ),
+    ] {
+        let response = call(&mut writer, &mut reader, method, method, params).await?;
+        ensure(
+            response.get("result").is_some(),
+            format!("{method}: {response}"),
+        )?;
+    }
+    let calls = backend.calls.lock().await;
+    ensure(
+        calls.len() == 4,
+        format!("forwarded {} requests", calls.len()),
+    )?;
+    ensure(
+        calls
+            .iter()
+            .all(|(_, request)| request["generation"] == generation()),
+        "omitted generation did not resolve to the selected binding".to_owned(),
     )?;
     Ok(())
 }

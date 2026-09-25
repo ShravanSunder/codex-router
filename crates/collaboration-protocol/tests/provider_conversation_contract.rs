@@ -1,4 +1,7 @@
-use collaboration_protocol::{control_error_is_valid, control_schema_document};
+use collaboration_protocol::{
+    ConversationBindingIdentity, ConversationCreateOutcome, control_error_is_valid,
+    control_schema_document,
+};
 use serde_json::{Value, json};
 
 fn method_validator(
@@ -46,7 +49,7 @@ fn operation_snapshot() -> Value {
     json!({
         "operationId": "019f0000-0000-7000-8000-000000000011",
         "operation": "conversationPrompt",
-        "binding": {
+        "binding": {"kind": "externalProvider", "binding": {
             "endpoint": endpoint(),
             "bindingId": "provider-binding-3",
             "runtime": {
@@ -60,7 +63,7 @@ fn operation_snapshot() -> Value {
                 {"name": "prompt", "status": "supported", "evidence": "observed"},
                 {"name": "callerDetach", "status": "supported", "evidence": "routerQualified"}
             ]
-        },
+        }},
         "target": session("provider-conversation"),
         "stage": "terminal",
         "effect": "applied",
@@ -68,6 +71,50 @@ fn operation_snapshot() -> Value {
         "admittedAt": "2026-09-20T12:00:00Z",
         "terminalAt": "2026-09-20T12:00:01Z"
     })
+}
+
+#[test]
+fn conversation_binding_identity_round_trips_both_routes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let external = operation_snapshot()["binding"].clone();
+    let decoded: ConversationBindingIdentity = serde_json::from_value(external.clone())?;
+    if serde_json::to_value(decoded)? != external {
+        return Err("external binding changed in the round trip".into());
+    }
+
+    let codex = json!({
+        "kind": "codexAcp",
+        "endpoint": {"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"codex-local"},
+        "listenerPath": "/tmp/codex-acp.sock",
+        "generation": generation()
+    });
+    let decoded: ConversationBindingIdentity = serde_json::from_value(codex.clone())?;
+    if serde_json::to_value(decoded)? != codex {
+        return Err("Codex binding changed in the round trip".into());
+    }
+    if serde_json::from_value::<ConversationBindingIdentity>(json!({
+        "kind":"codexAcp","endpoint":endpoint(),"listenerPath":"","generation":generation()
+    }))
+    .is_ok()
+    {
+        return Err("empty Codex listener path was accepted".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn conversation_create_outcome_keeps_caller_operation_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    for value in [
+        json!({"kind":"created","operationId":"019f0000-0000-7000-8000-000000000011","target":session("created")}),
+        json!({"kind":"pending","operationId":"019f0000-0000-7000-8000-000000000011"}),
+    ] {
+        let outcome: ConversationCreateOutcome = serde_json::from_value(value.clone())?;
+        if serde_json::to_value(outcome)? != value {
+            return Err("conversation create outcome changed in round trip".into());
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -100,7 +147,7 @@ fn external_conversation_methods_have_closed_typed_pairings() {
 }
 
 #[test]
-fn mutations_require_caller_operation_identity_and_exact_binding_generation() {
+fn mutations_require_caller_operation_identity_and_allow_unpinned_generation() {
     let schema = control_schema_document(None).unwrap_or_else(|error| panic!("schema: {error}"));
     let create_validator = method_validator(&schema, "conversation/create", "request")
         .unwrap_or_else(|error| panic!("create validator: {error}"));
@@ -133,7 +180,7 @@ fn mutations_require_caller_operation_identity_and_exact_binding_generation() {
         .as_object_mut()
         .unwrap_or_else(|| panic!("params"))
         .remove("generation");
-    assert!(!create_validator.is_valid(&request));
+    assert!(create_validator.is_valid(&request));
 }
 
 #[test]

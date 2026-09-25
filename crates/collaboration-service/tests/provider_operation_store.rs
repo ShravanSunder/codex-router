@@ -1,14 +1,14 @@
 use collaboration_protocol::{
-    CodexGeneration, EndpointId, EndpointRef, GenerationNumber, NonEmptyText, OperationId,
-    ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities, ProviderCapability,
-    ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
-    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
-    ProviderReconciliationState, ProviderRuntimeIdentity, ProviderTransport, SessionId, SessionRef,
-    UuidIdentity,
+    CodexGeneration, ConversationBindingIdentity, EndpointId, EndpointRef, GenerationNumber,
+    NonEmptyText, OperationId, ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities,
+    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationKind,
+    ProviderOperationStage, ProviderReconciliationState, ProviderRuntimeIdentity,
+    ProviderTransport, SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
-    ProviderOperationAdmission, ProviderOperationAdmissionResult, ProviderOperationStore,
-    ProviderOperationStoreError,
+    CodexConversationOperationRecorder, ConversationOperationRecorder, ProviderOperationAdmission,
+    ProviderOperationAdmissionResult, ProviderOperationStore, ProviderOperationStoreError,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 use std::{collections::HashSet, path::PathBuf};
@@ -145,7 +145,9 @@ fn admission(id: &str, admitted_at_ms: i64) -> TestResult<ProviderOperationAdmis
     Ok(ProviderOperationAdmission {
         operation_id: operation_id(id)?,
         operation_kind: ProviderOperationKind::ConversationPrompt,
-        binding: binding()?,
+        binding: ConversationBindingIdentity::ExternalProvider {
+            binding: binding()?,
+        },
         admitted_at_ms,
     })
 }
@@ -189,7 +191,12 @@ async fn admission_dispatch_and_terminal_states_survive_reopen() -> TestResult {
         .ok_or("dispatch-marked operation was not retained")?;
     ensure_eq!(reopened.stage, ProviderOperationStage::MayHaveDispatched);
     ensure_eq!(reopened.effect, ProviderOperationEffect::Unknown);
-    ensure_eq!(reopened.binding, binding()?);
+    ensure_eq!(
+        reopened.binding,
+        ConversationBindingIdentity::ExternalProvider {
+            binding: binding()?
+        }
+    );
     let no_dispatch = store
         .inspect(&admission_only.operation_id)
         .await?
@@ -494,5 +501,184 @@ async fn migration_reopens_populated_database_and_schema_is_metadata_only() -> T
         ProviderOperationStore::open(&database.path).await,
         Err(ProviderOperationStoreError::InvalidRecord)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_binding_migration_preserves_existing_operation_and_rejects_invalid_binding()
+-> TestResult {
+    let database = TestDatabase::new("binding-migration")?;
+    let mut store = ProviderOperationStore::open(&database.path).await?;
+    let operation_id = operation_id("018f1f62-6571-7ef0-8f0c-001122334477")?;
+    admitted_record(
+        store
+            .admit(admission(operation_id.as_str(), 1_000)?)
+            .await?,
+    )?;
+    store.close().await?;
+
+    let mut connection =
+        SqliteConnection::connect(&format!("sqlite:{}", database.path.display())).await?;
+    let legacy_json = serde_json::to_string(&binding()?)?;
+    sqlx::query("UPDATE provider_operations SET binding_json=? WHERE operation_id=?")
+        .bind(&legacy_json)
+        .bind(operation_id.as_str())
+        .execute(&mut connection)
+        .await?;
+    connection.close().await?;
+    let mut store = ProviderOperationStore::open(&database.path).await?;
+    ensure_eq!(
+        store
+            .inspect(&operation_id)
+            .await?
+            .ok_or("legacy decode lost")?
+            .binding,
+        ConversationBindingIdentity::ExternalProvider {
+            binding: binding()?
+        }
+    );
+    store.close().await?;
+    let mut connection =
+        SqliteConnection::connect(&format!("sqlite:{}", database.path.display())).await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/202609240001_conversation_binding_identity.sql"
+    ))
+    .execute(&mut connection)
+    .await?;
+    connection.close().await?;
+
+    let mut store = ProviderOperationStore::open(&database.path).await?;
+    let preserved = store
+        .inspect(&operation_id)
+        .await?
+        .ok_or("legacy row lost")?;
+    ensure_eq!(
+        preserved.binding,
+        ConversationBindingIdentity::ExternalProvider {
+            binding: binding()?
+        }
+    );
+    ensure_eq!(preserved.stage, ProviderOperationStage::Admitted);
+    store.close().await?;
+
+    let mut connection =
+        SqliteConnection::connect(&format!("sqlite:{}", database.path.display())).await?;
+    sqlx::query("UPDATE provider_operations SET binding_json=? WHERE operation_id=?")
+        .bind(r#"{"kind":"codexAcp","endpoint":{"bad":true}}"#)
+        .bind(operation_id.as_str())
+        .execute(&mut connection)
+        .await?;
+    connection.close().await?;
+    let mut store = ProviderOperationStore::open(&database.path).await?;
+    ensure!(matches!(
+        store.inspect(&operation_id).await,
+        Err(ProviderOperationStoreError::InvalidRecord)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_acp_binding_is_distinct_and_survives_reopen() -> TestResult {
+    let database = TestDatabase::new("codex-binding")?;
+    let mut store = ProviderOperationStore::open(&database.path).await?;
+    let binding = ConversationBindingIdentity::CodexAcp {
+        endpoint: endpoint()?,
+        listener_path: NonEmptyText::try_from("/tmp/codex-acp.sock".to_owned())?,
+        generation: binding()?.generation,
+    };
+    let id = operation_id("018f1f62-6571-7ef0-8f0c-001122334478")?;
+    admitted_record(
+        store
+            .admit(ProviderOperationAdmission {
+                operation_id: id.clone(),
+                operation_kind: ProviderOperationKind::ConversationCreate,
+                binding: binding.clone(),
+                admitted_at_ms: 1_000,
+            })
+            .await?,
+    )?;
+    store.close().await?;
+    let mut store = ProviderOperationStore::open(&database.path).await?;
+    ensure_eq!(
+        store
+            .inspect(&id)
+            .await?
+            .ok_or("Codex operation lost")?
+            .binding,
+        binding
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_create_recorder_preserves_target_and_uncertain_dispatch() -> TestResult {
+    let database = TestDatabase::new("codex-recorder")?;
+    let store = std::sync::Arc::new(tokio::sync::Mutex::new(
+        ProviderOperationStore::open(&database.path).await?,
+    ));
+    let endpoint = EndpointRef {
+        service_id: endpoint()?.service_id,
+        endpoint_id: EndpointId::try_from("codex-local".to_owned())?,
+    };
+    let recorder = CodexConversationOperationRecorder::new(
+        std::sync::Arc::clone(&store),
+        endpoint.clone(),
+        NonEmptyText::try_from("/tmp/codex-acp.sock".to_owned())?,
+    );
+    let generation = binding()?.generation;
+    let created_id = operation_id("018f1f62-6571-7ef0-8f0c-001122334479")?;
+    recorder.admit_create(&created_id, &generation).await?;
+    recorder.before_native_dispatch(&created_id).await?;
+    let session_id = SessionId::try_from("new-codex-thread".to_owned())?;
+    recorder.record_created(&created_id, &session_id).await?;
+    let created = store
+        .lock()
+        .await
+        .inspect(&created_id)
+        .await?
+        .ok_or("created operation missing")?;
+    ensure_eq!(
+        created.target,
+        Some(SessionRef {
+            endpoint: endpoint.clone(),
+            session_id
+        })
+    );
+    ensure_eq!(created.effect, ProviderOperationEffect::Applied);
+    ensure_eq!(
+        created.reconciliation_state,
+        ProviderReconciliationState::Confirmed
+    );
+
+    let uncertain_id = operation_id("018f1f62-6571-7ef0-8f0c-001122334480")?;
+    recorder.admit_create(&uncertain_id, &generation).await?;
+    recorder.before_native_dispatch(&uncertain_id).await?;
+    recorder.record_failure(&uncertain_id, false).await?;
+    let uncertain = store
+        .lock()
+        .await
+        .inspect(&uncertain_id)
+        .await?
+        .ok_or("uncertain operation missing")?;
+    ensure_eq!(uncertain.effect, ProviderOperationEffect::Unknown);
+    ensure_eq!(
+        uncertain.reconciliation_state,
+        ProviderReconciliationState::Unresolved
+    );
+
+    let unsubmitted_id = operation_id("018f1f62-6571-7ef0-8f0c-001122334481")?;
+    recorder.admit_create(&unsubmitted_id, &generation).await?;
+    recorder.record_failure(&unsubmitted_id, true).await?;
+    let unsubmitted = store
+        .lock()
+        .await
+        .inspect(&unsubmitted_id)
+        .await?
+        .ok_or("unsubmitted operation missing")?;
+    ensure_eq!(unsubmitted.effect, ProviderOperationEffect::None);
+    ensure_eq!(
+        unsubmitted.reconciliation_state,
+        ProviderReconciliationState::NotReconcilable
+    );
     Ok(())
 }

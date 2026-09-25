@@ -163,8 +163,15 @@ fn stream_and_raw_carrier_entrypoints_report_initial_permission_denial() {
             .output()
             .unwrap_or_else(|error| panic!("stream command {command:?}: {error}"));
         assert_eq!(output.status.code(), Some(3), "command {command:?}");
-        let record: serde_json::Value = serde_json::from_slice(&output.stdout)
+        let records = serde_json::Deserializer::from_slice(&output.stdout)
+            .into_iter::<serde_json::Value>()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap_or_else(|error| panic!("stream output {command:?}: {error}"));
+        if command.first() == Some(&"conversation") {
+            assert_eq!(records[0]["kind"], "conversationOperationStarted");
+            assert!(records[0]["operationId"].as_str().is_some());
+        }
+        let record = records.last().expect("permission failure record");
         assert_eq!(record["error"]["kind"], "permissionDenied");
         assert_eq!(record["error"]["nextAction"], "requestApproval");
     }

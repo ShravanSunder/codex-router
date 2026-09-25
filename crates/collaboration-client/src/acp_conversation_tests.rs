@@ -33,6 +33,7 @@ fn public_prompt_schema_cannot_decode_router_authored_content() {
 #[test]
 fn resumed_session_rejects_creation_settings_before_connection() {
     let request = ConversationCreateRequest {
+        operation_id: collaboration_protocol::OperationId::generate(),
         endpoint: endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f"),
         cwd: std::path::PathBuf::from("/tmp/project"),
         session: Some(SessionId::try_from("existing".to_owned()).expect("session ID")),
@@ -55,16 +56,25 @@ fn resumed_session_rejects_creation_settings_before_connection() {
 #[test]
 fn new_and_forked_conversations_require_local_creator_and_approver_before_setup() {
     let local_endpoint = endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f");
+    let peer_endpoint = EndpointRef {
+        service_id: local_endpoint.service_id.clone(),
+        endpoint_id: EndpointId::try_from("claude-local".to_owned()).expect("peer endpoint"),
+    };
     let foreign_endpoint = endpoint("018f47d2-24d5-7a68-b9ec-6f759c394590");
     let local_identity = SessionRef {
         endpoint: local_endpoint.clone(),
         session_id: SessionId::try_from("caller".to_owned()).expect("session ID"),
+    };
+    let peer_identity = SessionRef {
+        endpoint: peer_endpoint,
+        session_id: SessionId::try_from("peer".to_owned()).expect("session ID"),
     };
     let foreign_identity = SessionRef {
         endpoint: foreign_endpoint,
         session_id: SessionId::try_from("foreign".to_owned()).expect("session ID"),
     };
     let request = |created_by, approver| ConversationCreateRequest {
+        operation_id: collaboration_protocol::OperationId::generate(),
         endpoint: local_endpoint.clone(),
         cwd: std::path::PathBuf::from("/tmp/project"),
         session: None,
@@ -88,13 +98,27 @@ fn new_and_forked_conversations_require_local_creator_and_approver_before_setup(
             "new or forked conversation requires approver"
         ))
     ));
+    assert!(
+        validate_conversation_create_request(&request(
+            Some(peer_identity.clone()),
+            Some(local_identity.clone())
+        ))
+        .is_ok()
+    );
+    assert!(
+        validate_conversation_create_request(&request(
+            Some(local_identity.clone()),
+            Some(peer_identity)
+        ))
+        .is_ok()
+    );
     assert!(matches!(
         validate_conversation_create_request(&request(
             Some(foreign_identity),
             Some(local_identity.clone())
         )),
         Err(ClientError::InvalidRequest(
-            "conversation identities belong to another endpoint"
+            "conversation identities belong to another service"
         ))
     ));
     assert!(
@@ -109,6 +133,7 @@ fn new_and_forked_conversations_require_local_creator_and_approver_before_setup(
 #[test]
 fn existing_session_without_creation_identities_remains_valid() {
     let request = ConversationCreateRequest {
+        operation_id: collaboration_protocol::OperationId::generate(),
         endpoint: endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f"),
         cwd: std::path::PathBuf::from("/tmp/project"),
         session: Some(SessionId::try_from("existing".to_owned()).expect("session ID")),
@@ -142,6 +167,7 @@ async fn sdk_identity_preflight_fails_before_acp_discovery_or_mutation() {
         let result = AcpConversation::create(
             std::path::Path::new("/path-that-must-not-be-read"),
             ConversationCreateRequest {
+                operation_id: collaboration_protocol::OperationId::generate(),
                 endpoint: local_endpoint.clone(),
                 cwd: std::path::PathBuf::from("/tmp/project"),
                 session: None,
@@ -211,6 +237,7 @@ async fn invalid_prompt_deadline_fails_before_discovery_or_creation() {
         std::path::Path::new("/path-that-must-not-be-read"),
         ConversationCreatePromptRequest {
             create: ConversationCreateRequest {
+                operation_id: collaboration_protocol::OperationId::generate(),
                 endpoint,
                 cwd: std::path::PathBuf::from("/tmp/project"),
                 session: None,

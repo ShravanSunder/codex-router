@@ -67,14 +67,14 @@ impl ProviderConversationBackend for DelayedWaitBackend {
             let operation = serde_json::from_value(serde_json::json!({
                 "operationId":request.operation_id,
                 "operation":"conversationPrompt",
-                "binding":{
+                "binding":{"kind":"externalProvider","binding":{
                     "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
                     "bindingId":"binding",
                     "runtime":{"provider":"claudeCode","runtimeName":"fixture","runtimeVersion":null},
                     "transport":"stdioAcp",
                     "generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":1},
                     "capabilities":[{"name":"prompt","status":"supported","evidence":"advertised"}]
-                },
+                }},
                 "target":null,"stage":"mayHaveDispatched","effect":"unknown",
                 "reconciliation":"unresolved","admittedAt":"2026-09-22T00:00:00.000Z","terminalAt":null
             })).expect("snapshot");

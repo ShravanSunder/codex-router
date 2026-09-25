@@ -1,16 +1,16 @@
 use collaboration_client::{
-    AcpConversation, BoundedObservationRequest, BoundedObservationResult, ClientError,
-    ControlClient, ConversationCreatePromptError, ConversationCreatePromptRequest,
-    ConversationCreatePromptResult, ConversationCreateRequest, ConversationCreateResult,
-    ExistingConversationPromptRequest, ExistingConversationPromptResult, MessageSendError,
+    BoundedObservationRequest, BoundedObservationResult, ClientError, ControlClient,
+    ConversationCancelInput, ConversationClient, ConversationClientError,
+    ConversationCreatePromptOutcome, ConversationOperationResult, MessageSendError,
     MessageSendRequest, NativeObservation, OperationEffect, operation_failure_from_client_error,
 };
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
-    ApprovalListResult, DeliveryOutcome, DeliveryReceipt, EndpointInventory, JournalPage,
-    JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
-    NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
-    NativeSessionListParams, NativeSessionListResult,
+    ApprovalListResult, ConversationCreateOutcome, ConversationOperationSubmission,
+    DeliveryOutcome, DeliveryReceipt, EndpointInventory, JournalPage, JournalReadParams,
+    JournalStatus, NativeInspectParams, NativeInspectResult, NativeInterruptParams,
+    NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
+    NativeSessionListResult, OperationId,
 };
 use rmcp::{
     ServerHandler,
@@ -34,14 +34,25 @@ use std::{
 
 mod catalog_descriptions;
 mod catalog_tools;
-mod provider_conversation_tools;
+mod conversation_operation_tools;
+mod conversation_tool_requests;
+mod conversation_tool_results;
 mod schema_binding;
 use catalog_descriptions::operation_description;
 use catalog_tools::{
     EmptyToolInput, ThreadWaitToolInput, register_automation_inspection_tools,
     register_automation_mutation_tools, register_board_tools,
 };
-use provider_conversation_tools::register_provider_conversation_tools;
+use conversation_operation_tools::register_conversation_operation_tools;
+use conversation_tool_requests::{
+    ConversationCreatePromptToolRequest, ConversationCreateToolRequest,
+    ConversationLoadToolRequest, ConversationPromptToolRequest,
+};
+#[cfg(test)]
+use conversation_tool_results::common_prompt_tool_result;
+use conversation_tool_results::{
+    conversation_call_cancelled, conversation_create_tool_result, conversation_tool_result,
+};
 use schema_binding::{bind_native_schema_refs, load_advertised_native_definitions};
 
 #[derive(Clone, Debug)]
@@ -87,7 +98,7 @@ impl CollaborationMcpServer {
         register_board_tools(&mut tool_router);
         register_automation_inspection_tools(&mut tool_router);
         register_automation_mutation_tools(&mut tool_router);
-        register_provider_conversation_tools(&mut tool_router);
+        register_conversation_operation_tools(&mut tool_router);
         Self {
             service_directory,
             tool_router,
@@ -441,41 +452,187 @@ impl CollaborationMcpServer {
         }
     }
 
-    #[tool(name = "conversation_create", description = "Creates, loads, or forks one Codex conversation with explicit endpoint, cwd, model, effort, access, creator, and approver. A lost response may leave creation outcome unknown.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreateResult>())]
+    #[tool(name = "conversation_create", description = "Creates one conversation through its advertised client. Requires a caller UUIDv7 operationId and exact endpoint, working directory, access, and creator. Returns created with target or pending with the inspectable operation ID; optional model, effort, and fork are Codex-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreateOutcome>())]
     async fn conversation_create(
         &self,
-        Parameters(request): Parameters<ConversationCreateRequest>,
-    ) -> CallToolResult {
-        let mut emit = |_event| Ok(());
-        match AcpConversation::create(&self.service_directory, request, &mut emit).await {
-            Ok((_conversation, result)) => structured_result(Ok(result), OperationEffect::Unknown),
-            Err(error) => {
-                let (failure, target, turn_id) = error.into_parts();
-                operation_error_result(failure, target, turn_id)
-            }
-        }
-    }
-
-    #[tool(name = "conversation_create_and_prompt", description = "Creates one fresh Codex conversation and submits its first Agent- or Human-authored prompt on the same call-local ACP connection, then waits for correlated settlement. Requires explicit endpoint, cwd, model, effort, access, creator and approver inputs. The returned target is the actual conversation ID; a completed turn is not an assignment verdict or peer reply. Application deadlines return structured settlement when deliverable, while MCP cancellation or disconnection may suppress the response and does not guarantee every spawned effect ceased. A post-create failure retains the created target when known and is never replayed.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreatePromptResult>())]
-    async fn conversation_create_and_prompt(
-        &self,
-        Parameters(request): Parameters<ConversationCreatePromptRequest>,
+        Parameters(request): Parameters<ConversationCreateToolRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
-        create_prompt_tool_result(
-            AcpConversation::create_and_prompt(&self.service_directory, request, context.ct).await,
-        )
+        let operation_id = request.create.operation_id.clone();
+        let endpoint = request.create.endpoint.clone();
+        let timeout_seconds = request.timeout_seconds.map_or(300, u32::from);
+        if let Err(error) = ConversationClient::validate_create_input(
+            &request.create,
+            Duration::from_secs(u64::from(timeout_seconds)),
+        ) {
+            return conversation_create_tool_result(Err(error), operation_id);
+        }
+        let connected = tokio::select! {
+            _ = context.ct.cancelled() => {
+                return conversation_call_cancelled(OperationEffect::None, Some(&operation_id));
+            }
+            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
+        };
+        let result = match connected {
+            Ok(client) => {
+                tokio::select! {
+                    _ = context.ct.cancelled() => {
+                        return conversation_call_cancelled(OperationEffect::Unknown, Some(&operation_id));
+                    }
+                    result = client
+                    .create(
+                        request.create,
+                        Duration::from_secs(u64::from(timeout_seconds)),
+                    )
+                    => result,
+                }
+            }
+            Err(ConversationClientError::Client(error)) => {
+                return failure(error, OperationEffect::None);
+            }
+            Err(error) => Err(error),
+        };
+        conversation_create_tool_result(result, operation_id)
     }
 
-    #[tool(name = "conversation_prompt", description = "Loads an existing materialized conversation, renders the explicit current sender, submits one prompt, and waits for correlated settlement. For a newly created empty conversation, use message_send for its first input (or the CLI create-and-prompt convenience) before this history-resuming operation. Backend rejection remains explicit; no seed or fallback is sent. Cancellation requests backend cancellation but does not prove cessation.", output_schema = rmcp::handler::server::tool::schema_for_type::<ExistingConversationPromptResult>())]
+    #[tool(name = "conversation_load", description = "Loads one conversation through its advertised client using an exact target, working directory, access and requester. External providers require a caller UUIDv7 operation ID; Codex load must omit it because it is not inspectable. Returns a completed settlement or an inspectable provider operation when pending; uncertain work is never replayed.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationOperationResult>())]
+    async fn conversation_load(
+        &self,
+        Parameters(request): Parameters<ConversationLoadToolRequest>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> CallToolResult {
+        let operation_id = request.load.operation_id.clone();
+        let endpoint = request.load.target.endpoint.clone();
+        let timeout =
+            Duration::from_secs(u64::from(request.timeout_seconds.map_or(300, u32::from)));
+        let connected = tokio::select! {
+            _ = context.ct.cancelled() => {
+                return conversation_call_cancelled(OperationEffect::None, operation_id.as_ref());
+            }
+            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
+        };
+        let result = match connected {
+            Ok(client) => {
+                if let Err(error) =
+                    client.validate_operation_id(&endpoint, operation_id.as_ref(), "load")
+                {
+                    return conversation_tool_result::<ConversationOperationResult>(
+                        Err(error),
+                        operation_id,
+                    );
+                }
+                tokio::select! {
+                _ = context.ct.cancelled() => {
+                    return conversation_call_cancelled(OperationEffect::Unknown, operation_id.as_ref());
+                }
+                result = client.load(request.load, timeout) => result,
+                }
+            }
+            Err(ConversationClientError::Client(error)) => {
+                return failure(error, OperationEffect::None);
+            }
+            Err(error) => Err(error),
+        };
+        conversation_tool_result(result, operation_id)
+    }
+
+    #[tool(name = "conversation_prompt", description = "Prompts one conversation through its advertised client. External providers require a caller UUIDv7 operation ID; Codex prompt must omit it because it is not inspectable. The result records a completed turn or a pending provider operation. Caller cancellation detaches from provider work while Codex uses its native cancellation path.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationOperationResult>())]
     async fn conversation_prompt(
         &self,
-        Parameters(request): Parameters<ExistingConversationPromptRequest>,
+        Parameters(request): Parameters<ConversationPromptToolRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
-        existing_prompt_tool_result(
-            AcpConversation::prompt_existing(&self.service_directory, request, context.ct).await,
+        let operation_id = request.prompt.operation_id.clone();
+        let endpoint = request.prompt.target.endpoint.clone();
+        let timeout =
+            Duration::from_secs(u64::from(request.timeout_seconds.map_or(300, u32::from)));
+        let connected = tokio::select! {
+            _ = context.ct.cancelled() => {
+                return conversation_call_cancelled(OperationEffect::None, operation_id.as_ref());
+            }
+            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
+        };
+        let client = match connected {
+            Ok(client) => client,
+            Err(ConversationClientError::Client(error)) => {
+                return failure(error, OperationEffect::None);
+            }
+            Err(error) => {
+                return conversation_tool_result::<ConversationOperationResult>(
+                    Err(error),
+                    operation_id,
+                );
+            }
+        };
+        if let Err(error) = client.validate_operation_id(&endpoint, operation_id.as_ref(), "prompt")
+        {
+            return conversation_tool_result::<ConversationOperationResult>(
+                Err(error),
+                operation_id,
+            );
+        }
+        let result = if matches!(&client, ConversationClient::ExternalProvider(_)) {
+            tokio::select! {
+                _ = context.ct.cancelled() => {
+                    return conversation_call_cancelled(OperationEffect::Unknown, operation_id.as_ref());
+                }
+                result = client.prompt(request.prompt, timeout, context.ct.clone()) => result,
+            }
+        } else {
+            client.prompt(request.prompt, timeout, context.ct).await
+        };
+        conversation_tool_result(result, operation_id)
+    }
+
+    #[tool(name = "conversation_cancel", description = "Requests cancellation of one exact conversation operation. Requires a new operation ID and the target operation, conversation, and requester; accepted cancellation is distinct from confirmed cessation. Codex ACP reports unsupportedCapability with a turn interrupt fix.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationOperationSubmission>())]
+    async fn conversation_cancel(
+        &self,
+        Parameters(request): Parameters<ConversationCancelInput>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> CallToolResult {
+        let operation_id = request.operation_id.clone();
+        let endpoint = request.target.endpoint.clone();
+        let connected = tokio::select! {
+            _ = context.ct.cancelled() => {
+                return conversation_call_cancelled(OperationEffect::None, Some(&operation_id));
+            }
+            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
+        };
+        let result = match connected {
+            Ok(client) if matches!(&client, ConversationClient::ExternalProvider(_)) => {
+                tokio::select! {
+                    _ = context.ct.cancelled() => {
+                        return conversation_call_cancelled(OperationEffect::Unknown, Some(&operation_id));
+                    }
+                    result = client.cancel(request) => result,
+                }
+            }
+            Ok(client) => client.cancel(request).await,
+            Err(ConversationClientError::Client(error)) => {
+                return failure(error, OperationEffect::None);
+            }
+            Err(error) => Err(error),
+        };
+        conversation_tool_result(result, Some(operation_id))
+    }
+
+    #[tool(name = "conversation_create_and_prompt", description = "Creates a fresh conversation and prompts it through the advertised client. The create operation ID is inspectable; provider prompt requires a second caller UUIDv7 ID, while Codex prompt omits it because it is not inspectable. The result names a pending create or the prompt settlement. A completed turn is not an assignment verdict or peer reply; cancellation never silently replays a submission.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreatePromptOutcome>())]
+    async fn conversation_create_and_prompt(
+        &self,
+        Parameters(request): Parameters<ConversationCreatePromptToolRequest>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> CallToolResult {
+        let operation_id = request.input.create.operation_id.clone();
+        let timeout =
+            Duration::from_secs(u64::from(request.timeout_seconds.map_or(300, u32::from)));
+        let result = ConversationClient::create_and_prompt(
+            &self.service_directory,
+            request.input,
+            timeout,
+            context.ct,
         )
+        .await;
+        conversation_tool_result(result, Some(operation_id))
     }
 
     #[tool(name = "events_observe", description = "Explicitly attaches to one conversation and returns bounded call-local events. It never interrupts work and provides no replay cursor or ordering guarantee with concurrent sends.", output_schema = rmcp::handler::server::tool::schema_for_type::<BoundedObservationResult>())]
@@ -491,21 +648,6 @@ impl CollaborationMcpServer {
                 let (failure, target, turn_id) = error.into_parts();
                 operation_error_result(failure, target, turn_id)
             }
-        }
-    }
-}
-
-fn existing_prompt_tool_result(
-    result: Result<
-        ExistingConversationPromptResult,
-        collaboration_client::ExistingConversationPromptError,
-    >,
-) -> CallToolResult {
-    match result {
-        Ok(value) => structured_result(Ok(value), OperationEffect::None),
-        Err(error) => {
-            let (failure, target, turn_id) = error.into_parts();
-            operation_error_result(failure, target, turn_id)
         }
     }
 }
@@ -563,18 +705,6 @@ fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> Cal
                     CallToolResult::structured_error(value)
                 })
                 .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))
-        }
-    }
-}
-
-fn create_prompt_tool_result(
-    result: Result<ConversationCreatePromptResult, ConversationCreatePromptError>,
-) -> CallToolResult {
-    match result {
-        Ok(value) => structured_result(Ok(value), OperationEffect::None),
-        Err(error) => {
-            let (failure, target, turn_id) = error.into_parts();
-            operation_error_result(failure, target, turn_id)
         }
     }
 }
@@ -740,6 +870,9 @@ impl ServerHandler for CollaborationMcpServer {
             .find(|tool| tool.name == name)
     }
 }
+
+#[cfg(test)]
+mod conversation_result_tests;
 
 #[cfg(test)]
 mod tests;

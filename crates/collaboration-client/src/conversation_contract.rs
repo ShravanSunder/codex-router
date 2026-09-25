@@ -1,7 +1,9 @@
 //! Public request, result, settlement, and failure types for ACP conversations.
 
 use crate::ClientError;
-use collaboration_protocol::{EndpointRef, MessageContent, SessionId, SessionRef, UuidIdentity};
+use collaboration_protocol::{
+    EndpointRef, MessageContent, OperationId, SessionId, SessionRef, UuidIdentity,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,6 +26,7 @@ pub enum ConversationEvent {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationCreateRequest {
+    pub operation_id: OperationId,
     pub endpoint: EndpointRef,
     pub cwd: std::path::PathBuf,
     pub session: Option<SessionId>,

@@ -4,7 +4,7 @@ use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
 use collaboration_protocol::{
-    CodexGeneration, RouterAccess, SettingsObservation, SettingsObservationSource,
+    CodexGeneration, OperationId, RouterAccess, SettingsObservation, SettingsObservationSource,
     SettingsUnavailableReason,
 };
 use serde_json::{Value, json};
@@ -192,6 +192,8 @@ pub struct SessionSetupInputs {
     pub generation: CodexGeneration,
     pub params: Value,
     pub approval_broker: std::sync::Arc<dyn crate::ApprovalBroker>,
+    pub operation_id: Option<OperationId>,
+    pub recorder: std::sync::Arc<dyn crate::ConversationOperationRecorder>,
 }
 impl AcpSessionBinding {
     pub async fn create(
@@ -323,6 +325,13 @@ impl AcpSessionBinding {
         if let Some(fork_thread_id) = choice.fork_thread_id {
             fields.insert("threadId".into(), json!(fork_thread_id));
             fields.insert("excludeTurns".into(), json!(true));
+        }
+        if let Some(operation_id) = &inputs.operation_id {
+            inputs
+                .recorder
+                .before_native_dispatch(operation_id)
+                .await
+                .map_err(|_| SessionSetupError::Unavailable)?;
         }
         let result = connection
             .request_validated(&inputs.schemas, operation, native)

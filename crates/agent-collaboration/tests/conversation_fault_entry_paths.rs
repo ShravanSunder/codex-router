@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
 //! CLI subprocess proof for conversation failures before any ACP dispatch.
 
 use serde_json::Value;
@@ -8,31 +9,43 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-#[allow(clippy::panic)]
-fn validate_conversation_records(
-    stdout: &[u8],
-    label: &str,
-) -> Vec<collaboration_client::protocol::ConversationRecord> {
-    let schemas = collaboration_client::protocol::protocol_type_schemas()
-        .unwrap_or_else(|error| panic!("{label} schema export: {error}"));
-    let schema = schemas
-        .get("ConversationRecord")
-        .unwrap_or_else(|| panic!("{label} ConversationRecord schema"));
-    let validator = jsonschema::validator_for(schema)
-        .unwrap_or_else(|error| panic!("{label} validator: {error}"));
-    String::from_utf8(stdout.to_vec())
-        .unwrap_or_else(|error| panic!("{label} UTF-8: {error}"))
+fn create_result_line(stdout: &[u8]) -> Value {
+    let lines: Vec<_> = String::from_utf8_lossy(stdout)
         .lines()
-        .map(|line| {
-            let value: Value =
-                serde_json::from_str(line).unwrap_or_else(|error| panic!("{label} JSON: {error}"));
-            if let Err(error) = validator.validate(&value) {
-                panic!("{label} exported schema rejected actual stdout: {error}; {value}");
-            }
-            serde_json::from_value(value)
-                .unwrap_or_else(|error| panic!("{label} record contract: {error}"))
-        })
-        .collect()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines.len(), 2, "create operation ID precedes its result");
+    let started: collaboration_client::protocol::ConversationRecord =
+        serde_json::from_str(&lines[0]).expect("operation start record");
+    assert!(matches!(
+        started,
+        collaboration_client::protocol::ConversationRecord::ConversationCreateStarted { .. }
+    ));
+    serde_json::from_str(&lines[1]).expect("create result JSON")
+}
+
+fn create_prompt_result_line(stdout: &[u8]) -> Value {
+    let lines: Vec<_> = String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "create operation ID precedes prompt outcome"
+    );
+    let started: collaboration_client::protocol::ConversationRecord =
+        serde_json::from_str(&lines[0]).expect("operation start");
+    assert!(matches!(
+        started,
+        collaboration_client::protocol::ConversationRecord::ConversationOperationStarted { .. }
+    ));
+    let value: Value = serde_json::from_str(&lines[1]).expect("create prompt outcome");
+    if value["kind"] != "error" {
+        let _: collaboration_client::ConversationCreatePromptOutcome =
+            serde_json::from_value(value.clone()).expect("typed create prompt outcome");
+    }
+    value
 }
 
 #[tokio::test]
@@ -74,13 +87,13 @@ async fn standalone_create_manifest_preflight_reports_no_effect_without_acp_disp
     // about a conversation that might have been created.
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stderr.is_empty());
-    let record: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
+    let record: Value = create_result_line(&output.stdout);
     let typed_record: collaboration_client::protocol::ConversationRecord =
         serde_json::from_value(record.clone()).expect("published ConversationRecord");
     assert_eq!(record["kind"], "conversationError");
     assert_eq!(record["target"], Value::Null);
     assert_eq!(record["error"]["effect"], "none");
-    assert_eq!(record["error"]["stage"], "connect");
+    assert_eq!(record["error"]["stage"], "manifest-read");
     assert!(matches!(
         typed_record,
         collaboration_client::protocol::ConversationRecord::ConversationError { .. }
@@ -147,6 +160,10 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
         )
         .expect("new JSON");
         assert_eq!(creation["method"], "session/new");
+        assert_eq!(
+            creation["params"]["_meta"]["codexRouter"]["operationId"],
+            "019c6e27-e55b-73d1-87d8-4e01f1f75131"
+        );
         // Drop after the real fork allocation request is observed: no second request
         // is accepted, and the CLI must retain possible-effect uncertainty.
     });
@@ -166,6 +183,8 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
                 "low",
                 "--access",
                 "workspace-write",
+                "--operation-id",
+                "019c6e27-e55b-73d1-87d8-4e01f1f75131",
                 "--cwd",
             ])
             .arg(&root)
@@ -193,6 +212,38 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
     assert_eq!(record["kind"], "conversationError");
     assert_eq!(record["error"]["stage"], "fork");
     assert_eq!(record["error"]["effect"], "unknown");
+}
+
+#[tokio::test]
+async fn fork_rejects_uninspectable_prompt_operation_id() {
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "conversation",
+            "prompt",
+            "--endpoint",
+            "codex-local",
+            "--fork",
+            "source-thread",
+            "--prompt-operation-id",
+            "019c6e27-e55b-73d1-87d8-4e01f1f75132",
+            "--cwd",
+            "/tmp",
+            "--access",
+            "workspace-write",
+            "--text",
+            "hello",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("fork rejection output");
+    assert_eq!(output.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&output.stdout).expect("rejection JSON");
+    assert_eq!(error["error"]["kind"], "unsupportedCapability");
+    assert_eq!(
+        error["error"]["message"],
+        "omit the operation ID for Codex prompts; it is not inspectable"
+    );
 }
 
 #[tokio::test]
@@ -272,7 +323,7 @@ async fn acp_initialize_response_loss_reports_no_effect_before_conversation_crea
     std::fs::remove_file(root.join("acp.sock")).expect("ACP cleanup");
     std::fs::remove_dir(&root).expect("fixture cleanup");
     assert_eq!(output.status.code(), Some(2));
-    let record: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
+    let record: Value = create_result_line(&output.stdout);
     let _: collaboration_client::protocol::ConversationRecord =
         serde_json::from_value(record.clone()).expect("published ConversationRecord");
     assert_eq!(record["kind"], "conversationError");
@@ -324,14 +375,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
     let (interrupt_prompt_seen, interrupt_prompt_ready) = tokio::sync::oneshot::channel();
     let peer = tokio::spawn(async move {
         let mut interrupt_prompt_seen = Some(interrupt_prompt_seen);
-        for outcome in [
-            "create-probe",
-            "create",
-            "success",
-            "rejected",
-            "deadline",
-            "interrupt",
-        ] {
+        for outcome in ["create", "success", "rejected", "deadline", "interrupt"] {
             let (stream, _) = acp.accept().await.expect("ACP accept");
             let (reader, mut writer) = stream.into_split();
             let mut lines = BufReader::new(reader).lines();
@@ -345,9 +389,6 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
             .expect("init JSON");
             assert_eq!(initialize["method"], "initialize");
             writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}})).as_bytes()).await.expect("init response");
-            if outcome == "create-probe" {
-                continue;
-            }
             let creation: Value = serde_json::from_str(
                 &lines
                     .next_line()
@@ -362,6 +403,38 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
             if outcome == "create" {
                 continue;
             }
+            let (stream, _) = acp.accept().await.expect("prompt ACP accept");
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            let initialize: Value = serde_json::from_str(
+                &lines
+                    .next_line()
+                    .await
+                    .expect("prompt init read")
+                    .expect("prompt init frame"),
+            )
+            .expect("prompt init JSON");
+            assert_eq!(initialize["method"], "initialize");
+            writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}})).as_bytes()).await.expect("prompt init response");
+            let load: Value = serde_json::from_str(
+                &lines
+                    .next_line()
+                    .await
+                    .expect("load read")
+                    .expect("load frame"),
+            )
+            .expect("load JSON");
+            assert_eq!(load["method"], "session/load");
+            writer
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({"jsonrpc":"2.0","id":load["id"],"result":{"sessionId":session_id}})
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("load response");
             let prompt: Value = serde_json::from_str(
                 &lines
                     .next_line()
@@ -416,11 +489,28 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .await
         .expect("create output");
     assert!(create.status.success());
-    let created_records = validate_conversation_records(&create.stdout, "created");
-    assert!(created_records.iter().any(|record| matches!(
-        record,
-        collaboration_client::protocol::ConversationRecord::ConversationCreated { .. }
-    )));
+    let output_lines: Vec<_> = String::from_utf8_lossy(&create.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(output_lines.len(), 2, "one operation start and one outcome");
+    let started: collaboration_client::protocol::ConversationRecord =
+        serde_json::from_str(&output_lines[0]).expect("operation start");
+    let outcome: collaboration_client::protocol::ConversationCreateOutcome =
+        serde_json::from_str(&output_lines[1]).expect("create outcome");
+    let (
+        collaboration_client::protocol::ConversationRecord::ConversationCreateStarted {
+            operation_id,
+        },
+        collaboration_client::protocol::ConversationCreateOutcome::Created {
+            operation_id: result_id,
+            ..
+        },
+    ) = (started, outcome)
+    else {
+        panic!("create must print the operation ID before its result")
+    };
+    assert_eq!(operation_id, result_id);
 
     async fn prompt(root: &std::path::Path, timeout_seconds: u64) -> std::process::Output {
         tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -453,33 +543,37 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
     }
     let success = prompt(&root, 5).await;
     assert!(success.status.success());
-    let success_records = validate_conversation_records(&success.stdout, "success");
-    assert!(success_records.iter().any(|record| matches!(
-        record,
-        collaboration_client::protocol::ConversationRecord::PromptResult { .. }
-    )));
+    let success_result = create_prompt_result_line(&success.stdout);
+    assert_eq!(success_result["kind"], "prompt");
+    assert_eq!(success_result["prompt"]["kind"], "completed");
+    assert_eq!(
+        success_result["prompt"]["settlement"]["detail"]["kind"],
+        "codexPrompt"
+    );
+    assert!(success_result["prompt"].get("operationId").is_none());
 
     let rejected = prompt(&root, 5).await;
     assert_eq!(rejected.status.code(), Some(4));
-    let rejected_records = validate_conversation_records(&rejected.stdout, "rejection");
-    assert!(matches!(
-        rejected_records.last(),
-        Some(collaboration_client::protocol::ConversationRecord::ConversationError { .. })
-    ));
+    let rejected_result = create_prompt_result_line(&rejected.stdout);
+    assert_eq!(rejected_result["kind"], "error");
+    assert_eq!(rejected_result["error"]["kind"], "afterCreate");
+    assert_eq!(
+        rejected_result["error"]["target"]["sessionId"],
+        "rejected-thread"
+    );
+    assert_eq!(rejected_result["error"]["source"]["code"], -32603);
+    assert_eq!(
+        rejected_result["error"]["source"]["data"]["kind"],
+        "nativeRejected"
+    );
 
     let deadline = prompt(&root, 1).await;
     assert_eq!(deadline.status.code(), Some(124));
-    let deadline_records = validate_conversation_records(&deadline.stdout, "deadline");
-    assert!(matches!(
-        deadline_records.last(),
-        Some(
-            collaboration_client::protocol::ConversationRecord::ConversationSettlement {
-                terminal_reason:
-                    collaboration_client::protocol::ConversationTerminalReason::TimedOut,
-                ..
-            }
-        )
-    ));
+    let deadline_result = create_prompt_result_line(&deadline.stdout);
+    assert_eq!(
+        deadline_result["prompt"]["settlement"]["stopReason"],
+        "timedOut"
+    );
 
     let mut interrupted = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
     interrupted
@@ -531,17 +625,11 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .expect("interrupt deadline")
         .expect("interrupt output");
     assert_eq!(interrupted.status.code(), Some(130));
-    let interrupted_records = validate_conversation_records(&interrupted.stdout, "interrupt");
-    assert!(matches!(
-        interrupted_records.last(),
-        Some(
-            collaboration_client::protocol::ConversationRecord::ConversationSettlement {
-                terminal_reason:
-                    collaboration_client::protocol::ConversationTerminalReason::Cancelled,
-                ..
-            }
-        )
-    ));
+    let interrupted_result = create_prompt_result_line(&interrupted.stdout);
+    assert_eq!(
+        interrupted_result["prompt"]["settlement"]["stopReason"],
+        "cancelled"
+    );
 
     tokio::time::timeout(Duration::from_secs(5), peer)
         .await
@@ -759,31 +847,7 @@ async fn conversation_create_without_identity_or_from_reports_unavailable() {
         .expect("publish manifest");
     let stop = CancellationToken::new();
     let service = tokio::spawn(control.run(stop.clone()));
-    let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).expect("ACP bind");
-    let peer = tokio::spawn(async move {
-        let (stream, _) = acp.accept().await.expect("ACP accept");
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        let initialize: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("init read")
-                .expect("init frame"),
-        )
-        .expect("init JSON");
-        assert_eq!(initialize["method"], "initialize");
-        writer
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}})
-                )
-                .as_bytes(),
-            )
-            .await
-            .expect("init response");
-    });
+    // Creator validation precedes the ACP connection in the common create path.
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -812,14 +876,12 @@ async fn conversation_create_without_identity_or_from_reports_unavailable() {
     .await
     .expect("CLI deadline")
     .expect("CLI output");
-    let _ = peer.await;
     stop.cancel();
     let _ = service.await;
     drop(publication);
-    let _ = std::fs::remove_file(root.join("acp.sock"));
     std::fs::remove_dir(&root).expect("fixture cleanup");
     assert_eq!(output.status.code(), Some(2));
-    let record: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
+    let record: Value = create_result_line(&output.stdout);
     assert_eq!(record["kind"], "conversationError");
     assert_eq!(
         record["error"]["message"],
@@ -864,7 +926,7 @@ async fn conversation_create_from_supplies_created_by_without_env() {
     let service = tokio::spawn(control.run(stop.clone()));
     let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).expect("ACP bind");
     let peer = tokio::spawn(async move {
-        for outcome in ["create-probe", "create"] {
+        for outcome in ["create", "cancel", "load", "prompt", "prompt-id", "load-id"] {
             let (stream, _) = acp.accept().await.expect("ACP accept");
             let (reader, mut writer) = stream.into_split();
             let mut lines = BufReader::new(reader).lines();
@@ -887,7 +949,36 @@ async fn conversation_create_from_supplies_created_by_without_env() {
                 )
                 .await
                 .expect("init response");
-            if outcome == "create-probe" {
+            if matches!(outcome, "cancel" | "prompt-id" | "load-id") {
+                assert!(
+                    lines.next_line().await.expect("cancel read").is_none(),
+                    "Codex cancel must not send ACP work"
+                );
+                continue;
+            }
+            if outcome == "load" || outcome == "prompt" {
+                let load: Value = serde_json::from_str(
+                    &lines
+                        .next_line()
+                        .await
+                        .expect("load read")
+                        .expect("load frame"),
+                )
+                .expect("load JSON");
+                assert_eq!(load["method"], "session/load");
+                writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":load["id"],"result":{"sessionId":"created-from-override"}})).as_bytes()).await.expect("load response");
+                if outcome == "prompt" {
+                    let prompt: Value = serde_json::from_str(
+                        &lines
+                            .next_line()
+                            .await
+                            .expect("prompt read")
+                            .expect("prompt frame"),
+                    )
+                    .expect("prompt JSON");
+                    assert_eq!(prompt["method"], "session/prompt");
+                    writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).as_bytes()).await.expect("prompt response");
+                }
                 continue;
             }
             let creation: Value = serde_json::from_str(
@@ -950,20 +1041,200 @@ async fn conversation_create_from_supplies_created_by_without_env() {
     .await
     .expect("CLI deadline")
     .expect("CLI output");
+    assert!(
+        output.status.success(),
+        "stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let outcome = create_result_line(&output.stdout);
+    assert_eq!(outcome["kind"], "created");
+    assert_eq!(outcome["target"]["sessionId"], "created-from-override");
+    let target = outcome["target"].to_string();
+    let cancel = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "conversation",
+            "cancel",
+            "--target",
+            &target,
+            "--target-operation-id",
+            "019c6e27-e55b-73d1-87d8-4e01f1f75122",
+            "--from",
+            &from,
+            "--service-directory",
+        ])
+        .arg(&root)
+        .arg("--json")
+        .output()
+        .await
+        .expect("cancel output");
+    assert_eq!(cancel.status.code(), Some(4));
+    let cancelled: Value = serde_json::from_slice(&cancel.stdout).expect("cancel JSON");
+    assert_eq!(cancelled["error"]["kind"], "unsupportedCapability");
+    assert!(
+        cancelled["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("turn interrupt"))
+    );
+
+    let load = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "conversation",
+            "load",
+            "--target",
+            &target,
+            "--access",
+            "workspace-write",
+            "--from",
+            &from,
+            "--cwd",
+        ])
+        .arg(&root)
+        .args(["--service-directory"])
+        .arg(&root)
+        .arg("--json")
+        .output()
+        .await
+        .expect("load output");
+    assert!(
+        load.status.success(),
+        "stdout={}",
+        String::from_utf8_lossy(&load.stdout)
+    );
+    let loaded: Value = serde_json::from_slice(&load.stdout).expect("load JSON");
+    assert_eq!(loaded["kind"], "completed");
+    assert_eq!(loaded["settlement"]["detail"]["kind"], "codexLoad");
+    assert!(loaded.get("operationId").is_none());
+
+    let prompt = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "conversation",
+            "prompt",
+            "--to",
+            &target,
+            "--from",
+            &from,
+            "--cwd",
+        ])
+        .arg(&root)
+        .args(["--text", "hello", "--service-directory"])
+        .arg(&root)
+        .arg("--json")
+        .output()
+        .await
+        .expect("prompt output");
+    assert!(
+        prompt.status.success(),
+        "stdout={}",
+        String::from_utf8_lossy(&prompt.stdout)
+    );
+    let prompted: Value = serde_json::from_slice(&prompt.stdout).expect("prompt JSON");
+    assert_eq!(prompted["kind"], "completed");
+    assert_eq!(prompted["settlement"]["detail"]["kind"], "codexPrompt");
+    assert!(prompted.get("operationId").is_none());
+
+    let supplied_id = "019c6e27-e55b-73d1-87d8-4e01f1f75133";
+    let prompt_id = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "conversation",
+            "prompt",
+            "--to",
+            &target,
+            "--from",
+            &from,
+            "--cwd",
+        ])
+        .arg(&root)
+        .args([
+            "--text",
+            "hello",
+            "--operation-id",
+            supplied_id,
+            "--service-directory",
+        ])
+        .arg(&root)
+        .arg("--json")
+        .output()
+        .await
+        .expect("prompt ID rejection output");
+    assert_eq!(prompt_id.status.code(), Some(2));
+    let prompt_error: Value =
+        serde_json::from_slice(&prompt_id.stdout).expect("prompt ID rejection JSON");
+    assert_eq!(prompt_error["error"]["kind"], "unsupportedCapability");
+    assert_eq!(
+        prompt_error["error"]["message"],
+        "omit the operation ID for Codex prompts; it is not inspectable"
+    );
+
+    let load_id = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "conversation",
+            "load",
+            "--target",
+            &target,
+            "--from",
+            &from,
+            "--cwd",
+        ])
+        .arg(&root)
+        .args([
+            "--access",
+            "workspace-write",
+            "--operation-id",
+            supplied_id,
+            "--service-directory",
+        ])
+        .arg(&root)
+        .arg("--json")
+        .output()
+        .await
+        .expect("load ID rejection output");
+    assert_eq!(load_id.status.code(), Some(2));
+    let load_error: Value =
+        serde_json::from_slice(&load_id.stdout).expect("load ID rejection JSON");
+    assert_eq!(load_error["error"]["kind"], "unsupportedCapability");
+    assert_eq!(
+        load_error["error"]["message"],
+        "omit the operation ID for Codex prompts; it is not inspectable"
+    );
+
+    let new_prompt_id = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "conversation",
+            "prompt",
+            "--new",
+            "--endpoint",
+            "codex-local",
+            "--from",
+            &from,
+            "--cwd",
+        ])
+        .arg(&root)
+        .args([
+            "--access",
+            "workspace-write",
+            "--text",
+            "hello",
+            "--prompt-operation-id",
+            supplied_id,
+            "--service-directory",
+        ])
+        .arg(&root)
+        .arg("--json")
+        .output()
+        .await
+        .expect("new prompt ID rejection output");
+    assert_eq!(new_prompt_id.status.code(), Some(2));
+    let new_error = create_prompt_result_line(&new_prompt_id.stdout);
+    assert_eq!(new_error["error"]["kind"], "unsupportedCapability");
+    assert_eq!(
+        new_error["error"]["message"],
+        "omit the operation ID for Codex prompts; it is not inspectable"
+    );
+
     peer.await.expect("peer join");
     stop.cancel();
     service.await.expect("service join").expect("service stop");
     drop(publication);
     let _ = std::fs::remove_file(root.join("acp.sock"));
     std::fs::remove_dir(&root).expect("fixture cleanup");
-    assert!(
-        output.status.success(),
-        "stdout={}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let created_records = validate_conversation_records(&output.stdout, "from override");
-    assert!(created_records.iter().any(|record| matches!(
-        record,
-        collaboration_client::protocol::ConversationRecord::ConversationCreated { .. }
-    )));
 }

@@ -170,6 +170,22 @@ pub struct ProviderBindingIdentity {
     pub capabilities: ProviderCapabilities,
 }
 
+/// The binding that admitted a conversation operation. External provider identity
+/// remains distinct from the Codex ACP listener that owns a native session.
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ConversationBindingIdentity {
+    ExternalProvider {
+        binding: ProviderBindingIdentity,
+    },
+    #[serde(rename_all = "camelCase")]
+    CodexAcp {
+        endpoint: EndpointRef,
+        listener_path: NonEmptyText,
+        generation: CodexGeneration,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ProviderWorkingDirectory(String);
@@ -306,7 +322,7 @@ pub enum ProviderReconciliationState {
 pub struct ConversationOperationSnapshot {
     pub operation_id: OperationId,
     pub operation: ProviderOperationKind,
-    pub binding: ProviderBindingIdentity,
+    pub binding: ConversationBindingIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<SessionRef>,
     pub stage: ProviderOperationStage,
@@ -336,7 +352,8 @@ pub struct ConversationOperationSubmission {
 pub struct ConversationCreateRequest {
     pub operation_id: OperationId,
     pub endpoint: EndpointRef,
-    pub generation: CodexGeneration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<CodexGeneration>,
     pub working_directory: ProviderWorkingDirectory,
     pub created_by: SessionRef,
     pub approver: SessionRef,
@@ -348,7 +365,8 @@ pub struct ConversationCreateRequest {
 pub struct ConversationLoadRequest {
     pub operation_id: OperationId,
     pub target: SessionRef,
-    pub generation: CodexGeneration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<CodexGeneration>,
     pub working_directory: ProviderWorkingDirectory,
     pub requested_by: SessionRef,
     pub approver: SessionRef,
@@ -360,7 +378,8 @@ pub struct ConversationLoadRequest {
 pub struct ConversationPromptRequest {
     pub operation_id: OperationId,
     pub target: SessionRef,
-    pub generation: CodexGeneration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<CodexGeneration>,
     pub requested_by: SessionRef,
     pub approver: SessionRef,
     pub prompt: MessageContent,
@@ -372,7 +391,8 @@ pub struct ConversationCancelRequest {
     pub operation_id: OperationId,
     pub target_operation_id: OperationId,
     pub target: SessionRef,
-    pub generation: CodexGeneration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<CodexGeneration>,
     pub requested_by: SessionRef,
     pub approver: SessionRef,
 }

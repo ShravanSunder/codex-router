@@ -1,6 +1,6 @@
 use super::*;
 
-macro_rules! provider_conversation_tool {
+macro_rules! conversation_operation_tool {
     ($router:expr, $name:literal, $request:ty, $result:ty, $method:ident, $possible_effect:expr) => {
         $router.add_route(ToolRoute::new_dyn(
             Tool::new(
@@ -24,7 +24,7 @@ macro_rules! provider_conversation_tool {
                     };
                     let mut client = match tokio::select! {
                         _ = cancellation.cancelled() => {
-                            return Ok(CallToolResponse::Complete(provider_call_cancelled(OperationEffect::None)));
+                            return Ok(CallToolResponse::Complete(operation_call_cancelled(OperationEffect::None)));
                         }
                         result = context.service.connect() => result,
                     } {
@@ -39,12 +39,12 @@ macro_rules! provider_conversation_tool {
                     let result = tokio::select! {
                         _ = cancellation.cancelled() => {
                             let _closed = client.close().await;
-                            return Ok(CallToolResponse::Complete(provider_call_cancelled($possible_effect)));
+                            return Ok(CallToolResponse::Complete(operation_call_cancelled($possible_effect)));
                         }
                         result = client.$method(request) => result,
                     };
                     let _closed = client.close().await;
-                    Ok(CallToolResponse::Complete(provider_conversation_result(
+                    Ok(CallToolResponse::Complete(conversation_operation_result(
                         result,
                         $possible_effect,
                     )))
@@ -54,71 +54,39 @@ macro_rules! provider_conversation_tool {
     };
 }
 
-fn provider_call_cancelled(possible_effect: OperationEffect) -> CallToolResult {
+fn operation_call_cancelled(possible_effect: OperationEffect) -> CallToolResult {
     CallToolResult::structured_error(serde_json::json!({
         "kind": "callerCancelled",
         "stage": "response",
         "effect": possible_effect,
-        "message": "caller cancelled the call-local MCP attachment; provider work was not cancelled"
+        "message": "caller cancelled the call-local MCP attachment; conversation work was not cancelled"
     }))
 }
 
-pub(super) fn register_provider_conversation_tools(
+pub(super) fn register_conversation_operation_tools(
     router: &mut ToolRouter<CollaborationMcpServer>,
 ) {
     use collaboration_protocol::*;
 
-    provider_conversation_tool!(
+    conversation_operation_tool!(
         router,
-        "provider_conversation_create",
-        ConversationCreateRequest,
-        ConversationOperationSubmission,
-        create_provider_conversation,
-        OperationEffect::Unknown
-    );
-    provider_conversation_tool!(
-        router,
-        "provider_conversation_load",
-        ConversationLoadRequest,
-        ConversationOperationSubmission,
-        load_provider_conversation,
-        OperationEffect::Unknown
-    );
-    provider_conversation_tool!(
-        router,
-        "provider_conversation_prompt",
-        ConversationPromptRequest,
-        ConversationOperationSubmission,
-        prompt_provider_conversation,
-        OperationEffect::Unknown
-    );
-    provider_conversation_tool!(
-        router,
-        "provider_conversation_cancel",
-        ConversationCancelRequest,
-        ConversationOperationSubmission,
-        cancel_provider_conversation_operation,
-        OperationEffect::Unknown
-    );
-    provider_conversation_tool!(
-        router,
-        "provider_conversation_operation_show",
+        "conversation_operation_show",
         ConversationOperationShowRequest,
         ConversationOperationSnapshot,
         show_provider_conversation_operation,
         OperationEffect::None
     );
-    provider_conversation_tool!(
+    conversation_operation_tool!(
         router,
-        "provider_conversation_operation_wait",
+        "conversation_operation_wait",
         ConversationOperationWaitRequest,
         ConversationOperationWaitResult,
         wait_for_provider_conversation_operation,
         OperationEffect::None
     );
-    provider_conversation_tool!(
+    conversation_operation_tool!(
         router,
-        "provider_conversation_operation_reconcile",
+        "conversation_operation_reconcile",
         ConversationOperationReconcileRequest,
         ConversationOperationSnapshot,
         reconcile_provider_conversation_operation,
@@ -126,7 +94,7 @@ pub(super) fn register_provider_conversation_tools(
     );
 }
 
-fn provider_conversation_result<TValue: serde::Serialize>(
+fn conversation_operation_result<TValue: serde::Serialize>(
     result: Result<TValue, ClientError>,
     possible_effect: OperationEffect,
 ) -> CallToolResult {
@@ -140,10 +108,10 @@ fn provider_conversation_result<TValue: serde::Serialize>(
             Ok(failure) => serde_json::to_value(failure)
                 .map(CallToolResult::structured_error)
                 .unwrap_or_else(|_| {
-                    validation_failure("provider conversation failure encoding failed")
+                    validation_failure("conversation operation failure encoding failed")
                 }),
             Err(_) => failure(
-                ClientError::Protocol("invalid provider conversation failure response"),
+                ClientError::Protocol("invalid conversation operation failure response"),
                 possible_effect,
             ),
         },
@@ -157,13 +125,13 @@ mod tests {
 
     #[test]
     fn cancellation_effect_reflects_submission_boundary() {
-        let before_submission = provider_call_cancelled(OperationEffect::None)
+        let before_submission = operation_call_cancelled(OperationEffect::None)
             .structured_content
             .expect("pre-submission cancellation");
         assert_eq!(before_submission["kind"], "callerCancelled");
         assert_eq!(before_submission["effect"], "none");
 
-        let after_submission = provider_call_cancelled(OperationEffect::Unknown)
+        let after_submission = operation_call_cancelled(OperationEffect::Unknown)
             .structured_content
             .expect("post-submission cancellation");
         assert_eq!(after_submission["kind"], "callerCancelled");

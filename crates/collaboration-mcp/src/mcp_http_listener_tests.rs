@@ -566,7 +566,7 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
     assert!(tool_names.contains(&"endpoints_list"));
-    assert_eq!(tool_names.len(), 97);
+    assert_eq!(tool_names.len(), 95);
     let tools = tools_body
         .pointer("/result/tools")
         .and_then(Value::as_array)
@@ -575,10 +575,7 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
         ("wake_send", "native input acceptance"),
         ("schedule_prepare", "Preparation mutates"),
         ("board_message_post", "Saving the message"),
-        (
-            "conversation_create_and_prompt",
-            "same call-local ACP connection",
-        ),
+        ("conversation_create_and_prompt", "advertised client"),
     ] {
         let description = tools
             .iter()
@@ -619,13 +616,23 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
     );
     let create = client.post(listener.local_url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-session-id",session_id.clone()).header("mcp-protocol-version","2025-11-25").json(&json!({
             "jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"conversation_create","arguments":{
-                "endpoint":endpoint,"cwd":temporary.path(),"session":null,"fork":null,
+                "operationId":collaboration_protocol::OperationId::generate(),
+                "endpoint":endpoint,"workingDirectory":temporary.path(),"fork":null,
                 "model":"gpt-5.6-luna","effort":"low","access":"workspace-write",
                 "createdBy":{"endpoint":endpoint,"sessionId":"mcp-creator"},
                 "approver":{"endpoint":endpoint,"sessionId":"mcp-approver"},"rootMessageId":null
             }}
         })).send().await.expect("conversation create response");
     let create_body = protocol_response_json(create).await;
+    assert_eq!(
+        create_body.pointer("/result/structuredContent/kind"),
+        Some(&json!("created"))
+    );
+    assert!(
+        create_body
+            .pointer("/result/structuredContent/operationId")
+            .is_some()
+    );
     let created_target = create_body
         .pointer("/result/structuredContent/target")
         .cloned()
@@ -674,7 +681,9 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
     assert!(reconnect_initialized.status().is_success());
     let resumed = client.post(listener.local_url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-session-id",reconnect_session_id.clone()).header("mcp-protocol-version","2025-11-25").json(&json!({
             "jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"conversation_prompt","arguments":{
-                "target":created_target.clone(),"cwd":temporary.path(),"prompt":{"message":{"kind":"humanUser","text":"resume without replay"},"effort":null,"timeoutSeconds":3}
+                "target":created_target.clone(),"workingDirectory":temporary.path(),
+                "requestedBy":created_target.clone(),
+                "message":{"kind":"humanUser","text":"resume without replay"},"timeoutSeconds":3
             }}
         })).send().await.expect("reconnect prompt response");
     let resumed_body = protocol_response_json(resumed).await;
@@ -690,7 +699,9 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
     let active_prompt = tokio::spawn(async move {
         active_client.post(active_url).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-session-id",active_session_id).header("mcp-protocol-version","2025-11-25").json(&json!({
                 "jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"conversation_prompt","arguments":{
-                    "target":active_target,"cwd":active_cwd,"prompt":{"message":{"kind":"humanUser","text":"active shutdown proof"},"effort":null,"timeoutSeconds":60}
+                    "target":active_target.clone(),"workingDirectory":active_cwd,
+                    "requestedBy":active_target,
+                    "message":{"kind":"humanUser","text":"active shutdown proof"},"timeoutSeconds":60
                 }}
             })).send().await
     });
@@ -930,7 +941,9 @@ async fn run_initialized_mcp_resumed_prompt_after_load(load_error: Option<Value>
         .header("mcp-protocol-version", "2025-11-25")
         .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"conversation_prompt","arguments":{
             "target":{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"resumed-thread"},
-            "cwd":temporary.path(),"prompt":{"message":{"kind":"humanUser","text":"resume proof"},"effort":null,"timeoutSeconds":3}
+            "workingDirectory":temporary.path(),
+            "requestedBy":{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"resumed-thread"},
+            "message":{"kind":"humanUser","text":"resume proof"},"timeoutSeconds":3
         }}}))
         .send()
         .await
@@ -1413,7 +1426,8 @@ async fn run_initialized_mcp_create_response_loss(
     let session_id = initialize_mcp_session(&client, &listener, "create-loss-proof").await;
     let response = client.post(listener.local_url()).header(CONTENT_TYPE, "application/json").header(ACCEPT, "application/json, text/event-stream").header("mcp-session-id", session_id).header("mcp-protocol-version", "2025-11-25").json(&json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"conversation_create","arguments":{
-            "endpoint":endpoint,"cwd":temporary.path(),"session":null,"fork":if fork { json!("fork-source") } else { Value::Null },
+            "operationId":collaboration_protocol::OperationId::generate(),
+            "endpoint":endpoint,"workingDirectory":temporary.path(),"fork":if fork { json!("fork-source") } else { Value::Null },
             "model":"gpt-5.6-luna","effort":if fork { Value::Null } else { json!("low") },"access":"workspace-write",
             "createdBy":{"endpoint":endpoint,"sessionId":"mcp-creator"},
             "approver":{"endpoint":endpoint,"sessionId":"mcp-approver"},"rootMessageId":null

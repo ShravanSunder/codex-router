@@ -8,15 +8,21 @@ use std::{
     collections::BTreeMap,
     future::Future,
     io,
+    os::unix::fs::PermissionsExt,
     pin::Pin,
     sync::{Arc, Mutex},
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[path = "support/conversation_operation_recorder.rs"]
+mod conversation_operation_recorder;
+use conversation_operation_recorder::AcceptingConversationRecorder;
 
 struct FixtureCatalog;
 #[derive(Default)]
 struct TestBindingHolder {
     bindings: Mutex<BTreeMap<String, AcpSessionBinding>>,
+    held: tokio::sync::Notify,
+    create_tasks: tokio_util::task::TaskTracker,
 }
 impl UnmaterializedBindingStore for TestBindingHolder {
     fn hold(&self, binding: AcpSessionBinding) {
@@ -24,6 +30,7 @@ impl UnmaterializedBindingStore for TestBindingHolder {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(binding.session_id().to_owned(), binding);
+        self.held.notify_waiters();
     }
     fn checkout(&self, session_id: &str) -> HeldBindingCheckout {
         self.bindings
@@ -38,6 +45,9 @@ impl UnmaterializedBindingStore for TestBindingHolder {
         self.hold(binding);
     }
     fn finish(&self, _session_id: &str) {}
+    fn create_tasks(&self) -> tokio_util::task::TaskTracker {
+        self.create_tasks.clone()
+    }
 }
 struct DelayedCatalog {
     entered: tokio_util::sync::CancellationToken,
@@ -82,6 +92,7 @@ async fn pending_catalog_does_not_block_connection_routing_or_shutdown() {
             }),
             approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
             holder: Arc::new(TestBindingHolder::default()),
+            recorder: Arc::new(AcceptingConversationRecorder),
             retired: tokio_util::sync::CancellationToken::new(),
         },
     ));
@@ -236,6 +247,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             stored_sessions: Arc::new(FixtureCatalog),
             approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
             holder: Arc::new(TestBindingHolder::default()),
+            recorder: Arc::new(AcceptingConversationRecorder),
             retired: tokio_util::sync::CancellationToken::new(),
         },
     ));
@@ -253,7 +265,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
         (
             json!("new"),
             "session/new",
-            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
+            json!({"cwd":"/work","mcpServers":[{"name":"notes","command":"/usr/bin/example","args":[],"env":[]}],"_meta":{"codexRouter":{"operationId":collaboration_protocol::OperationId::generate(),"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
             "result",
         ),
         (
@@ -378,6 +390,121 @@ fn fixture_schemas() -> Result<Arc<NativePayloadSchemas>, Box<dyn std::error::Er
 }
 
 #[tokio::test]
+async fn detached_create_finishes_and_holds_its_empty_thread()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use futures_util::{SinkExt, StreamExt};
+    let root = std::env::current_dir()?;
+    let scratch = root.join("tmp/scratch/session-00000000-0000-4000-8000-000000000099");
+    std::fs::create_dir_all(&scratch)?;
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
+    let socket = std::path::PathBuf::from(format!("tmp/d{:04x}.sock", std::process::id() & 0xffff));
+    let listener = tokio::net::UnixListener::bind(&socket)?;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let native_scratch = scratch.clone();
+    let backend = tokio::spawn(async move {
+        let mut entered_tx = Some(entered_tx);
+        let mut release_rx = Some(release_rx);
+        let (stream, _) = listener.accept().await?;
+        let mut wire = tokio_tungstenite::accept_async(stream).await?;
+        for expected in ["initialize", "initialized", "thread/start"] {
+            let frame = wire.next().await.ok_or("native request missing")??;
+            let request: Value = serde_json::from_str(frame.to_text()?)?;
+            if request["method"] != expected {
+                return Err(format!("expected {expected}, got {}", request["method"]).into());
+            }
+            if expected == "initialized" {
+                continue;
+            }
+            if expected == "thread/start" {
+                if let Some(entered_tx) = entered_tx.take() {
+                    let _sent = entered_tx.send(());
+                }
+                if let Some(release_rx) = release_rx.take() {
+                    let _released = release_rx.await;
+                }
+            }
+            let result = if expected == "initialize" {
+                json!({})
+            } else {
+                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request",
+                    "approvalsReviewer":"auto_review",
+                    "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
+                    "sandbox":{"type":"workspaceWrite","writableRoots":[native_scratch]},
+                    "thread":{"id":"detached-thread","cwd":"/work","turns":[]}})
+            };
+            let _sent = wire
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let holder = Arc::new(TestBindingHolder::default());
+    let (client, server) = tokio::net::UnixStream::pair()?;
+    let serving = tokio::spawn(serve_acp_connection(
+        server,
+        AcpConnectionInputs {
+            backend_path: socket.clone(),
+            generation: serde_json::from_value(
+                json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
+            )?,
+            schemas: fixture_schemas().map_err(|error| format!("{error}"))?,
+            stored_sessions: Arc::new(FixtureCatalog),
+            approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+            holder: Arc::clone(&holder) as Arc<dyn UnmaterializedBindingStore>,
+            recorder: Arc::new(AcceptingConversationRecorder),
+            retired: tokio_util::sync::CancellationToken::new(),
+        },
+    ));
+    let (read, mut write) = client.into_split();
+    let mut read = BufReader::new(read);
+    write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1}}\n").await?;
+    let mut line = String::new();
+    read.read_line(&mut line).await?;
+    let operation_id = collaboration_protocol::OperationId::generate();
+    write.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{
+        "cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{
+            "operationId":operation_id,"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write",
+            "scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":scratch,
+            "createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
+            "approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}
+        }}
+    }})).as_bytes()).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered_rx)
+        .await
+        .map_err(|_| "native thread/start was not reached")??;
+    drop(write);
+    drop(read);
+    serving.await??;
+    let _released = release_tx.send(());
+    let held = async {
+        loop {
+            let mut changed = Box::pin(holder.held.notified());
+            changed.as_mut().enable();
+            if holder
+                .bindings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key("detached-thread")
+            {
+                break;
+            }
+            changed.await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), held)
+        .await
+        .map_err(|_| "detached create did not retain its empty thread")?;
+    backend.await??;
+    std::fs::remove_file(socket)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn closed_create_connection_loads_held_binding_without_native_resume_and_prompts()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use futures_util::{SinkExt, StreamExt};
@@ -463,6 +590,7 @@ async fn closed_create_connection_loads_held_binding_without_native_resume_and_p
         stored_sessions: Arc::new(FixtureCatalog),
         approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
         holder,
+        recorder: Arc::new(AcceptingConversationRecorder),
         retired: tokio_util::sync::CancellationToken::new(),
     };
     let (client, server) = tokio::net::UnixStream::pair()?;
@@ -507,7 +635,7 @@ async fn closed_create_connection_loads_held_binding_without_native_resume_and_p
     .await?;
     let created = call(&mut read, &mut write, "new", "session/new", json!({
         "cwd":"/work","mcpServers":[],
-        "_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write",
+        "_meta":{"codexRouter":{"operationId":collaboration_protocol::OperationId::generate(),"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write",
             "scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,
             "createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},
             "approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}

@@ -275,8 +275,15 @@ mod mcp_http_listener_tests;
 mod mcp_remediation_tests;
 
 #[cfg(test)]
+#[path = "codex_conversation_cancel_http_tests.rs"]
+mod codex_conversation_cancel_http_tests;
+#[cfg(test)]
 #[path = "provider_conversation_http_tests.rs"]
 mod provider_conversation_http_tests;
+
+#[cfg(test)]
+#[path = "conversation_cancellation_http_tests.rs"]
+mod conversation_cancellation_http_tests;
 
 #[cfg(test)]
 #[path = "provider_conversation_live_http_tests.rs"]

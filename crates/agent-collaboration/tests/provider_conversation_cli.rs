@@ -12,6 +12,317 @@ const CREATE_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75101";
 const PROMPT_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75102";
 const WRONG_GENERATION_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75103";
 const LOST_RESPONSE_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75104";
+const LOAD_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75105";
+const CANCEL_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75106";
+
+#[tokio::test]
+async fn common_provider_cancel_allocates_and_prints_omitted_operation_id() {
+    let root = fixture_directory("common-cancel-generated-id");
+    let listener = publish_fixture(&root);
+    let fixture = tokio::spawn(async move {
+        serve_one(&listener, "conversation/cancel", |request| {
+            let operation_id = request["params"]["operationId"].as_str().expect("generated operation ID");
+            let _: collaboration_client::protocol::OperationId = operation_id.to_owned().try_into().expect("UUIDv7 operation ID");
+            assert_eq!(request["params"]["targetOperationId"], PROMPT_OPERATION);
+            json!({"admission":"admitted","operation":operation_snapshot(operation_id, "conversationCancel", Some(target()), "admitted", "none")})
+        }).await;
+    });
+    let output = run_cli(
+        &root,
+        vec![
+            "conversation",
+            "cancel",
+            "--target-operation-id",
+            PROMPT_OPERATION,
+            "--target",
+            &target().to_string(),
+            "--from",
+            &actor(),
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("CLI JSON line"))
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["kind"], "conversationOperationStarted");
+    assert_eq!(
+        lines[0]["operationId"],
+        lines[1]["operation"]["operationId"]
+    );
+    fixture.await.expect("fixture");
+    cleanup_fixture(&root);
+}
+
+#[tokio::test]
+async fn common_new_prompt_composes_provider_create_then_prompt() {
+    let root = fixture_directory("common-new-prompt");
+    let listener = publish_fixture(&root);
+    let fixture = tokio::spawn(async move {
+        serve_inventory_only(&listener).await;
+        serve_one(&listener, "conversation/create", |request| {
+            assert_eq!(request["params"]["operationId"], CREATE_OPERATION);
+            json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied")})
+        }).await;
+        serve_one(&listener, "conversation/prompt", |request| {
+            assert_eq!(request["params"]["operationId"], PROMPT_OPERATION);
+            assert_eq!(request["params"]["target"], target());
+            json!({"admission":"admitted","operation":operation_snapshot(PROMPT_OPERATION, "conversationPrompt", Some(target()), "admitted", "none")})
+        }).await;
+    });
+    let output = run_cli(
+        &root,
+        vec![
+            "conversation",
+            "prompt",
+            "--new",
+            "--endpoint",
+            &endpoint().to_string(),
+            "--operation-id",
+            CREATE_OPERATION,
+            "--prompt-operation-id",
+            PROMPT_OPERATION,
+            "--from",
+            &actor(),
+            "--approver",
+            &actor(),
+            "--cwd",
+            "/tmp/project",
+            "--access",
+            "workspace-write",
+            "--text",
+            "hello",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("CLI JSON line"))
+        .collect();
+    assert_eq!(lines[0]["operationId"], CREATE_OPERATION);
+    assert_eq!(lines[1]["operationId"], PROMPT_OPERATION);
+    let outcome = common_result(&output.stdout);
+    assert_eq!(outcome["kind"], "prompt");
+    assert_eq!(outcome["createOperationId"], CREATE_OPERATION);
+    assert_eq!(outcome["prompt"]["kind"], "completed");
+    assert_eq!(outcome["prompt"]["operationId"], PROMPT_OPERATION);
+    assert_eq!(
+        outcome["prompt"]["settlement"]["detail"]["kind"],
+        "providerPrompt"
+    );
+    fixture.await.expect("fixture");
+    cleanup_fixture(&root);
+}
+
+#[tokio::test]
+async fn common_load_settles_and_cancel_names_exact_operation() {
+    let root = fixture_directory("common-load-cancel");
+    let listener = publish_fixture(&root);
+    let fixture = tokio::spawn(async move {
+        serve_one(&listener, "conversation/load", |request| {
+            assert_eq!(request["params"]["operationId"], LOAD_OPERATION);
+            assert_eq!(request["params"]["target"], target());
+            json!({"admission":"admitted","operation":operation_snapshot(LOAD_OPERATION, "conversationLoad", Some(target()), "admitted", "none")})
+        }).await;
+        serve_one(&listener, "conversation/cancel", |request| {
+            assert_eq!(request["params"]["operationId"], CANCEL_OPERATION);
+            assert_eq!(request["params"]["targetOperationId"], PROMPT_OPERATION);
+            assert_eq!(request["params"]["target"], target());
+            json!({"admission":"admitted","operation":operation_snapshot(CANCEL_OPERATION, "conversationCancel", Some(target()), "admitted", "none")})
+        }).await;
+    });
+    let load = run_cli(
+        &root,
+        vec![
+            "conversation",
+            "load",
+            "--operation-id",
+            LOAD_OPERATION,
+            "--target",
+            &target().to_string(),
+            "--generation",
+            &generation().to_string(),
+            "--from",
+            &actor(),
+            "--approver",
+            &actor(),
+            "--cwd",
+            "/tmp/project",
+            "--access",
+            "workspace-write",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(
+        load.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&load.stdout),
+        String::from_utf8_lossy(&load.stderr)
+    );
+    let loaded = common_result(&load.stdout);
+    assert_eq!(loaded["kind"], "completed");
+    assert_eq!(loaded["operationId"], LOAD_OPERATION);
+    assert_eq!(loaded["settlement"]["detail"]["kind"], "providerLoad");
+
+    let cancel = run_cli(
+        &root,
+        vec![
+            "conversation",
+            "cancel",
+            "--operation-id",
+            CANCEL_OPERATION,
+            "--target-operation-id",
+            PROMPT_OPERATION,
+            "--target",
+            &target().to_string(),
+            "--generation",
+            &generation().to_string(),
+            "--from",
+            &actor(),
+            "--approver",
+            &actor(),
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(
+        cancel.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&cancel.stdout),
+        String::from_utf8_lossy(&cancel.stderr)
+    );
+    let cancelled = common_result(&cancel.stdout);
+    assert_eq!(cancelled["operation"]["operationId"], CANCEL_OPERATION);
+    fixture.await.expect("fixture");
+    cleanup_fixture(&root);
+}
+
+#[tokio::test]
+async fn common_create_waits_for_provider_target_and_prints_operation_first() {
+    let root = fixture_directory("common-create");
+    let listener = publish_fixture(&root);
+    let fixture = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept common create");
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        initialize_fixture(&mut lines, &mut write).await;
+        let list: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("list read")
+                .expect("list frame"),
+        )
+        .expect("list JSON");
+        assert_eq!(list["method"], "endpoint/list");
+        write_response(&mut write, &list, json!({"serviceEpoch":SERVICE_EPOCH,"sequence":1,"endpoints":[{
+            "endpoint":endpoint(),"label":"Claude fixture",
+            "availability":{"state":"available","observedAt":"2026-09-24T00:00:00Z"},
+            "channels":[{"kind":"externalProvider","transport":"stdioAcp","bindingId":"fixture-binding","bindingGeneration":7,
+                "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
+                "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]}]
+        }]})).await;
+        let create: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("create read")
+                .expect("create frame"),
+        )
+        .expect("create JSON");
+        assert_eq!(create["method"], "conversation/create");
+        assert_eq!(create["params"]["operationId"], CREATE_OPERATION);
+        assert_eq!(create["params"]["generation"], generation());
+        write_response(&mut write, &create, json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", None, "admitted", "none")})).await;
+        let wait: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("wait read")
+                .expect("wait frame"),
+        )
+        .expect("wait JSON");
+        assert_eq!(wait["method"], "conversation/operationWait");
+        assert_eq!(wait["params"]["operationId"], CREATE_OPERATION);
+        write_response(&mut write, &wait, json!({"operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied"),
+            "output":{"kind":"outputUnavailable","reason":"notRetained"}})).await;
+    });
+    let create = run_cli(
+        &root,
+        vec![
+            "conversation",
+            "create",
+            "--operation-id",
+            CREATE_OPERATION,
+            "--endpoint",
+            &endpoint().to_string(),
+            "--generation",
+            &generation().to_string(),
+            "--from",
+            &actor(),
+            "--cwd",
+            "/tmp/project",
+            "--access",
+            "workspace-write",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(
+        create.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let lines: Vec<Value> = String::from_utf8_lossy(&create.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("line JSON"))
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["kind"], "conversationCreateStarted");
+    assert_eq!(lines[0]["operationId"], CREATE_OPERATION);
+    assert_eq!(lines[1]["kind"], "created");
+    assert_eq!(lines[1]["operationId"], CREATE_OPERATION);
+    assert_eq!(lines[1]["target"], target());
+    fixture.await.expect("fixture");
+    cleanup_fixture(&root);
+}
 
 #[tokio::test]
 async fn external_provider_create_then_prompt_preserves_target_and_supplied_operations() {
@@ -21,7 +332,7 @@ async fn external_provider_create_then_prompt_preserves_target_and_supplied_oper
         let create = serve_one(&listener, "conversation/create", |request| {
             assert_eq!(request["params"]["operationId"], CREATE_OPERATION);
             assert_eq!(request["params"]["generation"]["generation"], 7);
-            json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", None, "admitted", "none")})
+            json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied")})
         })
         .await;
         let expected_target = target();
@@ -41,23 +352,26 @@ async fn external_provider_create_then_prompt_preserves_target_and_supplied_oper
         "{}",
         String::from_utf8_lossy(&create.stderr)
     );
-    let create_json: Value = serde_json::from_slice(&create.stdout).expect("create JSON");
-    assert_eq!(
-        create_json["result"]["record"]["operation"]["operationId"],
-        CREATE_OPERATION
-    );
+    let create_json = common_result(&create.stdout);
+    assert_eq!(create_json["kind"], "created");
+    assert_eq!(create_json["operationId"], CREATE_OPERATION);
+    assert_eq!(create_json["target"], target());
 
     let prompt = run_cli(&root, prompt_arguments(PROMPT_OPERATION)).await;
     assert_eq!(
         prompt.status.code(),
         Some(0),
-        "{}",
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&prompt.stdout),
         String::from_utf8_lossy(&prompt.stderr)
     );
-    let prompt_json: Value = serde_json::from_slice(&prompt.stdout).expect("prompt JSON");
+    let prompt_json = common_result(&prompt.stdout);
+    assert_eq!(prompt_json["kind"], "completed");
+    assert_eq!(prompt_json["operationId"], PROMPT_OPERATION);
+    assert_eq!(prompt_json["target"], target());
     assert_eq!(
-        prompt_json["result"]["record"]["operation"]["target"],
-        target()
+        prompt_json["settlement"]["detail"]["kind"],
+        "providerPrompt"
     );
 
     fixture.await.expect("fixture");
@@ -88,7 +402,7 @@ async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read
         String::from_utf8_lossy(&wrong.stdout),
         String::from_utf8_lossy(&wrong.stderr)
     );
-    let wrong_json: Value = serde_json::from_slice(&wrong.stdout).expect("wrong-generation JSON");
+    let wrong_json = common_result(&wrong.stdout);
     assert_eq!(wrong_json["error"]["kind"], "staleGeneration");
     assert_eq!(wrong_json["error"]["effect"], "none");
     assert_eq!(
@@ -104,11 +418,11 @@ async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read
         serve_one_without_response(&lost_listener, "conversation/prompt").await;
     });
     let lost = run_cli(&lost_root, prompt_arguments(LOST_RESPONSE_OPERATION)).await;
-    assert_eq!(lost.status.code(), Some(5));
-    let lost_json: Value = serde_json::from_slice(&lost.stdout).expect("lost-response JSON");
-    assert_eq!(lost_json["error"]["kind"], "outcomeUnknown");
-    assert_eq!(lost_json["error"]["effect"], "unknown");
-    assert_eq!(lost_json["error"]["operationId"], LOST_RESPONSE_OPERATION);
+    assert_eq!(lost.status.code(), Some(0));
+    let lost_json = common_result(&lost.stdout);
+    assert_eq!(lost_json["kind"], "pending");
+    assert_eq!(lost_json["operationId"], LOST_RESPONSE_OPERATION);
+    assert_eq!(lost_json["target"], target());
     lost_fixture.await.expect("lost-response fixture");
     cleanup_fixture(&lost_root);
 
@@ -131,8 +445,8 @@ async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read
         &show_root,
         vec![
             "conversation",
-            "provider",
-            "operation-show",
+            "operation",
+            "show",
             "--operation-id",
             CREATE_OPERATION,
             "--json",
@@ -153,11 +467,7 @@ async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read
     cleanup_fixture(&show_root);
 
     for (fixture_name, method, command) in [
-        (
-            "show-response-loss",
-            "conversation/operationShow",
-            "operation-show",
-        ),
+        ("show-response-loss", "conversation/operationShow", "show"),
         ("wait-response-loss", "conversation/operationWait", "wait"),
         (
             "reconcile-response-loss",
@@ -172,7 +482,7 @@ async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read
         });
         let mut arguments = vec![
             "conversation".to_owned(),
-            "provider".to_owned(),
+            "operation".to_owned(),
             command.to_owned(),
             "--operation-id".to_owned(),
             CREATE_OPERATION.to_owned(),
@@ -371,7 +681,7 @@ async fn run_wait(root: &std::path::Path, operation_id: &str) -> std::process::O
         root,
         vec![
             "conversation",
-            "provider",
+            "operation",
             "wait",
             "--operation-id",
             operation_id,
@@ -431,11 +741,40 @@ async fn serve_one(
         json!({"version":{"major":1,"minor":0},"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,"controlSchemaDigest":format!("sha256:{}", "a".repeat(64))}),
     )
     .await;
-    let request: Value =
-        serde_json::from_str(&lines.next_line().await.expect("read").expect("request"))
-            .expect("request JSON");
+    let request = read_operation_request(&mut lines, &mut write).await;
     assert_eq!(request["method"], method);
     write_response(&mut write, &request, result(&request)).await;
+    if method == "conversation/prompt" {
+        let wait: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("wait read")
+                .expect("wait frame"),
+        )
+        .expect("wait JSON");
+        assert_eq!(wait["method"], "conversation/operationWait");
+        write_response(&mut write, &wait, json!({
+            "operation":operation_snapshot(PROMPT_OPERATION, "conversationPrompt", Some(target()), "terminal", "applied"),
+            "output":{"kind":"available","settlement":{"kind":"promptCompleted","target":target(),"stopReason":"end_turn","response":"fixture reply"}}
+        })).await;
+    } else if method == "conversation/load" {
+        let wait: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("wait read")
+                .expect("wait frame"),
+        )
+        .expect("wait JSON");
+        assert_eq!(wait["method"], "conversation/operationWait");
+        write_response(&mut write, &wait, json!({
+            "operation":operation_snapshot(LOAD_OPERATION, "conversationLoad", Some(target()), "terminal", "applied"),
+            "output":{"kind":"available","settlement":{"kind":"loaded","target":target(),"effectiveSettings":{
+                "requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"
+            }}}
+        })).await;
+    }
 }
 
 async fn serve_one_error(listener: &tokio::net::UnixListener, method: &str, data: Value) {
@@ -443,9 +782,7 @@ async fn serve_one_error(listener: &tokio::net::UnixListener, method: &str, data
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     initialize_fixture(&mut lines, &mut write).await;
-    let request: Value =
-        serde_json::from_str(&lines.next_line().await.expect("read").expect("request"))
-            .expect("request JSON");
+    let request = read_operation_request(&mut lines, &mut write).await;
     assert_eq!(request["method"], method);
     write
         .write_all(
@@ -464,10 +801,84 @@ async fn serve_one_without_response(listener: &tokio::net::UnixListener, method:
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     initialize_fixture(&mut lines, &mut write).await;
+    let request = read_operation_request(&mut lines, &mut write).await;
+    assert_eq!(request["method"], method);
+    if method == "conversation/prompt" {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+async fn read_operation_request(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+) -> Value {
     let request: Value =
         serde_json::from_str(&lines.next_line().await.expect("read").expect("request"))
             .expect("request JSON");
-    assert_eq!(request["method"], method);
+    if request["method"] != "endpoint/list" {
+        return request;
+    }
+    write_response(write, &request, json!({"serviceEpoch":SERVICE_EPOCH,"sequence":1,"endpoints":[{
+        "endpoint":endpoint(),"label":"Claude fixture",
+        "availability":{"state":"available","observedAt":"2026-09-24T00:00:00Z"},
+        "channels":[{"kind":"externalProvider","transport":"stdioAcp","bindingId":"fixture-binding","bindingGeneration":7,
+            "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
+            "capabilities":[{"name":"create","status":"supported","evidence":"advertised"},
+                {"name":"prompt","status":"supported","evidence":"advertised"},
+                {"name":"load","status":"supported","evidence":"advertised"},
+                {"name":"cancel","status":"supported","evidence":"advertised"}]}]
+    }]})).await;
+    serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .expect("operation read")
+            .expect("operation frame"),
+    )
+    .expect("operation JSON")
+}
+
+async fn serve_inventory_only(listener: &tokio::net::UnixListener) {
+    let (stream, _) = listener.accept().await.expect("inventory accept");
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    initialize_fixture(&mut lines, &mut write).await;
+    let request: Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .expect("inventory read")
+            .expect("inventory frame"),
+    )
+    .expect("inventory JSON");
+    assert_eq!(request["method"], "endpoint/list");
+    write_response(&mut write, &request, json!({"serviceEpoch":SERVICE_EPOCH,"sequence":1,"endpoints":[{
+        "endpoint":endpoint(),"label":"Claude fixture",
+        "availability":{"state":"available","observedAt":"2026-09-24T00:00:00Z"},
+        "channels":[{"kind":"externalProvider","transport":"stdioAcp","bindingId":"fixture-binding","bindingGeneration":7,
+            "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
+            "capabilities":[{"name":"create","status":"supported","evidence":"advertised"},
+                {"name":"prompt","status":"supported","evidence":"advertised"}]}]
+    }]})).await;
+}
+
+fn common_result(stdout: &[u8]) -> Value {
+    let lines: Vec<Value> = String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("CLI JSON line"))
+        .collect();
+    assert!(
+        (2..=3).contains(&lines.len()),
+        "operation IDs must precede the result"
+    );
+    assert!(matches!(
+        lines[0]["kind"].as_str(),
+        Some("conversationOperationStarted" | "conversationCreateStarted")
+    ));
+    if lines.len() == 3 {
+        assert_eq!(lines[1]["kind"], "conversationOperationStarted");
+    }
+    lines.last().expect("result line").clone()
 }
 
 async fn initialize_fixture(
@@ -511,7 +922,7 @@ fn operation_snapshot(
 ) -> Value {
     let mut value = json!({
         "operationId":operation_id,"operation":operation,
-        "binding":{
+        "binding":{"kind":"externalProvider","binding":{
             "endpoint":endpoint(),"bindingId":"fixture-binding",
             "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
             "transport":"stdioAcp","generation":generation(),
@@ -520,7 +931,7 @@ fn operation_snapshot(
                 {"name":"prompt","status":"supported","evidence":"advertised"},
                 {"name":"callerDetach","status":"supported","evidence":"routerQualified"}
             ]
-        },
+        }},
         "stage":stage,"effect":effect,"reconciliation":"unresolved",
         "admittedAt":"2026-09-20T00:00:00Z"
     });
@@ -550,7 +961,6 @@ fn actor() -> String {
 fn create_arguments(operation_id: &str) -> Vec<String> {
     vec![
         "conversation",
-        "provider",
         "create",
         "--operation-id",
         operation_id,
@@ -558,7 +968,7 @@ fn create_arguments(operation_id: &str) -> Vec<String> {
         &endpoint().to_string(),
         "--generation",
         &generation().to_string(),
-        "--created-by",
+        "--from",
         &actor(),
         "--approver",
         &actor(),
@@ -576,20 +986,21 @@ fn create_arguments(operation_id: &str) -> Vec<String> {
 fn prompt_arguments(operation_id: &str) -> Vec<String> {
     vec![
         "conversation",
-        "provider",
         "prompt",
         "--operation-id",
         operation_id,
-        "--target",
+        "--to",
         &target().to_string(),
         "--generation",
         &generation().to_string(),
-        "--requested-by",
+        "--from",
         &actor(),
         "--approver",
         &actor(),
         "--text",
         "hello",
+        "--timeout-seconds",
+        "1",
         "--json",
     ]
     .into_iter()

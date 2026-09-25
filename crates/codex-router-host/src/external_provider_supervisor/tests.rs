@@ -105,7 +105,7 @@ async fn concurrent_admission_precedes_reconcile_live_state_check() {
             .create(ConversationCreateRequest {
                 operation_id: create_operation_id,
                 endpoint: endpoint(),
-                generation: generation(),
+                generation: Some(generation()),
                 working_directory: ProviderWorkingDirectory::try_from("/tmp".to_owned())
                     .expect("working directory"),
                 created_by: requester(),

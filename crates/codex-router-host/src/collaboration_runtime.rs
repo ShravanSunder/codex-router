@@ -443,6 +443,16 @@ impl CollaborationRuntime {
         let wake_worker = identity.wake_timing_worker();
         let schedule_worker = identity.schedule_timing_worker();
         let retention_worker = identity.automation_retention_worker();
+        let codex_recorder = crate::codex_conversation_recording_composition::recording_for_store(
+            provider_store.as_ref(),
+            &inputs.directory,
+            &service_id,
+        )?;
+        let identity = if let Some(recorder) = &codex_recorder {
+            identity.with_codex_conversation_recorder(std::sync::Arc::clone(recorder))
+        } else {
+            identity
+        };
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
         let control = LocalControlService::bind(&inputs.directory.join("control.sock"), identity)?
             .with_connection_budget(std::sync::Arc::clone(&permits));
@@ -461,6 +471,7 @@ impl CollaborationRuntime {
             stored,
             approval_broker,
             unmaterialized_threads,
+            crate::codex_conversation_recording_composition::adapter_recorder(codex_recorder),
         )?
         .with_connection_budget(permits);
         let publication = publication.with_acp_listener()?;

@@ -1,17 +1,28 @@
 //! Unattended ACP conversation command using the reusable client and explicit cancellation.
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use collaboration_client::protocol::{ConversationRecord, ConversationTerminalReason};
+use collaboration_client::protocol::{
+    CodexGeneration, ConversationCreateOutcome, ConversationOperationFailure,
+    ConversationOperationFailureKind, ConversationRecord, ConversationTerminalReason, EndpointRef,
+    OperationId, RouterAccess, SessionId, SessionRef,
+};
 use collaboration_client::{
-    AcpConversation, ClientError, ConversationCreateRequest, ConversationEnd, ConversationEvent,
-    ConversationPromptRequest, OperationEffect, OperationFailure, OperationFailureKind,
-    PublicPromptContent, operation_failure_from_client_error,
+    AcpConversation, ClientError, ControlClient, ConversationCancelInput, ConversationClient,
+    ConversationClientError, ConversationCreateInput, ConversationCreatePromptInput,
+    ConversationCreatePromptOutcome, ConversationCreateRequest, ConversationEnd, ConversationEvent,
+    ConversationLoadInput, ConversationOperationResult, ConversationPromptInput,
+    ConversationPromptRequest, ConversationStopReason, OperationEffect, OperationFailure,
+    OperationFailureKind, PublicPromptContent, operation_failure_from_client_error,
 };
 use std::{
     ffi::OsString,
     io::{self, Read, Write},
     path::PathBuf,
+    time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+
+#[path = "conversation_client_commands.rs"]
+mod client_commands;
 
 #[derive(Parser)]
 #[command(
@@ -30,10 +41,14 @@ enum ConversationCommand {
     /// `conversation create`, submit its first input with `message send`; alternatively use
     /// `conversation prompt --new`. Permission requests are never automatically approved.
     Prompt(PromptArguments),
-    /// Operate on Host-owned external ACP provider conversations.
-    Provider {
+    /// Load an existing conversation binding and wait for its settlement.
+    Load(LoadArguments),
+    /// Cancel one exact active provider operation.
+    Cancel(CancelArguments),
+    /// Inspect, wait for, or reconcile one exact conversation operation.
+    Operation {
         #[command(subcommand)]
-        command: crate::provider_conversation_commands::ProviderConversationCommand,
+        command: crate::conversation_operation_commands::ConversationOperationCommand,
     },
 }
 #[derive(Args)]
@@ -41,9 +56,15 @@ struct CreateArguments {
     #[arg(long)]
     endpoint: String,
     #[arg(long)]
-    model: String,
+    model: Option<String>,
     #[arg(long)]
-    effort: String,
+    effort: Option<String>,
+    #[arg(long)]
+    fork: Option<String>,
+    #[arg(long)]
+    generation: Option<String>,
+    #[arg(long)]
+    operation_id: Option<String>,
     #[arg(long)]
     access: ConversationAccess,
     /// Exact SessionRef JSON for this caller. Overrides CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID.
@@ -58,6 +79,8 @@ struct CreateArguments {
     cwd: PathBuf,
     #[arg(long)]
     service_directory: Option<PathBuf>,
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..))]
+    timeout_seconds: u64,
     #[arg(long)]
     json: bool,
 }
@@ -78,6 +101,12 @@ struct PromptArguments {
     #[arg(long)]
     effort: Option<String>,
     #[arg(long)]
+    generation: Option<String>,
+    #[arg(long)]
+    operation_id: Option<String>,
+    #[arg(long)]
+    prompt_operation_id: Option<String>,
+    #[arg(long)]
     access: Option<ConversationAccess>,
     /// Exact SessionRef JSON for this caller. Overrides CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID.
     #[arg(long)]
@@ -89,7 +118,7 @@ struct PromptArguments {
     #[arg(long)]
     root_message_id: Option<String>,
     #[arg(long)]
-    cwd: PathBuf,
+    cwd: Option<PathBuf>,
     #[arg(
         long,
         required_unless_present = "text_file",
@@ -102,6 +131,50 @@ struct PromptArguments {
     service_directory: Option<PathBuf>,
     #[arg(long,default_value_t=300,value_parser=clap::value_parser!(u64).range(1..))]
     timeout_seconds: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct LoadArguments {
+    #[arg(long)]
+    target: String,
+    #[arg(long)]
+    cwd: PathBuf,
+    #[arg(long)]
+    access: ConversationAccess,
+    #[arg(long)]
+    generation: Option<String>,
+    #[arg(long)]
+    operation_id: Option<String>,
+    #[arg(long)]
+    from: Option<String>,
+    #[arg(long)]
+    approver: Option<String>,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..))]
+    timeout_seconds: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct CancelArguments {
+    #[arg(long)]
+    target: String,
+    #[arg(long)]
+    target_operation_id: String,
+    #[arg(long)]
+    generation: Option<String>,
+    #[arg(long)]
+    operation_id: Option<String>,
+    #[arg(long)]
+    from: Option<String>,
+    #[arg(long)]
+    approver: Option<String>,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
     #[arg(long)]
     json: bool,
 }
@@ -126,152 +199,45 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
         Err(code) => return code,
     };
     match parsed.command {
-        ConversationCommand::Create(args) => run_create(args),
+        ConversationCommand::Create(args) => client_commands::run_create(args),
         ConversationCommand::Prompt(args) => run_prompt(args),
-        ConversationCommand::Provider { command } => {
-            crate::provider_conversation_commands::run_provider_conversation_command(command)
+        ConversationCommand::Load(args) => client_commands::run_load(args),
+        ConversationCommand::Cancel(args) => client_commands::run_cancel(args),
+        ConversationCommand::Operation { command } => {
+            crate::conversation_operation_commands::run_conversation_operation_command(command)
         }
     }
 }
 
-fn run_create(args: CreateArguments) -> i32 {
-    let directory = match crate::endpoint_commands::resolve_directory(args.service_directory) {
-        Ok(value) => value,
-        Err(error) => {
-            return crate::endpoint_commands::report_failure("invalidField", &error, 2, args.json);
-        }
-    };
-    if !args.cwd.is_absolute()
-        || validate_choice_value(&args.model, "--model").is_err()
-        || validate_choice_value(&args.effort, "--effort").is_err()
-    {
+fn run_prompt(args: PromptArguments) -> i32 {
+    if args.new_session {
+        return client_commands::run_new_prompt(args);
+    }
+    if !args.new_session && args.fork.is_none() {
+        return client_commands::run_existing_prompt(args);
+    }
+    if args.prompt_operation_id.is_some() {
         return crate::endpoint_commands::report_failure(
-            "invalidField",
-            "Create requires an absolute --cwd and non-empty --model/--effort",
+            "unsupportedCapability",
+            "omit the operation ID for Codex prompts; it is not inspectable",
             2,
             args.json,
         );
     }
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(value) => value,
-        Err(_) => return 3,
-    };
-    runtime.block_on(async move {
-        let endpoint = match args.endpoint.try_into() {
+    let fork_operation_id = match args.operation_id.as_deref() {
+        Some(value) => match OperationId::try_from(value.to_owned()) {
             Ok(value) => value,
             Err(_) => {
                 return crate::endpoint_commands::report_failure(
                     "invalidField",
-                    "Invalid endpoint ID",
+                    "operation ID must be a canonical lowercase RFC UUIDv7",
                     2,
                     args.json,
                 );
             }
-        };
-        let client = match AcpConversation::connect_with_context(&directory, endpoint).await {
-            Ok(value) => value,
-            Err(error) => return report_create_failure(error, args.json),
-        };
-        let creator = match current_session_ref(&client.endpoint().service_id, args.from.as_deref())
-        {
-            Ok(value) => value,
-            Err(_) => {
-                let message = if args.from.is_some() {
-                    "invalid --from SessionRef"
-                } else {
-                    "current session identity unavailable"
-                };
-                return report_conversation_failure(
-                    operation_failure_from_client_error(
-                        ClientError::Protocol(message),
-                        OperationEffect::None,
-                    ),
-                    None,
-                    args.json,
-                );
-            }
-        };
-        let approver = match args.approver.as_deref() {
-            Some(value) => match serde_json::from_str(value) {
-                Ok(value) => Some(value),
-                Err(_) => {
-                    return crate::endpoint_commands::report_failure(
-                        "invalidField",
-                        "invalid --approver SessionRef",
-                        2,
-                        args.json,
-                    );
-                }
-            },
-            None => Some(creator.clone()),
-        };
-        let root_message_id = match args.root_message_id.map(TryInto::try_into).transpose() {
-            Ok(value) => value,
-            Err(_) => {
-                return crate::endpoint_commands::report_failure(
-                    "invalidField",
-                    "invalid root message ID",
-                    2,
-                    args.json,
-                );
-            }
-        };
-        let request = ConversationCreateRequest {
-            endpoint: client.endpoint().clone(),
-            cwd: args.cwd,
-            session: None,
-            fork: None,
-            model: Some(args.model),
-            effort: Some(args.effort),
-            access: Some(args.access.as_str().to_owned()),
-            created_by: Some(creator),
-            approver,
-            root_message_id,
-        };
-        let mut emit = |event| emit_record(event, args.json);
-        match AcpConversation::create(&directory, request, &mut emit).await {
-            Ok((_conversation, result)) => {
-                let record = ConversationRecord::ConversationCreated {
-                    target: result.target,
-                };
-                match serde_json::to_string(&record) {
-                    Ok(encoded) if writeln!(io::stdout(), "{encoded}").is_ok() => 0,
-                    Ok(_) | Err(_) => 3,
-                }
-            }
-            Err(error) => report_create_failure(error, args.json),
-        }
-    })
-}
-
-fn report_create_failure(error: collaboration_client::OperationError, json_output: bool) -> i32 {
-    let (failure, target, _turn_id) = error.into_parts();
-    report_conversation_failure(failure, target, json_output)
-}
-
-fn report_conversation_failure(
-    failure: OperationFailure,
-    target: Option<collaboration_client::protocol::SessionRef>,
-    json_output: bool,
-) -> i32 {
-    let record = ConversationRecord::ConversationError {
-        target,
-        error: failure.clone(),
+        },
+        None => OperationId::generate(),
     };
-    if json_output {
-        if let Ok(encoded) = serde_json::to_string(&record) {
-            let _printed = writeln!(io::stdout(), "{encoded}");
-        }
-    } else {
-        let _printed = writeln!(io::stderr(), "{}", failure.message);
-    }
-    operation_failure_exit(&failure)
-}
-
-fn run_prompt(args: PromptArguments) -> i32 {
     let prepared = prepare(&args);
     let (directory, text) = match prepared {
         Ok(v) => v,
@@ -322,8 +288,9 @@ fn run_prompt(args: PromptArguments) -> i32 {
             stage=if args.new_session{"new"}else if args.fork.is_some(){"fork"}else{"load"};
             let mut emit=|event|emit_record(event,args.json);
             let request = ConversationCreateRequest {
+                operation_id: fork_operation_id,
                 endpoint: client.endpoint().clone(),
-                cwd: args.cwd.clone(),
+                cwd: args.cwd.clone().ok_or(ClientError::Protocol("--cwd is required with --new or --fork"))?,
                 session: selected_id
                     .as_deref()
                     .filter(|_| args.fork.is_none())
@@ -444,12 +411,8 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
     if dispatch_count != 1 {
         return Err("Choose exactly one of --new, --session, or --fork".into());
     }
-    // Only a new thread must state its reasoning effort: resume keeps the
-    // thread's persisted effort and fork inherits the source thread's.
-    match args.effort.as_deref() {
-        Some(effort) => validate_choice_value(effort, "--effort")?,
-        None if args.new_session => return Err("--effort is required".into()),
-        None => {}
+    if let Some(effort) = args.effort.as_deref() {
+        validate_choice_value(effort, "--effort")?;
     }
     if args.fork.is_none() && !args.new_session && args.model.is_some() {
         return Err(
@@ -460,9 +423,6 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
     if args.fork.is_none() && !args.new_session && args.access.is_some() {
         return Err("--access is invalid with --session: access is fixed for a thread".into());
     }
-    if args.fork.is_none() && !args.new_session && args.approver.is_some() {
-        return Err("--approver is valid only with --new or --fork".into());
-    }
     if args.fork.is_none() && !args.new_session && args.root_message_id.is_some() {
         return Err(
             "--root-message-id is valid only with --new or --fork; resume retains its association"
@@ -470,11 +430,8 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
         );
     }
     if args.new_session || args.fork.is_some() {
-        // Fork inherits the source thread's model when the caller names none.
-        match args.model.as_deref() {
-            Some(model) => validate_choice_value(model, "--model")?,
-            None if args.fork.is_some() => {}
-            None => return Err("--model is required".into()),
+        if let Some(model) = args.model.as_deref() {
+            validate_choice_value(model, "--model")?;
         }
         args.access.as_ref().ok_or("--access is required")?;
         if let Some(root_message_id) = &args.root_message_id {
@@ -484,17 +441,27 @@ fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
                 .map_err(|_| "--root-message-id must be a canonical UUID")?;
         }
     }
-    if !args.cwd.is_absolute() {
-        return Err("ACP cwd must be absolute".into());
+    if args.cwd.as_ref().is_some_and(|cwd| !cwd.is_absolute()) {
+        return Err("--cwd must be absolute".into());
+    }
+    if (args.new_session || args.fork.is_some()) && args.cwd.is_none() {
+        return Err("--cwd is required with --new or --fork".into());
     }
     let directory = crate::endpoint_commands::resolve_directory(args.service_directory.clone())?;
     if args.new_session {
-        let _: collaboration_client::protocol::EndpointId = args
+        let endpoint = args
             .endpoint
-            .clone()
-            .ok_or("--endpoint is required with --new")?
-            .try_into()
-            .map_err(|_| "Invalid endpoint ID")?;
+            .as_deref()
+            .ok_or("--endpoint is required with --new")?;
+        if endpoint.starts_with('{') {
+            let _: EndpointRef =
+                serde_json::from_str(endpoint).map_err(|_| "Invalid endpoint JSON")?;
+        } else {
+            let _: collaboration_client::protocol::EndpointId = endpoint
+                .to_owned()
+                .try_into()
+                .map_err(|_| "Invalid endpoint ID")?;
+        }
     } else {
         let _ = conversation_target(args)?;
     }
@@ -758,6 +725,18 @@ mod tests {
     }
 
     #[test]
+    fn provider_subcommand_is_removed_after_common_cutover() {
+        assert!(
+            ConversationArguments::try_parse_from([
+                "agent-collaboration conversation",
+                "provider",
+                "create",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn create_accepts_from_session_ref_override() {
         let parsed = ConversationArguments::try_parse_from([
             "agent-collaboration conversation",
@@ -786,7 +765,10 @@ mod tests {
                     )
                 );
             }
-            ConversationCommand::Prompt(_) | ConversationCommand::Provider { .. } => {
+            ConversationCommand::Prompt(_)
+            | ConversationCommand::Load(_)
+            | ConversationCommand::Cancel(_)
+            | ConversationCommand::Operation { .. } => {
                 panic!("create parse selected another command")
             }
         }

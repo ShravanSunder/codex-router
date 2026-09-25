@@ -482,7 +482,7 @@ fn request_id(nullable: bool) -> Value {
     json!({"type":if nullable { json!(["string","null"]) } else { json!("string") },"minLength":1,"maxLength":128,"x-maxUtf8Bytes":128})
 }
 fn method_error(method: &str, failures: &[&str]) -> Value {
-    let stages = [
+    let mut stages = vec![
         "initialize",
         "discovery",
         "inspect",
@@ -492,9 +492,21 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
         "steer",
         "interrupt",
     ];
+    if method == "codex/sessionRename" {
+        stages.push("rename");
+    }
     let text = json!({"type":"string","minLength":1,"maxLength":1024,"x-maxUtf8Bytes":1024});
+    let native_control_diagnostics =
+        matches!(method, "codex/sessionInspect" | "codex/sessionRename");
+    let general_failures: Vec<_> = failures
+        .iter()
+        .copied()
+        .filter(|kind| {
+            !native_control_diagnostics || !matches!(*kind, "nativeRejected" | "nameMismatch")
+        })
+        .collect();
     let properties = Map::from_iter([
-        ("kind".to_owned(), json!({"enum":failures})),
+        ("kind".to_owned(), json!({"enum":general_failures})),
         ("stage".to_owned(), json!({"enum":stages})),
         ("message".to_owned(), text.clone()),
     ]);
@@ -502,6 +514,32 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     let method_data = json!({"type":"object","required":required,
         "additionalProperties":false,"properties":properties});
     let mut data = vec![method_data];
+    if native_control_diagnostics {
+        data.push(json!({"type":"object",
+            "required":["kind","stage","message","reason","nextAction"],
+            "additionalProperties":false,
+            "properties":{
+                "kind":{"const":"nativeRejected"},
+                "stage":{"enum":if method == "codex/sessionInspect" { vec!["inspect"] } else { vec!["rename"] }},
+                "message":text,
+                "reason":{"enum":["childThread","busy","notResumable","permissionDenied","unsupportedCapability","unknown"]},
+                "nextAction":{"enum":["inspectTarget","useDeliverySteer","requestApproval","correctRequest","retryLater"]},
+                "nativeCode":{"type":"integer"}
+            }
+        }));
+        if method == "codex/sessionRename" {
+            data.push(json!({"type":"object",
+                "required":["kind","stage","requested","effective"],
+                "additionalProperties":false,
+                "properties":{
+                    "kind":{"const":"nameMismatch"},
+                    "stage":{"const":"rename"},
+                    "requested":{"type":"string"},
+                    "effective":{"type":"string"}
+                }
+            }));
+        }
+    }
     if method.starts_with("wake/") || method.starts_with("delivery/") {
         data = vec![reference("wake-failure")];
     }

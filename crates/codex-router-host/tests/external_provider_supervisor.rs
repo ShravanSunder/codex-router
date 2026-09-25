@@ -474,7 +474,7 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
     let create_request = ConversationCreateRequest {
         operation_id: operation_id.clone(),
         endpoint: endpoint.clone(),
-        generation: generation()?,
+        generation: Some(generation()?),
         working_directory: working_directory()?,
         created_by: requester.clone(),
         approver: requester.clone(),
@@ -499,7 +499,7 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_operation_id.clone(),
                 target: target.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
                 approver: requester.clone(),
                 prompt: MessageContent::HumanUser {
@@ -518,7 +518,7 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 operation_id: cancel_operation_id.clone(),
                 target_operation_id: prompt_operation_id.clone(),
                 target: target.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
                 approver: requester.clone(),
             })
@@ -551,7 +551,7 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 operation_id: cancel_operation_id,
                 target_operation_id: prompt_operation_id,
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
                 approver: requester,
             })
@@ -584,7 +584,7 @@ async fn supervisor_shutdown_joins_runtime_and_settles_held_work() -> TestResult
             .create(ConversationCreateRequest {
                 operation_id: create_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -605,7 +605,7 @@ async fn supervisor_shutdown_joins_runtime_and_settles_held_work() -> TestResult
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_id.clone(),
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
                 approver: requester,
                 prompt: MessageContent::HumanUser {
@@ -653,7 +653,7 @@ async fn supervisor_shutdown_drains_saturated_load_completions_and_preserves_unk
                 .load(ConversationLoadRequest {
                     operation_id: operation_id.clone(),
                     target: actor(provider_endpoint.clone(), &format!("held-load-{index}"))?,
-                    generation: generation()?,
+                    generation: Some(generation()?),
                     working_directory: working_directory()?,
                     requested_by: requester.clone(),
                     approver: requester.clone(),
@@ -715,7 +715,7 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
             .create(ConversationCreateRequest {
                 operation_id: create_operation_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: approver.clone(),
@@ -737,7 +737,7 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_operation_id.clone(),
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester,
                 approver: approver.clone(),
                 prompt: MessageContent::HumanUser {
@@ -828,7 +828,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             .create(ConversationCreateRequest {
                 operation_id: create_operation_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: approver.clone(),
@@ -849,7 +849,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_operation_id.clone(),
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester,
                 approver: approver.clone(),
                 prompt: MessageContent::HumanUser {
@@ -933,7 +933,7 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
             .load(ConversationLoadRequest {
                 operation_id: operation_id.clone(),
                 target: target.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 requested_by: requester.clone(),
                 approver: requester,
@@ -973,7 +973,7 @@ sys.stdin.readline()
             .create(ConversationCreateRequest {
                 operation_id: operation_id.clone(),
                 endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester,
@@ -1028,7 +1028,7 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
             .create(ConversationCreateRequest {
                 operation_id: first_id.clone(),
                 endpoint: provider_endpoint.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -1049,7 +1049,7 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
             .create(ConversationCreateRequest {
                 operation_id: first_id,
                 endpoint: provider_endpoint.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -1064,7 +1064,7 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
             .create(ConversationCreateRequest {
                 operation_id: second_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester,
@@ -1105,7 +1105,7 @@ async fn prompt_authentication_required_is_no_effect_and_fresh_prompt_retains_fi
             .create(ConversationCreateRequest {
                 operation_id: create_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -1125,7 +1125,7 @@ async fn prompt_authentication_required_is_no_effect_and_fresh_prompt_retains_fi
     let prompt_request = |operation_id: OperationId| ConversationPromptRequest {
         operation_id,
         target: target.clone(),
-        generation: generation().expect("generation"),
+        generation: Some(generation().expect("generation")),
         requested_by: requester.clone(),
         approver: requester.clone(),
         prompt: MessageContent::HumanUser {
@@ -1182,7 +1182,7 @@ async fn provider_prompt_error_text_cannot_become_a_local_no_effect_rejection() 
             .create(ConversationCreateRequest {
                 operation_id: create_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -1203,7 +1203,7 @@ async fn provider_prompt_error_text_cannot_become_a_local_no_effect_rejection() 
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_id.clone(),
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
                 approver: requester,
                 prompt: MessageContent::HumanUser {

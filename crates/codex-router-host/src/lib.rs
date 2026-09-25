@@ -3,6 +3,7 @@
 mod app_server_endpoint_guard;
 mod app_server_shutdown;
 mod child_diagnostics;
+mod codex_conversation_recording_composition;
 mod codex_update_preparation;
 mod explicit_app_server_restart;
 mod explicit_router_restart;
