@@ -155,9 +155,7 @@ pub(crate) async fn compose_provider_startup(
                         endpoints.push(unavailable_endpoint(
                             service_id,
                             binding.provider,
-                            text(&format!(
-                                "provider launch or initialize failed for {executable}: {error}"
-                            ))?,
+                            text(&provider_startup_failure_reason(&executable, &error))?,
                             text(fix)?,
                         )?);
                     }
@@ -176,6 +174,13 @@ pub(crate) async fn compose_provider_startup(
         endpoints,
         retirements,
     })
+}
+
+fn provider_startup_failure_reason(
+    executable: &str,
+    error: &crate::ExternalProviderRuntimeError,
+) -> String {
+    format!("provider launch or initialize failed for {executable}: {error}")
 }
 
 fn unavailable_endpoint(
@@ -280,4 +285,29 @@ fn provider_capabilities(
         },
     ])
     .map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_startup_reason_preserves_sanitized_failure_metadata() {
+        let account_sentinel = "synthetic-account-sentinel@example.invalid";
+        let token_sentinel = "synthetic-token-sentinel-7f4e";
+        let source_error =
+            agent_client_protocol::Error::new(-32001, format!("denied {token_sentinel}"))
+                .data(serde_json::json!({"account": account_sentinel, "token": token_sentinel}));
+        let runtime_error = crate::ExternalProviderRuntimeError::Initialize(
+            crate::external_provider_runtime::sanitized_initialization_error(&source_error),
+        );
+
+        let reason = provider_startup_failure_reason("/fixture/acp-provider", &runtime_error);
+
+        assert!(reason.contains("initialize"));
+        assert!(reason.contains("-32001"));
+        assert!(reason.contains("error_data_bytes="));
+        assert!(!reason.contains(account_sentinel));
+        assert!(!reason.contains(token_sentinel));
+    }
 }

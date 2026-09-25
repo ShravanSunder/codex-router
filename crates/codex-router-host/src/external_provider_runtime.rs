@@ -277,6 +277,18 @@ pub(crate) fn acp_operation_error(
     }
 }
 
+pub(crate) fn sanitized_initialization_error(error: &agent_client_protocol::Error) -> String {
+    sanitized_acp_error(error, "initialize", "initialize")
+}
+
+fn sanitized_acp_error(error: &agent_client_protocol::Error, method: &str, stage: &str) -> String {
+    let error_data_bytes = error.data.as_ref().map_or(0, |data| data.to_string().len());
+    format!(
+        "ACP request failed (method={method}, stage={stage}, code={}, error_data_bytes={error_data_bytes})",
+        i32::from(error.code),
+    )
+}
+
 enum ProviderCommand {
     Create {
         cwd: PathBuf,
@@ -562,7 +574,9 @@ impl ExternalProviderRuntime {
                             actual: response.protocol_version,
                         }),
                         Err(error) => {
-                            Err(ExternalProviderRuntimeError::Initialize(error.to_string()))
+                            Err(ExternalProviderRuntimeError::Initialize(
+                                sanitized_initialization_error(&error),
+                            ))
                         }
                     };
                     let admitted = admission.is_ok();
@@ -1173,7 +1187,9 @@ fn discard_queued_session_updates(
         match session.read_update().now_or_never() {
             Some(Ok(_update)) => continue,
             Some(Err(error)) => {
-                return Err(ExternalProviderRuntimeError::Operation(error.to_string()));
+                return Err(ExternalProviderRuntimeError::Operation(
+                    sanitized_acp_error(&error, "session/update", "load replay"),
+                ));
             }
             None => return Ok(()),
         }
