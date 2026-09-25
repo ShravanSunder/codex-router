@@ -151,8 +151,8 @@ impl ControlClient {
     ) -> Result<collaboration_protocol::DeliveryReceipt, ClientError> {
         use collaboration_protocol::{
             AcceptedResumeEffect, DeliveryClientReceipt, DeliveryOutcome, MessageContent,
-            MessageDelivery, MessageInputKind, MessageRepresentation, NativeSendAcceptance,
-            SessionReachability,
+            MessageDelivery, MessageInputKind, MessageRepresentation, NativeInputOperation,
+            NativeSendAcceptance, SessionReachability,
         };
         let value = self.connection.call("message/send", json!(params)).await?;
         let decoded = serde_json::from_value::<collaboration_protocol::DeliveryReceipt>(value);
@@ -181,6 +181,13 @@ impl ControlClient {
                 let acceptance_matches = matches!(
                     (&params.mode, &receipt.outcome, &native.acceptance),
                     (
+                        MessageDelivery::Auto,
+                        DeliveryOutcome::Started,
+                        NativeSendAcceptance::NativeInputAccepted {
+                            operation: NativeInputOperation::TurnStart,
+                            ..
+                        }
+                    ) | (
                         MessageDelivery::Auto,
                         DeliveryOutcome::StartedOrSteered,
                         NativeSendAcceptance::NativeInputAccepted { .. }

@@ -100,7 +100,7 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
                 let message = if args.from.is_some() {
                     "invalid --from SessionRef"
                 } else {
-                    "current session identity unavailable"
+                    "current session identity unavailable; run agent-collaboration whoami --json or pass --from SessionRef JSON"
                 };
                 return report_conversation_failure(
                     operation_failure_from_client_error(

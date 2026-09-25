@@ -160,6 +160,22 @@ fn endpoint(channels: serde_json::Value) -> EndpointDescription {
 }
 
 #[test]
+fn conversation_create_defaults_approver_to_the_caller() {
+    let mut input: ConversationCreateInput = serde_json::from_value(json!({
+        "operationId":collaboration_protocol::OperationId::generate(),
+        "endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"claude-local"},
+        "workingDirectory":"/tmp/project","access":"workspace-write",
+        "createdBy":{"endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"codex-local"},"sessionId":"caller"}
+    }))
+    .unwrap_or_else(|error| panic!("create input: {error}"));
+    let caller = input.created_by.clone();
+
+    input.default_approver();
+
+    assert_eq!(input.approver, Some(caller));
+}
+
+#[test]
 fn conversation_transport_follows_advertised_channel() {
     let acp = endpoint(json!([
         {"kind":"nativeCodex","transport":"unixWebSocket","path":"codex-native.sock","schemaDigest":null,"generation":null},

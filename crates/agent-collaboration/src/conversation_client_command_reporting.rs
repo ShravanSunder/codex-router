@@ -131,6 +131,19 @@ pub(super) fn report_create_client_error(
             4,
             json_output,
         ),
+        ConversationClientError::UnavailableEndpoint {
+            endpoint,
+            reason,
+            fix,
+        } => crate::endpoint_commands::report_failure(
+            "unavailable",
+            &format!(
+                "{} is unavailable: {reason}; fix: {fix}",
+                String::from(endpoint.endpoint_id)
+            ),
+            4,
+            json_output,
+        ),
         ConversationClientError::InvalidInput(message) => {
             crate::endpoint_commands::report_failure("invalidField", message, 2, json_output)
         }

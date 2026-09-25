@@ -33,7 +33,7 @@ impl JsonSchema for PageLimit {
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AutomationPageRequest {
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
     pub limit: PageLimit,
 }

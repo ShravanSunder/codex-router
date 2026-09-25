@@ -8,6 +8,10 @@ use serde::Deserialize;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(extend("allOf" = [{
+    "if": {"properties": {"endpoint": {"properties": {"endpointId": {"const": "codex-local"}}}}},
+    "then": {"required": ["model", "effort"]}
+}]))]
 pub(super) struct ConversationCreateToolRequest {
     #[serde(flatten)]
     pub(super) create: ConversationCreateInput,
@@ -35,6 +39,10 @@ pub(super) struct ConversationPromptToolRequest {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(extend("allOf" = [{
+    "if": {"properties": {"create": {"properties": {"endpoint": {"properties": {"endpointId": {"const": "codex-local"}}}}}}},
+    "then": {"properties": {"create": {"required": ["model", "effort"]}}}
+}]))]
 pub(super) struct ConversationCreatePromptToolRequest {
     #[serde(flatten)]
     pub(super) input: ConversationCreatePromptInput,

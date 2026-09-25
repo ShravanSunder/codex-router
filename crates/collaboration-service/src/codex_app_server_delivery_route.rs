@@ -95,7 +95,7 @@ impl CodexAppServerDeliveryRoute {
         let checked_out = self
             .holder
             .checkout(&String::from(request.target.session_id.clone()));
-        let response = match checked_out {
+        let (response, held_idle_submission) = match checked_out {
             HeldBindingCheckout::Ready(mut binding) => {
                 let mut checkout = HeldBindingCleanup::new(&self.holder, binding.session_id());
                 if binding.generation() != &generation {
@@ -140,7 +140,7 @@ impl CodexAppServerDeliveryRoute {
                     }
                     _ => checkout.finish(),
                 }
-                response
+                (response, true)
             }
             HeldBindingCheckout::Busy => {
                 effects.submission = SubmissionEffect::NotDispatched;
@@ -150,7 +150,7 @@ impl CodexAppServerDeliveryRoute {
                 return Ok(not_submitted("Held session is busy", true));
             }
             HeldBindingCheckout::Missing => {
-                crate::native_message_dispatch::dispatch_message(
+                let response = crate::native_message_dispatch::dispatch_message(
                     crate::native_message_dispatch::NativeMessageRequest {
                         params,
                         id: json!(request.attempt.as_str()),
@@ -160,10 +160,16 @@ impl CodexAppServerDeliveryRoute {
                         held_connection: None,
                     },
                 )
-                .await
+                .await;
+                (response, false)
             }
         };
-        let receipt = interpret_native_response(&request.target, response, &mut effects);
+        let receipt = interpret_native_response(
+            &request.target,
+            response,
+            held_idle_submission,
+            &mut effects,
+        );
         if sink
             .record(RouteEffectEvidence::CodexAppServer(effects))
             .await
@@ -268,6 +274,7 @@ fn not_submitted(reason: &str, retryable: bool) -> DeliveryReceipt {
 fn interpret_native_response(
     target: &SessionRef,
     response: crate::native_message_dispatch::NativeMessageOutcome,
+    held_idle_submission: bool,
     effects: &mut NativeEffectEvidence<SessionRef, CodexGeneration>,
 ) -> DeliveryReceipt {
     let (outcome, client) = match response {
@@ -289,9 +296,20 @@ fn interpret_native_response(
                         effects.native_submission_id = Some(String::from(submission_id));
                         (DeliveryOutcome::Queued, client)
                     }
-                    NativeSendAcceptance::NativeInputAccepted { turn_id, .. } => {
+                    NativeSendAcceptance::NativeInputAccepted {
+                        operation, turn_id, ..
+                    } => {
                         effects.native_turn_id = Some(String::from(turn_id));
-                        (DeliveryOutcome::StartedOrSteered, client)
+                        let outcome = if held_idle_submission
+                            && matches!(
+                                operation,
+                                collaboration_protocol::NativeInputOperation::TurnStart
+                            ) {
+                            DeliveryOutcome::Started
+                        } else {
+                            DeliveryOutcome::StartedOrSteered
+                        };
+                        (outcome, client)
                     }
                     NativeSendAcceptance::SteerAccepted {
                         turn_id,

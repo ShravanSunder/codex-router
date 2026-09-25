@@ -28,6 +28,14 @@ pub fn command_help() -> String {
         "  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n",
         "  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n  events observe --endpoint ID --session ID --attach [--timeout-seconds 60] [--max-events 256] [--max-bytes 262144]\n",
     )
+    .replace(
+        "  wake send --to ADDRESS --from ADDRESS",
+        "  wake send --to ADDRESS [--from ADDRESS]",
+    )
+    .replace(
+        "  message send --to ADDRESS --from ADDRESS",
+        "  message send --to ADDRESS [--from ADDRESS]",
+    )
 }
 
 /// Usage for the standalone session picker executable.
