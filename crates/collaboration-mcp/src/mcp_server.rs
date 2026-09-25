@@ -12,6 +12,7 @@ use collaboration_protocol::{
     NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
     NativeSessionListResult, OperationId,
 };
+use futures_util::FutureExt;
 use rmcp::{
     ServerHandler,
     handler::server::router::tool::ToolRoute,
@@ -63,12 +64,28 @@ pub(crate) struct CollaborationMcpServer {
     router_executable_observation: Arc<std::sync::Mutex<McpExecutableObservation>>,
 }
 
-#[derive(Clone, Debug)]
 pub(crate) struct McpExecutableObservation {
     launch_path: Option<PathBuf>,
     running_version: String,
     running_identity: Option<codex_native_integration::ExecutableIdentity>,
+    pending_identity: Option<codex_native_integration::ExecutableIdentityTask>,
     file_stamp: Option<McpExecutableFileStamp>,
+}
+
+impl std::fmt::Debug for McpExecutableObservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpExecutableObservation")
+            .field("launch_path", &self.launch_path)
+            .field("running_version", &self.running_version)
+            .field(
+                "running_identity_captured",
+                &self.running_identity.is_some(),
+            )
+            .field("identity_capture_pending", &self.pending_identity.is_some())
+            .field("file_stamp", &self.file_stamp)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,9 +100,39 @@ impl McpExecutableObservation {
             .ok()
             .filter(|_| cfg!(debug_assertions))
             .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
-        Self::capture_from(std::env::current_exe().ok(), running_version)
+        let launch_path = std::env::current_exe().ok();
+        let has_runtime = tokio::runtime::Handle::try_current().is_ok();
+        let pending_identity = has_runtime
+            .then(|| {
+                launch_path
+                    .as_deref()
+                    .map(codex_native_integration::start_executable_identity)
+            })
+            .flatten();
+        let running_identity = if has_runtime {
+            None
+        } else {
+            launch_path
+                .as_deref()
+                .and_then(|path| codex_native_integration::executable_identity_sync(path).ok())
+        };
+        let file_stamp = launch_path
+            .as_deref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| McpExecutableFileStamp {
+                length: metadata.len(),
+                modified: metadata.modified().ok(),
+            });
+        Self {
+            launch_path,
+            running_version,
+            running_identity,
+            pending_identity,
+            file_stamp,
+        }
     }
 
+    #[cfg(test)]
     fn capture_from(launch_path: Option<PathBuf>, running_version: String) -> Self {
         let running_identity = launch_path
             .as_deref()
@@ -101,22 +148,43 @@ impl McpExecutableObservation {
             launch_path,
             running_version,
             running_identity,
+            pending_identity: None,
             file_stamp,
         }
     }
 
+    fn resolve_pending_identity(&mut self) -> bool {
+        let Some(mut pending_identity) = self.pending_identity.take() else {
+            return self.running_identity.is_some();
+        };
+        match pending_identity.wait().now_or_never() {
+            Some(Ok(identity)) => {
+                self.running_identity = Some(identity);
+                true
+            }
+            Some(Err(_error)) => false,
+            None => {
+                self.pending_identity = Some(pending_identity);
+                false
+            }
+        }
+    }
+
     fn drift_warning(&mut self) -> Option<String> {
-        let path = self.launch_path.as_deref()?;
-        let metadata = std::fs::metadata(path).ok();
+        let path = self.launch_path.clone()?;
+        if !self.resolve_pending_identity() && self.pending_identity.is_some() {
+            return None;
+        }
+        let metadata = std::fs::metadata(&path).ok();
         let current_stamp = metadata.map(|metadata| McpExecutableFileStamp {
             length: metadata.len(),
             modified: metadata.modified().ok(),
         });
-        if current_stamp == self.file_stamp {
+        if current_stamp == self.file_stamp && self.running_identity.is_some() {
             return None;
         }
         self.file_stamp = current_stamp;
-        let installed_identity = codex_native_integration::executable_identity_sync(path).ok();
+        let installed_identity = codex_native_integration::executable_identity_sync(&path).ok();
         if installed_identity.is_some() && installed_identity == self.running_identity {
             return None;
         }
@@ -124,7 +192,7 @@ impl McpExecutableObservation {
             .ok()
             .filter(|_| cfg!(debug_assertions))
             .unwrap_or_else(|| self.running_version.clone());
-        let installed_version = codex_native_integration::executable_version_sync(path)
+        let installed_version = codex_native_integration::executable_version_sync(&path)
             .ok()
             .unwrap_or_else(|| "unknown".to_owned());
         Some(format!(

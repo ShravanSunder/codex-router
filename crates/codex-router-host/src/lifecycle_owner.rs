@@ -269,8 +269,7 @@ impl HostRuntime {
             .filter(|_| cfg!(debug_assertions))
             .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
         let router_executable_observer = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::RouterExecutableObserver::capture(std::env::current_exe(), running_version)
-                .await,
+            crate::RouterExecutableObserver::capture(std::env::current_exe(), running_version),
         ));
         let mut interrupt =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -337,7 +336,7 @@ impl HostRuntime {
             }
         };
         let mut state = RuntimeState::ready(router_condition, readiness);
-        let initial_router_relation = router_executable_observer.lock().await.observe().await;
+        let initial_router_relation = router_executable_observer.lock().await.relation();
         state.observe_router_executable(initial_router_relation);
         state.record_lifecycle(
             HostOperation::Start,

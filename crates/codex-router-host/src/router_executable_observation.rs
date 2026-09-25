@@ -31,6 +31,7 @@ pub struct RouterExecutableObserver {
     launch_path: Option<PathBuf>,
     running_version: String,
     running_identity: Option<ExecutableIdentity>,
+    pending_identity: Option<codex_native_integration::ExecutableIdentityTask>,
     observed_stamp: Option<ExecutableFileStamp>,
     relation: RouterExecutableRelation,
 }
@@ -43,34 +44,23 @@ struct ExecutableFileStamp {
 
 impl RouterExecutableObserver {
     /// Captures the Host's startup executable identity and launch-path metadata.
-    pub async fn capture(
-        launch_path: Result<PathBuf, std::io::Error>,
-        running_version: String,
-    ) -> Self {
+    pub fn capture(launch_path: Result<PathBuf, std::io::Error>, running_version: String) -> Self {
         let launch_path = launch_path.ok();
-        let running_identity = match launch_path.as_deref() {
-            Some(path) => codex_native_integration::executable_identity(path)
-                .await
-                .ok(),
-            None => None,
-        };
+        let pending_identity = launch_path
+            .as_deref()
+            .map(codex_native_integration::start_executable_identity);
         let observed_stamp = launch_path
             .as_deref()
             .and_then(|path| executable_file_stamp(path).ok());
-        let relation = if running_identity.is_some() && observed_stamp.is_some() {
-            RouterExecutableRelation::Match
-        } else {
-            RouterExecutableRelation::Unknown {
-                reason: "the Router executable identity could not be captured at startup"
-                    .to_owned(),
-            }
-        };
         Self {
             launch_path,
             running_version,
-            running_identity,
+            running_identity: None,
+            pending_identity,
             observed_stamp,
-            relation,
+            relation: RouterExecutableRelation::Unknown {
+                reason: "the Router startup executable identity is being captured".to_owned(),
+            },
         }
     }
 
@@ -98,10 +88,32 @@ impl RouterExecutableObserver {
                 return self.relation.clone();
             }
         };
+        if let Some(mut pending_identity) = self.pending_identity.take() {
+            match pending_identity.wait().await {
+                Ok(identity) => self.running_identity = Some(identity),
+                Err(_error) => {
+                    self.relation = RouterExecutableRelation::Unknown {
+                        reason: "the Router executable identity could not be captured at startup"
+                            .to_owned(),
+                    };
+                    return self.relation.clone();
+                }
+            }
+            if self.observed_stamp == Some(current_stamp) {
+                self.relation = RouterExecutableRelation::Match;
+                return self.relation.clone();
+            }
+        }
         if self.observed_stamp == Some(current_stamp) {
             return self.relation.clone();
         }
         self.observed_stamp = Some(current_stamp);
+        if self.running_identity.is_none() {
+            self.relation = RouterExecutableRelation::Unknown {
+                reason: "the Router startup executable identity is unavailable".to_owned(),
+            };
+            return self.relation.clone();
+        }
         let (installed_identity, installed_version) = tokio::join!(
             codex_native_integration::executable_identity(path),
             codex_native_integration::executable_version(path),
@@ -124,6 +136,12 @@ impl RouterExecutableObserver {
         }
         self.relation.clone()
     }
+
+    /// Returns the latest relation without waiting for an in-flight startup hash.
+    #[must_use]
+    pub fn relation(&self) -> RouterExecutableRelation {
+        self.relation.clone()
+    }
 }
 
 fn executable_file_stamp(path: &std::path::Path) -> std::io::Result<ExecutableFileStamp> {
@@ -142,8 +160,7 @@ mod tests {
     #[tokio::test]
     async fn same_file_remains_a_match() {
         let path = std::env::current_exe().expect("test executable");
-        let mut observer =
-            RouterExecutableObserver::capture(Ok(path), "test-running".to_owned()).await;
+        let mut observer = RouterExecutableObserver::capture(Ok(path), "test-running".to_owned());
         assert_eq!(observer.observe().await, RouterExecutableRelation::Match);
     }
 
@@ -153,7 +170,8 @@ mod tests {
         let launch_path = directory.path().join("codex-router");
         write_version_script(&launch_path, "0.1.36");
         let mut observer =
-            RouterExecutableObserver::capture(Ok(launch_path.clone()), "0.1.36".to_owned()).await;
+            RouterExecutableObserver::capture(Ok(launch_path.clone()), "0.1.36".to_owned());
+        assert_eq!(observer.observe().await, RouterExecutableRelation::Match);
         write_version_script(&launch_path, "0.1.37");
         assert_eq!(
             observer.observe().await,
@@ -169,8 +187,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("router");
         std::fs::write(&path, b"router").expect("write router");
-        let mut observer =
-            RouterExecutableObserver::capture(Ok(path.clone()), "0.1.36".to_owned()).await;
+        let mut observer = RouterExecutableObserver::capture(Ok(path.clone()), "0.1.36".to_owned());
         std::fs::remove_file(path).expect("remove launch file");
         assert_eq!(
             observer.observe().await,
@@ -186,8 +203,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("router");
         std::fs::create_dir(&path).expect("create unreadable executable directory");
-        let mut observer =
-            RouterExecutableObserver::capture(Ok(path.clone()), "0.1.36".to_owned()).await;
+        let mut observer = RouterExecutableObserver::capture(Ok(path.clone()), "0.1.36".to_owned());
         std::fs::write(path.join("changed"), b"changed").expect("change launch path stamp");
         assert!(matches!(
             observer.observe().await,
