@@ -69,6 +69,43 @@ fn message_adapter_preserves_preparation_and_submission_effects() {
 }
 
 #[test]
+fn native_control_errors_keep_service_detail_and_only_uncertain_effects_are_unknown() {
+    let unsupported = super::structured_result::<serde_json::Value>(
+        Err(collaboration_client::ClientError::Rejected {
+            code: -32050,
+            data: Some(serde_json::json!({
+                "kind":"unsupportedCapability",
+                "stage":"rename",
+                "message":"Codex app-server method `thread/name/set` is missing from its cached schema"
+            })),
+        }),
+        collaboration_protocol::OperationEffect::Unknown,
+    );
+    let unsupported = unsupported.structured_content.expect("unsupported detail");
+    assert_eq!(
+        unsupported["message"],
+        "Codex app-server method `thread/name/set` is missing from its cached schema"
+    );
+    assert_eq!(unsupported["effect"], "none");
+    assert_eq!(unsupported["data"]["kind"], "unsupportedCapability");
+
+    let lost_after_send = super::structured_result::<serde_json::Value>(
+        Err(collaboration_client::ClientError::Protocol(
+            "connection closed after dispatch",
+        )),
+        collaboration_protocol::OperationEffect::Unknown,
+    );
+    let lost_after_send = lost_after_send
+        .structured_content
+        .expect("transport detail");
+    assert_eq!(lost_after_send["effect"], "unknown");
+    assert_eq!(
+        lost_after_send["message"],
+        "Control protocol violation: connection closed after dispatch"
+    );
+}
+
+#[test]
 fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());

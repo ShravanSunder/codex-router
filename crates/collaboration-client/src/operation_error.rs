@@ -142,6 +142,24 @@ pub fn operation_failure_from_client_error(
             data.clone(),
         ),
     };
+    let possible_effect = match &error {
+        ClientError::Rejected { data, .. }
+            if native_control_rejection_has_no_effect(data.as_ref()) =>
+        {
+            OperationEffect::None
+        }
+        _ => effect,
+    };
+    let message = match &error {
+        ClientError::Rejected { data, .. } => data
+            .as_ref()
+            .and_then(|value| value.get("message"))
+            .and_then(Value::as_str)
+            .filter(|message| !message.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string()),
+        _ => error.to_string(),
+    };
     AdapterOperationFailure {
         kind,
         service_kind,
@@ -149,12 +167,33 @@ pub fn operation_failure_from_client_error(
         effect: if matches!(error, ClientError::InvalidRequest(_)) {
             OperationEffect::None
         } else {
-            effect
+            possible_effect
         },
-        message: error.to_string(),
+        message,
         code,
         data,
     }
+}
+
+fn native_control_rejection_has_no_effect(data: Option<&Value>) -> bool {
+    let Some(data) = data else {
+        return false;
+    };
+    let stage = data.get("stage").and_then(Value::as_str);
+    if !matches!(stage, Some("inspect" | "rename" | "interrupt")) {
+        return false;
+    }
+    matches!(
+        data.get("kind").and_then(Value::as_str),
+        Some(
+            "unsupportedCapability"
+                | "nativeRejected"
+                | "wrongService"
+                | "endpointNotFound"
+                | "unavailable"
+                | "staleGeneration"
+        )
+    )
 }
 
 #[cfg(test)]
@@ -202,5 +241,60 @@ mod tests {
             Some(json!({"ioKind":"NotFound","osCode":null}))
         );
         assert!(!failure.message.contains("private path"));
+    }
+
+    #[test]
+    fn native_rejections_keep_the_server_message_and_do_not_claim_an_unknown_effect() {
+        let failure = operation_failure_from_client_error(
+            ClientError::Rejected {
+                code: -32050,
+                data: Some(json!({
+                    "kind":"unsupportedCapability",
+                    "stage":"rename",
+                    "message":"Codex app-server method `thread/name/set` is missing"
+                })),
+            },
+            OperationEffect::Unknown,
+        );
+
+        assert_eq!(
+            failure.message,
+            "Codex app-server method `thread/name/set` is missing"
+        );
+        assert_eq!(failure.effect, OperationEffect::None);
+    }
+
+    #[test]
+    fn outcome_unknown_rejections_keep_the_server_message_and_unknown_effect() {
+        let failure = operation_failure_from_client_error(
+            ClientError::Rejected {
+                code: -32050,
+                data: Some(json!({
+                    "kind":"outcomeUnknown",
+                    "stage":"rename",
+                    "message":"native request outcome is unknown after dispatch"
+                })),
+            },
+            OperationEffect::Unknown,
+        );
+
+        assert_eq!(
+            failure.message,
+            "native request outcome is unknown after dispatch"
+        );
+        assert_eq!(failure.effect, OperationEffect::Unknown);
+    }
+
+    #[test]
+    fn conversation_busy_rejections_keep_the_possible_effect_classification() {
+        let failure = operation_failure_from_client_error(
+            ClientError::Rejected {
+                code: -32050,
+                data: Some(json!({"kind":"busy","stage":"load"})),
+            },
+            OperationEffect::Unknown,
+        );
+
+        assert_eq!(failure.effect, OperationEffect::Unknown);
     }
 }
