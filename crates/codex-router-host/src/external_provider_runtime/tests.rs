@@ -405,7 +405,9 @@ prompt=json.loads(sys.stdin.readline())
 chunk='x'*(600*1024)
 update={'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':chunk}}}}
 print(json.dumps(update)); print(json.dumps(update)); sys.stdout.flush()
-print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})); sys.stdout.flush()
+cancel=json.loads(sys.stdin.readline())
+assert cancel['method']=='session/cancel'
+print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})); sys.stdout.flush()
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
@@ -1157,7 +1159,10 @@ async fn aggregate_prompt_output_is_bounded_across_valid_frames() {
         .prompt("fixture-session".to_owned(), "overflow".to_owned())
         .await
         .expect_err("aggregate output must be bounded");
-    assert!(error.to_string().contains("output byte limit"), "{error}");
+    assert!(matches!(
+        error,
+        ExternalProviderRuntimeError::PromptOutputLimitExceeded
+    ));
 
     runtime.shutdown().await;
 }
