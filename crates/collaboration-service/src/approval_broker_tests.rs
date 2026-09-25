@@ -278,6 +278,45 @@ async fn native_request_by_its_own_approver_is_recorded_and_refused() {
 }
 
 #[tokio::test]
+async fn missing_native_approval_route_emits_only_typed_safe_diagnostic() {
+    use codex_acp_adapter::{ApprovalBroker as _, BrokeredApprovalRequest};
+
+    let (broker, generation, _directory) = fixture_broker().await;
+    let provider_session_id = "requester";
+    let request = json!({
+        "method":"item/commandExecution/requestApproval",
+        "params":{"options":[],"command":"PRIVATE_COMMAND_SENTINEL"}
+    });
+    let diagnostic = native_approval_refusal_diagnostic(
+        &broker.backend.endpoint,
+        provider_session_id,
+        &request,
+        NativeApprovalRefusalReason::MissingRoute,
+    );
+
+    assert_eq!(
+        diagnostic,
+        NativeApprovalRefusalDiagnostic {
+            endpoint: "codex-local".to_owned(),
+            provider_session_id: "requester".to_owned(),
+            method: "item/commandExecution/requestApproval",
+            reason_code: "nativeApprovalRouteUnavailable",
+        }
+    );
+    assert!(
+        broker
+            .request(BrokeredApprovalRequest {
+                thread_id: provider_session_id.to_owned(),
+                generation,
+                request,
+            })
+            .await
+            .is_err()
+    );
+    assert!(broker.list(false).await.approvals.is_empty());
+}
+
+#[tokio::test]
 async fn native_request_with_empty_option_mapping_is_recorded_as_refused() {
     use codex_acp_adapter::{ApprovalBroker as _, ApprovalRoute, BrokeredApprovalRequest};
     use collaboration_protocol::RouterAccess;

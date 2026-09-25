@@ -10,7 +10,8 @@ use codex_acp_adapter::{
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListResult,
     ApprovalOfferedOption, ApprovalOptionScope, ApprovalPresentation, ApprovalRequestRecord,
-    ApprovalState, DeliveryOutcome, MessageContent, MessageDelivery, SessionRef, UuidIdentity,
+    ApprovalState, DeliveryOutcome, EndpointRef, MessageContent, MessageDelivery, SessionRef,
+    UuidIdentity,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -117,6 +118,47 @@ enum ApprovalGenerationAuthority {
         generation: collaboration_protocol::CodexGeneration,
         retirement: tokio_util::sync::CancellationToken,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeApprovalRefusalReason {
+    MissingRoute,
+}
+
+impl NativeApprovalRefusalReason {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::MissingRoute => "nativeApprovalRouteUnavailable",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NativeApprovalRefusalDiagnostic {
+    endpoint: String,
+    provider_session_id: String,
+    method: &'static str,
+    reason_code: &'static str,
+}
+
+fn native_approval_refusal_diagnostic(
+    endpoint: &EndpointRef,
+    provider_session_id: &str,
+    request: &Value,
+    reason: NativeApprovalRefusalReason,
+) -> NativeApprovalRefusalDiagnostic {
+    let method = match request.get("method").and_then(Value::as_str) {
+        Some("item/commandExecution/requestApproval") => "item/commandExecution/requestApproval",
+        Some("item/fileChange/requestApproval") => "item/fileChange/requestApproval",
+        Some("item/permissions/requestApproval") => "item/permissions/requestApproval",
+        _ => "unknownNativeApprovalMethod",
+    };
+    NativeApprovalRefusalDiagnostic {
+        endpoint: String::from(endpoint.endpoint_id.clone()),
+        provider_session_id: provider_session_id.to_owned(),
+        method,
+        reason_code: reason.code(),
+    }
 }
 
 pub struct ServiceApprovalBroker {
@@ -549,13 +591,23 @@ impl ApprovalBroker for ServiceApprovalBroker {
                     .try_into()
                     .map_err(|_| ApprovalBrokerError::Unavailable)?,
             };
-            let route = self
-                .routes
-                .lock()
-                .await
-                .get(&request.thread_id)
-                .cloned()
-                .ok_or(ApprovalBrokerError::RouteUnavailable)?;
+            let route = self.routes.lock().await.get(&request.thread_id).cloned();
+            let Some(route) = route else {
+                let diagnostic = native_approval_refusal_diagnostic(
+                    &self.backend.endpoint,
+                    &request.thread_id,
+                    &request.request,
+                    NativeApprovalRefusalReason::MissingRoute,
+                );
+                tracing::warn!(
+                    endpoint = %diagnostic.endpoint,
+                    provider_session_id = %diagnostic.provider_session_id,
+                    method = diagnostic.method,
+                    reason_code = diagnostic.reason_code,
+                    "native approval request refused before route lookup",
+                );
+                return Err(ApprovalBrokerError::RouteUnavailable);
+            };
             let native_options = request
                 .request
                 .pointer("/params/options")
