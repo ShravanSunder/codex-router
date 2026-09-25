@@ -1,7 +1,7 @@
 //! Load a recorded provider session only after checking live peer ownership.
 use crate::{
-    ExternalProviderSupervisor, LiveSessionOwnership, LiveSessionOwnershipCheck,
-    ProviderSessionActivity,
+    ExternalProviderRuntimeError, ExternalProviderSupervisor, LiveSessionOwnership,
+    LiveSessionOwnershipCheck, ProviderSessionActivity,
 };
 use collaboration_protocol::SessionRef;
 use collaboration_service::ProviderOperationStore;
@@ -13,7 +13,39 @@ pub(crate) enum ProviderSessionLoadOutcome {
     Ready,
     MissingRecord,
     LiveElsewhere,
-    Unavailable { reason: String },
+    Rejected {
+        reason: ProviderSessionLoadRejection,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderSessionLoadRejection {
+    SessionNotFound { code: i64 },
+    ProviderRejected { code: i64 },
+}
+
+impl ProviderSessionLoadRejection {
+    #[must_use]
+    pub(crate) fn code(self) -> i64 {
+        match self {
+            Self::SessionNotFound { code } | Self::ProviderRejected { code } => code,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn safe_detail(self) -> String {
+        match self {
+            Self::SessionNotFound { .. } => {
+                "this session never started a turn and did not survive the provider restart; create a new conversation".to_owned()
+            }
+            Self::ProviderRejected { code } => {
+                format!("provider rejected the ACP operation (code {code})")
+            }
+        }
+    }
 }
 
 pub(crate) async fn ensure_provider_session_loaded(
@@ -53,6 +85,17 @@ pub(crate) async fn ensure_provider_session_loaded(
         .await
     {
         Ok(()) => ProviderSessionLoadOutcome::Ready,
+        Err(ExternalProviderRuntimeError::ProviderSessionNotFound { code }) => {
+            ProviderSessionLoadOutcome::Rejected {
+                reason: ProviderSessionLoadRejection::SessionNotFound { code },
+            }
+        }
+        Err(ExternalProviderRuntimeError::AuthenticationRequired { code })
+        | Err(ExternalProviderRuntimeError::ProviderRejected { code }) => {
+            ProviderSessionLoadOutcome::Rejected {
+                reason: ProviderSessionLoadRejection::ProviderRejected { code },
+            }
+        }
         Err(error) => unavailable(error.to_string()),
     }
 }
@@ -270,7 +313,7 @@ sys.stdin.read()
     }
 
     #[tokio::test]
-    async fn failed_load_reports_unavailable_without_creating_replacement() {
+    async fn rejected_load_preserves_provider_code_without_creating_replacement() {
         let root = tempfile::tempdir().expect("fixture root");
         let event_path = root.path().join("provider-method.txt");
         let target = target();
@@ -318,7 +361,7 @@ sys.stdin.read()
         .await;
 
         assert!(
-            matches!(&result, ProviderSessionLoadOutcome::Unavailable { reason } if reason.contains("provider rejected the ACP operation")),
+            matches!(&result, ProviderSessionLoadOutcome::Rejected { reason: ProviderSessionLoadRejection::ProviderRejected { code } } if *code == -32001),
             "{result:?}"
         );
         assert_eq!(

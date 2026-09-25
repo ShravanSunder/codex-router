@@ -3,7 +3,7 @@ use crate::external_provider_supervisor::ProviderPromptDispatch;
 use crate::provider_acp_message_fifo::ProviderAcpMessageFifo;
 use crate::provider_acp_route_claim::ProviderAcpRouteClaim;
 use crate::provider_acp_session_loading::{
-    ProviderSessionLoadOutcome, ensure_provider_session_loaded,
+    ProviderSessionLoadOutcome, ProviderSessionLoadRejection, ensure_provider_session_loaded,
 };
 use crate::{
     ExternalProviderSupervisor, LiveSessionOwnershipCheck, ProviderSessionActivity,
@@ -307,6 +307,9 @@ impl ProviderAcpDeliveryRoute {
                     .finish_known_none(&request, sink, &mut effect, reason, true)
                     .await;
             }
+            ProviderSessionLoadOutcome::Rejected { reason } => {
+                return self.finish_rejected(sink, &mut effect, reason).await;
+            }
         }
         let activity = match runtime
             .session_activity(String::from(request.target.session_id.clone()))
@@ -452,6 +455,39 @@ impl ProviderAcpDeliveryRoute {
             return Ok(Self::receipt(DeliveryOutcome::Unknown, None));
         }
         Ok(Self::not_submitted(reason, retryable))
+    }
+
+    async fn finish_rejected(
+        &self,
+        sink: &dyn AttemptEvidenceSink,
+        effect: &mut RouteEffectEvidence<SessionRef, CodexGeneration>,
+        provider_reason: ProviderSessionLoadRejection,
+    ) -> Result<DeliveryReceipt, DeliveryContractError> {
+        update_submission(effect, SubmissionEffect::NotDispatched);
+        if sink.record(effect.clone()).await.is_err() {
+            return Ok(Self::receipt(DeliveryOutcome::Unknown, None));
+        }
+        let client_code = Some(provider_reason.code());
+        let detail = Some(provider_reason.safe_detail());
+        let (reason, next_action) = match provider_reason {
+            ProviderSessionLoadRejection::SessionNotFound { .. } => (
+                DeliveryRejectionReason::ProviderSessionNotFound,
+                DeliveryNextAction::CorrectRequest,
+            ),
+            ProviderSessionLoadRejection::ProviderRejected { .. } => (
+                DeliveryRejectionReason::ProviderRejected,
+                DeliveryNextAction::InspectTarget,
+            ),
+        };
+        Ok(Self::receipt(
+            DeliveryOutcome::Rejected(DeliveryRejection {
+                reason,
+                next_action,
+                client_code,
+                detail,
+            }),
+            None,
+        ))
     }
 
     async fn finish_unknown(

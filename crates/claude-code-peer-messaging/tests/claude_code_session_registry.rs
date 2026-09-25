@@ -18,7 +18,7 @@ fn live_record_fixture(process_id: u32, session_id: &str) -> Value {
 }
 
 #[test]
-fn live_registry_entry_is_writable_only_for_supported_protocol_and_status() {
+fn live_registry_entry_is_writable_only_for_supported_protocol() {
     let root = tempfile::tempdir().expect("registry directory");
     let pid = std::process::id();
     let path = root.path().join(format!("{pid}.json"));
@@ -92,11 +92,50 @@ fn live_registry_entry_is_writable_only_for_supported_protocol_and_status() {
         })
         .to_string(),
     )
-    .expect("unsupported status record");
+    .expect("shell status record");
     assert!(matches!(
-        registry.lookup(&session_id).expect("status lookup"),
-        PeerSessionLookup::LiveUnsupported { .. }
+        registry.lookup(&session_id).expect("shell lookup"),
+        PeerSessionLookup::Writable(_)
     ));
+}
+
+#[test]
+fn live_registry_status_is_advisory_and_preserves_unknown_values() {
+    let root = tempfile::tempdir().expect("registry directory");
+    let process_id = std::process::id();
+    let session_id = SessionId::try_from("fixture-session".to_owned()).expect("session ID");
+    let path = root.path().join(format!("{process_id}.json"));
+    let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+
+    for (status, expected) in [
+        (Some("busy"), PeerSessionStatus::Busy),
+        (Some("idle"), PeerSessionStatus::Idle),
+        (Some("waiting"), PeerSessionStatus::Waiting),
+        (Some("shell"), PeerSessionStatus::Shell),
+        (
+            Some("compacting"),
+            PeerSessionStatus::Other("compacting".to_owned()),
+        ),
+        (None, PeerSessionStatus::Unreported),
+    ] {
+        let mut record = json!({
+            "pid": process_id,
+            "sessionId": "fixture-session",
+            "peerProtocol": 1,
+            "messagingSocketPath": root.path().join("peer.sock"),
+        });
+        if let Some(status) = status {
+            record["status"] = json!(status);
+        }
+        std::fs::write(&path, record.to_string()).expect("registry record");
+
+        let lookup = registry.lookup(&session_id).expect("live registry lookup");
+
+        let PeerSessionLookup::Writable(record) = lookup else {
+            panic!("live status {status:?} must not make the peer unsupported")
+        };
+        assert_eq!(record.status, expected);
+    }
 }
 
 #[test]

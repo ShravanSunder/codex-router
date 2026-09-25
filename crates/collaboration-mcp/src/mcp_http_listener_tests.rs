@@ -1538,6 +1538,12 @@ async fn schema_required_fields_reach_each_tool_without_missing_field_errors() {
             !encoded.contains("missing field") && !encoded.contains("requires "),
             "{name} rejected the schema-required input as incomplete: {encoded}"
         );
+        if name == "wake_send" {
+            assert!(
+                !encoded.contains("explicit nullable generationGuard"),
+                "wake_send must accept an omitted optional generationGuard: {encoded}"
+            );
+        }
     }
 }
 

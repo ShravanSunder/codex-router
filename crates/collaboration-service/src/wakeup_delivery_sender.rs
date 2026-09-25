@@ -17,6 +17,9 @@ use tokio::sync::Mutex;
 #[cfg(test)]
 #[path = "native_delivery_crash_tests.rs"]
 mod crash_tests;
+#[cfg(test)]
+#[path = "wakeup_delivery_sender_tests.rs"]
+mod tests;
 
 #[derive(Clone)]
 pub(crate) struct WakeDeliverySender {

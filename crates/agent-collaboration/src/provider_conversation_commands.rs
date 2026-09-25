@@ -65,6 +65,7 @@ fn report_typed_failure(failure: &ConversationOperationFailure, json_output: boo
         | ConversationOperationFailureKind::Busy
         | ConversationOperationFailureKind::NotFound
         | ConversationOperationFailureKind::StaleGeneration
+        | ConversationOperationFailureKind::ProviderSessionNotFound
         | ConversationOperationFailureKind::ProviderRejected => 4,
         ConversationOperationFailureKind::OutcomeUnknown => 5,
     };

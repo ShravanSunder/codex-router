@@ -10,10 +10,14 @@ use std::{
 
 const MAX_REGISTRY_RECORD_BYTES: u64 = 256 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PeerSessionStatus {
     Busy,
     Idle,
+    Waiting,
+    Shell,
+    Unreported,
+    Other(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -188,10 +192,16 @@ fn decode_record(target: &SessionId, filename_pid: u32, envelope: &Value) -> Pee
             "live registry peer protocol {protocol} is unsupported"
         ));
     }
-    let status = match envelope.get("status").and_then(Value::as_str) {
-        Some("busy") => PeerSessionStatus::Busy,
-        Some("idle") => PeerSessionStatus::Idle,
-        _ => return unsupported("live registry session status is unsupported"),
+    let status = match envelope.get("status") {
+        None => PeerSessionStatus::Unreported,
+        Some(Value::String(status)) => match status.as_str() {
+            "busy" => PeerSessionStatus::Busy,
+            "idle" => PeerSessionStatus::Idle,
+            "waiting" => PeerSessionStatus::Waiting,
+            "shell" => PeerSessionStatus::Shell,
+            _ => PeerSessionStatus::Other(status.clone()),
+        },
+        Some(status) => PeerSessionStatus::Other(status.to_string()),
     };
     let Some(socket_path) = envelope.get("messagingSocketPath").and_then(Value::as_str) else {
         return unsupported("live registry record has no peer socket path");

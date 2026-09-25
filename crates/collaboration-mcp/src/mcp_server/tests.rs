@@ -258,6 +258,20 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
     let mut provider_with_effort = provider_create.clone();
     provider_with_effort["effort"] = serde_json::json!("medium");
     assert!(!create_validator.is_valid(&provider_with_effort));
+    for (field, value) in [
+        ("fork", serde_json::json!("source-thread")),
+        (
+            "rootMessageId",
+            serde_json::json!("019f0000-0000-7000-8000-000000000301"),
+        ),
+    ] {
+        let mut provider_with_codex_only_field = provider_create.clone();
+        provider_with_codex_only_field[field] = value;
+        assert!(
+            !create_validator.is_valid(&provider_with_codex_only_field),
+            "provider create schema must reject {field}"
+        );
+    }
     let mut empty_codex_create = provider_create.clone();
     empty_codex_create["endpoint"]["endpointId"] = serde_json::json!("codex-local");
     assert!(!create_validator.is_valid(&empty_codex_create));
@@ -275,6 +289,23 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
     let mut provider_create_and_prompt_with_effort = provider_create_and_prompt;
     provider_create_and_prompt_with_effort["create"]["effort"] = serde_json::json!("medium");
     assert!(!create_and_prompt_validator.is_valid(&provider_create_and_prompt_with_effort));
+    for (field, value) in [
+        ("fork", serde_json::json!("source-thread")),
+        (
+            "rootMessageId",
+            serde_json::json!("019f0000-0000-7000-8000-000000000302"),
+        ),
+    ] {
+        let mut provider_create_and_prompt = serde_json::json!({
+            "create":provider_create,
+            "message":{"kind":"humanUser","text":"hello"}
+        });
+        provider_create_and_prompt["create"][field] = value;
+        assert!(
+            !create_and_prompt_validator.is_valid(&provider_create_and_prompt),
+            "provider create-and-prompt schema must reject {field}"
+        );
+    }
 
     let schedule_schema = schema_for("schedule_create");
     let schedule_definition = &schedule_schema["$defs"]["ScheduleDefinition"];
@@ -335,6 +366,8 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
             description.contains("rejected for provider endpoints"),
             "{description}"
         );
+        assert!(description.contains("rootMessageId"), "{description}");
+        assert!(description.contains("fork"), "{description}");
     }
 }
 
@@ -974,6 +1007,103 @@ async fn inspect_tool_rejects_well_shaped_wrong_target_response_like_typed_sdk()
             .as_ref()
             .and_then(|value| value.get("kind")),
         Some(&serde_json::json!("protocolViolation"))
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), peer)
+        .await
+        .expect("Control fixture traffic deadline")
+        .expect("peer join");
+}
+
+#[tokio::test]
+async fn inspect_tool_exposes_native_rejection_message() {
+    use rmcp::handler::server::wrapper::Parameters;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private directory");
+    }
+    let digest = format!("sha256:{}", "a".repeat(64));
+    std::fs::write(
+        temporary.path().join("service.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version":2,
+            "serviceId":"00000000-0000-4000-8000-000000000001",
+            "serviceEpoch":"00000000-0000-4000-8000-000000000002",
+            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "controlSchemaDigest":digest,
+            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+        }))
+        .expect("manifest JSON"),
+    )
+    .expect("manifest write");
+    let listener = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
+        .expect("Control bind");
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("Control accept");
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let initialize: serde_json::Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read init")
+                .expect("init frame"),
+        )
+        .expect("init JSON");
+        let initialized = serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
+            "version":{"major":1,"minor":0},"serviceId":"00000000-0000-4000-8000-000000000001",
+            "serviceEpoch":"00000000-0000-4000-8000-000000000002","controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
+        }});
+        write
+            .write_all(format!("{initialized}\n").as_bytes())
+            .await
+            .expect("write init");
+        let inspect: serde_json::Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read inspect")
+                .expect("inspect frame"),
+        )
+        .expect("inspect JSON");
+        assert_eq!(inspect["method"], "codex/sessionInspect");
+        let message = "native thread is unreadable: fixture refusal";
+        let response = serde_json::json!({"jsonrpc":"2.0","id":inspect["id"],"error":{
+            "code":-32050,"message":message,"data":{
+                "kind":"nativeRejected","stage":"inspect","message":message,
+                "reason":"unknown","nextAction":"inspectTarget","nativeCode":-32600
+            }
+        }});
+        write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .expect("write rejection");
+    });
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"unreadable-thread"
+    }))
+    .expect("target");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+
+    let result = server
+        .session_inspect(Parameters(collaboration_protocol::NativeInspectParams {
+            target,
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured rejection");
+    assert_eq!(
+        structured["message"],
+        "native thread is unreadable: fixture refusal"
+    );
+    assert_eq!(
+        structured["data"]["message"],
+        "native thread is unreadable: fixture refusal"
     );
     tokio::time::timeout(std::time::Duration::from_secs(2), peer)
         .await

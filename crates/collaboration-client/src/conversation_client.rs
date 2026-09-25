@@ -491,6 +491,7 @@ impl ConversationClient {
                                 effect,
                                 message,
                                 operation_id: operation_id.clone(),
+                                provider_code: None,
                                 target: None,
                                 endpoint: None,
                                 availability: None,

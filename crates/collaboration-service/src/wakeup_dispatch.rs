@@ -72,7 +72,7 @@ pub(crate) async fn dispatch(request: WakeRequest<'_>) -> Value {
         "wake/send" => {
             let params = match serde_json::from_value::<WakeSendRequest>(request.params) {
                 Ok(params) => params,
-                Err(_) => return failure(request.id,context,WakeFailureReason::InvalidField { field:"request".into(), constraint:"Provide closed wake fields, UUIDv7 operation identity, an explicit nullable generationGuard and valid bounded timing.".into() },LocalMutationState::None),
+                Err(_) => return failure(request.id,context,WakeFailureReason::InvalidField { field:"request".into(), constraint:"Provide closed wake fields, a UUIDv7 operation identity and valid bounded timing.".into() },LocalMutationState::None),
             };
             let timing = serde_json::to_value(params.timing).and_then(serde_json::from_value);
             let expiry = serde_json::to_value(params.expiry).and_then(serde_json::from_value);

@@ -290,10 +290,12 @@ pub enum ExternalProviderRuntimeError {
     LocalNotFound,
     #[error("provider cancellation target is no longer active")]
     LocalCancelTargetMismatch,
-    #[error("provider authentication is required")]
-    AuthenticationRequired,
-    #[error("provider rejected the ACP operation")]
-    ProviderFailure,
+    #[error("provider authentication is required (ACP code {code})")]
+    AuthenticationRequired { code: i64 },
+    #[error("provider session was not found (ACP code {code})")]
+    ProviderSessionNotFound { code: i64 },
+    #[error("provider rejected the ACP operation (ACP code {code})")]
+    ProviderRejected { code: i64 },
     #[error("provider operation response was unavailable")]
     TransportFailure,
     #[error(
@@ -311,10 +313,14 @@ pub enum ExternalProviderRuntimeError {
 pub(crate) fn acp_operation_error(
     error: agent_client_protocol::Error,
 ) -> ExternalProviderRuntimeError {
-    if error.code == agent_client_protocol::schema::v1::ErrorCode::AuthRequired {
-        ExternalProviderRuntimeError::AuthenticationRequired
-    } else {
-        ExternalProviderRuntimeError::ProviderFailure
+    use agent_client_protocol::schema::v1::ErrorCode;
+    let code = i64::from(i32::from(error.code));
+    match error.code {
+        ErrorCode::AuthRequired => ExternalProviderRuntimeError::AuthenticationRequired { code },
+        ErrorCode::ResourceNotFound => {
+            ExternalProviderRuntimeError::ProviderSessionNotFound { code }
+        }
+        _ => ExternalProviderRuntimeError::ProviderRejected { code },
     }
 }
 

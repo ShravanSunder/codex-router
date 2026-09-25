@@ -17,6 +17,8 @@ pub enum DeliveryRejectionReason {
     SteerUnsupported,
     QueueUnsupported,
     StaleGeneration,
+    ProviderSessionNotFound,
+    ProviderRejected,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]

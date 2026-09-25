@@ -1052,7 +1052,11 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
         .await;
     if !matches!(
         classification,
-        Err(codex_router_host::ExternalProviderRuntimeError::AuthenticationRequired)
+        Err(
+            codex_router_host::ExternalProviderRuntimeError::AuthenticationRequired {
+                code: -32000
+            }
+        )
     ) {
         return Err(format!("unexpected authentication classification: {classification:?}").into());
     }

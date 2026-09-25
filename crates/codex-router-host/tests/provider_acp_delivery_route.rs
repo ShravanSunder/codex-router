@@ -159,7 +159,7 @@ sys.stdin.read()
     }
 }
 
-fn refusing_load_fixture(load_marker: &Path) -> ExternalProviderLaunch {
+fn refusing_load_fixture(load_marker: &Path, error_code: i32) -> ExternalProviderLaunch {
     let script = format!(
         r#"
 import json,sys
@@ -170,9 +170,28 @@ for line in sys.stdin:
  assert request['method']=='session/load', request['method']
  assert request['params']['sessionId']=='fixture-session'
  with open({:?},'a') as marker: marker.write('session/load\n')
- print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'error':{{'code':-32001,'message':'refused load'}}}})); sys.stdout.flush()
+ print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'error':{{'code':{error_code},'message':'provider fixture refusal','data':{{'privateText':'must not escape'}}}}}})); sys.stdout.flush()
 "#,
-        load_marker.display().to_string()
+        load_marker.display().to_string(),
+        error_code = error_code,
+    );
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), script],
+        environment: Vec::new(),
+    }
+}
+
+fn exited_provider_fixture(exit_marker: &Path) -> ExternalProviderLaunch {
+    let script = format!(
+        r#"
+import json,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{'loadSession':True}},'agentInfo':{{'name':'exited-provider-fixture','version':'1'}}}}}})); sys.stdout.flush()
+with open({:?},'w') as marker: marker.write('provider exited')
+sys.exit(0)
+"#,
+        exit_marker.display().to_string()
     );
     ExternalProviderLaunch {
         executable: PathBuf::from("/usr/bin/python3"),
@@ -446,12 +465,12 @@ async fn router_queued_reconciliation_uses_only_the_operation_store() {
 }
 
 #[tokio::test]
-async fn failed_load_returns_not_submitted_without_session_new() {
+async fn provider_load_auth_rejection_is_typed_without_session_new() {
     let root = tempfile::tempdir().expect("provider root");
     let load_marker = root.path().join("load-method.txt");
     let target = target();
     let binding = provider_binding(&target);
-    let runtime = ExternalProviderRuntime::initialize(refusing_load_fixture(&load_marker))
+    let runtime = ExternalProviderRuntime::initialize(refusing_load_fixture(&load_marker, -32000))
         .await
         .expect("fixture provider");
     let store = Arc::new(tokio::sync::Mutex::new(
@@ -498,10 +517,11 @@ async fn failed_load_returns_not_submitted_without_session_new() {
         .await
         .expect("load refusal");
 
-    assert!(matches!(
-        receipt.outcome,
-        DeliveryOutcome::NotSubmitted { .. }
-    ));
+    let outcome = serde_json::to_value(&receipt.outcome).expect("receipt encoding");
+    assert_eq!(outcome["kind"], "rejected");
+    assert_eq!(outcome["reason"], "providerRejected");
+    assert_eq!(outcome["clientCode"], -32000);
+    assert!(!outcome.to_string().contains("must not escape"));
     assert_eq!(
         std::fs::read_to_string(load_marker).expect("method").trim(),
         "session/load"
@@ -514,12 +534,184 @@ async fn failed_load_returns_not_submitted_without_session_new() {
 }
 
 #[tokio::test]
+async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text() {
+    for (error_code, expected_reason) in [
+        (-32002, "providerSessionNotFound"),
+        (-32600, "providerRejected"),
+    ] {
+        let root = tempfile::tempdir().expect("provider root");
+        let load_marker = root.path().join("load-method.txt");
+        let target = target();
+        let binding = provider_binding(&target);
+        let runtime =
+            ExternalProviderRuntime::initialize(refusing_load_fixture(&load_marker, error_code))
+                .await
+                .expect("fixture provider");
+        let store = Arc::new(tokio::sync::Mutex::new(
+            ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+                .await
+                .expect("store"),
+        ));
+        store
+            .lock()
+            .await
+            .record_session(&ProviderSessionRecord {
+                target: target.clone(),
+                working_directory: ProviderWorkingDirectory::try_from("/tmp".to_owned())
+                    .expect("cwd"),
+                requested_policy: ProviderRequestedPolicy {
+                    access: RouterAccess::WriteRestricted,
+                },
+                created_by: target.clone(),
+                approver: target.clone(),
+                updated_at_ms: 1,
+            })
+            .await
+            .expect("session record");
+        let supervisor = Arc::new(
+            ExternalProviderSupervisor::new(
+                vec![ExternalProviderBinding {
+                    identity: binding.clone(),
+                    runtime,
+                }],
+                Arc::clone(&store),
+            )
+            .expect("supervisor"),
+        );
+        let route = ProviderAcpDeliveryRoute::new(
+            target.endpoint.service_id.clone(),
+            available_directory(&target, &binding),
+            Arc::clone(&supervisor),
+            store,
+            Arc::new(NoLivePeer),
+        );
+        let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
+
+        let receipt = route
+            .deliver(request(target, "empty restart session"), &evidence)
+            .await
+            .expect("load refusal");
+        let outcome = serde_json::to_value(&receipt.outcome).expect("receipt encoding");
+
+        assert_eq!(outcome["kind"], "rejected");
+        assert_eq!(outcome["reason"], expected_reason);
+        assert_eq!(outcome["clientCode"], error_code);
+        assert!(
+            outcome["detail"]
+                .as_str()
+                .is_some_and(|detail| !detail.contains("must not escape")),
+            "ACP error data escaped: {outcome}"
+        );
+        if error_code == -32002 {
+            assert_eq!(
+                outcome["detail"],
+                "this session never started a turn and did not survive the provider restart; create a new conversation"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&load_marker)
+                .expect("load marker")
+                .trim(),
+            "session/load"
+        );
+        assert!(matches!(evidence.0.lock().await.as_slice(),
+            [RouteEffectEvidence::ProviderAcp(before), RouteEffectEvidence::ProviderAcp(after)]
+            if before.submission == SubmissionEffect::Dispatching && after.submission == SubmissionEffect::NotDispatched));
+        route.shutdown_queue().await;
+        supervisor.shutdown().await.expect("shutdown");
+    }
+}
+
+#[tokio::test]
+async fn provider_process_transport_failure_remains_retryable() {
+    let root = tempfile::tempdir().expect("provider root");
+    let exit_marker = root.path().join("provider-exit.txt");
+    let target = target();
+    let binding = provider_binding(&target);
+    let runtime = ExternalProviderRuntime::initialize(exited_provider_fixture(&exit_marker))
+        .await
+        .expect("fixture provider");
+    let store = Arc::new(tokio::sync::Mutex::new(
+        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("store"),
+    ));
+    store
+        .lock()
+        .await
+        .record_session(&ProviderSessionRecord {
+            target: target.clone(),
+            working_directory: ProviderWorkingDirectory::try_from("/tmp".to_owned()).expect("cwd"),
+            requested_policy: ProviderRequestedPolicy {
+                access: RouterAccess::WriteRestricted,
+            },
+            created_by: target.clone(),
+            approver: target.clone(),
+            updated_at_ms: 1,
+        })
+        .await
+        .expect("session record");
+    let supervisor = Arc::new(
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: binding.clone(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor"),
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !exit_marker.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provider exit marker deadline");
+    let route = ProviderAcpDeliveryRoute::new(
+        target.endpoint.service_id.clone(),
+        available_directory(&target, &binding),
+        Arc::clone(&supervisor),
+        store,
+        Arc::new(NoLivePeer),
+    );
+
+    let receipt = route
+        .deliver(
+            request(target, "retry a transient provider disconnect"),
+            &RecordedEvidence(tokio::sync::Mutex::new(Vec::new())),
+        )
+        .await
+        .expect("transport failure receipt");
+
+    assert!(
+        matches!(
+            &receipt.outcome,
+            DeliveryOutcome::NotSubmitted {
+                retryable: true,
+                ..
+            }
+        ),
+        "transport refusal was not retryable: {:?}",
+        receipt.outcome
+    );
+    assert_eq!(
+        std::fs::read_to_string(exit_marker)
+            .expect("provider exit marker")
+            .trim(),
+        "provider exited"
+    );
+    route.shutdown_queue().await;
+    supervisor.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn live_peer_recheck_prevents_provider_load() {
     let root = tempfile::tempdir().expect("provider root");
     let load_marker = root.path().join("load-method.txt");
     let target = target();
     let binding = provider_binding(&target);
-    let runtime = ExternalProviderRuntime::initialize(refusing_load_fixture(&load_marker))
+    let runtime = ExternalProviderRuntime::initialize(refusing_load_fixture(&load_marker, -32002))
         .await
         .expect("fixture provider");
     let store = Arc::new(tokio::sync::Mutex::new(

@@ -372,7 +372,7 @@ fn native_call_failure(
             let (reason, next_action) =
                 crate::message_effect_state::classify_native_rejection(*code, native);
             let native_message = native
-                .and_then(|value| value.pointer("/error/message"))
+                .and_then(|value| value.get("message"))
                 .and_then(Value::as_str)
                 .filter(|message| !message.is_empty());
             let message = native_message.unwrap_or("Native control operation failed");
@@ -439,7 +439,7 @@ mod native_failure_tests {
     #[test]
     fn every_native_error_class_keeps_its_own_projection_on_the_rename_path() {
         // Arrange: one refusal with native evidence, plus the transport classes.
-        let rejection = json!({"error":{"message":"thread has an active turn"}});
+        let rejection = json!({"message":"thread has an active turn"});
 
         // Act & assert: a refusal carries its reason and corrective action.
         let refused = native_call_failure(

@@ -242,6 +242,7 @@ pub(super) fn report_create_operation_failure(
         | ConversationOperationFailureKind::Busy
         | ConversationOperationFailureKind::NotFound
         | ConversationOperationFailureKind::StaleGeneration
+        | ConversationOperationFailureKind::ProviderSessionNotFound
         | ConversationOperationFailureKind::ProviderRejected => 4,
         ConversationOperationFailureKind::OutcomeUnknown => 5,
     };

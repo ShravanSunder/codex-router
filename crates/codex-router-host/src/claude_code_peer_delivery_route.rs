@@ -5,7 +5,7 @@ use agent_automation::{
 };
 use claude_code_peer_messaging::{
     ClaudeCodePeerSocket, ClaudeCodeSessionRegistry, PeerSessionLookup, PeerSessionRecord,
-    PeerSessionStatus, PeerSocketWriteOutcome,
+    PeerSocketWriteOutcome,
 };
 use collaboration_protocol::{
     CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
@@ -221,15 +221,6 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
                 }
                 PeerSessionLookup::Writable(peer) => peer,
             };
-            if request.mode == MessageDelivery::Steer && peer.status != PeerSessionStatus::Busy {
-                return Ok(peer_receipt(
-                    DeliveryOutcome::NotSubmitted {
-                        retryable: false,
-                        reason: "no running turn".to_owned(),
-                    },
-                    None,
-                ));
-            }
             let text = Self::render_peer_message(&request.target, &request.message)?;
             evidence
                 .record(Self::evidence(&peer, PeerWriteEffect::Dispatching)?)

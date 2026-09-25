@@ -515,6 +515,7 @@ pub enum ConversationOperationFailureKind {
     PermissionRejected,
     Busy,
     NotFound,
+    ProviderSessionNotFound,
     StaleGeneration,
     Unavailable,
     ProviderRejected,
@@ -530,6 +531,8 @@ pub struct ConversationOperationFailure {
     pub effect: ProviderOperationEffect,
     pub message: NonEmptyText,
     pub operation_id: OperationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<SessionRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -48,21 +48,19 @@ fn target() -> SessionRef {
     }
 }
 
-fn publish_peer(root: &Path, status: &str) -> std::path::PathBuf {
+fn publish_peer(root: &Path, status: Option<&str>) -> std::path::PathBuf {
     let pid = std::process::id();
     let socket_path = root.join("peer.sock");
-    std::fs::write(
-        root.join(format!("{pid}.json")),
-        json!({
-            "pid": pid,
-            "sessionId": "fixture-session",
-            "status": status,
-            "peerProtocol": 1,
-            "messagingSocketPath": socket_path,
-        })
-        .to_string(),
-    )
-    .expect("registry fixture");
+    let mut record = json!({
+        "pid": pid,
+        "sessionId": "fixture-session",
+        "peerProtocol": 1,
+        "messagingSocketPath": socket_path,
+    });
+    if let Some(status) = status {
+        record["status"] = json!(status);
+    }
+    std::fs::write(root.join(format!("{pid}.json")), record.to_string()).expect("registry fixture");
     let digest = Sha256::digest(socket_path.to_str().expect("socket path").as_bytes());
     let key_path = root.join(format!("{pid}.{digest:x}.key"));
     std::fs::write(
@@ -92,7 +90,7 @@ fn delivery(mode: MessageDelivery) -> DeliveryRequest {
 #[tokio::test]
 async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
     let root = tempfile::tempdir().expect("registry root");
-    let socket_path = publish_peer(root.path(), "busy");
+    let socket_path = publish_peer(root.path(), Some("busy"));
     let listener = tokio::net::UnixListener::bind(&socket_path).expect("peer listener");
     let receiver = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accepted peer");
@@ -149,9 +147,19 @@ async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
 }
 
 #[tokio::test]
-async fn peer_queue_rejects_and_idle_steer_does_not_write() {
+async fn peer_queue_rejects_but_idle_steer_writes_to_the_live_socket() {
     let root = tempfile::tempdir().expect("registry root");
-    publish_peer(root.path(), "idle");
+    let socket_path = publish_peer(root.path(), Some("idle"));
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("peer listener");
+    let receiver = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accepted peer");
+        let mut lines = BufReader::new(stream).lines();
+        let _auth: Value =
+            serde_json::from_str(&lines.next_line().await.expect("auth line").expect("auth"))
+                .expect("auth JSON");
+        serde_json::from_str::<Value>(&lines.next_line().await.expect("user line").expect("user"))
+            .expect("user JSON")
+    });
     let route = ClaudeCodePeerDeliveryRoute::new(
         target().endpoint.service_id,
         Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
@@ -172,16 +180,15 @@ async fn peer_queue_rejects_and_idle_steer_does_not_write() {
         matches!(queued.outcome, DeliveryOutcome::Rejected(rejection)
             if rejection.reason == DeliveryRejectionReason::QueueUnsupported)
     );
-    assert!(
-        matches!(steered.outcome, DeliveryOutcome::NotSubmitted { reason, .. } if reason == "no running turn")
-    );
-    assert!(evidence.0.lock().await.is_empty());
+    assert_eq!(steered.outcome, DeliveryOutcome::PeerMessageWritten);
+    assert_eq!(receiver.await.expect("receiver")["type"], "user");
+    assert_eq!(evidence.0.lock().await.len(), 2);
 }
 
 #[tokio::test]
 async fn live_unknown_peer_protocol_reports_live_elsewhere() {
     let root = tempfile::tempdir().expect("registry root");
-    let socket_path = publish_peer(root.path(), "idle");
+    let socket_path = publish_peer(root.path(), Some("idle"));
     std::fs::write(
         root.path().join(format!("{}.json", std::process::id())),
         json!({
@@ -219,6 +226,60 @@ async fn live_unknown_peer_protocol_reports_live_elsewhere() {
         if rejection.reason == DeliveryRejectionReason::LiveElsewhere)
     );
     assert!(evidence.0.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn every_live_registry_status_allows_auto_and_steer_peer_writes() {
+    for status in [
+        Some("busy"),
+        Some("idle"),
+        Some("waiting"),
+        Some("shell"),
+        Some("compacting"),
+        None,
+    ] {
+        for mode in [MessageDelivery::Auto, MessageDelivery::Steer] {
+            let root = tempfile::tempdir().expect("registry root");
+            let socket_path = publish_peer(root.path(), status);
+            let listener = tokio::net::UnixListener::bind(&socket_path).expect("peer listener");
+            let receiver = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accepted peer");
+                let mut lines = BufReader::new(stream).lines();
+                let _auth: Value = serde_json::from_str(
+                    &lines.next_line().await.expect("auth line").expect("auth"),
+                )
+                .expect("auth JSON");
+                serde_json::from_str::<Value>(
+                    &lines.next_line().await.expect("user line").expect("user"),
+                )
+                .expect("user JSON")
+            });
+            let route = ClaudeCodePeerDeliveryRoute::new(
+                target().endpoint.service_id,
+                Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
+                Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
+            );
+            let evidence = RecordedPeerEvidence(tokio::sync::Mutex::new(Vec::new()));
+
+            let outcome = route
+                .deliver(delivery(mode), &evidence)
+                .await
+                .expect("peer delivery");
+
+            assert_eq!(
+                outcome.outcome,
+                DeliveryOutcome::PeerMessageWritten,
+                "status={status:?}, mode={mode:?}"
+            );
+            let message = receiver.await.expect("peer receives write");
+            assert_eq!(message["type"], "user");
+            assert_eq!(
+                evidence.0.lock().await.len(),
+                2,
+                "status={status:?}, mode={mode:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

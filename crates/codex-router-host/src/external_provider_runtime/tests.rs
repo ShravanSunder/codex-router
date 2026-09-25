@@ -400,7 +400,7 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     authentication.message = "provider conversation is busy".to_owned();
     assert!(matches!(
         acp_operation_error(authentication),
-        ExternalProviderRuntimeError::AuthenticationRequired
+        ExternalProviderRuntimeError::AuthenticationRequired { code: -32000 }
     ));
     for message in [
         "provider conversation is busy",
@@ -410,11 +410,24 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     ] {
         let mut provider = agent_client_protocol::Error::internal_error();
         provider.message = message.to_owned();
+        provider.data = Some(serde_json::json!({"privateText":"must not escape"}));
+        let reason = acp_operation_error(provider);
         assert!(matches!(
-            acp_operation_error(provider),
-            ExternalProviderRuntimeError::ProviderFailure
+            &reason,
+            ExternalProviderRuntimeError::ProviderRejected { code } if *code == -32603
         ));
+        assert!(!reason.to_string().contains("must not escape"));
+        assert!(!reason.to_string().contains(message));
     }
+
+    let mut missing = agent_client_protocol::Error::new(-32002, "private missing-session text");
+    missing.data = Some(serde_json::json!({"privateText":"must not escape"}));
+    let reason = acp_operation_error(missing);
+    assert!(matches!(
+        &reason,
+        ExternalProviderRuntimeError::ProviderSessionNotFound { code } if *code == -32002
+    ));
+    assert!(!reason.to_string().contains("private"));
 }
 
 #[cfg(unix)]

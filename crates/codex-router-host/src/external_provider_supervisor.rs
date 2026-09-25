@@ -1069,21 +1069,36 @@ fn runtime_failure(
             operation_id,
             target,
         ),
-        ExternalProviderRuntimeError::AuthenticationRequired => failure(
-            ConversationOperationFailureKind::AuthenticationRequired,
-            ConversationOperationFailureStage::Binding,
-            ProviderOperationEffect::None,
-            "provider authentication is required",
-            operation_id,
-            target,
-        ),
-        ExternalProviderRuntimeError::ProviderFailure => failure(
+        ExternalProviderRuntimeError::AuthenticationRequired { code } => {
+            failure_with_provider_code(
+                ConversationOperationFailureKind::AuthenticationRequired,
+                ConversationOperationFailureStage::Binding,
+                ProviderOperationEffect::None,
+                "provider authentication is required",
+                operation_id,
+                target,
+                Some(code),
+            )
+        }
+        ExternalProviderRuntimeError::ProviderSessionNotFound { code } => {
+            failure_with_provider_code(
+                ConversationOperationFailureKind::ProviderSessionNotFound,
+                ConversationOperationFailureStage::Binding,
+                ProviderOperationEffect::None,
+                "this session never started a turn and did not survive the provider restart; create a new conversation",
+                operation_id,
+                target,
+                Some(code),
+            )
+        }
+        ExternalProviderRuntimeError::ProviderRejected { code } => failure_with_provider_code(
             ConversationOperationFailureKind::ProviderRejected,
             ConversationOperationFailureStage::Settlement,
             ProviderOperationEffect::Unknown,
             "provider rejected the operation after dispatch",
             operation_id,
             target,
+            Some(code),
         ),
         ExternalProviderRuntimeError::PromptOutputLimitExceeded => failure(
             ConversationOperationFailureKind::OutcomeUnknown,
@@ -1193,10 +1208,25 @@ fn failure(
         message: NonEmptyText::try_from(message.to_owned())
             .expect("static provider failure message is valid"),
         operation_id,
+        provider_code: None,
         target,
         endpoint: None,
         availability: None,
     }
+}
+
+fn failure_with_provider_code(
+    kind: ConversationOperationFailureKind,
+    stage: ConversationOperationFailureStage,
+    effect: ProviderOperationEffect,
+    message: &'static str,
+    operation_id: OperationId,
+    target: Option<SessionRef>,
+    provider_code: Option<i64>,
+) -> ConversationOperationFailure {
+    let mut operation_failure = failure(kind, stage, effect, message, operation_id, target);
+    operation_failure.provider_code = provider_code;
+    operation_failure
 }
 
 fn now_ms() -> i64 {

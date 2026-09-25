@@ -455,21 +455,41 @@ fn typed_runtime_failure_mapping_never_classifies_provider_text() {
         let failure = runtime_failure(
             operation_id.clone(),
             None,
-            ExternalProviderRuntimeError::ProviderFailure,
+            ExternalProviderRuntimeError::ProviderRejected { code: -32603 },
         );
         assert_eq!(
             failure.kind,
             ConversationOperationFailureKind::ProviderRejected
         );
         assert_eq!(failure.effect, ProviderOperationEffect::Unknown);
+        assert_eq!(failure.provider_code, Some(-32603));
     }
     for error in [
         ExternalProviderRuntimeError::LocalBusy,
         ExternalProviderRuntimeError::LocalNotFound,
         ExternalProviderRuntimeError::LocalCancelTargetMismatch,
-        ExternalProviderRuntimeError::AuthenticationRequired,
+        ExternalProviderRuntimeError::AuthenticationRequired { code: -32000 },
     ] {
         let failure = runtime_failure(operation_id.clone(), None, error);
         assert_eq!(failure.effect, ProviderOperationEffect::None);
     }
+}
+
+#[test]
+fn provider_session_not_found_failure_has_typed_guidance_and_code() {
+    let failure = runtime_failure(
+        OperationId::generate(),
+        None,
+        ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002 },
+    );
+
+    assert_eq!(
+        failure.kind,
+        ConversationOperationFailureKind::ProviderSessionNotFound
+    );
+    assert_eq!(failure.provider_code, Some(-32002));
+    assert_eq!(
+        String::from(failure.message),
+        "this session never started a turn and did not survive the provider restart; create a new conversation"
+    );
 }

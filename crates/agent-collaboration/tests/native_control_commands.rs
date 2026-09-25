@@ -93,6 +93,110 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
 }
 
 #[tokio::test]
+async fn session_inspect_cli_preserves_native_rejection_message() {
+    let root = std::path::PathBuf::from(format!("/tmp/session-inspect-cli-{}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .unwrap_or_else(|error| panic!("directory: {error}"));
+    let listener = tokio::net::UnixListener::bind(root.join("control.sock"))
+        .unwrap_or_else(|error| panic!("listener: {error}"));
+    let service_id = "00000000-0000-4000-8000-000000000001";
+    let epoch = "00000000-0000-4000-8000-000000000002";
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let manifest = serde_json::from_value(json!({
+        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
+        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+    }))
+    .unwrap_or_else(|error| panic!("manifest: {error}"));
+    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
+        .unwrap_or_else(|error| panic!("publish: {error}"));
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("Control accept");
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let initialize: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read init")
+                .expect("init frame"),
+        )
+        .expect("init JSON");
+        let initialized = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
+            "version":{"major":1,"minor":0},"serviceId":service_id,
+            "serviceEpoch":epoch,"serviceVersion":"0.1.37","controlSchemaDigest":digest
+        }});
+        write
+            .write_all(format!("{initialized}\n").as_bytes())
+            .await
+            .expect("write init");
+        let inspect: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read inspect")
+                .expect("inspect frame"),
+        )
+        .expect("inspect JSON");
+        assert_eq!(inspect["method"], "codex/sessionInspect");
+        let message = "native thread is unreadable: fixture refusal";
+        let response = json!({"jsonrpc":"2.0","id":inspect["id"],"error":{
+            "code":-32050,"message":message,"data":{
+                "kind":"nativeRejected","stage":"inspect","message":message,
+                "reason":"unknown","nextAction":"inspectTarget","nativeCode":-32600
+            }
+        }});
+        write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .expect("write rejection");
+    });
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args([
+                "session",
+                "inspect",
+                "--endpoint",
+                "codex-local",
+                "--session",
+                "unreadable-thread",
+                "--json",
+                "--service-directory",
+            ])
+            .arg(&root)
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("command deadline: {error}"))
+    .unwrap_or_else(|error| panic!("command: {error}"));
+    peer.await
+        .unwrap_or_else(|error| panic!("Control fixture: {error}"));
+    drop(publication);
+    std::fs::remove_file(root.join("control.sock"))
+        .unwrap_or_else(|error| panic!("socket cleanup: {error}"));
+    std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
+    assert_eq!(
+        result["error"]["message"],
+        "native thread is unreadable: fixture refusal"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[tokio::test]
 async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distinct() {
     for (label, rejection_kind, expected_exit) in [
         ("response-loss", None, 5),

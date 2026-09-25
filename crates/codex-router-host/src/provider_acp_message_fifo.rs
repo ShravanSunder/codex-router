@@ -198,6 +198,12 @@ async fn run_provider_message_fifo(
                             .mark_not_submitted(&operation_id, reason);
                         break;
                     }
+                    ProviderSessionLoadOutcome::Rejected { reason } => {
+                        supervisor
+                            .queued_operation_registry()
+                            .mark_not_submitted(&operation_id, reason.safe_detail());
+                        break;
+                    }
                 }
             }
             let idle = tokio::select! {
