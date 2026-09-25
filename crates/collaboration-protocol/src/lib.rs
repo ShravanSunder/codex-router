@@ -100,6 +100,8 @@ mod control_frame_decoder;
 pub use control_frame_decoder::{ControlFrameDecoder, FrameError, MAX_CONTROL_FRAME_BYTES};
 mod request_admission;
 pub use request_admission::{AdmissionError, ControlAdmission};
+mod router_executable_relation;
+pub use router_executable_relation::{RouterExecutableRelation, router_build_warning};
 
 mod endpoint_description;
 pub use endpoint_description::{

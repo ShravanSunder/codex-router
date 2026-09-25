@@ -12,6 +12,8 @@ pub(super) struct CollaborationLifecycle {
     mcp_bind: std::net::SocketAddr,
     external_provider_startups: Vec<crate::ExternalProviderStartup>,
     provider_operation_retention_days: std::num::NonZeroU32,
+    router_executable_relation:
+        tokio::sync::watch::Receiver<collaboration_protocol::RouterExecutableRelation>,
     runtime: Option<CollaborationRuntime>,
     published_child: Option<u32>,
     schema_digest: Option<[u8; 32]>,
@@ -20,6 +22,9 @@ impl CollaborationLifecycle {
     pub(super) async fn start(
         config: &HostConfig,
         child: &AppServerChild,
+        router_executable_relation: tokio::sync::watch::Receiver<
+            collaboration_protocol::RouterExecutableRelation,
+        >,
     ) -> io::Result<Option<Self>> {
         let Some(directory) = config.collaboration_directory() else {
             return Ok(None);
@@ -34,6 +39,7 @@ impl CollaborationLifecycle {
             mcp_bind: config.mcp_bind(),
             external_provider_startups: config.external_provider_startups().to_vec(),
             provider_operation_retention_days: config.provider_operation_retention_days(),
+            router_executable_relation,
             runtime: None,
             published_child: None,
             schema_digest: None,
@@ -77,18 +83,20 @@ impl CollaborationLifecycle {
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
             }
-            let mut runtime = CollaborationRuntime::start_with_external_providers(
-                CollaborationRuntimeInputs {
-                    directory: self.directory.clone(),
-                    codex_home: self.codex_home.clone(),
-                    backend_socket: self.backend_socket.clone(),
-                    mcp_bind: self.mcp_bind,
-                    native_schema: export.clone(),
-                    peer_registry_directory: None,
-                },
-                self.external_provider_startups.clone(),
-            )
-            .await?;
+            let mut runtime =
+                CollaborationRuntime::start_with_external_providers_and_router_relation(
+                    CollaborationRuntimeInputs {
+                        directory: self.directory.clone(),
+                        codex_home: self.codex_home.clone(),
+                        backend_socket: self.backend_socket.clone(),
+                        mcp_bind: self.mcp_bind,
+                        native_schema: export.clone(),
+                        peer_registry_directory: None,
+                    },
+                    self.external_provider_startups.clone(),
+                    self.router_executable_relation.clone(),
+                )
+                .await?;
             runtime
                 .configure_provider_operation_retention(self.provider_operation_retention_days)
                 .await?;

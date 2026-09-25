@@ -3,29 +3,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+pub use collaboration_protocol::RouterExecutableRelation;
+use tokio::sync::watch;
 
 const INSTALLED_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Router Host build compared with the executable still present at its launch path.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RouterExecutableRelation {
-    /// The launch path still has its startup file identity or reports the same version.
-    Match,
-    /// The launch path now resolves to a different Router version or is missing.
-    Drift {
-        /// Version of the executable captured when this Host started.
-        running_version: String,
-        /// Version currently reported at the original launch path, if readable.
-        installed_version: Option<String>,
-    },
-    /// The launch path could not be compared reliably.
-    Unknown {
-        /// Safe, actionable-free reason for the failed observation.
-        reason: String,
-    },
-}
 
 /// Shared observer retained by the Host and refreshed on status or periodic checks.
 pub struct RouterExecutableObserver {
@@ -34,7 +15,7 @@ pub struct RouterExecutableObserver {
     startup_identity: Option<ExecutableFileIdentity>,
     #[cfg(test)]
     installed_version_override: Option<String>,
-    relation: RouterExecutableRelation,
+    relation_sender: watch::Sender<RouterExecutableRelation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,45 +34,43 @@ impl RouterExecutableObserver {
         let startup_identity = launch_path
             .as_deref()
             .and_then(|path| executable_file_identity(path).ok());
+        let initial_relation = RouterExecutableRelation::Unknown {
+            reason: "the Router launch path has not been observed yet".to_owned(),
+        };
+        let (relation_sender, _relation_receiver) = watch::channel(initial_relation);
         Self {
             launch_path,
             running_version,
             startup_identity,
             #[cfg(test)]
             installed_version_override: None,
-            relation: RouterExecutableRelation::Unknown {
-                reason: "the Router launch path has not been observed yet".to_owned(),
-            },
+            relation_sender,
         }
     }
 
     /// Compares the launch path's stat identity and probes its version only after drift.
     pub async fn observe(&mut self) -> RouterExecutableRelation {
         let Some(path) = self.launch_path.as_deref() else {
-            self.relation = RouterExecutableRelation::Unknown {
+            return self.publish_relation(RouterExecutableRelation::Unknown {
                 reason: "the Router launch path is unavailable".to_owned(),
-            };
-            return self.relation.clone();
+            });
         };
         let current_identity = match executable_file_identity(path) {
             Ok(identity) => identity,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.relation = RouterExecutableRelation::Drift {
+                return self.publish_relation(RouterExecutableRelation::Drift {
                     running_version: self.running_version.clone(),
                     installed_version: None,
-                };
-                return self.relation.clone();
+                });
             }
             Err(_error) => {
-                self.relation = RouterExecutableRelation::Unknown {
+                return self.publish_relation(RouterExecutableRelation::Unknown {
                     reason: "the Router launch path could not be inspected".to_owned(),
-                };
-                return self.relation.clone();
+                });
             }
         };
         if self.startup_identity == Some(current_identity) {
-            self.relation = RouterExecutableRelation::Match;
-            return self.relation.clone();
+            return self.publish_relation(RouterExecutableRelation::Match);
         }
 
         #[cfg(test)]
@@ -101,31 +80,36 @@ impl RouterExecutableObserver {
         };
         #[cfg(not(test))]
         let installed_version = installed_version(path).await;
-        match installed_version {
+        let relation = match installed_version {
             Ok(installed_version) if installed_version == self.running_version => {
                 self.startup_identity = Some(current_identity);
-                self.relation = RouterExecutableRelation::Match;
+                RouterExecutableRelation::Match
             }
-            Ok(installed_version) => {
-                self.relation = RouterExecutableRelation::Drift {
-                    running_version: self.running_version.clone(),
-                    installed_version: Some(installed_version),
-                };
-            }
-            Err(()) => {
-                self.relation = RouterExecutableRelation::Unknown {
-                    reason: "the changed Router launch path could not report its version"
-                        .to_owned(),
-                };
-            }
-        }
-        self.relation.clone()
+            Ok(installed_version) => RouterExecutableRelation::Drift {
+                running_version: self.running_version.clone(),
+                installed_version: Some(installed_version),
+            },
+            Err(()) => RouterExecutableRelation::Unknown {
+                reason: "the changed Router launch path could not report its version".to_owned(),
+            },
+        };
+        self.publish_relation(relation)
     }
 
     /// Returns the latest relation without performing filesystem work.
     #[must_use]
     pub fn relation(&self) -> RouterExecutableRelation {
-        self.relation.clone()
+        self.relation_sender.borrow().clone()
+    }
+
+    /// Subscribes to the latest relation and every subsequent Host observation.
+    pub fn subscribe(&self) -> watch::Receiver<RouterExecutableRelation> {
+        self.relation_sender.subscribe()
+    }
+
+    fn publish_relation(&self, relation: RouterExecutableRelation) -> RouterExecutableRelation {
+        self.relation_sender.send_replace(relation.clone());
+        relation
     }
 }
 
@@ -164,7 +148,12 @@ mod tests {
     async fn same_file_is_a_match() {
         let path = std::env::current_exe().expect("test executable");
         let mut observer = RouterExecutableObserver::capture(Ok(path), "test-running".to_owned());
+        let mut relation_receiver = observer.subscribe();
         assert_eq!(observer.observe().await, RouterExecutableRelation::Match);
+        assert_eq!(
+            relation_receiver.borrow_and_update().clone(),
+            RouterExecutableRelation::Match
+        );
     }
 
     #[tokio::test]

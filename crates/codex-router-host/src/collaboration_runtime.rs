@@ -2,7 +2,7 @@
 use crate::BackendPublication;
 use collaboration_protocol::{
     CodexGeneration, EndpointAvailability, EndpointId, EndpointRef, NonEmptyText,
-    ObservationTimestamp, ProviderKind, SchemaDigest, UuidIdentity,
+    ObservationTimestamp, ProviderKind, RouterExecutableRelation, SchemaDigest, UuidIdentity,
 };
 use collaboration_service::{
     LocalControlService, NativeRelayListener, ServiceIdentity, load_service_identity,
@@ -167,6 +167,21 @@ impl CollaborationRuntime {
         inputs: CollaborationRuntimeInputs,
         provider_launches: Vec<crate::ExternalProviderStartup>,
     ) -> io::Result<Self> {
+        let (_relation_sender, relation_receiver) =
+            tokio::sync::watch::channel(RouterExecutableRelation::Match);
+        Self::start_with_external_providers_and_router_relation(
+            inputs,
+            provider_launches,
+            relation_receiver,
+        )
+        .await
+    }
+
+    pub async fn start_with_external_providers_and_router_relation(
+        inputs: CollaborationRuntimeInputs,
+        provider_launches: Vec<crate::ExternalProviderStartup>,
+        relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+    ) -> io::Result<Self> {
         let service_id = load_service_identity(&inputs.directory)?;
         let service_epoch = new_service_uuid()?;
         let native_digest = if let Some(export) = &inputs.native_schema {
@@ -279,12 +294,13 @@ impl CollaborationRuntime {
         };
         let mcp_bind = collaboration_mcp::LoopbackBindAddress::new(inputs.mcp_bind)
             .map_err(io::Error::other)?;
-        let mcp = collaboration_mcp::CollaborationMcpListener::start(
+        let mcp = collaboration_mcp::CollaborationMcpListener::start_with_router_relation(
             collaboration_mcp::CollaborationMcpListenerConfig {
                 bind_address: mcp_bind,
                 service_directory: inputs.directory.clone(),
                 allowed_origins: Vec::new(),
             },
+            relation_receiver,
         )
         .await?;
         let mcp_url = mcp.local_url();

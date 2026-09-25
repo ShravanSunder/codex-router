@@ -1,6 +1,6 @@
 use crate::mcp_server::CollaborationMcpServer;
-use crate::mcp_server::McpExecutableObservation;
 use bytes::Bytes;
+use collaboration_protocol::RouterExecutableRelation;
 use http::Request;
 use http_body_util::{BodyExt, Empty};
 use hyper::{body::Incoming, service::service_fn};
@@ -75,6 +75,15 @@ pub struct CollaborationMcpListener {
 
 impl CollaborationMcpListener {
     pub async fn start(config: CollaborationMcpListenerConfig) -> io::Result<Self> {
+        let (_sender, relation_receiver) =
+            tokio::sync::watch::channel(RouterExecutableRelation::Match);
+        Self::start_with_router_relation(config, relation_receiver).await
+    }
+
+    pub async fn start_with_router_relation(
+        config: CollaborationMcpListenerConfig,
+        relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(config.bind_address.socket_addr()).await?;
         let local_address = listener.local_addr()?;
         let shutdown = CancellationToken::new();
@@ -91,16 +100,13 @@ impl CollaborationMcpListener {
         let session_manager = Arc::new(LocalSessionManager::default());
         let active_services = Arc::new(AtomicUsize::new(0));
         let service_lifecycle = Arc::clone(&active_services);
-        let router_executable_observation =
-            Arc::new(std::sync::Mutex::new(McpExecutableObservation::capture()));
-        let executable_observation = Arc::clone(&router_executable_observation);
         let service: StreamableHttpService<CollaborationMcpServer, LocalSessionManager> =
             StreamableHttpService::new(
                 move || {
                     Ok(CollaborationMcpServer::with_lifecycle(
                         config.service_directory.clone(),
                         Arc::clone(&service_lifecycle),
-                        Arc::clone(&executable_observation),
+                        relation_receiver.clone(),
                     ))
                 },
                 Arc::clone(&session_manager),

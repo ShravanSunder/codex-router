@@ -10,7 +10,7 @@ use collaboration_protocol::{
     DeliveryOutcome, DeliveryReceipt, EndpointInventory, JournalPage, JournalReadParams,
     JournalStatus, NativeInspectParams, NativeInspectResult, NativeInterruptParams,
     NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
-    NativeSessionListResult, OperationId,
+    NativeSessionListResult, OperationId, RouterExecutableRelation, router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -23,7 +23,6 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
-use std::os::unix::fs::MetadataExt;
 use std::{
     path::PathBuf,
     sync::{
@@ -32,8 +31,6 @@ use std::{
     },
     time::Duration,
 };
-
-const MCP_INSTALLED_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 
 mod catalog_descriptions;
 mod catalog_tools;
@@ -63,160 +60,7 @@ pub(crate) struct CollaborationMcpServer {
     service_directory: PathBuf,
     tool_router: ToolRouter<Self>,
     _lifecycle: ActiveServiceGuard,
-    router_executable_observation: Arc<std::sync::Mutex<McpExecutableObservation>>,
-}
-
-pub(crate) struct McpExecutableObservation {
-    launch_path: Option<PathBuf>,
-    running_version: String,
-    startup_identity: Option<McpExecutableFileIdentity>,
-    #[cfg(test)]
-    installed_version_override: Option<String>,
-}
-
-impl std::fmt::Debug for McpExecutableObservation {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("McpExecutableObservation")
-            .field("launch_path", &self.launch_path)
-            .field("running_version", &self.running_version)
-            .field("startup_identity", &self.startup_identity)
-            .finish()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct McpExecutableFileIdentity {
-    device: u64,
-    inode: u64,
-    size: u64,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
-}
-
-impl McpExecutableObservation {
-    pub(crate) fn capture() -> Self {
-        let running_version = std::env::var("CODEX_ROUTER_DEBUG_RUNNING_VERSION")
-            .ok()
-            .filter(|_| cfg!(debug_assertions))
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
-        let launch_path = std::env::current_exe().ok();
-        let startup_identity = launch_path
-            .as_deref()
-            .and_then(|path| mcp_executable_file_identity(path).ok());
-        Self {
-            launch_path,
-            running_version,
-            startup_identity,
-            #[cfg(test)]
-            installed_version_override: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn capture_from(launch_path: Option<PathBuf>, running_version: String) -> Self {
-        let startup_identity = launch_path
-            .as_deref()
-            .and_then(|path| mcp_executable_file_identity(path).ok());
-        Self {
-            launch_path,
-            running_version,
-            startup_identity,
-            installed_version_override: None,
-        }
-    }
-
-    fn drift_warning(&mut self) -> Option<String> {
-        let path = self.launch_path.as_deref()?;
-        let current_identity = match mcp_executable_file_identity(path) {
-            Ok(identity) => Some(identity),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_error) => return None,
-        };
-        if current_identity.is_some() && current_identity == self.startup_identity {
-            return None;
-        }
-        let installed_version = match current_identity {
-            Some(_) => match self.installed_version(path) {
-                Some(version) if version == self.running_version => {
-                    self.startup_identity = current_identity;
-                    return None;
-                }
-                Some(version) => version,
-                None => return None,
-            },
-            None => "unknown".to_owned(),
-        };
-        Some(format!(
-            "⚠ Router Host is stale (running {}, installed {installed_version}); run `codex-router host restart`",
-            self.running_version
-        ))
-    }
-
-    fn installed_version(&self, path: &std::path::Path) -> Option<String> {
-        #[cfg(test)]
-        if let Some(version) = &self.installed_version_override {
-            return Some(version.clone());
-        }
-        mcp_installed_version(path)
-    }
-}
-
-fn mcp_executable_file_identity(
-    path: &std::path::Path,
-) -> std::io::Result<McpExecutableFileIdentity> {
-    let metadata = std::fs::metadata(path)?;
-    Ok(McpExecutableFileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        size: metadata.size(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds: metadata.mtime_nsec(),
-    })
-}
-
-fn mcp_installed_version(path: &std::path::Path) -> Option<String> {
-    let executable_path = path.to_owned();
-    if tokio::runtime::Handle::try_current().is_ok() {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let _task = tokio::task::spawn_blocking(move || {
-            let result = run_bounded_version_command(&executable_path);
-            let _sent = sender.send(result);
-        });
-        return receiver
-            .recv_timeout(MCP_INSTALLED_VERSION_TIMEOUT + Duration::from_millis(100))
-            .ok()
-            .flatten();
-    }
-    run_bounded_version_command(&executable_path)
-}
-
-fn run_bounded_version_command(path: &std::path::Path) -> Option<String> {
-    let mut child = std::process::Command::new(path)
-        .arg("--version")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + MCP_INSTALLED_VERSION_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => {
-                let output = child.wait_with_output().ok()?;
-                return codex_native_integration::parse_executable_version(&output.stdout).ok();
-            }
-            Ok(Some(_status)) => return None,
-            Err(_error) => return None,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let _killed = child.kill();
-                let _reaped = child.wait();
-                return None;
-            }
-        }
-    }
+    router_executable_relation: tokio::sync::watch::Receiver<RouterExecutableRelation>,
 }
 
 #[derive(Debug)]
@@ -244,17 +88,19 @@ impl Drop for ActiveServiceGuard {
 impl CollaborationMcpServer {
     #[cfg(test)]
     pub(crate) fn new(service_directory: PathBuf) -> Self {
+        let (_sender, relation_receiver) =
+            tokio::sync::watch::channel(RouterExecutableRelation::Match);
         Self::with_lifecycle(
             service_directory,
             Arc::new(AtomicUsize::new(0)),
-            Arc::new(std::sync::Mutex::new(McpExecutableObservation::capture())),
+            relation_receiver,
         )
     }
 
     pub(crate) fn with_lifecycle(
         service_directory: PathBuf,
         active_services: Arc<AtomicUsize>,
-        router_executable_observation: Arc<std::sync::Mutex<McpExecutableObservation>>,
+        router_executable_relation: tokio::sync::watch::Receiver<RouterExecutableRelation>,
     ) -> Self {
         let mut tool_router = Self::tool_router();
         register_board_tools(&mut tool_router);
@@ -265,7 +111,7 @@ impl CollaborationMcpServer {
             service_directory,
             tool_router,
             _lifecycle: ActiveServiceGuard::new(active_services),
-            router_executable_observation,
+            router_executable_relation,
         }
     }
 
@@ -1008,9 +854,8 @@ impl ServerHandler for CollaborationMcpServer {
                 "codex-router-collaboration",
                 env!("CARGO_PKG_VERSION"),
             ));
-        if let Ok(mut observation) = self.router_executable_observation.lock()
-            && let Some(warning) = observation.drift_warning()
-        {
+        let relation = self.router_executable_relation.borrow().clone();
+        if let Some(warning) = router_build_warning(&relation) {
             config = config.with_instructions(warning);
         }
         config
@@ -1045,45 +890,7 @@ impl ServerHandler for CollaborationMcpServer {
 }
 
 #[cfg(test)]
-mod executable_observation_tests {
-    use super::CollaborationMcpServer;
-    use super::McpExecutableObservation;
-    use rmcp::ServerHandler;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[tokio::test]
-    async fn initialize_instructions_report_running_and_installed_router_versions() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("codex-router");
-        write_version_script(&path, "0.1.36");
-        let server = CollaborationMcpServer::new(directory.path().to_owned());
-        let mut observation =
-            McpExecutableObservation::capture_from(Some(path.clone()), "0.1.36".to_owned());
-        observation.installed_version_override = Some("0.1.37".to_owned());
-        *server
-            .router_executable_observation
-            .lock()
-            .expect("executable observer lock") = observation;
-        write_version_script(&path, "0.1.37");
-        let initialize = serde_json::to_value(server.get_info()).expect("initialize response");
-        assert_eq!(
-            initialize["instructions"].as_str(),
-            Some(
-                "⚠ Router Host is stale (running 0.1.36, installed 0.1.37); run `codex-router host restart`"
-            )
-        );
-    }
-
-    fn write_version_script(path: &std::path::Path, version: &str) {
-        std::fs::write(
-            path,
-            format!("#!/bin/sh\nprintf 'codex-router {version}\\n'\n"),
-        )
-        .expect("write version script");
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .expect("make version script executable");
-    }
-}
+mod router_relation_instruction_tests;
 
 #[cfg(test)]
 mod conversation_result_tests;

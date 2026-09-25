@@ -89,17 +89,11 @@ impl RuntimeState {
         &mut self,
         relation: crate::RouterExecutableRelation,
     ) -> bool {
-        let should_log = if let crate::RouterExecutableRelation::Drift {
-            running_version,
-            installed_version,
-        } = &relation
+        let warning = collaboration_protocol::router_build_warning(&relation);
+        let should_log = if let Some(warning) = warning
             && !self.router_drift_logged
         {
-            tracing::warn!(
-                running_version,
-                installed_version = installed_version.as_deref().unwrap_or("unknown"),
-                "Router executable drift detected; run `codex-router host restart`"
-            );
+            tracing::warn!(router_build_warning = %warning, "Router executable drift detected");
             self.router_drift_logged = true;
             true
         } else {

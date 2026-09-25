@@ -321,9 +321,11 @@ impl HostRuntime {
             }
             emit(None);
         }
+        let router_executable_relation = router_executable_observer.lock().await.subscribe();
         let mut collaboration = match collaboration_lifecycle::CollaborationLifecycle::start(
             &config,
             &app_server,
+            router_executable_relation,
         )
         .await
         {

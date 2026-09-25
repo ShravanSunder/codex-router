@@ -270,16 +270,8 @@ fn render_snapshot<W: Write>(stdout: &mut W, snapshot: &HostSnapshot) -> std::io
         "router_executable_relation: {}",
         router_executable_relation_label(router_relation)
     )?;
-    if let codex_router_host::RouterExecutableRelation::Drift {
-        running_version,
-        installed_version,
-    } = router_relation
-    {
-        writeln!(
-            stdout,
-            "⚠ Router Host is stale (running {running_version}, installed {}); run `codex-router host restart`",
-            installed_version.as_deref().unwrap_or("unknown")
-        )?;
+    if let Some(warning) = collaboration_protocol::router_build_warning(router_relation) {
+        writeln!(stdout, "{warning}")?;
     }
     writeln!(
         stdout,
