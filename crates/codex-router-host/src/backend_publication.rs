@@ -114,6 +114,7 @@ impl BackendPublication {
             EndpointAvailability::Unavailable {
                 observed_at,
                 reason,
+                fix: None,
             },
             None,
             None,

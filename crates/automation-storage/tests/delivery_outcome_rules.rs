@@ -1,6 +1,6 @@
 use agent_automation::{
-    AttemptId, CessationEvidence, DeliveryId, DurableMessage, ExpiryRule, NativeEffectEvidence,
-    OperationId, PreparationEffect, SubmissionEffect, TimingRule,
+    AcceptedDeliveryEffect, AttemptId, CessationEvidence, DeliveryId, DurableMessage, ExpiryRule,
+    NativeEffectEvidence, OperationId, PreparationEffect, SubmissionEffect, TimingRule,
 };
 use automation_storage::{
     AutomationStore, DeliveryCompletion, DeliveryPreparation, DeliveryResult, WakeCreate,
@@ -100,6 +100,7 @@ async fn cancellation_retains_latest_acceptance_and_current_uncertainty()
             (
                 SubmissionEffect::Accepted,
                 DeliveryResult::Accepted {
+                    effect: AcceptedDeliveryEffect::StartedOrSteered,
                     receipt: format!("receipt-{occurrence}"),
                 },
             )
@@ -315,6 +316,7 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
             attempt_id: first.attempt_id,
             effects: Some(effects(SubmissionEffect::Accepted).into()),
             result: DeliveryResult::Accepted {
+                effect: AcceptedDeliveryEffect::StartedOrSteered,
                 receipt: "old receipt".to_owned(),
             },
             now_ms: 999999,
@@ -455,6 +457,7 @@ async fn pause_preserves_late_acceptance_and_unknown_effects()
             (
                 SubmissionEffect::Accepted,
                 DeliveryResult::Accepted {
+                    effect: AcceptedDeliveryEffect::StartedOrSteered,
                     receipt: "native receipt".to_owned(),
                 },
             )

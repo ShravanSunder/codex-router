@@ -25,8 +25,10 @@ fn python_fixture(
 async fn assert_process_reaped(process_id_path: &std::path::Path) {
     let process_id = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Ok(value) = std::fs::read_to_string(process_id_path) {
-                break value.parse::<i32>().expect("fixture process id");
+            if let Ok(value) = std::fs::read_to_string(process_id_path)
+                && let Ok(process_id) = value.trim().parse::<i32>()
+            {
+                break process_id;
             }
             tokio::task::yield_now().await;
         }
@@ -59,6 +61,127 @@ sys.stdin.read()
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
     }
+}
+
+#[cfg(unix)]
+fn steering_fixture(observed_prompt_socket: &std::path::Path) -> ExternalProviderLaunch {
+    let fixture = format!(
+        r#"
+import json,socket,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{'loadSession':True}},'agentInfo':{{'name':'steering-fixture','version':'1'}},'_meta':{{'steering':{{'supported':True}}}}}}}})); sys.stdout.flush()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='session/new'
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'sessionId':'fixture-session'}}}})); sys.stdout.flush()
+prompt=json.loads(sys.stdin.readline())
+assert prompt['method']=='session/prompt'
+notice=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+notice.connect({observed_socket:?})
+notice.sendall(b'prompt')
+notice.close()
+steer=json.loads(sys.stdin.readline())
+assert steer['method']=='_session/steering'
+assert steer['params']['sessionId']=='fixture-session'
+assert steer['params']['prompt'][0]['text']=='follow-up'
+assert steer['params']['_meta']['steering']['idleBehavior']=='promptRequired'
+print(json.dumps({{'jsonrpc':'2.0','id':steer['id'],'result':{{'outcome':'injected'}}}})); sys.stdout.flush()
+print(json.dumps({{'jsonrpc':'2.0','id':prompt['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
+idle=json.loads(sys.stdin.readline())
+assert idle['method']=='_session/steering'
+print(json.dumps({{'jsonrpc':'2.0','id':idle['id'],'result':{{'outcome':'promptRequired','reason':'noRunningTurn'}}}})); sys.stdout.flush()
+sys.stdin.read()
+"#,
+        observed_socket = observed_prompt_socket.display().to_string(),
+    );
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), fixture],
+        environment: vec![],
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn steering_injects_during_prompt_and_returns_prompt_required_when_idle() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let marker = root.path().join("prompt.sock");
+    let listener = tokio::net::UnixListener::bind(&marker).expect("prompt event listener");
+    let runtime = std::sync::Arc::new(
+        ExternalProviderRuntime::initialize(steering_fixture(&marker))
+            .await
+            .expect("provider runtime"),
+    );
+    assert!(runtime.admission().supports_steering);
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
+    let running_operation_id =
+        OperationId::try_from("018f1f62-6571-7ef0-8f0c-001122334499".to_owned())
+            .expect("running operation ID");
+    let prompt_runtime = std::sync::Arc::clone(&runtime);
+    let prompt_operation_id = running_operation_id.clone();
+    let (dispatch, dispatched) = tokio::sync::oneshot::channel();
+    let prompt = tokio::spawn(async move {
+        prompt_runtime
+            .prompt_for_operation(
+                "fixture-session".to_owned(),
+                Some(prompt_operation_id),
+                "first".to_owned(),
+                Some(dispatch),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), dispatched)
+        .await
+        .expect("prompt dispatch notification")
+        .expect("prompt was sent before settlement");
+    tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("prompt observed before steer")
+        .expect("prompt notification");
+    assert_eq!(
+        runtime
+            .session_activity("fixture-session".to_owned())
+            .await
+            .expect("active session state"),
+        ProviderSessionActivity::Running
+    );
+    let wait_runtime = std::sync::Arc::clone(&runtime);
+    let waiting = tokio::spawn(async move {
+        wait_runtime
+            .wait_session_idle("fixture-session".to_owned())
+            .await
+    });
+
+    let injected = runtime
+        .steer_session("fixture-session".to_owned(), "follow-up".to_owned())
+        .await
+        .expect("steer active turn");
+    assert_eq!(
+        injected,
+        ProviderSteeringOutcome::Injected {
+            running_operation_id: Some(running_operation_id),
+        }
+    );
+    prompt
+        .await
+        .expect("prompt task")
+        .expect("prompt settlement");
+    waiting.await.expect("idle wait task").expect("idle event");
+    assert_eq!(
+        runtime
+            .session_activity("fixture-session".to_owned())
+            .await
+            .expect("idle state"),
+        ProviderSessionActivity::Idle
+    );
+    let idle = runtime
+        .steer_session("fixture-session".to_owned(), "later".to_owned())
+        .await
+        .expect("steer idle session");
+    assert_eq!(idle, ProviderSteeringOutcome::PromptRequired);
+    runtime.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -364,6 +487,7 @@ async fn stable_v1_initialize_admits_runtime_and_capabilities() {
             runtime_version: Some("1.2.3".to_owned()),
             supports_load: true,
             supports_mcp_http: false,
+            supports_steering: false,
         }
     );
 
@@ -501,8 +625,9 @@ async fn dropping_admitted_runtime_reaps_owned_process() {
     drop(runtime);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Ok(value) = std::fs::read_to_string(&process_id_path) {
-                let raw = value.parse::<i32>().expect("fixture process id");
+            if let Ok(value) = std::fs::read_to_string(&process_id_path)
+                && let Ok(raw) = value.trim().parse::<i32>()
+            {
                 let process_id = rustix::process::Pid::from_raw(raw).expect("positive process id");
                 if matches!(
                     rustix::process::test_kill_process(process_id),
@@ -901,6 +1026,7 @@ async fn prompt_cancel_remains_responsive_during_create_admission() {
         "active-session".to_owned(),
         Some(prompt_id.clone()),
         "hold".to_owned(),
+        None,
     ));
     assert!(futures_util::poll!(&mut prompt).is_pending());
     let mut create = Box::pin(runtime.create_session(PathBuf::from("/tmp")));
@@ -947,6 +1073,7 @@ async fn prompt_cancel_remains_responsive_during_load_admission() {
         "active-session".to_owned(),
         Some(prompt_id.clone()),
         "hold".to_owned(),
+        None,
     ));
     assert!(futures_util::poll!(&mut prompt).is_pending());
     let mut load =

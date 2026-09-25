@@ -146,7 +146,6 @@ fn validate_execution(
                         ..
                     }
                 )
-                || evidence.acceptance.is_some()
             {
                 return Err("peer execution must be a final written message");
             }
@@ -238,6 +237,14 @@ fn validate_acceptance(
         {
             Ok(())
         }
+        (
+            Some(DeliveryRouteEvidence::ClaudeCodePeer {
+                write: PeerWriteEffect::Written,
+                ..
+            }),
+            Some(DeliveryClientReceipt::ClaudeCodePeer),
+            Some(RunExecution::ClaudeCodePeer { .. }),
+        ) if matches!(&receipt.outcome, DeliveryOutcome::PeerMessageWritten) => Ok(()),
         _ => Err("run acceptance and selected route differ"),
     }
 }

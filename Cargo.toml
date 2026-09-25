@@ -11,6 +11,7 @@ members = [
     "crates/collaboration-mcp",
     "crates/collaboration-service",
     "crates/collaboration-protocol",
+    "crates/claude-code-peer-messaging",
     "crates/agent-collaboration",
     "crates/codex-router-auth",
     "crates/codex-router-cli",

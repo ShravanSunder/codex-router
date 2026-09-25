@@ -191,6 +191,7 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
             attempt_id: claimed.attempt_id,
             effects: Some(effects.into()),
             result: automation_storage::DeliveryResult::Accepted {
+                effect: agent_automation::AcceptedDeliveryEffect::Queued,
                 receipt: receipt.clone(),
             },
             now_ms: chrono::Utc::now().timestamp_millis(),

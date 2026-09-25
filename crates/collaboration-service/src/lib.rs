@@ -29,11 +29,14 @@ pub use codex_acp_adapter::ConversationOperationRecorder;
 pub use codex_conversation_operation_recorder::{
     CodexConversationOperationRecorder, UnavailableConversationOperationRecorder,
 };
+mod provider_session_record;
 pub use provider_operation_store::{
     ProviderOperationAdmission, ProviderOperationAdmissionResult, ProviderOperationRecord,
     ProviderOperationStore, ProviderOperationStoreError,
 };
+mod delivery_acceptance_effect;
 mod delivery_route_projection;
+pub use provider_session_record::ProviderSessionRecord;
 mod provider_conversation_backend;
 mod schedule_preparation_evidence_sink;
 mod scheduled_run_contract;

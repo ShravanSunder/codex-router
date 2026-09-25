@@ -1,17 +1,21 @@
 //! Host-owned ACP provider process admission and connection lifetime.
 
+mod provider_approval_dispatch;
+
+use crate::provider_session_actor::{
+    ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
+    ProviderSteeringOutcome, run_provider_session,
+};
 #[cfg(test)]
 use agent_client_protocol::schema::v1::ToolKind;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, ContentChunk, LoadSessionRequest, McpServer, McpServerHttp,
-    NewSessionRequest, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate, StopReason,
+    LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, PermissionOptionKind,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome,
 };
 use agent_client_protocol::schema::{ProtocolVersion, v1::InitializeRequest};
-use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines, SessionMessage,
+    AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines,
 };
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
 use std::collections::HashMap;
@@ -25,8 +29,8 @@ use tokio_util::sync::CancellationToken;
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ACP_FRAME_BYTES: usize = 1024 * 1024;
-const MAX_PROMPT_OUTPUT_BYTES: usize = 1024 * 1024;
-const MAX_PROMPT_UPDATES: usize = 4096;
+pub(crate) const MAX_PROMPT_OUTPUT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_PROMPT_UPDATES: usize = 4096;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderLaunch {
@@ -49,6 +53,7 @@ pub struct ExternalProviderAdmission {
     pub runtime_version: Option<String>,
     pub supports_load: bool,
     pub supports_mcp_http: bool,
+    pub supports_steering: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,7 +83,7 @@ pub enum ExternalProviderToolOutcome {
 }
 
 #[cfg(test)]
-fn classify_mcp_tool_outcome(
+pub(crate) fn classify_mcp_tool_outcome(
     raw_output: Option<&serde_json::Value>,
 ) -> ExternalProviderToolOutcome {
     let Some(output) = raw_output.and_then(serde_json::Value::as_object) else {
@@ -246,6 +251,8 @@ pub enum ExternalProviderRuntimeError {
     UnsupportedProtocol { actual: ProtocolVersion },
     #[error("provider conversation is busy")]
     LocalBusy,
+    #[error("provider does not advertise steering")]
+    UnsupportedSteering,
     #[error("provider conversation operation is not active")]
     LocalNotFound,
     #[error("provider cancellation target is no longer active")]
@@ -260,7 +267,9 @@ pub enum ExternalProviderRuntimeError {
     Operation(String),
 }
 
-fn acp_operation_error(error: agent_client_protocol::Error) -> ExternalProviderRuntimeError {
+pub(crate) fn acp_operation_error(
+    error: agent_client_protocol::Error,
+) -> ExternalProviderRuntimeError {
     if error.code == agent_client_protocol::schema::v1::ErrorCode::AuthRequired {
         ExternalProviderRuntimeError::AuthenticationRequired
     } else {
@@ -284,6 +293,7 @@ enum ProviderCommand {
         provider_session_id: String,
         operation_id: Option<OperationId>,
         prompt: String,
+        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>,
         >,
@@ -293,18 +303,19 @@ enum ProviderCommand {
         expected_operation_id: Option<OperationId>,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
-}
-
-enum ProviderSessionCommand {
-    Prompt {
-        operation_id: Option<OperationId>,
+    Steer {
+        provider_session_id: String,
         prompt: String,
         reply: tokio::sync::oneshot::Sender<
-            Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>,
+            Result<ProviderSteeringOutcome, ExternalProviderRuntimeError>,
         >,
     },
-    Cancel {
-        expected_operation_id: Option<OperationId>,
+    InspectSession {
+        provider_session_id: String,
+        reply: tokio::sync::oneshot::Sender<ProviderSessionActivity>,
+    },
+    WaitSessionIdle {
+        provider_session_id: String,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
 }
@@ -339,8 +350,9 @@ pub struct ExternalProviderRuntime {
     permission_request_count: Arc<AtomicU64>,
     #[cfg(test)]
     permission_outcome: Arc<std::sync::atomic::AtomicU8>,
-    approval_broker:
-        Arc<tokio::sync::RwLock<Option<Arc<collaboration_service::ServiceApprovalBroker>>>>,
+    approval_broker: Arc<
+        tokio::sync::RwLock<Option<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>>,
+    >,
     approval_contexts: Arc<std::sync::Mutex<HashMap<String, ExternalProviderApprovalContext>>>,
     #[cfg(test)]
     test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
@@ -408,7 +420,7 @@ impl ExternalProviderRuntime {
         #[cfg(test)]
         let callback_permission_outcome = Arc::clone(&permission_outcome);
         let approval_broker = Arc::new(tokio::sync::RwLock::new(
-            None::<Arc<collaboration_service::ServiceApprovalBroker>>,
+            None::<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>,
         ));
         let callback_approval_broker = Arc::clone(&approval_broker);
         let approval_contexts = Arc::new(std::sync::Mutex::new(HashMap::<
@@ -449,7 +461,11 @@ impl ExternalProviderRuntime {
                         let context = callback_approval_contexts.lock().ok().and_then(|contexts| {
                             contexts.get(request.session_id.0.as_ref()).cloned()
                         });
-                        let broker = callback_approval_broker.read().await.clone();
+                        let broker = callback_approval_broker
+                            .read()
+                            .await
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade);
                         let outcome = match (broker, context) {
                             (Some(broker), Some(context)) => {
                                 let options = request
@@ -535,6 +551,11 @@ impl ExternalProviderRuntime {
                                     .agent_capabilities
                                     .mcp_capabilities
                                     .http,
+                                supports_steering: response.meta.as_ref()
+                                    .and_then(|meta| meta.get("steering"))
+                                    .and_then(|steering| steering.get("supported"))
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(true),
                             })
                         }
                         Ok(response) => Err(ExternalProviderRuntimeError::UnsupportedProtocol {
@@ -652,12 +673,19 @@ impl ExternalProviderRuntime {
                                                 });
                                             }
                                         }
-                                        ProviderCommand::Prompt { provider_session_id, operation_id, prompt, reply } => {
+                                        ProviderCommand::Prompt { provider_session_id, operation_id, prompt, dispatch, reply } => {
                                             let Some(session) = sessions.get(&provider_session_id) else {
+                                                if let Some(dispatch) = dispatch {
+                                                    let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
+                                                }
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                                                 continue;
                                             };
-                                            let _result = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, reply }).await;
+                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, dispatch, reply }).await
+                                                && let ProviderSessionCommand::Prompt { dispatch: Some(dispatch), .. } = error.0
+                                            {
+                                                let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
+                                            }
                                         }
                                         ProviderCommand::Cancel { provider_session_id, expected_operation_id, reply } => {
                                             let Some(session) = sessions.get(&provider_session_id) else {
@@ -665,6 +693,27 @@ impl ExternalProviderRuntime {
                                                 continue;
                                             };
                                             let _result = session.send(ProviderSessionCommand::Cancel { expected_operation_id, reply }).await;
+                                        }
+                                        ProviderCommand::Steer { provider_session_id, prompt, reply } => {
+                                            let Some(session) = sessions.get(&provider_session_id) else {
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
+                                                continue;
+                                            };
+                                            let _result = session.send(ProviderSessionCommand::Steer { prompt, reply }).await;
+                                        }
+                                        ProviderCommand::InspectSession { provider_session_id, reply } => {
+                                            let Some(session) = sessions.get(&provider_session_id) else {
+                                                let _result = reply.send(ProviderSessionActivity::NotLoaded);
+                                                continue;
+                                            };
+                                            let _result = session.send(ProviderSessionCommand::Inspect { reply }).await;
+                                        }
+                                        ProviderCommand::WaitSessionIdle { provider_session_id, reply } => {
+                                            let Some(session) = sessions.get(&provider_session_id) else {
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
+                                                continue;
+                                            };
+                                            let _result = session.send(ProviderSessionCommand::WaitIdle { reply }).await;
                                         }
                                     }
                                 }
@@ -780,7 +829,7 @@ impl ExternalProviderRuntime {
         &self,
         broker: Arc<collaboration_service::ServiceApprovalBroker>,
     ) {
-        *self.approval_broker.write().await = Some(broker);
+        *self.approval_broker.write().await = Some(Arc::downgrade(&broker));
     }
 
     pub async fn prompt_with_approval_context(
@@ -789,24 +838,7 @@ impl ExternalProviderRuntime {
         prompt: String,
         context: ExternalProviderApprovalContext,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        let operation_id = context.operation_id.clone();
-        {
-            let mut contexts = self.approval_contexts.lock().map_err(|_| {
-                ExternalProviderRuntimeError::Operation(
-                    "provider approval context unavailable".to_owned(),
-                )
-            })?;
-            if contexts.contains_key(&provider_session_id) {
-                return Err(ExternalProviderRuntimeError::LocalBusy);
-            }
-            contexts.insert(provider_session_id.clone(), context);
-        }
-        let _context_guard = ApprovalContextGuard {
-            contexts: Arc::clone(&self.approval_contexts),
-            provider_session_id: provider_session_id.clone(),
-            operation_id: operation_id.clone(),
-        };
-        self.prompt_for_operation(provider_session_id, Some(operation_id), prompt)
+        self.prompt_with_approval_dispatch(provider_session_id, prompt, context, None)
             .await
     }
 
@@ -857,8 +889,64 @@ impl ExternalProviderRuntime {
         provider_session_id: String,
         prompt: String,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_for_operation(provider_session_id, None, prompt)
+        self.prompt_for_operation(provider_session_id, None, prompt, None)
             .await
+    }
+
+    pub async fn steer_session(
+        &self,
+        provider_session_id: String,
+        prompt: String,
+    ) -> Result<ProviderSteeringOutcome, ExternalProviderRuntimeError> {
+        if !self.admission.supports_steering {
+            return Err(ExternalProviderRuntimeError::UnsupportedSteering);
+        }
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::Steer {
+                provider_session_id,
+                prompt,
+                reply,
+            })
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+        result
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+    }
+
+    pub async fn session_activity(
+        &self,
+        provider_session_id: String,
+    ) -> Result<ProviderSessionActivity, ExternalProviderRuntimeError> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::InspectSession {
+                provider_session_id,
+                reply,
+            })
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+        result
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)
+    }
+
+    pub async fn wait_session_idle(
+        &self,
+        provider_session_id: String,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::WaitSessionIdle {
+                provider_session_id,
+                reply,
+            })
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+        result
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
     }
 
     async fn prompt_for_operation(
@@ -866,6 +954,7 @@ impl ExternalProviderRuntime {
         provider_session_id: String,
         operation_id: Option<OperationId>,
         prompt: String,
+        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
@@ -873,10 +962,20 @@ impl ExternalProviderRuntime {
                 provider_session_id,
                 operation_id,
                 prompt,
+                dispatch,
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+            .map_err(|error| {
+                if let ProviderCommand::Prompt {
+                    dispatch: Some(dispatch),
+                    ..
+                } = error.0
+                {
+                    let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
+                }
+                ExternalProviderRuntimeError::TransportFailure
+            })?;
         result
             .await
             .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
@@ -980,87 +1079,6 @@ fn register_static_provider_session(
     })
 }
 
-async fn run_provider_session(
-    mut session: ActiveSession<'_, Agent>,
-    mut commands: tokio::sync::mpsc::Receiver<ProviderSessionCommand>,
-    shutdown: CancellationToken,
-    #[cfg(test)] test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
-) {
-    loop {
-        tokio::select! {
-            () = shutdown.cancelled() => break,
-            command = commands.recv() => {
-                let Some(command) = command else { break; };
-                match command {
-                    ProviderSessionCommand::Prompt { operation_id, prompt, reply } => {
-                        let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
-                        let prompt_request = PromptRequest::new(
-                            session.session_id().clone(),
-                            vec![prompt.into()],
-                        );
-                        if let Err(error) = session
-                            .connection()
-                            .send_request(prompt_request)
-                            .on_receiving_result(async move |result| {
-                                let _result = terminal_tx.send(
-                                    result.map(|response| response.stop_reason),
-                                );
-                                Ok(())
-                            })
-                        {
-                            let _result = reply.send(Err(acp_operation_error(error)));
-                            continue;
-                        }
-                        let provider_session_id = session.session_id().clone();
-                        let provider_connection = session.connection().clone();
-                        let mut prompt_result = Box::pin(read_bounded_prompt(
-                            &mut session,
-                            terminal_rx,
-                            #[cfg(test)]
-                            Arc::clone(&test_tool_calls),
-                        ));
-                        loop {
-                            tokio::select! {
-                                () = shutdown.cancelled() => {
-                                    let _result = reply.send(Err(ExternalProviderRuntimeError::Operation(
-                                        "provider runtime shut down while prompt was active".to_owned(),
-                                    )));
-                                    return;
-                                }
-                                result = &mut prompt_result => {
-                                    let _result = reply.send(result);
-                                    break;
-                                }
-                                command = commands.recv() => {
-                                    match command {
-                                        Some(ProviderSessionCommand::Cancel { expected_operation_id, reply }) => {
-                                            let result = if expected_operation_id.is_some() && expected_operation_id != operation_id {
-                                                Err(ExternalProviderRuntimeError::LocalCancelTargetMismatch)
-                                            } else {
-                                                provider_connection
-                                                    .send_notification(CancelNotification::new(provider_session_id.clone()))
-                                                    .map_err(acp_operation_error)
-                                            };
-                                            let _result = reply.send(result);
-                                        }
-                                        Some(ProviderSessionCommand::Prompt { reply, .. }) => {
-                                            let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
-                                        }
-                                        None => return,
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ProviderSessionCommand::Cancel { reply, .. } => {
-                        let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
-                    }
-                }
-            }
-        }
-    }
-}
-
 async fn run_create_admission(
     connection: ConnectionTo<Agent>,
     request: NewSessionRequest,
@@ -1143,160 +1161,6 @@ fn fail_pending_session_admission(completion: PendingSessionAdmission) {
         PendingSessionAdmission::Load { reply, .. } => {
             let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
         }
-    }
-}
-
-async fn read_bounded_prompt(
-    session: &mut ActiveSession<'_, Agent>,
-    mut terminal: tokio::sync::oneshot::Receiver<Result<StopReason, agent_client_protocol::Error>>,
-    #[cfg(test)] test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
-) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-    use futures_util::FutureExt as _;
-
-    let mut output = String::new();
-    #[cfg(test)]
-    let mut tool_calls = HashMap::<String, ExternalProviderToolCall>::new();
-    let mut updates = 0_usize;
-    let stop_reason = loop {
-        tokio::select! {
-            biased;
-            update = session.read_update() => {
-                let update = update.map_err(|error| ExternalProviderRuntimeError::Operation(error.to_string()))?;
-                if let Some(reason) = record_prompt_update(
-                    update,
-                    &mut output,
-                    &mut updates,
-                    #[cfg(test)] &mut tool_calls,
-                    #[cfg(test)] &test_tool_calls,
-                ).await? {
-                    break reason;
-                }
-            }
-            result = &mut terminal => {
-                let result = result.map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-                let reason = result.map_err(acp_operation_error)?;
-                while let Some(update) = session.read_update().now_or_never() {
-                    let update = update.map_err(|error| ExternalProviderRuntimeError::Operation(error.to_string()))?;
-                    let _legacy_reason = record_prompt_update(
-                        update,
-                        &mut output,
-                        &mut updates,
-                        #[cfg(test)] &mut tool_calls,
-                        #[cfg(test)] &test_tool_calls,
-                    ).await?;
-                }
-                break reason;
-            }
-        }
-    };
-    #[cfg(test)]
-    {
-        *test_tool_calls.lock().expect("test tool calls") = tool_calls.into_values().collect();
-    }
-    Ok(ExternalProviderPromptOutcome {
-        output,
-        stop_reason: provider_prompt_stop_reason(stop_reason)?,
-    })
-}
-
-async fn record_prompt_update(
-    update: SessionMessage,
-    output: &mut String,
-    updates: &mut usize,
-    #[cfg(test)] tool_calls: &mut HashMap<String, ExternalProviderToolCall>,
-    #[cfg(test)] test_tool_calls: &Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
-) -> Result<Option<StopReason>, ExternalProviderRuntimeError> {
-    *updates = updates.saturating_add(1);
-    if *updates > MAX_PROMPT_UPDATES {
-        return Err(ExternalProviderRuntimeError::Operation(
-            "provider prompt exceeded the update limit".to_owned(),
-        ));
-    }
-    match update {
-        SessionMessage::SessionMessage(dispatch) => MatchDispatch::new(dispatch)
-            .if_notification(async |notification: SessionNotification| {
-                match notification.update {
-                    SessionUpdate::AgentMessageChunk(ContentChunk {
-                        content: ContentBlock::Text(text),
-                        ..
-                    }) => {
-                        if output.len().saturating_add(text.text.len()) > MAX_PROMPT_OUTPUT_BYTES {
-                            return Err(agent_client_protocol::Error::internal_error()
-                                .data("provider prompt exceeded the output byte limit"));
-                        }
-                        output.push_str(&text.text);
-                    }
-                    SessionUpdate::ToolCall(tool_call) => {
-                        #[cfg(not(test))]
-                        let _ = tool_call;
-                        #[cfg(test)]
-                        tool_calls.insert(
-                            tool_call.tool_call_id.0.to_string(),
-                            ExternalProviderToolCall {
-                                name: tool_call.name,
-                                title: tool_call.title,
-                                kind: tool_call.kind,
-                                status: tool_call.status,
-                                outcome: classify_mcp_tool_outcome(tool_call.raw_output.as_ref()),
-                            },
-                        );
-                    }
-                    SessionUpdate::ToolCallUpdate(update) => {
-                        #[cfg(not(test))]
-                        let _ = update;
-                        #[cfg(test)]
-                        if let Some(observation) =
-                            tool_calls.get_mut(update.tool_call_id.0.as_ref())
-                        {
-                            if let Some(name) = update.fields.name {
-                                observation.name = Some(name);
-                            }
-                            if let Some(title) = update.fields.title {
-                                observation.title = title;
-                            }
-                            if let Some(kind) = update.fields.kind {
-                                observation.kind = kind;
-                            }
-                            if let Some(status) = update.fields.status {
-                                observation.status = status;
-                            }
-                            let outcome =
-                                classify_mcp_tool_outcome(update.fields.raw_output.as_ref());
-                            if outcome != ExternalProviderToolOutcome::Unknown {
-                                observation.outcome = outcome;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                #[cfg(test)]
-                {
-                    *test_tool_calls.lock().expect("test tool calls") =
-                        tool_calls.values().cloned().collect();
-                }
-                Ok(())
-            })
-            .await
-            .otherwise_ignore()
-            .map_err(|error| ExternalProviderRuntimeError::Operation(error.to_string()))?,
-        SessionMessage::StopReason(reason) => return Ok(Some(reason)),
-        _ => {}
-    }
-    Ok(None)
-}
-
-fn provider_prompt_stop_reason(
-    reason: StopReason,
-) -> Result<ProviderPromptStopReason, ExternalProviderRuntimeError> {
-    match reason {
-        StopReason::EndTurn => Ok(ProviderPromptStopReason::EndTurn),
-        StopReason::MaxTokens => Ok(ProviderPromptStopReason::MaxTokens),
-        StopReason::MaxTurnRequests => Ok(ProviderPromptStopReason::MaxTurnRequests),
-        StopReason::Refusal => Ok(ProviderPromptStopReason::Refusal),
-        StopReason::Cancelled => Ok(ProviderPromptStopReason::Cancelled),
-        _ => Err(ExternalProviderRuntimeError::Operation(
-            "provider returned an unsupported prompt stop reason".to_owned(),
-        )),
     }
 }
 

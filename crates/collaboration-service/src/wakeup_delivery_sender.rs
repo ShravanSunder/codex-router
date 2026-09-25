@@ -87,12 +87,17 @@ impl WakeDeliverySender {
         ) {
             crash_tests::checkpoint("receipt-before-commit");
         }
+        let accepted_effect =
+            crate::delivery_acceptance_effect::accepted_delivery_effect(&receipt.outcome);
         let result = match &receipt.outcome {
             DeliveryOutcome::Started
             | DeliveryOutcome::Steered
             | DeliveryOutcome::StartedOrSteered
             | DeliveryOutcome::Queued
-            | DeliveryOutcome::PeerMessageWritten => DeliveryResult::Accepted { receipt },
+            | DeliveryOutcome::PeerMessageWritten => DeliveryResult::Accepted {
+                effect: accepted_effect.ok_or(StorageError::InvalidRecord)?,
+                receipt,
+            },
             DeliveryOutcome::NotSubmitted { retryable, reason } => {
                 DeliveryResult::KnownNotSubmitted {
                     reason: reason.clone(),

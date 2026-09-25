@@ -100,7 +100,9 @@ pub(crate) async fn persist_settlement(
                 "Native turn was interrupted.".into()
             }),
         },
-        RunSettlement::WrittenWithoutCompletion => return Err(StorageError::InvalidRecord),
+        RunSettlement::WrittenWithoutCompletion => WorkerOutcome::PeerMessageWritten {
+            explanation: "Peer message written; receiver completion was not observed.".into(),
+        },
     };
     let recorded = record
         .evidence
@@ -117,7 +119,7 @@ pub(crate) async fn persist_settlement(
         RouteEffectEvidence::ProviderAcp(provider) => {
             RunStopIdentity::ProviderOperation(provider.attempt_id.clone())
         }
-        RouteEffectEvidence::ClaudeCodePeer(_) => return Err(StorageError::InvalidRecord),
+        RouteEffectEvidence::ClaudeCodePeer(_) => RunStopIdentity::PeerMessageWritten,
     };
     store
         .lock()

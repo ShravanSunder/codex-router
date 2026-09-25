@@ -3,9 +3,9 @@ use super::*;
 use crate::{
     DeliveryFuture, FreshSessionRequest, PreparationEvidenceSink, PreparedTarget, RunAcceptance,
     RunEvidenceDisposition, RunEvidenceSink, RunReconciliation, RunSettlement, RunSubmission,
-    RunSummarySource, ScheduleDestination, SchedulePreparationFailure, SchedulePreparationOutcome,
-    SchedulePreparationRequest, ScheduleSupport, ScheduledRunSubmission, SettlementEvidence,
-    StopRequestOutcome,
+    RunSummarySource, ScheduleCapability, ScheduleDestination, SchedulePreparationFailure,
+    SchedulePreparationOutcome, SchedulePreparationRequest, ScheduleSupport,
+    ScheduledRunSubmission, SettlementEvidence, StopRequestOutcome,
 };
 use agent_automation::{
     AttemptId, ClaudeCodePeerEffectEvidence, ContinuityInput, InstructionText, OperationId,
@@ -65,7 +65,7 @@ impl FakeScheduledExecution {
                     binding: ProviderBindingReference::try_from("fixture-binding".to_owned())
                         .unwrap_or_else(|error| panic!("binding: {error}")),
                     attempt_id: self.attempt_id.clone(),
-                    submission: SubmissionEffect::Dispatching,
+                    submission: SubmissionEffect::NotDispatched,
                     settlement: ProviderSettlementEffect::NotObserved,
                 })
             }
@@ -77,7 +77,7 @@ impl FakeScheduledExecution {
                     process_id: 42_u32
                         .try_into()
                         .unwrap_or_else(|error| panic!("process: {error}")),
-                    write: PeerWriteEffect::Dispatching,
+                    write: PeerWriteEffect::NotDispatched,
                 })
             }
         }
@@ -137,8 +137,19 @@ impl ScheduledRunExecution for FakeScheduledExecution {
         })
     }
 
-    fn support(&self, _: &ScheduleDestination) -> DeliveryFuture<'_, ScheduleSupport> {
-        Box::pin(async {
+    fn support(&self, destination: &ScheduleDestination) -> DeliveryFuture<'_, ScheduleSupport> {
+        let destination = destination.clone();
+        Box::pin(async move {
+            if matches!(destination, ScheduleDestination::Fresh { .. }) {
+                return Ok(ScheduleSupport::Unsupported {
+                    missing: vec![ScheduleCapability::CreateSession],
+                });
+            }
+            if matches!(destination, ScheduleDestination::Fork { .. }) {
+                return Ok(ScheduleSupport::Unsupported {
+                    missing: vec![ScheduleCapability::ForkSession],
+                });
+            }
             Ok(ScheduleSupport::Supported {
                 settlement: match self.kind {
                     FakeRouteKind::Provider => SettlementEvidence::OperationSettlement,
@@ -190,8 +201,14 @@ impl ScheduledRunExecution for FakeScheduledExecution {
                 return Ok(RunSubmission::NotStartedBusy);
             }
             let mut evidence = run.recorded;
-            if let RouteEffectEvidence::ClaudeCodePeer(peer) = &mut evidence {
-                peer.write = PeerWriteEffect::Dispatching;
+            match &mut evidence {
+                RouteEffectEvidence::ProviderAcp(provider) => {
+                    provider.submission = SubmissionEffect::Dispatching;
+                }
+                RouteEffectEvidence::ClaudeCodePeer(peer) => {
+                    peer.write = PeerWriteEffect::Dispatching;
+                }
+                RouteEffectEvidence::CodexAppServer(_) => {}
             }
             let timing = match sink.record(evidence.clone()).await? {
                 RunEvidenceDisposition::Recorded {
@@ -279,9 +296,7 @@ impl ScheduledRunExecution for FakeScheduledExecution {
         Box::pin(async {
             Ok(match self.settlement_plan {
                 FakeSettlementPlan::Completed => RunSettlement::Completed {
-                    summary_source: RunSummarySource::ProviderResponse {
-                        text: "provider completed".into(),
-                    },
+                    summary_source: None,
                 },
                 FakeSettlementPlan::Failed => RunSettlement::Failed {
                     reason: "fixture operation failed".into(),
@@ -296,11 +311,7 @@ impl ScheduledRunExecution for FakeScheduledExecution {
     }
 
     fn summary_source(&self, _: RunObservationContext) -> DeliveryFuture<'_, RunSummarySource> {
-        Box::pin(async {
-            Ok(RunSummarySource::ProviderResponse {
-                text: "provider completed".into(),
-            })
-        })
+        Box::pin(async { Err(DeliveryContractError::InvalidEvidence) })
     }
 
     fn request_stop<'a>(
@@ -646,7 +657,8 @@ async fn provider_and_peer_routes_drive_run_show_without_native_turns() -> TestR
 }
 
 #[tokio::test]
-async fn provider_preparation_is_inspectable_and_fork_is_unsupported() -> TestResult<()> {
+async fn provider_existing_preparation_is_inspectable_and_fresh_activation_is_rejected()
+-> TestResult<()> {
     let root = std::env::temp_dir().join(format!(
         "provider-preparation-{}",
         OperationId::generate().as_str()
@@ -709,11 +721,37 @@ async fn provider_preparation_is_inspectable_and_fork_is_unsupported() -> TestRe
     let (socket, server) = tokio::net::UnixStream::pair()?;
     let service_task = tokio::spawn(crate::serve_control_connection(server, identity.clone()));
     let mut client = ControlClient::initialize(socket, "provider-preparation", "1").await?;
+    let fresh = client
+        .create_schedule(serde_json::from_value(json!({
+            "operationId": OperationId::generate(),
+            "definition": {
+                "instructionId": instruction.instruction_id.clone(),
+                "timing": {"kind": "interval", "seconds": 60},
+                "enabled": true,
+                "destination": {"kind": "freshEachRun", "endpoint": target.endpoint.clone(), "cwd": root},
+                "executionTimeoutSeconds": 120,
+                "model": "fixture-model",
+                "effort": "medium"
+            }
+        }))?)
+        .await;
+    if !matches!(fresh, Err(collaboration_client::ScheduleClientError::Rejected(failure))
+        if failure.field.as_deref() == Some("destination")
+            && failure.constraint.as_deref().is_some_and(|fix| fix.contains("conversation create")))
+    {
+        return Err("fresh provider schedule activation lacked the create-first fix".into());
+    }
+    drop(client);
+    service_task.await??;
+    let (socket, server) = tokio::net::UnixStream::pair()?;
+    let service_task = tokio::spawn(crate::serve_control_connection(server, identity.clone()));
+    let mut client =
+        ControlClient::initialize(socket, "provider-preparation-existing", "1").await?;
     let operation_id = OperationId::generate();
     let prepared = client
         .prepare_schedule(serde_json::from_value(json!({
             "operationId":operation_id,"scheduleId":schedules[0],
-            "destination":{"kind":"fresh","endpoint":target.endpoint,"cwd":root}
+            "destination":{"kind":"existing","target":target.clone(),"cwd":root}
         }))?)
         .await?;
     if !matches!(prepared.definition.destination, collaboration_protocol::ExecutionDestination::OwnedThread { target: prepared_target, .. } if prepared_target == target)

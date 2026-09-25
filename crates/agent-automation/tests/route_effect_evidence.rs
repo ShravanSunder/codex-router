@@ -75,6 +75,27 @@ fn tagged_codex_evidence_round_trips_native_fields() {
 }
 
 #[test]
+fn router_queued_evidence_is_provider_only() {
+    let mut native = legacy_native();
+    native["submission"] = json!("routerQueued");
+    assert!(serde_json::from_value::<RouteEffectEvidence<String, String>>(native.clone()).is_err());
+    native["kind"] = json!("codexAppServer");
+    assert!(serde_json::from_value::<RouteEffectEvidence<String, String>>(native).is_err());
+
+    let provider = RouteEffectEvidence::<String, String>::ProviderAcp(ProviderAcpEffectEvidence {
+        target: "claude-thread".to_owned(),
+        generation: "generation-2".to_owned(),
+        binding: ProviderBindingReference::try_from("binding-1".to_owned()).expect("binding"),
+        attempt_id: agent_automation::AttemptId::generate(),
+        submission: SubmissionEffect::RouterQueued,
+        settlement: ProviderSettlementEffect::NotObserved,
+    });
+    let encoded = serde_json::to_value(&provider).expect("provider queue encodes");
+    assert_eq!(encoded["submission"], "routerQueued");
+    assert!(serde_json::from_value::<RouteEffectEvidence<String, String>>(encoded).is_ok());
+}
+
+#[test]
 fn provider_and_peer_evidence_round_trip_as_separate_routes() {
     let provider = RouteEffectEvidence::<String, String>::ProviderAcp(ProviderAcpEffectEvidence {
         target: "claude-thread".to_owned(),

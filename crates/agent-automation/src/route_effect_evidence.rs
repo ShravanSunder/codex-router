@@ -43,8 +43,9 @@ impl<TTarget, TGeneration> RouteEffectEvidence<TTarget, TGeneration> {
     #[must_use]
     pub fn is_valid(&self) -> bool {
         match self {
-            Self::CodexAppServer(_) | Self::ClaudeCodePeer(_) => true,
+            Self::CodexAppServer(native) => native.submission != SubmissionEffect::RouterQueued,
             Self::ProviderAcp(provider) => provider.is_valid(),
+            Self::ClaudeCodePeer(_) => true,
         }
     }
 
@@ -311,17 +312,20 @@ where
     where
         D: Deserializer<'de>,
     {
-        Ok(
-            match DecodedRouteEffectEvidence::deserialize(deserializer)? {
-                DecodedRouteEffectEvidence::Tagged(tagged) => match tagged {
-                    TaggedRouteEffectEvidence::CodexAppServer(native) => {
-                        Self::CodexAppServer(native)
-                    }
-                    TaggedRouteEffectEvidence::ProviderAcp(provider) => Self::ProviderAcp(provider),
-                    TaggedRouteEffectEvidence::ClaudeCodePeer(peer) => Self::ClaudeCodePeer(peer),
-                },
-                DecodedRouteEffectEvidence::LegacyNative(native) => Self::CodexAppServer(native),
+        let evidence = match DecodedRouteEffectEvidence::deserialize(deserializer)? {
+            DecodedRouteEffectEvidence::Tagged(tagged) => match tagged {
+                TaggedRouteEffectEvidence::CodexAppServer(native) => Self::CodexAppServer(native),
+                TaggedRouteEffectEvidence::ProviderAcp(provider) => Self::ProviderAcp(provider),
+                TaggedRouteEffectEvidence::ClaudeCodePeer(peer) => Self::ClaudeCodePeer(peer),
             },
-        )
+            DecodedRouteEffectEvidence::LegacyNative(native) => Self::CodexAppServer(native),
+        };
+        if evidence.is_valid() {
+            Ok(evidence)
+        } else {
+            Err(serde::de::Error::custom(
+                "routerQueued submission is valid only for providerAcp evidence",
+            ))
+        }
     }
 }

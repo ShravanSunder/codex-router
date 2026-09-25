@@ -186,6 +186,16 @@ pub enum ConversationBindingIdentity {
     },
 }
 
+impl ConversationBindingIdentity {
+    #[must_use]
+    pub fn external_provider(&self) -> Option<&ProviderBindingIdentity> {
+        match self {
+            Self::ExternalProvider { binding } => Some(binding),
+            Self::CodexAcp { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ProviderWorkingDirectory(String);

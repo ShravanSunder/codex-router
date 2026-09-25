@@ -1,5 +1,5 @@
 //! Enable admission requires a prepared owned address or an available fresh-thread endpoint.
-use crate::{ScheduleDestination, ScheduleSupport, ScheduledRunExecution};
+use crate::{ScheduleCapability, ScheduleDestination, ScheduleSupport, ScheduledRunExecution};
 use agent_automation::{ExecutionDestination, OperationId, ScheduleDefinition, ScheduleId};
 use automation_storage::{AutomationStore, BindingAddress, StorageError};
 use collaboration_protocol::{EndpointRef, SessionRef, UuidIdentity};
@@ -88,6 +88,15 @@ pub(crate) async fn validate(
         .map_err(|_| StorageError::ActivationUnavailable)?
     {
         ScheduleSupport::Supported { .. } => Ok(()),
+        ScheduleSupport::Unsupported { missing }
+            if matches!(destination, ScheduleDestination::Fresh { .. })
+                && missing.contains(&ScheduleCapability::CreateSession) =>
+        {
+            Err(StorageError::InvalidSchedule {
+                field: "destination",
+                reason: "create the session first (conversation create), then schedule it as an existing target",
+            })
+        }
         ScheduleSupport::Unsupported { .. } => Err(StorageError::ActivationUnavailable),
     }
 }

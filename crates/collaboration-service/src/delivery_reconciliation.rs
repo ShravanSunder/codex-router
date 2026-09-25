@@ -54,7 +54,13 @@ pub(crate) async fn reconcile(
             if !apply_accepted_evidence(&mut effects, &receipt) {
                 return Ok(());
             }
-            DeliveryResult::Accepted { receipt: *receipt }
+            let effect =
+                crate::delivery_acceptance_effect::accepted_delivery_effect(&receipt.outcome)
+                    .ok_or(StorageError::InvalidRecord)?;
+            DeliveryResult::Accepted {
+                effect,
+                receipt: *receipt,
+            }
         }
         AttemptReconciliation::KnownNotSubmitted => {
             let reachability = match &effects {
@@ -126,9 +132,20 @@ fn apply_accepted_evidence(
         }
         (
             RouteEffectEvidence::ProviderAcp(provider),
-            DeliveryOutcome::Started | DeliveryOutcome::Steered | DeliveryOutcome::Queued,
+            DeliveryOutcome::Queued,
             Some(DeliveryClientReceipt::ProviderAcp { operation_id }),
-        ) if provider.attempt_id.as_str() == operation_id.as_str() => {
+        ) if provider.attempt_id.as_str() == operation_id.as_str()
+            && provider.submission == SubmissionEffect::RouterQueued =>
+        {
+            true
+        }
+        (
+            RouteEffectEvidence::ProviderAcp(provider),
+            DeliveryOutcome::Started | DeliveryOutcome::Steered,
+            Some(DeliveryClientReceipt::ProviderAcp { operation_id }),
+        ) if provider.attempt_id.as_str() == operation_id.as_str()
+            && provider.submission != SubmissionEffect::RouterQueued =>
+        {
             provider.submission = SubmissionEffect::Accepted;
             true
         }

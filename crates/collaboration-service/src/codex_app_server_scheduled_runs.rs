@@ -149,7 +149,7 @@ impl CodexAppServerScheduledRuns {
         }
         match observed_turn.turn.get("status").and_then(Value::as_str) {
             Some("completed") => Ok(RunSettlement::Completed {
-                summary_source: RunSummarySource::NativeTurn {
+                summary_source: Some(RunSummarySource::NativeTurn {
                     turn: crate::NativeTurnRef {
                         target: target.clone(),
                         turn_id: turn_id
@@ -157,7 +157,7 @@ impl CodexAppServerScheduledRuns {
                             .try_into()
                             .map_err(|_| DeliveryContractError::InvalidEvidence)?,
                     },
-                },
+                }),
             }),
             Some("failed") => Ok(RunSettlement::Failed {
                 reason: "Native turn failed; inspect its recorded output.".into(),

@@ -543,6 +543,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "claude-code-peer-messaging"
+version = "0.1.37"
+dependencies = [
+ "agent-automation",
+ "collaboration-protocol",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -618,6 +633,7 @@ dependencies = [
  "codex-router-selection",
  "codex-router-state",
  "collaboration-client",
+ "collaboration-protocol",
  "comfy-table",
  "crossterm",
  "futures-util",
@@ -633,6 +649,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -659,9 +676,11 @@ dependencies = [
 name = "codex-router-host"
 version = "0.1.37"
 dependencies = [
+ "agent-automation",
  "agent-client-protocol",
  "automation-storage",
  "chrono",
+ "claude-code-peer-messaging",
  "codex-native-integration",
  "codex-router-core",
  "codex-router-test-support",
@@ -678,6 +697,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -898,6 +918,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",

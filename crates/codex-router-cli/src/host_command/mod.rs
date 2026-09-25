@@ -19,6 +19,7 @@ use operator_client::OperatorClientError;
 
 mod foreground_launch;
 pub(crate) mod operator_client;
+mod provider_launch_configuration;
 pub(crate) mod replacement_outcome;
 
 const DEFAULT_HOST_PORT: u16 = 8787;

@@ -22,7 +22,9 @@ impl AutomationStore {
         &mut self,
         request: RunCompletion,
     ) -> Result<bool, StorageError> {
-        if request.now_ms < 0 || matches!(request.outcome, WorkerOutcome::PeerMessageWritten { .. })
+        if request.now_ms < 0
+            || matches!(request.settlement, RunStopIdentity::PeerMessageWritten)
+                != matches!(request.outcome, WorkerOutcome::PeerMessageWritten { .. })
         {
             return Err(StorageError::InvalidRecord);
         }
@@ -66,16 +68,20 @@ impl AutomationStore {
             {
                 provider.settlement = ProviderSettlementEffect::Confirmed;
             }
+            (RouteEffectEvidence::ClaudeCodePeer(peer), RunStopIdentity::PeerMessageWritten)
+                if peer.write == agent_automation::PeerWriteEffect::Written
+                    && matches!(request.outcome, WorkerOutcome::PeerMessageWritten { .. }) => {}
             _ => {
                 transaction.commit().await?;
                 return Ok(false);
             }
         }
         let inputs = record.inputs.as_ref().ok_or(StorageError::InvalidRecord)?;
-        let requires_summary = matches!(
-            inputs.execution_configuration.destination,
-            agent_automation::ExecutionDestination::FreshEachRun { .. }
-        );
+        let requires_summary = !matches!(request.settlement, RunStopIdentity::PeerMessageWritten)
+            && matches!(
+                inputs.execution_configuration.destination,
+                agent_automation::ExecutionDestination::FreshEachRun { .. }
+            );
         let phase = if requires_summary {
             "summaryRequired"
         } else {

@@ -7,11 +7,23 @@ use agent_automation::{
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::Connection;
 pub enum RunSubmissionOutcome<TReceipt> {
-    Accepted { turn_id: String, receipt: TReceipt },
-    ProviderAdmitted { receipt: TReceipt },
-    PeerWritten { written_at_ms: i64 },
-    Rejected { explanation: String },
-    Unknown { explanation: String },
+    Accepted {
+        turn_id: String,
+        receipt: TReceipt,
+    },
+    ProviderAdmitted {
+        receipt: TReceipt,
+    },
+    PeerWritten {
+        written_at_ms: i64,
+        receipt: TReceipt,
+    },
+    Rejected {
+        explanation: String,
+    },
+    Unknown {
+        explanation: String,
+    },
 }
 pub struct RunSubmissionResult<TTarget, TGeneration, TReceipt> {
     pub run_id: RunId,
@@ -95,7 +107,10 @@ impl AutomationStore {
                 record.evidence.acceptance = Some(receipt);
                 ("executing", None, None, None)
             }
-            RunSubmissionOutcome::PeerWritten { written_at_ms } => {
+            RunSubmissionOutcome::PeerWritten {
+                written_at_ms,
+                receipt,
+            } => {
                 let (
                     RouteEffectEvidence::ClaudeCodePeer(before),
                     RouteEffectEvidence::ClaudeCodePeer(after),
@@ -116,6 +131,7 @@ impl AutomationStore {
                 {
                     return Err(StorageError::InvalidRecord);
                 }
+                record.evidence.acceptance = Some(receipt);
                 (
                     "finished",
                     None,

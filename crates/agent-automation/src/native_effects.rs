@@ -15,6 +15,7 @@ pub enum PreparationEffect {
 pub enum SubmissionEffect {
     NotDispatched,
     Dispatching,
+    RouterQueued,
     Accepted,
     Rejected,
     Unknown,

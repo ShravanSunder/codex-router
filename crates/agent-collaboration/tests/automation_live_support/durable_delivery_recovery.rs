@@ -47,6 +47,7 @@ pub async fn exercise(proof: &mut ProofContext, portable: PortableRunProof) -> P
             reason: "Backend admission intentionally held by the acceptance test"
                 .to_owned()
                 .try_into()?,
+            fix: None,
         },
         channels: vec![ChannelDescription::NativeCodex {
             transport: NativeCarrier::UnixWebSocket,

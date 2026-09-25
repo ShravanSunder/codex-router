@@ -1,13 +1,24 @@
 //! Foreground lifecycle control for one shared Codex app-server.
 
 mod app_server_endpoint_guard;
+mod live_session_ownership_check;
+pub use live_session_ownership_check::{LiveSessionOwnership, LiveSessionOwnershipCheck};
 mod app_server_shutdown;
 mod child_diagnostics;
+mod claude_code_peer_delivery_route;
 mod codex_conversation_recording_composition;
+pub use claude_code_peer_delivery_route::ClaudeCodePeerDeliveryRoute;
+mod claude_code_peer_scheduled_runs;
 mod codex_update_preparation;
 mod explicit_app_server_restart;
 mod explicit_router_restart;
 mod external_provider_runtime;
+mod provider_acp_delivery_route;
+mod provider_acp_message_fifo;
+mod provider_acp_route_claim;
+pub use provider_acp_delivery_route::ProviderAcpDeliveryRoute;
+mod provider_acp_scheduled_runs;
+mod provider_acp_session_loading;
 pub use external_provider_runtime::{
     ExternalProviderAdmission, ExternalProviderApprovalContext, ExternalProviderLaunch,
     ExternalProviderPromptOutcome, ExternalProviderRuntime, ExternalProviderRuntimeError,
@@ -25,7 +36,19 @@ mod operator_connection;
 mod operator_messages;
 mod owned_router;
 mod process_group_child;
+mod provider_configuration_file;
+pub use provider_configuration_file::{
+    ProviderConfigurationEntries, ProviderConfigurationEntry, ProviderConfigurationError,
+    ProviderConfigurationFile,
+};
+mod provider_startup_composition;
+pub use provider_startup_composition::ExternalProviderStartup;
+mod provider_operation_settlement;
+mod provider_prompt_observation;
+mod provider_session_actor;
+pub use provider_session_actor::{ProviderSessionActivity, ProviderSteeringOutcome};
 mod router_compatibility;
+mod session_message_route_composition;
 
 pub use app_server_endpoint_guard::AppServerEndpointError;
 pub use app_server_endpoint_guard::require_unowned_app_server_endpoint;

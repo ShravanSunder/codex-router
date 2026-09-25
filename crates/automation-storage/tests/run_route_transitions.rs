@@ -135,13 +135,29 @@ async fn provider_run_stop_waits_for_exact_operation_settlement()
             run_id: run_id.clone(),
             effects: provider_evidence(
                 attempt_id.clone(),
-                SubmissionEffect::Dispatching,
+                SubmissionEffect::NotDispatched,
                 ProviderSettlementEffect::NotObserved,
             )?,
         })
         .await?
     {
         return Err("provider route preparation was not recorded".into());
+    }
+    if store
+        .begin_run_dispatch::<String, String, String, String>(RunDispatchIntent {
+            run_id: run_id.clone(),
+            effects: provider_evidence(
+                AttemptId::generate(),
+                SubmissionEffect::Dispatching,
+                ProviderSettlementEffect::NotObserved,
+            )?,
+            configured_timeout_seconds: 3600,
+            now_ms: 62000,
+        })
+        .await
+        .is_ok()
+    {
+        return Err("different provider operation dispatched the run".into());
     }
     store
         .begin_run_dispatch::<String, String, String, String>(RunDispatchIntent {
@@ -256,11 +272,23 @@ async fn peer_written_run_finishes_without_claiming_turn_completion()
     if !store
         .begin_run_preparation::<String, String, String, String>(RunPreparationIntent {
             run_id: run_id.clone(),
-            effects: peer_evidence(PeerWriteEffect::Dispatching)?,
+            effects: peer_evidence(PeerWriteEffect::NotDispatched)?,
         })
         .await?
     {
         return Err("peer route preparation was not recorded".into());
+    }
+    if store
+        .begin_run_dispatch::<String, String, String, String>(RunDispatchIntent {
+            run_id: run_id.clone(),
+            effects: peer_evidence(PeerWriteEffect::Written)?,
+            configured_timeout_seconds: 3600,
+            now_ms: 62000,
+        })
+        .await
+        .is_ok()
+    {
+        return Err("peer write cannot bypass dispatch intent".into());
     }
     store
         .begin_run_dispatch::<String, String, String, String>(RunDispatchIntent {
@@ -276,6 +304,7 @@ async fn peer_written_run_finishes_without_claiming_turn_completion()
             effects: peer_evidence(PeerWriteEffect::Written)?,
             outcome: RunSubmissionOutcome::PeerWritten {
                 written_at_ms: 61000,
+                receipt: "peer receipt".into(),
             },
         })
         .await
@@ -289,6 +318,7 @@ async fn peer_written_run_finishes_without_claiming_turn_completion()
             effects: peer_evidence(PeerWriteEffect::Written)?,
             outcome: RunSubmissionOutcome::PeerWritten {
                 written_at_ms: 63000,
+                receipt: "peer receipt".into(),
             },
         })
         .await?;
@@ -318,6 +348,74 @@ async fn peer_written_run_finishes_without_claiming_turn_completion()
         .await?
     {
         return Err("final peer write accepted a stop request".into());
+    }
+    store.close().await?;
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn peer_written_evidence_finishes_after_uncertain_submission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "peer-reconcile-{}.sqlite",
+        OperationId::generate().as_str()
+    ));
+    let mut store = AutomationStore::open(&path).await?;
+    let run_id = admitted_run(&mut store).await?;
+    store
+        .begin_run_preparation::<String, String, String, String>(RunPreparationIntent {
+            run_id: run_id.clone(),
+            effects: peer_evidence(PeerWriteEffect::NotDispatched)?,
+        })
+        .await?;
+    store
+        .begin_run_dispatch::<String, String, String, String>(RunDispatchIntent {
+            run_id: run_id.clone(),
+            effects: peer_evidence(PeerWriteEffect::Dispatching)?,
+            configured_timeout_seconds: 120,
+            now_ms: 62_000,
+        })
+        .await?;
+    store
+        .record_run_submission::<String, String, String, String>(RunSubmissionResult {
+            run_id: run_id.clone(),
+            effects: peer_evidence(PeerWriteEffect::Written)?,
+            outcome: RunSubmissionOutcome::Unknown {
+                explanation: "reply lost after full write".into(),
+            },
+        })
+        .await?;
+    let uncertain = store
+        .read_run::<String, String, String, String>(&run_id)
+        .await?;
+    if uncertain.phase != RunPhase::Uncertain {
+        return Err("peer write was not retained as uncertain".into());
+    }
+    if !store
+        .complete_run_settlement::<String, String, String, String>(RunCompletion {
+            run_id: run_id.clone(),
+            settlement: RunStopIdentity::PeerMessageWritten,
+            outcome: WorkerOutcome::PeerMessageWritten {
+                explanation: "Peer message written; receiver completion was not observed.".into(),
+            },
+            now_ms: 63_000,
+        })
+        .await?
+    {
+        return Err("recorded peer write did not settle".into());
+    }
+    let finished = store
+        .read_run::<String, String, String, String>(&run_id)
+        .await?;
+    if finished.phase != RunPhase::Finished
+        || finished.evidence.acceptance.is_some()
+        || !matches!(
+            finished.worker_outcome,
+            Some(WorkerOutcome::PeerMessageWritten { .. })
+        )
+    {
+        return Err("peer recovery fabricated client acceptance or completion".into());
     }
     store.close().await?;
     std::fs::remove_file(path)?;
@@ -368,7 +466,7 @@ async fn provider_summary_reference_feeds_the_next_fresh_run()
     let provider_attempt = AttemptId::generate();
     let preparing = provider_evidence(
         provider_attempt.clone(),
-        SubmissionEffect::Dispatching,
+        SubmissionEffect::NotDispatched,
         ProviderSettlementEffect::NotObserved,
     )?;
     store
@@ -380,7 +478,11 @@ async fn provider_summary_reference_feeds_the_next_fresh_run()
     store
         .begin_run_dispatch::<String, String, String, String>(RunDispatchIntent {
             run_id: first_run.clone(),
-            effects: preparing,
+            effects: provider_evidence(
+                provider_attempt.clone(),
+                SubmissionEffect::Dispatching,
+                ProviderSettlementEffect::NotObserved,
+            )?,
             configured_timeout_seconds: 3600,
             now_ms: 62000,
         })

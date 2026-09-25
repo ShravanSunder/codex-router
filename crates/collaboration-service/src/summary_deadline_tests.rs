@@ -23,9 +23,9 @@ async fn summary_connection_failure_preserves_timeout_retry_without_stopping_int
 }
 
 #[tokio::test]
-async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome() -> TestResult<()> {
+async fn unavailable_native_source_blocks_summary_and_keeps_worker_outcome() -> TestResult<()> {
     let directory = std::env::temp_dir().join(format!(
-        "provider-summary-unavailable-{}",
+        "native-summary-unavailable-{}",
         agent_automation::OperationId::generate().as_str()
     ));
     std::fs::create_dir(&directory)?;
@@ -34,9 +34,9 @@ async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome()
     let service = "00000000-0000-4000-8000-000000000001";
     let summary_endpoint: EndpointRef =
         serde_json::from_value(json!({"serviceId":service,"endpointId":"codex-local"}))?;
-    let provider_target: SessionRef = serde_json::from_value(json!({
-        "endpoint":{"serviceId":service,"endpointId":"claude-local"},
-        "sessionId":"provider-worker"
+    let native_target: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":service,"endpointId":"codex-local"},
+        "sessionId":"native-worker"
     }))?;
     let summary_target = SessionRef {
         endpoint: summary_endpoint.clone(),
@@ -44,7 +44,7 @@ async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome()
     };
     let generation: CodexGeneration =
         serde_json::from_value(json!({"serviceEpoch":service,"generation":1}))?;
-    let provider_attempt = agent_automation::AttemptId::generate();
+    let native_turn_id = "native-turn".to_owned();
     let run_id = agent_automation::RunId::generate();
     let schedule_id = agent_automation::ScheduleId::generate();
     let instruction_id = agent_automation::InstructionId::generate();
@@ -53,9 +53,9 @@ async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome()
     let worker_outcome = agent_automation::WorkerOutcome::Completed { explanation: None };
     let attempt = SummaryAttempt {
         attempt_id: agent_automation::AttemptId::generate(),
-        source_target: provider_target.clone(),
-        source_reference: agent_automation::SummarySourceReference::ProviderOperation {
-            attempt_id: provider_attempt.clone(),
+        source_target: native_target.clone(),
+        source_reference: agent_automation::SummarySourceReference::NativeTurn {
+            turn_id: native_turn_id.clone(),
         },
         target: Some(summary_target.clone()),
         native_turn_id: None,
@@ -77,14 +77,17 @@ async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome()
         explanation: None,
     };
     let evidence = agent_automation::RunExecutionEvidence {
-        route: Some(agent_automation::RouteEffectEvidence::ProviderAcp(
-            agent_automation::ProviderAcpEffectEvidence {
-                target: provider_target,
-                generation: generation.clone(),
-                binding: "provider-binding".to_owned().try_into()?,
-                attempt_id: provider_attempt,
+        route: Some(agent_automation::RouteEffectEvidence::CodexAppServer(
+            agent_automation::NativeEffectEvidence {
+                target: Some(native_target),
+                generation: Some(generation.clone()),
+                client_user_message_id: None,
+                native_turn_id: Some(native_turn_id.clone()),
+                native_submission_id: None,
+                allocation: PreparationEffect::NotRequested,
+                resume: PreparationEffect::NotRequested,
                 submission: SubmissionEffect::Accepted,
-                settlement: agent_automation::ProviderSettlementEffect::Confirmed,
+                cessation: CessationEvidence::Confirmed,
             },
         )),
         timing: agent_automation::ExecutionTiming::start(now_ms - 120_000, 120),
@@ -158,7 +161,7 @@ async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome()
         phase: RunPhase::SummaryRunning,
         inputs: None,
         thread_binding_id: None,
-        native_turn_id: None,
+        native_turn_id: Some(native_turn_id),
         evidence,
         worker_outcome: Some(worker_outcome),
         summary_attempt: Some(attempt),
@@ -171,9 +174,7 @@ async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome()
         store: &store,
         admission: &admission,
         summary_endpoint,
-        source: Some(crate::RunSummarySource::Unavailable {
-            reason: "provider response no longer retained".into(),
-        }),
+        source: None,
         record,
         timeout_seconds: 900,
     })
@@ -195,10 +196,10 @@ async fn unavailable_provider_response_blocks_summary_and_keeps_worker_outcome()
                 && attempt
                     .explanation
                     .as_deref()
-                    .is_some_and(|reason| reason.contains("provider response no longer retained"))
+                    .is_some_and(|reason| reason.contains("source is unavailable"))
         })
     {
-        return Err("unavailable provider response did not block only the summary".into());
+        return Err("unavailable native source did not block only the summary".into());
     }
     drop(store);
     std::fs::remove_file(path)?;

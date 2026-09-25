@@ -1,8 +1,9 @@
 use super::*;
 use crate::ExternalProviderLaunch;
 use collaboration_protocol::{
-    CodexGeneration, ConversationCreateRequest, EndpointId, GenerationNumber, ProviderBindingId,
-    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    CodexGeneration, ConversationCreateRequest, ConversationPromptRequest, EndpointId,
+    GenerationNumber, MessageContent, MessageText, ProviderBindingId, ProviderCapabilities,
+    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy, ProviderRuntimeIdentity,
     ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId, UuidIdentity,
 };
@@ -22,6 +23,56 @@ sys.stdin.read()
 "#
             .to_owned(),
         ],
+        environment: Vec::new(),
+    }
+}
+
+fn pending_prompt_fixture() -> ExternalProviderLaunch {
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec![
+            "-c".to_owned(),
+            r#"
+import json,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'dispatch-fixture','version':'1'}}})); sys.stdout.flush()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='session/new'
+print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})); sys.stdout.flush()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='session/prompt'
+sys.stdin.read()
+"#
+            .to_owned(),
+        ],
+        environment: Vec::new(),
+    }
+}
+
+fn ordered_prompt_fixture(socket_path: &std::path::Path) -> ExternalProviderLaunch {
+    let script = format!(
+        r#"
+import json,socket,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{}},'agentInfo':{{'name':'fifo-fixture','version':'1'}}}}}})); sys.stdout.flush()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='session/new'
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'sessionId':'fixture-session'}}}})); sys.stdout.flush()
+for expected in ('first','second'):
+ request=json.loads(sys.stdin.readline())
+ assert request['method']=='session/prompt'
+ assert request['params']['prompt'][0]['text'].endswith(expected)
+ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
+  event.connect({:?})
+  event.sendall(expected.encode())
+ print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
+sys.stdin.read()
+"#,
+        socket_path.display().to_string()
+    );
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
     }
 }
@@ -67,6 +118,258 @@ fn requester() -> SessionRef {
         endpoint: endpoint(),
         session_id: SessionId::try_from("requester".to_owned()).expect("session ID"),
     }
+}
+
+struct NoLivePeer;
+
+impl crate::LiveSessionOwnershipCheck for NoLivePeer {
+    fn check<'a>(
+        &'a self,
+        _target: &'a SessionRef,
+    ) -> collaboration_service::DeliveryFuture<'a, crate::LiveSessionOwnership> {
+        Box::pin(async { Ok(crate::LiveSessionOwnership::NotLive) })
+    }
+}
+
+#[tokio::test]
+async fn delivery_prompt_reports_submission_before_turn_settles() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let runtime = ExternalProviderRuntime::initialize(pending_prompt_fixture())
+        .await
+        .expect("fixture initializes");
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
+    let store = ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+        .await
+        .expect("operation store opens");
+    let backend = ExternalProviderSupervisor::new(
+        vec![ExternalProviderBinding {
+            identity: binding(),
+            runtime,
+        }],
+        Arc::new(Mutex::new(store)),
+    )
+    .expect("supervisor initializes");
+    let operation_id = OperationId::generate();
+    let target = SessionRef {
+        endpoint: endpoint(),
+        session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
+    };
+
+    let dispatch = backend
+        .submit_delivery_prompt(ConversationPromptRequest {
+            operation_id: operation_id.clone(),
+            target: target.clone(),
+            generation: Some(generation()),
+            requested_by: requester(),
+            approver: requester(),
+            prompt: MessageContent::Router {
+                text: MessageText::try_from("start work".to_owned()).expect("message"),
+            },
+        })
+        .await
+        .expect("delivery prompt admission");
+
+    assert_eq!(
+        dispatch,
+        provider_delivery_submission::ProviderPromptDispatch::Submitted
+    );
+    let operation = backend
+        .show(ConversationOperationShowRequest { operation_id })
+        .await
+        .expect("operation");
+    assert_eq!(operation.stage, ProviderOperationStage::MayHaveDispatched);
+    backend.shutdown().await.expect("supervisor shuts down");
+}
+
+#[tokio::test]
+async fn delivery_prompt_without_loaded_session_is_known_not_submitted() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let runtime = ExternalProviderRuntime::initialize(create_fixture())
+        .await
+        .expect("fixture initializes");
+    let store = ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+        .await
+        .expect("operation store");
+    let backend = ExternalProviderSupervisor::new(
+        vec![ExternalProviderBinding {
+            identity: binding(),
+            runtime,
+        }],
+        Arc::new(Mutex::new(store)),
+    )
+    .expect("supervisor");
+
+    let dispatch = backend
+        .submit_delivery_prompt(ConversationPromptRequest {
+            operation_id: OperationId::generate(),
+            target: SessionRef {
+                endpoint: endpoint(),
+                session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
+            },
+            generation: Some(generation()),
+            requested_by: requester(),
+            approver: requester(),
+            prompt: MessageContent::Router {
+                text: MessageText::try_from("start work".to_owned()).expect("message"),
+            },
+        })
+        .await
+        .expect("delivery prompt admission");
+
+    assert_eq!(
+        dispatch,
+        provider_delivery_submission::ProviderPromptDispatch::NotSubmitted
+    );
+    backend.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn router_queue_drains_provider_prompts_in_fifo_order() {
+    use tokio::io::AsyncReadExt as _;
+    let root = tempfile::tempdir().expect("temporary root");
+    let socket_path = root.path().join("prompt-events.sock");
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("fixture event listener");
+    let runtime = ExternalProviderRuntime::initialize(ordered_prompt_fixture(&socket_path))
+        .await
+        .expect("fixture initializes");
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
+    let store = ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+        .await
+        .expect("operation store opens");
+    let store = Arc::new(Mutex::new(store));
+    let backend = Arc::new(
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: binding(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor initializes"),
+    );
+    let queue = crate::provider_acp_message_fifo::ProviderAcpMessageFifo::new(
+        Arc::clone(&backend),
+        store,
+        Arc::new(NoLivePeer),
+    );
+    let target = SessionRef {
+        endpoint: endpoint(),
+        session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
+    };
+    for text in ["first", "second"] {
+        let permit = queue.reserve(&target).expect("queue capacity");
+        permit.send(ConversationPromptRequest {
+            operation_id: OperationId::generate(),
+            target: target.clone(),
+            generation: Some(generation()),
+            requested_by: requester(),
+            approver: requester(),
+            prompt: MessageContent::Router {
+                text: MessageText::try_from(text.to_owned()).expect("prompt text"),
+            },
+        });
+    }
+
+    for expected in ["first", "second"] {
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("prompt event deadline")
+            .expect("prompt event");
+        let mut bytes = Vec::new();
+        stream
+            .read_to_end(&mut bytes)
+            .await
+            .expect("prompt event bytes");
+        assert_eq!(bytes, expected.as_bytes());
+    }
+    queue.shutdown().await;
+    backend.shutdown().await.expect("supervisor shuts down");
+}
+
+#[tokio::test]
+async fn router_queue_shutdown_drops_an_unstarted_prompt() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let runtime = ExternalProviderRuntime::initialize(pending_prompt_fixture())
+        .await
+        .expect("fixture initializes");
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
+    let store = Arc::new(Mutex::new(
+        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("operation store"),
+    ));
+    let backend = Arc::new(
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: binding(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor"),
+    );
+    let target = SessionRef {
+        endpoint: endpoint(),
+        session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
+    };
+    let active = backend
+        .submit_delivery_prompt(ConversationPromptRequest {
+            operation_id: OperationId::generate(),
+            target: target.clone(),
+            generation: Some(generation()),
+            requested_by: requester(),
+            approver: requester(),
+            prompt: MessageContent::Router {
+                text: MessageText::try_from("active".to_owned()).expect("message"),
+            },
+        })
+        .await
+        .expect("active prompt");
+    assert_eq!(
+        active,
+        provider_delivery_submission::ProviderPromptDispatch::Submitted
+    );
+    let queue = crate::provider_acp_message_fifo::ProviderAcpMessageFifo::new(
+        Arc::clone(&backend),
+        Arc::clone(&store),
+        Arc::new(NoLivePeer),
+    );
+    let queued_id = OperationId::generate();
+    queue
+        .reserve(&target)
+        .expect("queue capacity")
+        .send(ConversationPromptRequest {
+            operation_id: queued_id.clone(),
+            target,
+            generation: Some(generation()),
+            requested_by: requester(),
+            approver: requester(),
+            prompt: MessageContent::Router {
+                text: MessageText::try_from("never started".to_owned()).expect("message"),
+            },
+        });
+
+    queue.shutdown().await;
+
+    assert!(
+        store
+            .lock()
+            .await
+            .inspect(&queued_id)
+            .await
+            .expect("queued lookup")
+            .is_none()
+    );
+    backend.shutdown().await.expect("supervisor shutdown");
 }
 
 #[tokio::test]

@@ -41,7 +41,10 @@ impl AutomationStore {
             }
             RouteEffectEvidence::ProviderAcp(provider) => {
                 provider.attempt_id == request.attempt_id
-                    && provider.submission == SubmissionEffect::Dispatching
+                    && matches!(
+                        provider.submission,
+                        SubmissionEffect::Dispatching | SubmissionEffect::RouterQueued
+                    )
                     && provider.settlement == ProviderSettlementEffect::NotObserved
             }
             RouteEffectEvidence::ClaudeCodePeer(peer) => peer.write == PeerWriteEffect::Dispatching,

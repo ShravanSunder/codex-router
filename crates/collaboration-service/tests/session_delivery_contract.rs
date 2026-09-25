@@ -46,15 +46,21 @@ fn route_claims_and_preconditions_keep_tagged_meaning() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn provider_summary_source_preserves_text_and_unavailable_reason()
--> Result<(), Box<dyn std::error::Error>> {
+fn settled_run_records_summary_source_only_when_available() -> Result<(), Box<dyn std::error::Error>>
+{
+    let native_turn = serde_json::from_value(json!({
+        "target": {
+            "endpoint": {
+                "serviceId": "00000000-0000-4000-8000-000000000001",
+                "endpointId": "codex-local"
+            },
+            "sessionId": "thread-one"
+        },
+        "turnId": "turn-one"
+    }))?;
     for source in [
-        RunSummarySource::ProviderResponse {
-            text: "Finished the task".into(),
-        },
-        RunSummarySource::Unavailable {
-            reason: "response no longer retained".into(),
-        },
+        None,
+        Some(RunSummarySource::NativeTurn { turn: native_turn }),
     ] {
         let settlement = RunSettlement::Completed {
             summary_source: source,

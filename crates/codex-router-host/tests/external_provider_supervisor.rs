@@ -492,6 +492,15 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
         } => target,
         output => return Err(format!("unexpected create output: {output:?}").into()),
     };
+    let mut stored =
+        ProviderOperationStore::open(&root.path().join("provider-operations.sqlite")).await?;
+    let session_record = stored
+        .session_record(&target)
+        .await?
+        .ok_or("created session record missing")?;
+    ensure_eq!(session_record.created_by, requester);
+    ensure_eq!(session_record.approver, requester);
+    stored.close().await?;
 
     let prompt_operation_id = OperationId::generate();
     let prompt = operation(
@@ -553,7 +562,7 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 target,
                 generation: Some(generation()?),
                 requested_by: requester.clone(),
-                approver: requester,
+                approver: requester.clone(),
             })
             .await,
     )?;
@@ -936,7 +945,7 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
                 requested_by: requester.clone(),
-                approver: requester,
+                approver: requester.clone(),
                 requested_policy: policy(),
             })
             .await,
@@ -948,6 +957,15 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
             settlement: ConversationOperationSettlement::Loaded { .. }
         }
     ));
+    let mut stored =
+        ProviderOperationStore::open(&root.path().join("provider-operations.sqlite")).await?;
+    let session_record = stored
+        .session_record(&target)
+        .await?
+        .ok_or("loaded session record missing")?;
+    ensure_eq!(session_record.created_by, requester);
+    ensure_eq!(session_record.approver, requester);
+    stored.close().await?;
     Ok(())
 }
 

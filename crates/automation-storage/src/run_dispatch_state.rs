@@ -76,7 +76,8 @@ impl AutomationStore {
                     && before.generation == after.generation
                     && before.binding == after.binding
                     && before.attempt_id == after.attempt_id
-                    && before.submission == SubmissionEffect::Dispatching
+                    && before.submission == SubmissionEffect::NotDispatched
+                    && after.submission == SubmissionEffect::Dispatching
             }
             (
                 RouteEffectEvidence::ClaudeCodePeer(before),
@@ -84,7 +85,8 @@ impl AutomationStore {
             ) => {
                 before.session_id == after.session_id
                     && before.process_id == after.process_id
-                    && before.write == PeerWriteEffect::Dispatching
+                    && before.write == PeerWriteEffect::NotDispatched
+                    && after.write == PeerWriteEffect::Dispatching
             }
             _ => false,
         };

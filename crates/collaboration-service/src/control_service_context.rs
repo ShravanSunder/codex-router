@@ -1,6 +1,6 @@
 //! Shared service identity and composed dependencies, separate from connection admission.
 use crate::EndpointDirectory;
-use collaboration_protocol::{EndpointDescription, UuidIdentity};
+use collaboration_protocol::{EndpointAvailability, EndpointDescription, UuidIdentity};
 
 #[derive(Clone)]
 pub struct ServiceIdentity {
@@ -160,7 +160,13 @@ impl ServiceIdentity {
             if !identities.insert(endpoint.endpoint.clone()) {
                 return Err("duplicate endpoint identity".into());
             }
-            if !(1..=2).contains(&endpoint.channels.len()) {
+            if endpoint.channels.len() > 2
+                || (endpoint.channels.is_empty()
+                    && !matches!(
+                        endpoint.availability,
+                        EndpointAvailability::Unavailable { .. }
+                    ))
+            {
                 return Err("invalid channel count".into());
             }
         }
