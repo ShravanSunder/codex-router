@@ -52,6 +52,7 @@ All rows are `authorized` by the owner in the 2026-09-23 conversation; priority 
 ## Non-goals
 
 - Relaying Claude Code permission prompts to Router.
+- A Codex TUI façade for interacting with Router-owned sessions (app-server responses, live tool events, approvals, history). This is separate later work by another agent; this design only has to leave the Codex app-server route's native semantics intact for it.
 - Session-bound MCP URLs or caller authentication; attribution stays self-declared.
 - Interrupting a running Cursor turn to deliver a message.
 - Installing Router as a background service.
