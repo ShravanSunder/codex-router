@@ -1,7 +1,7 @@
 //! Ephemeral Listen ownership with bounded admission, monotonic deadlines, and cancellation.
 use message_board::*;
 use message_board_storage::BoardStore;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -11,6 +11,9 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_ACTIVE_THREAD_LISTENS: usize = 64;
 const MAX_TERMINAL_THREAD_LISTENS: usize = 64;
+
+#[path = "thread_listen_session_delivery.rs"]
+mod session_delivery;
 
 struct ThreadListenState {
     context: ThreadListenContext,
@@ -183,177 +186,8 @@ impl ThreadListenRegistry {
     ) {
         let registry = self.clone();
         tokio::spawn(async move {
-            registry.run_session_delivery(listen_id, store, sink).await;
+            session_delivery::run(registry, listen_id, store, sink).await;
         });
-    }
-
-    async fn run_session_delivery(
-        &self,
-        listen_id: ListenId,
-        store: Arc<Mutex<BoardStore>>,
-        sink: Arc<dyn BatchSink>,
-    ) {
-        let Ok(state) = self.state(&listen_id).await else {
-            return;
-        };
-        let mark_total = match state.mode {
-            ThreadListenMode::Once { .. } => 1_u8,
-            ThreadListenMode::Repeating { lifetime_seconds }
-                if lifetime_seconds > ThreadListenLifetime::Short.seconds() =>
-            {
-                3
-            }
-            ThreadListenMode::Repeating { .. } => 1,
-        };
-        let mut next_mark = Instant::now() + THREAD_LISTEN_MARK;
-        let mut mark = 1_u8;
-        let mut delivered_since_mark = false;
-        let mut consecutive_rejections = 0_u8;
-        let mut last_rejection = Value::Null;
-        let mut wait = tokio::spawn({
-            let registry = self.clone();
-            let listen_id = listen_id.clone();
-            let store = Arc::clone(&store);
-            async move {
-                registry
-                    .wait(
-                        &listen_id,
-                        &store,
-                        collaboration_protocol::MAX_CONTROL_FRAME_BYTES,
-                    )
-                    .await
-            }
-        });
-        loop {
-            tokio::select! {
-                result = &mut wait => {
-                    let result = match result {
-                        Ok(Ok(result)) => result,
-                        _ => {
-                            self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, json!({"kind":"unavailable"})).await;
-                            return;
-                        }
-                    };
-                    if let Some(batch_set) = result.batch_set {
-                        match sink.deliver(ListenDeliveryRecord::Batch(batch_set.clone())).await {
-                            Ok(()) => {
-                                record_batch_progress(&state, &batch_set);
-                                delivered_since_mark = true;
-                                consecutive_rejections = 0;
-                                publish_rejection_state(&state, consecutive_rejections, &last_rejection);
-                                if state.acknowledge {
-                                    for batch in &batch_set.batches {
-                                        if store.lock().await.acknowledge_inbox(InboxAcknowledgeRequest {
-                                            actor: state.context.reader.clone(),
-                                            acting_for: None,
-                                            scope: ReadScope::Thread { root_message_id: batch.root_message_id.clone() },
-                                            through_activity_sequence: batch.delivered_through,
-                                        }).await.is_err() {
-                                            self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, json!({"kind":"acknowledgementFailed"})).await;
-                                            return;
-                                        }
-                                    }
-                                    state.acknowledged.store(true, Ordering::Relaxed);
-                                }
-                            }
-                            Err(BatchSinkFailure::Rejected { evidence }) => {
-                                let terminal = record_rejection(&mut consecutive_rejections, &mut last_rejection, evidence);
-                                publish_rejection_state(&state, consecutive_rejections, &last_rejection);
-                                if terminal {
-                                    self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, last_rejection).await;
-                                    return;
-                                }
-                            }
-                            Err(BatchSinkFailure::Unavailable) => {
-                                self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, json!({"kind":"unavailable"})).await;
-                                return;
-                            }
-                        }
-                    }
-                    if let Some(end) = result.end {
-                        self.finish_session_delivery(&listen_id, &state, end.reason, &sink, Value::Null).await;
-                        return;
-                    }
-                    wait = tokio::spawn({
-                        let registry = self.clone();
-                        let listen_id = listen_id.clone();
-                        let store = Arc::clone(&store);
-                        async move { registry.wait(&listen_id, &store, collaboration_protocol::MAX_CONTROL_FRAME_BYTES).await }
-                    });
-                }
-                _ = tokio::time::sleep_until(next_mark) => {
-                    if mark == mark_total {
-                        wait.abort();
-                        state.cancellation.cancel();
-                        let reason = match state.mode {
-                            ThreadListenMode::Once { .. } => ThreadListenEndReason::Timeout,
-                            ThreadListenMode::Repeating { .. } => ThreadListenEndReason::Lifetime,
-                        };
-                        self.finish_session_delivery(&listen_id, &state, reason, &sink, Value::Null).await;
-                        return;
-                    }
-                    if !delivered_since_mark {
-                        let snapshot = state.snapshot(listen_id.clone());
-                        let heartbeat_sequence = snapshot
-                            .last_sequence
-                            .or(Some(state.context.armed_after_sequence));
-                        let heartbeat = ThreadListenHeartbeat {
-                            kind: ThreadListenHeartbeatKind::ListenHeartbeat,
-                            listen_id: listen_id.clone(),
-                            last_sequence: heartbeat_sequence,
-                            mark,
-                            text: format!("nothing new since sequence {}, still listening; no action", heartbeat_sequence.map(ActivitySequence::get).unwrap_or(0)),
-                        };
-                        match sink.deliver(ListenDeliveryRecord::Heartbeat(heartbeat)).await {
-                            Ok(()) => consecutive_rejections = 0,
-                            Err(BatchSinkFailure::Rejected { evidence }) => {
-                                let terminal = record_rejection(&mut consecutive_rejections, &mut last_rejection, evidence);
-                                publish_rejection_state(&state, consecutive_rejections, &last_rejection);
-                                if terminal {
-                                    self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, last_rejection).await;
-                                    return;
-                                }
-                            }
-                            Err(BatchSinkFailure::Unavailable) => {
-                                self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, json!({"kind":"unavailable"})).await;
-                                return;
-                            }
-                        }
-                    }
-                    delivered_since_mark = false;
-                    mark += 1;
-                    next_mark += THREAD_LISTEN_MARK;
-                }
-            }
-        }
-    }
-
-    async fn finish_session_delivery(
-        &self,
-        listen_id: &ListenId,
-        state: &Arc<ThreadListenState>,
-        reason: ThreadListenEndReason,
-        sink: &Arc<dyn BatchSink>,
-        rejection: serde_json::Value,
-    ) {
-        let snapshot = state.snapshot(listen_id.clone());
-        let finalization = ThreadListenFinalization {
-            kind: ThreadListenFinalizationKind::ListenEnd,
-            listen_id: listen_id.clone(),
-            reason,
-            batches_delivered: snapshot.batches_delivered,
-            first_sequence: snapshot.first_sequence,
-            last_sequence: snapshot.last_sequence,
-            catch_up: snapshot.catch_up,
-            acknowledged: snapshot.acknowledged,
-            last_rejection: (!rejection.is_null())
-                .then_some(rejection)
-                .or(snapshot.last_rejection),
-        };
-        let _ = sink
-            .deliver(ListenDeliveryRecord::Finalization(finalization))
-            .await;
-        self.remove(listen_id).await;
     }
 
     pub(crate) async fn show(
@@ -460,16 +294,30 @@ impl ThreadListenRegistry {
                         quiet_deadline = Instant::now() + THREAD_LISTEN_DEBOUNCE;
                     }
                 }
-                let batch_set = match store
-                    .lock()
-                    .await
-                    .select_thread_listen_batch_set(
-                        listen_id.clone(),
-                        &state.context,
-                        maximum_batch_set_bytes,
-                    )
-                    .await
-                {
+                let selection = {
+                    let mut store = store.lock().await;
+                    match state.delivery {
+                        ThreadListenDelivery::Stdout => {
+                            store
+                                .select_thread_listen_batch_set(
+                                    listen_id.clone(),
+                                    &state.context,
+                                    maximum_batch_set_bytes,
+                                )
+                                .await
+                        }
+                        ThreadListenDelivery::Session => {
+                            store
+                                .select_pending_thread_listen_batch_set(
+                                    listen_id.clone(),
+                                    &state.context,
+                                    maximum_batch_set_bytes,
+                                )
+                                .await
+                        }
+                    }
+                };
+                let batch_set = match selection {
                     Ok(batch_set) => batch_set,
                     Err(error) => {
                         self.remove(listen_id).await;
@@ -482,11 +330,12 @@ impl ThreadListenRegistry {
                 if state.delivery == ThreadListenDelivery::Stdout {
                     record_batch_progress(&state, &batch_set);
                 }
-                let terminal =
-                    matches!(state.mode, ThreadListenMode::Once { .. }).then(|| ThreadListenEnd {
-                        listen_id: listen_id.clone(),
-                        reason: ThreadListenEndReason::Emitted,
-                    });
+                let terminal = (state.delivery == ThreadListenDelivery::Stdout
+                    && matches!(state.mode, ThreadListenMode::Once { .. }))
+                .then(|| ThreadListenEnd {
+                    listen_id: listen_id.clone(),
+                    reason: ThreadListenEndReason::Emitted,
+                });
                 if terminal.is_some() {
                     self.remove(listen_id).await;
                 }

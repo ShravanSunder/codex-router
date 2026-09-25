@@ -15,7 +15,7 @@ use collaboration_service::{ProviderOperationStore, ProviderSessionRecord};
 use route_fixture::{
     create_provider_target, message, post_thread_activity_for_sessions,
     prompt_and_approve_from_peer_provider, provider_fixture, publish_peer, send_and_wait_wake,
-    wait_for_prompt_text,
+    wait_for_completed_provider_prompts, wait_for_prompt_text,
 };
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt as _;
@@ -229,9 +229,15 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
         &claude_prompts,
     )
     .await;
+    std::fs::write(&claude_prompts, "").expect("clear Claude prompt log before listen proof");
+    std::fs::write(&cursor_prompts, "").expect("clear Cursor prompt log before listen proof");
     post_thread_activity_for_sessions(&mut client, [held_claude, held_cursor]).await;
     wait_for_prompt_text(&claude_prompts, "Thread activity").await;
     wait_for_prompt_text(&cursor_prompts, "Thread activity").await;
+    wait_for_prompt_text(&claude_prompts, "batchesDelivered").await;
+    wait_for_prompt_text(&cursor_prompts, "batchesDelivered").await;
+    wait_for_completed_provider_prompts(&claude_prompts, 2).await;
+    wait_for_completed_provider_prompts(&cursor_prompts, 2).await;
 
     runtime.shutdown().await.expect("Host shutdown");
 }
