@@ -70,6 +70,8 @@ pub(crate) struct McpExecutableObservation {
     launch_path: Option<PathBuf>,
     running_version: String,
     startup_identity: Option<McpExecutableFileIdentity>,
+    #[cfg(test)]
+    installed_version_override: Option<String>,
 }
 
 impl std::fmt::Debug for McpExecutableObservation {
@@ -106,6 +108,8 @@ impl McpExecutableObservation {
             launch_path,
             running_version,
             startup_identity,
+            #[cfg(test)]
+            installed_version_override: None,
         }
     }
 
@@ -118,6 +122,7 @@ impl McpExecutableObservation {
             launch_path,
             running_version,
             startup_identity,
+            installed_version_override: None,
         }
     }
 
@@ -132,7 +137,7 @@ impl McpExecutableObservation {
             return None;
         }
         let installed_version = match current_identity {
-            Some(_) => match mcp_installed_version(path) {
+            Some(_) => match self.installed_version(path) {
                 Some(version) if version == self.running_version => {
                     self.startup_identity = current_identity;
                     return None;
@@ -146,6 +151,14 @@ impl McpExecutableObservation {
             "⚠ Router Host is stale (running {}, installed {installed_version}); run `codex-router host restart`",
             self.running_version
         ))
+    }
+
+    fn installed_version(&self, path: &std::path::Path) -> Option<String> {
+        #[cfg(test)]
+        if let Some(version) = &self.installed_version_override {
+            return Some(version.clone());
+        }
+        mcp_installed_version(path)
     }
 }
 
@@ -1044,8 +1057,9 @@ mod executable_observation_tests {
         let path = directory.path().join("codex-router");
         write_version_script(&path, "0.1.36");
         let server = CollaborationMcpServer::new(directory.path().to_owned());
-        let observation =
+        let mut observation =
             McpExecutableObservation::capture_from(Some(path.clone()), "0.1.36".to_owned());
+        observation.installed_version_override = Some("0.1.37".to_owned());
         *server
             .router_executable_observation
             .lock()

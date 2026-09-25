@@ -32,6 +32,8 @@ pub struct RouterExecutableObserver {
     launch_path: Option<PathBuf>,
     running_version: String,
     startup_identity: Option<ExecutableFileIdentity>,
+    #[cfg(test)]
+    installed_version_override: Option<String>,
     relation: RouterExecutableRelation,
 }
 
@@ -55,6 +57,8 @@ impl RouterExecutableObserver {
             launch_path,
             running_version,
             startup_identity,
+            #[cfg(test)]
+            installed_version_override: None,
             relation: RouterExecutableRelation::Unknown {
                 reason: "the Router launch path has not been observed yet".to_owned(),
             },
@@ -90,7 +94,14 @@ impl RouterExecutableObserver {
             return self.relation.clone();
         }
 
-        match installed_version(path).await {
+        #[cfg(test)]
+        let installed_version = match &self.installed_version_override {
+            Some(version) => Ok(version.clone()),
+            None => installed_version(path).await,
+        };
+        #[cfg(not(test))]
+        let installed_version = installed_version(path).await;
+        match installed_version {
             Ok(installed_version) if installed_version == self.running_version => {
                 self.startup_identity = Some(current_identity);
                 self.relation = RouterExecutableRelation::Match;
@@ -165,6 +176,7 @@ mod tests {
             RouterExecutableObserver::capture(Ok(launch_path.clone()), "0.1.36".to_owned());
         assert_eq!(observer.observe().await, RouterExecutableRelation::Match);
         write_version_script(&launch_path, "0.1.37");
+        observer.installed_version_override = Some("0.1.37".to_owned());
         assert_eq!(
             observer.observe().await,
             RouterExecutableRelation::Drift {
@@ -183,6 +195,7 @@ mod tests {
             RouterExecutableObserver::capture(Ok(launch_path.clone()), "0.1.36".to_owned());
         assert_eq!(observer.observe().await, RouterExecutableRelation::Match);
         write_version_script(&launch_path, "0.1.36");
+        observer.installed_version_override = Some("0.1.36".to_owned());
         assert_eq!(observer.observe().await, RouterExecutableRelation::Match);
     }
 
