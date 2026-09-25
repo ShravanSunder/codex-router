@@ -98,9 +98,16 @@ request=read()
 assert request['method']=='session/new'
 send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})
 send({'jsonrpc':'2.0','id':91,'method':'session/unknown','params':{'sessionId':'fixture-session'}})
-idle_response=read()
-prompt=read()
-assert prompt['method']=='session/prompt'
+idle_response=None
+prompt=None
+while idle_response is None or prompt is None:
+    message=read()
+    if message.get('method')=='session/prompt':
+        prompt=message
+    elif message.get('id')==91 and 'error' in message:
+        idle_response=message
+    else:
+        raise AssertionError('unexpected message while awaiting unknown-request reply and prompt')
 send({'jsonrpc':'2.0','id':91,'method':'session/unknown','params':{'sessionId':'fixture-session'}})
 active_response=read()
 report=json.dumps([idle_response,active_response])
@@ -124,18 +131,18 @@ def send(value): print(json.dumps(value)); sys.stdout.flush()
 request=read()
 send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'sessionless-request-fixture','version':'1'}}})
 send({'jsonrpc':'2.0','id':91,'method':'unknown/sessionless','params':{}})
-first=read()
-response=first if first.get('id')==91 else None
-if response is None:
-    assert first['method']=='session/new'
-    send({'jsonrpc':'2.0','id':first['id'],'result':{'sessionId':'fixture-session'}})
-    prompt=read()
-else:
-    prompt=read()
-    assert prompt['method']=='session/new'
-    send({'jsonrpc':'2.0','id':prompt['id'],'result':{'sessionId':'fixture-session'}})
-prompt=read()
-assert prompt['method']=='session/prompt'
+response=None
+prompt=None
+while response is None or prompt is None:
+    message=read()
+    if message.get('method')=='session/new':
+        send({'jsonrpc':'2.0','id':message['id'],'result':{'sessionId':'fixture-session'}})
+    elif message.get('method')=='session/prompt':
+        prompt=message
+    elif message.get('id')==91 and 'error' in message:
+        response=message
+    else:
+        raise AssertionError('unexpected message while awaiting sessionless reply and prompt')
 report=json.dumps(response)
 send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':report}}}})
 send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
