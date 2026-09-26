@@ -24,6 +24,9 @@ env:
 #   build ──┼─► validated
 #   test ───┘
 #
+# Every job installs all rust-toolchain.toml components up front: otherwise
+# parallel background cargo steps race rustup's on-demand component download.
+#
 # rust-cache keys on the toolchain and Cargo.lock with prefix fallback, so a
 # workflow edit or a dependency bump reuses the previous build. The optimized
 # macOS idle-transport regression runs in the release workflow.
@@ -36,7 +39,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt
+          components: clippy,rustfmt,rust-src
       - name: Cache pinned Rust tools
         uses: actions/cache@v4
         with:
@@ -76,7 +79,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: clippy,rust-src
+          components: clippy,rustfmt,rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
@@ -103,6 +106,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy,rustfmt,rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: build
@@ -125,6 +129,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy,rustfmt,rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
