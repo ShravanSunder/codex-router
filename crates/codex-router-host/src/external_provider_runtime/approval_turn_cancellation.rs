@@ -5,6 +5,23 @@ use collaboration_protocol::{OperationId, SessionRef};
 use collaboration_service::ServiceApprovalBroker;
 use std::sync::{Arc, Weak};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+
+pub(crate) struct ProviderTurnCancellation {
+    pub(crate) cancelling: CancellationToken,
+    pub(crate) target: SessionRef,
+    pub(crate) approval_broker: Arc<RwLock<Option<Weak<ServiceApprovalBroker>>>>,
+}
+
+impl ProviderTurnCancellation {
+    pub(crate) fn mark_cancelling(&self) {
+        self.cancelling.cancel();
+    }
+
+    pub(crate) async fn settle_pending_approvals(&self) {
+        cancel_pending_approvals(&self.approval_broker, Some(&self.target)).await;
+    }
+}
 
 impl ExternalProviderRuntime {
     #[cfg(test)]
@@ -29,7 +46,7 @@ impl ExternalProviderRuntime {
         provider_session_id: String,
         expected_operation_id: Option<OperationId>,
     ) -> Result<(), ExternalProviderRuntimeError> {
-        let approval_target = self.approval_contexts.lock().ok().and_then(|contexts| {
+        let turn_cancellation = self.approval_contexts.lock().ok().and_then(|contexts| {
             contexts.get(&provider_session_id).and_then(|context| {
                 if expected_operation_id
                     .as_ref()
@@ -37,10 +54,16 @@ impl ExternalProviderRuntime {
                 {
                     return None;
                 }
-                context.cancelling.cancel();
-                Some(context.approval.target.clone())
+                Some(ProviderTurnCancellation {
+                    cancelling: context.cancelling.clone(),
+                    target: context.approval.target.clone(),
+                    approval_broker: Arc::clone(&self.approval_broker),
+                })
             })
         });
+        if let Some(turn_cancellation) = &turn_cancellation {
+            turn_cancellation.mark_cancelling();
+        }
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
             .send(ProviderCommand::Cancel {
@@ -55,7 +78,9 @@ impl ExternalProviderRuntime {
         result.await.map_err(|_| {
             ExternalProviderRuntimeError::Operation("provider runtime closed".to_owned())
         })??;
-        cancel_pending_approvals(&self.approval_broker, approval_target.as_ref()).await;
+        if let Some(turn_cancellation) = &turn_cancellation {
+            turn_cancellation.settle_pending_approvals().await;
+        }
         Ok(())
     }
 }

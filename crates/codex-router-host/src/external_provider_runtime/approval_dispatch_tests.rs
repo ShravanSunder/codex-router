@@ -201,6 +201,44 @@ sys.stdin.read()
     }
 }
 
+fn output_limit_with_pending_permission_fixture(
+    event_socket: &std::path::Path,
+) -> ExternalProviderLaunch {
+    // ACP v1 prompt-turn.mdx:336-350 requires an outstanding permission to
+    // receive `cancelled` when Router cancels the Turn for its output limit.
+    let fixture = format!(
+        r#"
+import json,socket,sys
+def send(value):
+    print(json.dumps(value)); sys.stdout.flush()
+initialize=json.loads(sys.stdin.readline())
+send({{'jsonrpc':'2.0','id':initialize['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{}},'agentInfo':{{'name':'output-limit-permission-fixture','version':'1'}}}}}})
+create=json.loads(sys.stdin.readline())
+send({{'jsonrpc':'2.0','id':create['id'],'result':{{'sessionId':'session-a'}}}})
+prompt=json.loads(sys.stdin.readline())
+assert prompt['method']=='session/prompt'
+send({{'jsonrpc':'2.0','id':91,'method':'session/request_permission','params':{{'sessionId':'session-a','toolCall':{{'toolCallId':'pending-tool','title':'Pending tool','kind':'execute'}},'options':[{{'optionId':'allow-a','name':'Allow once','kind':'allow_once'}}]}}}})
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
+    event.connect({event_socket:?})
+    assert event.recv(1)==b'g'
+send({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'session-a','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'x'*(1024*1024+1)}}}}}}}})
+cancel=json.loads(sys.stdin.readline())
+assert cancel['method']=='session/cancel'
+answer=json.loads(sys.stdin.readline())
+assert answer['id']==91
+assert answer['result']['outcome']['outcome']=='cancelled'
+send({{'jsonrpc':'2.0','id':prompt['id'],'result':{{'stopReason':'cancelled'}}}})
+sys.stdin.read()
+"#,
+        event_socket = event_socket.display().to_string()
+    );
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-u".to_owned(), "-c".to_owned(), fixture],
+        environment: Vec::new(),
+    }
+}
+
 async fn wait_for_pending_approval<TPromptFuture>(
     broker: &ServiceApprovalBroker,
     approval_notice: &Notify,
@@ -602,6 +640,58 @@ async fn permission_arriving_after_router_cancel_is_answered_cancelled() -> Test
     let outcome: ExternalProviderPromptOutcome =
         tokio::time::timeout(Duration::from_secs(2), prompt).await???;
     assert_eq!(outcome.stop_reason, ProviderPromptStopReason::Cancelled);
+    assert!(broker.list(true).await.approvals.is_empty());
+    runtime.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn output_limit_cancels_pending_permission() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let event_socket = root.path().join("output-limit-event.sock");
+    let listener = tokio::net::UnixListener::bind(&event_socket)?;
+    let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
+    let generation = CodexGeneration {
+        service_epoch: service_id.clone(),
+        generation: GenerationNumber::try_from(1)?,
+    };
+    let runtime = ExternalProviderRuntime::initialize(
+        output_limit_with_pending_permission_fixture(&event_socket),
+    )
+    .await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
+    runtime.install_approval_broker(Arc::clone(&broker)).await;
+    runtime.create_session(root.path().to_owned()).await?;
+    let requester = session_ref(&service_id, "codex-local", "approver")?;
+    let mut prompt = Box::pin(runtime.prompt_with_approval_context(
+        "session-a".to_owned(),
+        "Produce output.".to_owned(),
+        ExternalProviderApprovalContext {
+            requester: requester.clone(),
+            approver: requester,
+            target: session_ref(&service_id, "cursor-local", "session-a")?,
+            operation_id: OperationId::generate(),
+            binding_generation: generation,
+            binding_retirement: CancellationToken::new(),
+        },
+    ));
+    wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
+    let (mut event, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await??;
+    tokio::io::AsyncWriteExt::write_all(&mut event, b"g").await?;
+    let error = tokio::time::timeout(Duration::from_secs(5), &mut prompt)
+        .await?
+        .expect_err("output limit stops prompt");
+    assert!(matches!(
+        error,
+        ExternalProviderRuntimeError::PromptOutputLimitExceeded
+    ));
+    let history = broker.list(false).await.approvals;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].state,
+        collaboration_protocol::ApprovalState::Cancelled
+    );
     assert!(broker.list(true).await.approvals.is_empty());
     runtime.shutdown().await;
     Ok(())

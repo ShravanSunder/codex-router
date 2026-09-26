@@ -1,6 +1,7 @@
 //! One provider session's prompt, cancellation, and steering actor.
 #[cfg(test)]
 use crate::external_provider_runtime::ExternalProviderToolCall;
+use crate::external_provider_runtime::ProviderTurnCancellation;
 use crate::external_provider_runtime::{
     ExternalProviderPromptOutcome, ExternalProviderRuntimeError, ProviderFrameObservation,
     acp_operation_error,
@@ -44,6 +45,7 @@ pub(crate) enum ProviderSessionCommand {
     Prompt {
         operation_id: Option<OperationId>,
         prompt: ProviderPromptContent,
+        turn_cancellation: Option<ProviderTurnCancellation>,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>,
@@ -86,7 +88,7 @@ pub(crate) async fn run_provider_session(
             command = commands.recv() => {
                 let Some(command) = command else { break; };
                 match command {
-                    ProviderSessionCommand::Prompt { operation_id, prompt, dispatch, reply } => {
+                    ProviderSessionCommand::Prompt { operation_id, prompt, turn_cancellation, dispatch, reply } => {
                         let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
                         let prompt_request = PromptRequest::new(
                             session.session_id().clone(),
@@ -145,8 +147,14 @@ pub(crate) async fn run_provider_session(
                                 limit_notice = output_limit_rx.recv(), if !output_limit_cancelled => {
                                     if limit_notice.is_some() {
                                         output_limit_cancelled = true;
+                                        if let Some(turn_cancellation) = &turn_cancellation {
+                                            turn_cancellation.mark_cancelling();
+                                        }
                                         let _result = provider_connection
                                             .send_notification(CancelNotification::new(provider_session_id.clone()));
+                                        if let Some(turn_cancellation) = &turn_cancellation {
+                                            turn_cancellation.settle_pending_approvals().await;
+                                        }
                                     }
                                 }
                                 result = &mut prompt_result => {

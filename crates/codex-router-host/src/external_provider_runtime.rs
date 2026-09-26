@@ -30,6 +30,7 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines,
 };
+pub(crate) use approval_turn_cancellation::ProviderTurnCancellation;
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
 use external_approval_dispatch::spawn_external_approval_dispatch;
 use provider_acp_error_mapping::acp_load_session_error;
@@ -556,11 +557,13 @@ impl ExternalProviderRuntime {
             None::<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>,
         ));
         let callback_approval_broker = Arc::clone(&approval_broker);
+        let task_approval_broker = Arc::clone(&approval_broker);
         let approval_contexts = Arc::new(std::sync::Mutex::new(HashMap::<
             String,
             ActiveApprovalContext,
         >::new()));
         let callback_approval_contexts = Arc::clone(&approval_contexts);
+        let task_approval_contexts = Arc::clone(&approval_contexts);
         let known_sessions = ProviderKnownSessions::default();
         let request_known_sessions = known_sessions.clone();
         let permission_refusal_reasons = Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -860,7 +863,16 @@ impl ExternalProviderRuntime {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                                                 continue;
                                             };
-                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, dispatch, reply }).await
+                                            let turn_cancellation = task_approval_contexts.lock().ok().and_then(|contexts| {
+                                                contexts.get(&provider_session_id).and_then(|context| {
+                                                    (Some(&context.approval.operation_id) == operation_id.as_ref()).then(|| ProviderTurnCancellation {
+                                                        cancelling: context.cancelling.clone(),
+                                                        target: context.approval.target.clone(),
+                                                        approval_broker: Arc::clone(&task_approval_broker),
+                                                    })
+                                                })
+                                            });
+                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, turn_cancellation, dispatch, reply }).await
                                                 && let ProviderSessionCommand::Prompt { dispatch: Some(dispatch), .. } = error.0
                                             {
                                                 let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
