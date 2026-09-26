@@ -700,30 +700,50 @@ fn describe_record(record: &ListenDeliveryRecord) -> String {
 /// Two things paused time cannot do on its own. Auto-advance races task startup,
 /// so a single long sleep can jump the clock past the delivery task's first poll
 /// and leave its debounce window opening after the observation window closed.
-/// And the storage calls behind a Batch set complete on a background thread the
-/// paused clock cannot advance, so each step yields repeatedly instead of once.
+/// And the storage calls behind a Batch set complete on SQLx's worker thread,
+/// outside the paused clock, so every step waits for storage to settle before
+/// simulated time moves again.
 async fn drive_session_delivery(
+    store: &Arc<Mutex<BoardStore>>,
     records: &Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
     minutes: u64,
     settled: impl Fn(&[ListenDeliveryRecord]) -> bool,
 ) {
-    for _ in 0..32 {
-        tokio::task::yield_now().await;
-    }
+    settle_storage_work(store).await;
     for _ in 0..minutes {
         if settled(&records.lock().await) {
             // Finalization is published before the detached delivery task drops
             // its last store reference. Let that task finish so fixture cleanup
             // observes ownership rather than racing publication.
-            for _ in 0..32 {
-                tokio::task::yield_now().await;
-            }
+            settle_storage_work(store).await;
             return;
         }
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        settle_storage_work(store).await;
+    }
+}
+
+/// Waits in real time until no task is inside a storage call.
+///
+/// Every storage call holds the store lock until its SQLx worker replies, which
+/// can take milliseconds when SQLite syncs to disk. A fixed number of yields is
+/// not enough to cover that on every host. This task stays runnable while it
+/// waits, so the paused clock cannot auto-advance, and a free lock after a round
+/// of yields means the delivery tasks are parked on timers or channels rather
+/// than on storage.
+async fn settle_storage_work(store: &Arc<Mutex<BoardStore>>) {
+    let real_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }
+        if store.try_lock().is_ok() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < real_deadline,
+            "storage work did not settle within 10 real seconds"
+        );
     }
 }
 
@@ -753,7 +773,7 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
             rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(2)),
         }),
     );
-    drive_session_delivery(&records, 90, |seen| {
+    drive_session_delivery(&fixture.store, &records, 90, |seen| {
         matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
     })
     .await;
@@ -820,7 +840,7 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
             attempts: Arc::clone(&attempts),
         }),
     );
-    drive_session_delivery(&records, 30, |seen| {
+    drive_session_delivery(&fixture.store, &records, 30, |seen| {
         seen.iter()
             .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)))
     })
@@ -851,7 +871,7 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
         .cancel(&listen.listen_id)
         .await
         .expect("cancel listen");
-    drive_session_delivery(&records, 5, |seen| {
+    drive_session_delivery(&fixture.store, &records, 5, |seen| {
         matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
     })
     .await;
@@ -881,7 +901,7 @@ async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
         RecordingSink::accepting(&records),
     );
     // Run past the second mark, which proves the first passed silently.
-    drive_session_delivery(&records, 90, |seen| {
+    drive_session_delivery(&fixture.store, &records, 90, |seen| {
         seen.iter().any(
             |record| matches!(record, ListenDeliveryRecord::Heartbeat(value) if value.mark == 2),
         )
@@ -905,7 +925,7 @@ async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
 
     // Release the delivery task before the fixture reclaims the store.
     let _cancelled = registry.cancel(&listen.listen_id).await;
-    drive_session_delivery(&records, 5, |seen| {
+    drive_session_delivery(&fixture.store, &records, 5, |seen| {
         matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
     })
     .await;
@@ -938,7 +958,7 @@ async fn a_third_consecutive_rejection_ends_the_listen_with_its_evidence() {
             rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(u8::MAX)),
         }),
     );
-    drive_session_delivery(&records, 90, |seen| {
+    drive_session_delivery(&fixture.store, &records, 90, |seen| {
         matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
     })
     .await;

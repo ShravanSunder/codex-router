@@ -865,6 +865,67 @@ async fn clean_eof_before_initialize_is_a_typed_failure() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn stdout_eof_after_initialize_retires_live_provider() {
+    let fixture_root = tempfile::tempdir().expect("fixture root");
+    let process_id_path = fixture_root.path().join("provider.pid");
+    let close_marker = fixture_root.path().join("close-stdout");
+    let fixture = format!(
+        "import json,os,sys,time; open({:?},'w').write(str(os.getpid())); request=json.loads(sys.stdin.readline()); print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{}},'agentInfo':{{'name':'eof-fixture','version':'1'}}}}}})); sys.stdout.flush(); marker={:?};
+while not os.path.exists(marker): time.sleep(0.01)
+os.close(1); sys.stdin.read()",
+        process_id_path.display().to_string(), close_marker.display().to_string()
+    );
+    let runtime = ExternalProviderRuntime::initialize(ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), fixture],
+        environment: vec![],
+    })
+    .await
+    .expect("fixture initializes before stdout closes");
+    std::fs::write(&close_marker, b"close").expect("signal fixture to close stdout");
+
+    tokio::time::timeout(Duration::from_secs(2), runtime.retirement().cancelled())
+        .await
+        .expect("stdout EOF must retire the connection while provider stays alive");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let process_id = std::fs::read_to_string(&process_id_path)
+                .expect("fixture wrote process id")
+                .trim()
+                .parse::<i32>()
+                .expect("positive process id");
+            let process_id =
+                rustix::process::Pid::from_raw(process_id).expect("positive process id");
+            if matches!(
+                rustix::process::test_kill_process(process_id),
+                Err(rustix::io::Errno::SRCH)
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retired provider process must be reaped");
+}
+
+/// Blocks until the fixture has recorded its process id, bounded in real time.
+#[cfg(unix)]
+fn wait_for_recorded_process_id(process_id_path: &std::path::Path) -> bool {
+    let real_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < real_deadline {
+        if std::fs::read_to_string(process_id_path)
+            .is_ok_and(|value| value.trim().parse::<i32>().is_ok())
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
 async fn held_initialize_times_out_and_reaps_owned_process() {
     let fixture_root = tempfile::tempdir().expect("fixture root");
     let process_id_path = fixture_root.path().join("provider.pid");
@@ -872,6 +933,15 @@ async fn held_initialize_times_out_and_reaps_owned_process() {
         "import os,sys,time; open({:?},'w').write(str(os.getpid())); sys.stdin.readline(); time.sleep(60)",
         process_id_path.display().to_string()
     );
+    // The timeout must not start running until the fixture is provably alive and
+    // holding initialize. A cold Python start can outlast a short timeout, and a
+    // fixture killed before it records its pid leaves nothing to prove reaped.
+    // A running blocking task stops the paused clock from auto-advancing, so the
+    // simulated timeout elapses only after the pid file exists.
+    let fixture_recorded_process_id = tokio::task::spawn_blocking({
+        let process_id_path = process_id_path.clone();
+        move || wait_for_recorded_process_id(&process_id_path)
+    });
     let error = ExternalProviderRuntime::initialize_with_timeout(
         ExternalProviderLaunch {
             executable: PathBuf::from("/usr/bin/python3"),
@@ -883,6 +953,12 @@ async fn held_initialize_times_out_and_reaps_owned_process() {
     .await
     .expect_err("held initialize must time out");
 
+    assert!(
+        fixture_recorded_process_id
+            .await
+            .expect("process id watcher finished"),
+        "fixture recorded its process id before the timeout"
+    );
     assert!(matches!(
         error,
         ExternalProviderRuntimeError::InitializeTimeout

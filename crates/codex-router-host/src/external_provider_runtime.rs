@@ -602,7 +602,13 @@ impl ExternalProviderRuntime {
                     }
                     std::io::Error::other(error)
                 })
-            });
+            })
+            .chain(futures_util::stream::once(async {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "provider stdout closed",
+                ))
+            }));
             let final_approval_broker = Arc::clone(&callback_approval_broker);
             let connection = Client.builder().name("codex-router-host")
                 .with_handler(ProviderRequestSessionGuard::new(request_known_sessions))
