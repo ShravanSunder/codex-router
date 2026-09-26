@@ -85,6 +85,7 @@ dependencies = [
  "iocraft",
  "jsonschema",
  "lifecycle-observation",
+ "message-board",
  "message-board-storage",
  "serde",
  "serde_json",

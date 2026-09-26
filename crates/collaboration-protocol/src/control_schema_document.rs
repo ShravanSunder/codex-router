@@ -355,7 +355,7 @@ pub fn control_schema_document(
             "overloaded",
         ],
     )?;
-    assembly.add_method::<ApprovalListParams, ApprovalListResult>(
+    assembly.add_method::<ApprovalListParams, ApprovalListResponse>(
         "approval/list",
         &["unavailable", "overloaded"],
     )?;

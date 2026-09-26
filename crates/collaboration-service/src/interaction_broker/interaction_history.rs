@@ -1,39 +1,92 @@
-//! Persisted history for typed interactions. The 0.1.38 approval-history.json
-//! format is frozen and is deliberately absent from this module.
+//! Persisted typed interactions. The 0.1.38 approval-history.json shape is
+//! frozen and deliberately absent from this module.
 
 use std::{collections::BTreeMap, path::PathBuf};
 
 use message_board::{Identity, SessionRef};
 use serde::{Deserialize, Serialize};
-use session_event_model::InteractionKind;
+use session_event_model::{ApprovalRequest, ApprovalScope, OfferedOptionId};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InteractionHistoryRecord {
-    pub request_id: String,
-    pub requester: SessionRef,
-    pub approver: Identity,
-    pub kind: InteractionKind,
-    pub state: InteractionHistoryState,
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum InteractionHistoryRecord {
+    Approval {
+        requester: SessionRef,
+        approver: Identity,
+        request: ApprovalRequest,
+        state: InteractionHistoryState,
+    },
+}
+
+impl InteractionHistoryRecord {
+    #[must_use]
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Approval { request, .. } => &request.request_id,
+        }
+    }
+
+    #[must_use]
+    pub fn approval_request(&self) -> &ApprovalRequest {
+        match self {
+            Self::Approval { request, .. } => request,
+        }
+    }
+
+    #[must_use]
+    pub fn state(&self) -> &InteractionHistoryState {
+        match self {
+            Self::Approval { state, .. } => state,
+        }
+    }
+
+    fn approver(&self) -> &Identity {
+        match self {
+            Self::Approval { approver, .. } => approver,
+        }
+    }
+
+    fn is_valid_stored_value(&self) -> bool {
+        let Self::Approval {
+            requester,
+            approver,
+            request,
+            state,
+        } = self;
+        if request.request_id.is_empty()
+            || matches!(approver, Identity::Session { session } if session == requester)
+        {
+            return false;
+        }
+        match state {
+            InteractionHistoryState::Pending => true,
+            InteractionHistoryState::Decided { option_id } => request
+                .options
+                .iter()
+                .any(|option| &option.option_id == option_id),
+            InteractionHistoryState::Cancelled { reason } => !reason.trim().is_empty(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum InteractionHistoryState {
     Pending,
-    Decided { option_id: String },
+    Decided { option_id: OfferedOptionId },
     Cancelled { reason: String },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InteractionHistoryError {
     AlreadyExists,
     NotPending,
     WrongActor,
     SelfApprover,
     InvalidOptionId,
-    WrongKind,
+    OptionNotOffered { offered: Vec<String> },
+    PersistentChoiceNotAcknowledged { persistent_target: String },
     Unavailable,
 }
 
@@ -60,7 +113,7 @@ impl InteractionHistoryStore {
                 Err(_) => return Err(InteractionHistoryError::Unavailable),
             };
         if records.iter().any(|(request_id, record)| {
-            request_id != &record.request_id || !record.is_valid_stored_value()
+            request_id != record.request_id() || !record.is_valid_stored_value()
         }) {
             return Err(InteractionHistoryError::Unavailable);
         }
@@ -74,22 +127,41 @@ impl InteractionHistoryStore {
         &self,
         record: InteractionHistoryRecord,
     ) -> Result<(), InteractionHistoryError> {
-        if matches!(&record.approver, Identity::Session { session } if session == &record.requester)
+        if let InteractionHistoryRecord::Approval {
+            requester,
+            approver: Identity::Session { session },
+            ..
+        } = &record
+            && session == requester
         {
             return Err(InteractionHistoryError::SelfApprover);
         }
-        if record.request_id.is_empty() || record.state != InteractionHistoryState::Pending {
+        if !record.is_valid_stored_value() || record.state() != &InteractionHistoryState::Pending {
             return Err(InteractionHistoryError::NotPending);
         }
         let mut records = self.records.lock().await;
-        if records.contains_key(&record.request_id) {
+        if records.contains_key(record.request_id()) {
             return Err(InteractionHistoryError::AlreadyExists);
         }
         let mut next = records.clone();
-        next.insert(record.request_id.clone(), record);
+        next.insert(record.request_id().to_owned(), record);
         self.persist(&next).await?;
         *records = next;
         Ok(())
+    }
+
+    pub(super) async fn list_approvals(&self, pending_only: bool) -> Vec<InteractionHistoryRecord> {
+        self.records
+            .lock()
+            .await
+            .values()
+            .filter(|record| !pending_only || record.state() == &InteractionHistoryState::Pending)
+            .cloned()
+            .collect()
+    }
+
+    pub(super) async fn approval(&self, request_id: &str) -> Option<InteractionHistoryRecord> {
+        self.records.lock().await.get(request_id).cloned()
     }
 
     pub(super) async fn decide(
@@ -97,33 +169,52 @@ impl InteractionHistoryStore {
         request_id: &str,
         actor: &Identity,
         option_id: &str,
-    ) -> Result<(), InteractionHistoryError> {
-        if option_id.trim().is_empty() {
+        acknowledge_persistent: bool,
+    ) -> Result<OfferedOptionId, InteractionHistoryError> {
+        if option_id.is_empty() {
             return Err(InteractionHistoryError::InvalidOptionId);
         }
         let mut records = self.records.lock().await;
         let record = records
             .get(request_id)
             .ok_or(InteractionHistoryError::NotPending)?;
-        if &record.approver != actor {
+        if record.approver() != actor {
             return Err(InteractionHistoryError::WrongActor);
         }
-        if record.kind != InteractionKind::Approval {
-            return Err(InteractionHistoryError::WrongKind);
-        }
-        if record.state != InteractionHistoryState::Pending {
+        if record.state() != &InteractionHistoryState::Pending {
             return Err(InteractionHistoryError::NotPending);
         }
+        let request = record.approval_request();
+        let option = request
+            .options
+            .iter()
+            .find(|option| option.option_id.as_str() == option_id)
+            .ok_or_else(|| InteractionHistoryError::OptionNotOffered {
+                offered: request
+                    .options
+                    .iter()
+                    .map(|option| option.option_id.as_str().to_owned())
+                    .collect(),
+            })?;
+        if let ApprovalScope::Persistent { where_stored } = &option.choice.scope
+            && !acknowledge_persistent
+        {
+            return Err(InteractionHistoryError::PersistentChoiceNotAcknowledged {
+                persistent_target: where_stored.as_str().to_owned(),
+            });
+        }
+        let selected = option.option_id.clone();
         let mut next = records.clone();
         let updated = next
             .get_mut(request_id)
             .ok_or(InteractionHistoryError::NotPending)?;
-        updated.state = InteractionHistoryState::Decided {
-            option_id: option_id.to_owned(),
+        let InteractionHistoryRecord::Approval { state, .. } = updated;
+        *state = InteractionHistoryState::Decided {
+            option_id: selected.clone(),
         };
         self.persist(&next).await?;
         *records = next;
-        Ok(())
+        Ok(selected)
     }
 
     async fn persist(
@@ -139,22 +230,5 @@ impl InteractionHistoryStore {
         tokio::fs::rename(&temporary, &self.path)
             .await
             .map_err(|_| InteractionHistoryError::Unavailable)
-    }
-}
-
-impl InteractionHistoryRecord {
-    fn is_valid_stored_value(&self) -> bool {
-        if self.request_id.is_empty()
-            || matches!(&self.approver, Identity::Session { session } if session == &self.requester)
-        {
-            return false;
-        }
-        match &self.state {
-            InteractionHistoryState::Pending => true,
-            InteractionHistoryState::Decided { option_id } => {
-                self.kind == InteractionKind::Approval && !option_id.trim().is_empty()
-            }
-            InteractionHistoryState::Cancelled { reason } => !reason.trim().is_empty(),
-        }
     }
 }

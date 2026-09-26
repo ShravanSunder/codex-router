@@ -570,7 +570,14 @@ async fn dispatch_approval(
             else {
                 return error(id, -32602, "Invalid params");
             };
-            json!({"jsonrpc":"2.0","id":id,"result":broker.list(params.pending).await})
+            if params.include_options {
+                match broker.list_detailed(params.pending).await {
+                    Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                    Err(_) => error(id, -32050, "Approval service unavailable"),
+                }
+            } else {
+                json!({"jsonrpc":"2.0","id":id,"result":broker.list(params.pending).await})
+            }
         }
         "approval/decide" => {
             let Ok(params) =
@@ -580,8 +587,14 @@ async fn dispatch_approval(
             };
             match broker.decide(params).await {
                 Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-                Err(kind) => {
-                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Approval decision rejected","data":{"kind":kind,"stage":"inspect","message":"Approval decision rejected"}}})
+                Err(failure) => {
+                    let mut data = json!({"kind":failure.code(),"stage":"inspect","message":"Approval decision rejected"});
+                    if let (Some(data), serde_json::Value::Object(detail)) =
+                        (data.as_object_mut(), failure.detail())
+                    {
+                        data.extend(detail);
+                    }
+                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Approval decision rejected","data":data}})
                 }
             }
         }

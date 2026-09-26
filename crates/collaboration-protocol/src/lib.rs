@@ -36,8 +36,10 @@ pub use access_contract::{
 };
 pub use approval_contract::{
     ApprovalArgument, ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision,
-    ApprovalListParams, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionScope,
-    ApprovalPresentation, ApprovalRequestRecord, ApprovalState,
+    ApprovalDetailedListResult, ApprovalDetailedRecord, ApprovalListParams, ApprovalListResponse,
+    ApprovalListResult, ApprovalOfferedOption, ApprovalOptionEffect, ApprovalOptionScope,
+    ApprovalOptionView, ApprovalOptionViewScope, ApprovalPresentation, ApprovalRequestRecord,
+    ApprovalState,
 };
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,

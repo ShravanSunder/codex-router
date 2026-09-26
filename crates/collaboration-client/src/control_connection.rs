@@ -352,11 +352,30 @@ impl ControlClient {
             .call(
                 "approval/list",
                 json!(collaboration_protocol::ApprovalListParams {
-                    pending: pending_only
+                    pending: pending_only,
+                    include_options: false,
                 }),
             )
             .await?;
         serde_json::from_value(value).map_err(|_| ClientError::Protocol("invalid approval list"))
+    }
+
+    pub async fn list_approvals_with_options(
+        &mut self,
+        pending_only: bool,
+    ) -> Result<collaboration_protocol::ApprovalDetailedListResult, ClientError> {
+        let value = self
+            .connection
+            .call(
+                "approval/list",
+                json!(collaboration_protocol::ApprovalListParams {
+                    pending: pending_only,
+                    include_options: true,
+                }),
+            )
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|_| ClientError::Protocol("invalid detailed approval list"))
     }
 
     pub async fn decide_approval(

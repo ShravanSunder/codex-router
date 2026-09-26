@@ -5,12 +5,13 @@ use collaboration_client::{
     MessageSendRequest, NativeObservation, OperationEffect, operation_failure_from_client_error,
 };
 use collaboration_protocol::{
-    AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
-    ApprovalListResult, ConversationCreateOutcome, ConversationOperationSubmission,
-    DeliveryOutcome, DeliveryReceipt, EndpointInventory, JournalPage, JournalReadParams,
-    JournalStatus, NativeInspectParams, NativeInspectResult, NativeInterruptParams,
-    NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
-    NativeSessionListResult, OperationId, RouterExecutableRelation, router_build_warning,
+    AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult,
+    ApprovalDetailedListResult, ApprovalListParams, ConversationCreateOutcome,
+    ConversationOperationSubmission, DeliveryOutcome, DeliveryReceipt, EndpointInventory,
+    JournalPage, JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
+    NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
+    NativeSessionListParams, NativeSessionListResult, OperationId, RouterExecutableRelation,
+    router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -306,7 +307,7 @@ impl CollaborationMcpServer {
         message_tool_result(result)
     }
 
-    #[tool(name = "approval_list", description = "Lists approval requests using the existing Router approval policy. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ApprovalListResult>())]
+    #[tool(name = "approval_list", description = "Lists approval requests and every offered choice, including persistent effects. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ApprovalDetailedListResult>())]
     async fn approval_list(
         &self,
         Parameters(request): Parameters<ApprovalListParams>,
@@ -315,7 +316,7 @@ impl CollaborationMcpServer {
             Ok(value) => value,
             Err(error) => return failure(error, OperationEffect::None),
         };
-        let result = client.list_pending_approvals(request.pending).await;
+        let result = client.list_approvals_with_options(request.pending).await;
         let _closed = client.close().await;
         structured_result(result, OperationEffect::None)
     }

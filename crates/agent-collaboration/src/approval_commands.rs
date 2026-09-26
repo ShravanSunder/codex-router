@@ -1,10 +1,11 @@
 //! Explicit listing and single-use decisions for client-exposed native approvals.
 use clap::{Args, Parser, Subcommand};
-use collaboration_client::protocol::{ApprovalDecideParams, ApprovalDecision, SessionRef};
+use collaboration_client::protocol::{ApprovalDecideParams, ApprovalDecision};
 use collaboration_client::{
     ClientError, ControlClient, OperationEffect, OperationFailure, OperationFailureKind,
     operation_failure_from_client_error,
 };
+use message_board::Identity;
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -37,6 +38,10 @@ enum ApprovalCommand {
         allow_for_session: bool,
         #[arg(long, group = "decision")]
         deny: bool,
+        #[arg(long, group = "decision")]
+        option_id: Option<String>,
+        #[arg(long)]
+        acknowledge_persistent: bool,
         #[arg(long)]
         actor: String,
         #[command(flatten)]
@@ -81,6 +86,8 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
             allow,
             allow_for_session,
             deny,
+            option_id,
+            acknowledge_persistent,
             actor,
             output,
         } => {
@@ -89,32 +96,41 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
                 Err(_) => {
                     return crate::endpoint_commands::report_failure(
                         "invalidField",
-                        "--actor must be exact SessionRef JSON",
+                        "--actor must be typed Identity or exact SessionRef JSON",
                         2,
                         output.json,
                     );
                 }
             };
-            if usize::from(allow) + usize::from(allow_for_session) + usize::from(deny) != 1 {
+            if usize::from(allow)
+                + usize::from(allow_for_session)
+                + usize::from(deny)
+                + usize::from(option_id.is_some())
+                != 1
+            {
                 return crate::endpoint_commands::report_failure(
                     "invalidField",
-                    "Choose exactly one of --allow, --allow-for-session, or --deny",
+                    "Choose exactly one of --option-id, --allow, --allow-for-session, or --deny",
                     2,
                     output.json,
                 );
             }
             let decision = if allow {
-                ApprovalDecision::Allow
+                Some(ApprovalDecision::Allow)
             } else if allow_for_session {
-                ApprovalDecision::AllowForSession
+                Some(ApprovalDecision::AllowForSession)
+            } else if deny {
+                Some(ApprovalDecision::Deny)
             } else {
-                ApprovalDecision::Deny
+                None
             };
             (
                 output,
                 Some(ApprovalDecideParams {
                     request_id,
                     decision,
+                    option_id,
+                    acknowledge_persistent,
                     actor,
                 }),
                 false,
@@ -153,7 +169,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
             ),
             None => serde_json::to_value(
                 client
-                    .list_pending_approvals(pending_only)
+                    .list_approvals_with_options(pending_only)
                     .await
                     .map_err(ApprovalCommandError::Client)?,
             ),
@@ -210,10 +226,11 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
     }
 }
 
-fn parse_actor(value: &str) -> Result<SessionRef, ()> {
+fn parse_actor(value: &str) -> Result<Identity, ()> {
     let parsed: serde_json::Value = serde_json::from_str(value).map_err(|_| ())?;
-    if parsed.get("kind").and_then(serde_json::Value::as_str) == Some("session") {
-        return serde_json::from_value(parsed.get("session").cloned().ok_or(())?).map_err(|_| ());
+    if parsed.get("kind").is_some() {
+        return serde_json::from_value(parsed).map_err(|_| ());
     }
-    serde_json::from_value(parsed).map_err(|_| ())
+    let session = serde_json::from_value(parsed).map_err(|_| ())?;
+    Ok(Identity::Session { session })
 }
