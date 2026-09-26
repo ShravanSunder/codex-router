@@ -160,10 +160,20 @@ async fn steering_injects_during_prompt_and_returns_prompt_required_when_idle() 
         .await
         .expect("prompt dispatch notification")
         .expect("prompt was sent before settlement");
-    tokio::time::timeout(Duration::from_secs(2), listener.accept())
-        .await
-        .expect("prompt observed before steer")
-        .expect("prompt notification");
+    // Read the notice to EOF instead of dropping the accepted stream: an early
+    // close makes the fixture's `sendall` fail with EPIPE, which kills the
+    // provider and surfaces as a spurious steering TransportFailure.
+    let prompt_notice = tokio::time::timeout(Duration::from_secs(2), async {
+        let (mut stream, _address) = listener.accept().await.expect("prompt notification");
+        let mut notice = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut notice)
+            .await
+            .expect("prompt notice payload");
+        notice
+    })
+    .await
+    .expect("prompt observed before steer");
+    assert_eq!(prompt_notice, b"prompt");
     assert_eq!(
         runtime
             .session_activity("fixture-session".to_owned())
