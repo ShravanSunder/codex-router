@@ -1301,7 +1301,7 @@ async fn overlapping_prompt_cannot_replace_context_and_dropped_waiter_cleans_it(
             .lock()
             .expect("approval contexts")
             .get("fixture-session")
-            .map(|context| String::from(context.operation_id.clone())),
+            .map(|context| String::from(context.approval.operation_id.clone())),
         Some(first_operation.to_owned())
     );
     drop(first);

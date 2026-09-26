@@ -1,7 +1,7 @@
 //! Connection-task ownership and lifecycle for provider permission requests.
 
 use super::{
-    ExternalProviderApprovalContext,
+    ActiveApprovalContext, ExternalProviderApprovalContext,
     approval_presentation::approval_presentation,
     external_permission_options::{
         ExternalPermissionOptionMapping, map_external_permission_options,
@@ -24,7 +24,7 @@ pub(super) fn spawn_external_approval_dispatch(
     responder: Responder<RequestPermissionResponse>,
     connection: ConnectionTo<Agent>,
     broker: Option<Arc<ServiceApprovalBroker>>,
-    context: Option<ExternalProviderApprovalContext>,
+    context: Option<ActiveApprovalContext>,
     #[cfg(test)] permission_outcome: Arc<std::sync::atomic::AtomicU8>,
 ) -> Result<(), Error> {
     let request_cancellation = responder.cancellation();
@@ -33,7 +33,8 @@ pub(super) fn spawn_external_approval_dispatch(
             (Some(broker), Some(context)) => {
                 handle_contextual_permission_request(
                     &broker,
-                    context,
+                    context.approval,
+                    context.cancelling,
                     request,
                     request_cancellation,
                 )
@@ -57,9 +58,14 @@ pub(super) fn spawn_external_approval_dispatch(
 async fn handle_contextual_permission_request(
     broker: &ServiceApprovalBroker,
     context: ExternalProviderApprovalContext,
+    turn_cancellation: CancellationToken,
     request: RequestPermissionRequest,
     request_cancellation: agent_client_protocol::RequestCancellation,
 ) -> RequestPermissionOutcome {
+    if turn_cancellation.is_cancelled() {
+        return RequestPermissionOutcome::Cancelled;
+    }
+    let approval_target = context.target.clone();
     let presentation = approval_presentation(&request.tool_call.fields);
     let operation_metadata = ExternalApprovalOperationMetadata {
         operation_id: context.operation_id.clone(),
@@ -102,12 +108,19 @@ async fn handle_contextual_permission_request(
     tokio::pin!(broker_request);
     let result = tokio::select! {
         biased;
+        () = turn_cancellation.cancelled() => {
+            let _ = broker.cancel_all_for_session(&approval_target, "turn cancelled").await;
+            return RequestPermissionOutcome::Cancelled;
+        }
         () = request_cancellation.cancelled() => {
             cancellation.cancel();
             broker_request.await
         }
         result = &mut broker_request => result,
     };
+    if turn_cancellation.is_cancelled() {
+        return RequestPermissionOutcome::Cancelled;
+    }
     match result {
         Ok(collaboration_service::BrokeredApprovalOutcome::Selected { option_id }) => {
             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id))

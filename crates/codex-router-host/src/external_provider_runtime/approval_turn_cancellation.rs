@@ -30,9 +30,16 @@ impl ExternalProviderRuntime {
         expected_operation_id: Option<OperationId>,
     ) -> Result<(), ExternalProviderRuntimeError> {
         let approval_target = self.approval_contexts.lock().ok().and_then(|contexts| {
-            contexts
-                .get(&provider_session_id)
-                .map(|context| context.target.clone())
+            contexts.get(&provider_session_id).and_then(|context| {
+                if expected_operation_id
+                    .as_ref()
+                    .is_some_and(|expected| expected != &context.approval.operation_id)
+                {
+                    return None;
+                }
+                context.cancelling.cancel();
+                Some(context.approval.target.clone())
+            })
         });
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
