@@ -1,5 +1,8 @@
 //! Host-owned admission and settlement for external ACP provider operations.
 
+mod provider_operation_failure;
+use provider_operation_failure::{admission_failure, prompt_runtime_failure};
+
 use crate::provider_operation_settlement::{
     ProviderOperationCompletion, effective_settings, optional_message_text, provider_session_record,
 };
@@ -749,11 +752,13 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                                     Some(completion_target),
                                 )),
                             },
-                            Err(error) => ProviderOperationCompletion::Failure(runtime_failure(
-                                operation_id,
-                                Some(completion_target),
-                                error,
-                            )),
+                            Err(error) => {
+                                ProviderOperationCompletion::Failure(prompt_runtime_failure(
+                                    operation_id,
+                                    Some(completion_target),
+                                    error,
+                                ))
+                            }
                         }
                     });
                     Ok(admitted_submission(snapshot))
@@ -1133,21 +1138,6 @@ fn runtime_failure(
             target,
         ),
     }
-}
-
-fn admission_failure(
-    operation_id: OperationId,
-    message: &'static str,
-    target: Option<SessionRef>,
-) -> ConversationOperationFailure {
-    failure(
-        ConversationOperationFailureKind::Unavailable,
-        ConversationOperationFailureStage::Admission,
-        ProviderOperationEffect::None,
-        message,
-        operation_id,
-        target,
-    )
 }
 
 fn unavailable_failure(

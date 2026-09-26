@@ -2,6 +2,31 @@
 use super::*;
 
 impl ServiceApprovalBroker {
+    pub async fn cancel_retired_external(&self) -> Result<(), ApprovalBrokerError> {
+        let request_ids = self
+            .pending
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, pending)| {
+                matches!(
+                    &pending.generation_authority,
+                    ApprovalGenerationAuthority::External { retirement, .. } if retirement.is_cancelled()
+                )
+            })
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            self.finish_pending(
+                &request_id,
+                ApprovalState::Cancelled,
+                Some("providerRetired"),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Resolve the pending external permissions for one provider session before
     /// its cancelled turn is allowed to settle.
     pub async fn cancel_all_for_session(
@@ -15,6 +40,12 @@ impl ServiceApprovalBroker {
             .await
             .iter()
             .filter_map(|(request_id, pending)| {
+                if !matches!(
+                    &pending.generation_authority,
+                    ApprovalGenerationAuthority::External { .. }
+                ) {
+                    return None;
+                }
                 let operation_target: collaboration_protocol::SessionRef =
                     serde_json::from_value(pending.record.operation.get("target")?.clone()).ok()?;
                 (&operation_target == target).then(|| request_id.clone())
@@ -188,7 +219,7 @@ impl ServiceApprovalBroker {
                 let finished = self.finish_pending(
                     &request_id,
                     ApprovalState::Cancelled,
-                    Some("provider retired before approval completed"),
+                    Some("providerRetired"),
                 ).await?;
                 cancellation.armed = false;
                 return Ok(if finished {

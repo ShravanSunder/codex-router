@@ -373,6 +373,105 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
 }
 
 #[tokio::test]
+async fn provider_retirement_settles_queued_input_without_resubmission() {
+    // Specification R5: queued Inputs of a lost Session become notSubmitted
+    // with providerRetired and are never sent to a successor connection.
+    let root = tempfile::tempdir().expect("temporary root");
+    let runtime = ExternalProviderRuntime::initialize(pending_prompt_fixture())
+        .await
+        .expect("fixture initializes");
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
+    let store = Arc::new(Mutex::new(
+        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("operation store"),
+    ));
+    let backend = Arc::new(
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: binding(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor"),
+    );
+    let target = SessionRef {
+        endpoint: endpoint(),
+        session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
+    };
+    assert_eq!(
+        backend
+            .submit_delivery_prompt(ConversationPromptRequest {
+                operation_id: OperationId::generate(),
+                target: target.clone(),
+                generation: Some(generation()),
+                requested_by: requester(),
+                approver: requester(),
+                prompt: MessageContent::Router {
+                    text: MessageText::try_from("active".to_owned()).expect("message"),
+                },
+            })
+            .await
+            .expect("active prompt"),
+        provider_delivery_submission::ProviderPromptDispatch::Submitted
+    );
+    let queue = crate::provider_acp_message_fifo::ProviderAcpMessageFifo::new(
+        Arc::clone(&backend),
+        Arc::clone(&store),
+        Arc::new(NoLivePeer),
+    );
+    let queued_id = OperationId::generate();
+    let permit = queue.reserve(&target).expect("queue capacity");
+    backend
+        .queued_operation_registry()
+        .record_queued(queued_id.clone(), target.clone(), binding());
+    permit.send(ConversationPromptRequest {
+        operation_id: queued_id.clone(),
+        target,
+        generation: Some(generation()),
+        requested_by: requester(),
+        approver: requester(),
+        prompt: MessageContent::Router {
+            text: MessageText::try_from("queued".to_owned()).expect("message"),
+        },
+    });
+    backend
+        .runtime_for(&endpoint())
+        .expect("provider runtime")
+        .shutdown()
+        .await;
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = backend
+                .queued_operation_registry()
+                .snapshot(&queued_id)
+                .expect("queued operation snapshot")
+                .expect("queued operation exists");
+            if matches!(
+                snapshot.queue_state,
+                Some(collaboration_protocol::ConversationOperationQueueState::NotSubmitted { .. })
+            ) {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued operation settles");
+    assert!(matches!(
+        snapshot.queue_state,
+        Some(collaboration_protocol::ConversationOperationQueueState::NotSubmitted { reason })
+            if reason == "providerRetired"
+    ));
+    queue.shutdown().await;
+    backend.shutdown().await.expect("supervisor shutdown");
+}
+
+#[tokio::test]
 async fn concurrent_admission_precedes_reconcile_live_state_check() {
     let root = tempfile::tempdir().expect("temporary root");
     let runtime = ExternalProviderRuntime::initialize(create_fixture())
@@ -473,6 +572,26 @@ fn typed_runtime_failure_mapping_never_classifies_provider_text() {
         let failure = runtime_failure(operation_id.clone(), None, error);
         assert_eq!(failure.effect, ProviderOperationEffect::None);
     }
+}
+
+#[test]
+fn lost_provider_prompt_has_terminal_unknown_effect_and_sanitized_reason() {
+    // A prompt dispatched before connection loss cannot be retried safely.
+    // Specification E4 and R5 require a terminal lost projection in PR 1.
+    let failure = prompt_runtime_failure(
+        OperationId::generate(),
+        None,
+        ExternalProviderRuntimeError::TransportFailure,
+    );
+    assert_eq!(
+        failure.kind,
+        ConversationOperationFailureKind::OutcomeUnknown
+    );
+    assert_eq!(failure.effect, ProviderOperationEffect::Unknown);
+    assert_eq!(
+        String::from(failure.message),
+        "provider connection lost before the agent ended the turn (providerRetired)"
+    );
 }
 
 #[test]

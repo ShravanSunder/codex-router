@@ -582,6 +582,7 @@ impl ExternalProviderRuntime {
                     std::io::Error::other(error)
                 })
             });
+            let final_approval_broker = Arc::clone(&callback_approval_broker);
             let connection = Client.builder().name("codex-router-host")
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, connection| {
@@ -867,6 +868,7 @@ impl ExternalProviderRuntime {
                 _status = child.status() => true,
             };
             connection_retirement.cancel();
+            approval_turn_cancellation::cancel_on_provider_loss(&final_approval_broker).await;
             #[cfg(unix)]
             if !child_exited
                 && let Some(process_id) = rustix::process::Pid::from_raw(child.id().cast_signed())
@@ -1127,55 +1129,6 @@ impl ExternalProviderRuntime {
         } else {
             ExternalProviderRuntimeError::TransportFailure
         }
-    }
-
-    #[cfg(test)]
-    pub async fn cancel_active_prompt(
-        &self,
-        provider_session_id: String,
-    ) -> Result<(), ExternalProviderRuntimeError> {
-        self.cancel_prompt(provider_session_id, None).await
-    }
-
-    pub async fn cancel_prompt_operation(
-        &self,
-        provider_session_id: String,
-        expected_operation_id: OperationId,
-    ) -> Result<(), ExternalProviderRuntimeError> {
-        self.cancel_prompt(provider_session_id, Some(expected_operation_id))
-            .await
-    }
-
-    async fn cancel_prompt(
-        &self,
-        provider_session_id: String,
-        expected_operation_id: Option<OperationId>,
-    ) -> Result<(), ExternalProviderRuntimeError> {
-        let approval_target = self.approval_contexts.lock().ok().and_then(|contexts| {
-            contexts
-                .get(&provider_session_id)
-                .map(|context| context.target.clone())
-        });
-        let (reply, result) = tokio::sync::oneshot::channel();
-        self.commands
-            .send(ProviderCommand::Cancel {
-                provider_session_id,
-                expected_operation_id,
-                reply,
-            })
-            .await
-            .map_err(|_| {
-                ExternalProviderRuntimeError::Operation("provider runtime closed".to_owned())
-            })?;
-        result.await.map_err(|_| {
-            ExternalProviderRuntimeError::Operation("provider runtime closed".to_owned())
-        })??;
-        approval_turn_cancellation::cancel_pending_approvals(
-            &self.approval_broker,
-            approval_target.as_ref(),
-        )
-        .await;
-        Ok(())
     }
 
     pub async fn shutdown(&self) {

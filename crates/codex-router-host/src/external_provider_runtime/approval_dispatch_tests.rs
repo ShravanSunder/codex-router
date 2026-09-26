@@ -65,6 +65,7 @@ permission=json.loads(sys.stdin.readline())
 assert permission['id']==91
 assert permission['result']['outcome']['outcome']=='selected'
 assert permission['result']['outcome']['optionId']=='allow-a'
+send({'jsonrpc':'2.0','method':'$/cancel_request','params':{'requestId':91}})
 send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'session-a','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'session-a-approved'}}}})
 send({'jsonrpc':'2.0','id':first_prompt['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
@@ -232,7 +233,8 @@ async fn approval_broker_fixture(
 }
 
 #[tokio::test]
-async fn permission_wait_keeps_dispatcher_free_for_peer_session_and_approver() -> TestResult {
+async fn permission_decision_survives_late_agent_withdrawal_and_peer_turn_progresses() -> TestResult
+{
     let root = tempfile::tempdir()?;
     let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
     let generation = CodexGeneration {
@@ -522,6 +524,108 @@ async fn permission_wait_observes_cancellation_during_provider_cancel() -> TestR
         collaboration_protocol::ApprovalState::Cancelled
     );
     assert!(history[0].reason.is_some());
+    assert!(broker.list(true).await.approvals.is_empty());
+    runtime.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestResult {
+    // ACP v1 prompt-turn.mdx:365-367 ends a Turn only at the agent's prompt
+    // result. Specification R5 projects connection loss as providerRetired.
+    let root = tempfile::tempdir_in("/private/tmp")?;
+    let process_id_path = root.path().join("fixture-process-id");
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "loss-fixture", "version": "1"}}))
+        .expect_request("create", "session/new", serde_json::json!({}))
+        .respond("create", serde_json::json!({"sessionId": "session-a"}))
+        .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId": "session-a"}))
+        .send(serde_json::json!({"jsonrpc": "2.0", "id": 91, "method": "session/request_permission", "params": {"sessionId": "session-a", "toolCall": {"toolCallId": "permission-a", "title": "Run an approved command", "kind": "execute"}, "options": [{"optionId": "allow-a", "name": "Allow once", "kind": "allow_once"}]}}))
+        .wait_for_signal(&process_id_path)
+        .exit()
+        .record_diagnostics(root.path().join("fixture-diagnostics.txt"))
+        .launch();
+    let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
+    let generation = CodexGeneration {
+        service_epoch: service_id.clone(),
+        generation: GenerationNumber::try_from(1)?,
+    };
+    let runtime = ExternalProviderRuntime::initialize(fixture).await?;
+    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    runtime.install_approval_broker(Arc::clone(&broker)).await;
+    runtime.create_session(root.path().to_owned()).await?;
+    let approver = session_ref(&service_id, "codex-local", "approver")?;
+    let mut prompt = Box::pin(runtime.prompt_with_approval_context(
+        "session-a".to_owned(),
+        "Run a command requiring permission.".to_owned(),
+        ExternalProviderApprovalContext {
+            requester: approver.clone(),
+            approver,
+            target: session_ref(&service_id, "cursor-local", "session-a")?,
+            operation_id: OperationId::generate(),
+            binding_generation: generation,
+            binding_retirement: runtime.retirement(),
+        },
+    ));
+    if let Err(error) = wait_for_pending_approval(&broker, prompt.as_mut()).await {
+        let diagnostics = std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
+            .unwrap_or_default();
+        return Err(format!("{error}; fixture: {diagnostics}").into());
+    }
+    let process_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(value) = std::fs::read_to_string(&process_id_path)
+                && let Ok(process_id) = value.parse::<i32>()
+            {
+                break process_id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "fixture process did not become ready for signal: {}",
+            std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
+                .unwrap_or_default()
+        )
+    })?;
+    let process_id =
+        rustix::process::Pid::from_raw(process_id).ok_or("invalid fixture process ID")?;
+    rustix::process::kill_process(process_id, rustix::process::Signal::USR1)?;
+    let prompt_result = tokio::time::timeout(Duration::from_secs(5), &mut prompt)
+        .await
+        .map_err(|_| "prompt did not settle after fixture agent exited")?;
+    assert!(
+        matches!(
+            prompt_result,
+            Err(ExternalProviderRuntimeError::TransportFailure)
+        ),
+        "{prompt_result:?}"
+    );
+    let history_result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let history = broker.list(false).await.approvals;
+            if history[0].state == collaboration_protocol::ApprovalState::Cancelled {
+                break history;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let history = match history_result {
+        Ok(history) => history,
+        Err(_) => {
+            return Err(format!(
+                "approval history did not settle after fixture agent exited: {:?}",
+                broker.list(false).await.approvals
+            )
+            .into());
+        }
+    };
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].reason.as_deref(), Some("providerRetired"));
     assert!(broker.list(true).await.approvals.is_empty());
     runtime.shutdown().await;
     Ok(())

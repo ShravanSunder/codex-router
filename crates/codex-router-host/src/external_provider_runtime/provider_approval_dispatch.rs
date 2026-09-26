@@ -32,17 +32,18 @@ impl ExternalProviderRuntime {
             provider_session_id: provider_session_id.clone(),
             operation_id: operation_id.clone(),
         };
-        let mut outcome = self
+        let prompt_result = self
             .prompt_for_operation(
                 provider_session_id,
                 Some(operation_id.clone()),
                 prompt,
                 dispatch,
             )
-            .await?;
+            .await;
         if binding_retirement.is_cancelled() {
             return Err(ExternalProviderRuntimeError::TransportFailure);
         }
+        let mut outcome = prompt_result?;
         outcome.permission_refusal_reason = self
             .permission_refusal_reasons
             .lock()

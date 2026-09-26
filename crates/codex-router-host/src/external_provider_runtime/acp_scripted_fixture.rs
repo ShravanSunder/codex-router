@@ -12,6 +12,7 @@ const AGENT_SCRIPT: &str = include_str!("acp_scripted_fixture.py");
 #[derive(Default)]
 pub(super) struct AcpFixtureScript {
     steps: Vec<Value>,
+    diagnostic_path: Option<PathBuf>,
 }
 
 impl AcpFixtureScript {
@@ -61,6 +62,24 @@ impl AcpFixtureScript {
         self
     }
 
+    pub(super) fn exit(mut self) -> Self {
+        self.steps.push(json!({"action": "exit"}));
+        self
+    }
+
+    pub(super) fn wait_for_signal(mut self, process_id_path: &std::path::Path) -> Self {
+        self.steps.push(json!({
+            "action": "wait_for_signal",
+            "processIdPath": process_id_path,
+        }));
+        self
+    }
+
+    pub(super) fn record_diagnostics(mut self, path: PathBuf) -> Self {
+        self.diagnostic_path = Some(path);
+        self
+    }
+
     pub(super) fn launch(self) -> ExternalProviderLaunch {
         let script = serde_json::to_string(&self.steps).expect("fixture script serializes");
         ExternalProviderLaunch {
@@ -71,7 +90,15 @@ impl AcpFixtureScript {
                 AGENT_SCRIPT.to_owned(),
                 script,
             ],
-            environment: vec![],
+            environment: self
+                .diagnostic_path
+                .map(|path| {
+                    vec![(
+                        "ACP_FIXTURE_DIAGNOSTICS".to_owned(),
+                        path.to_string_lossy().into_owned(),
+                    )]
+                })
+                .unwrap_or_default(),
         }
     }
 }

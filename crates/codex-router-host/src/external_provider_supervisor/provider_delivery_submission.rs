@@ -86,7 +86,7 @@ impl ExternalProviderSupervisor {
                         Some(completion_target),
                     )),
                 },
-                Err(error) => ProviderOperationCompletion::Failure(runtime_failure(
+                Err(error) => ProviderOperationCompletion::Failure(prompt_runtime_failure(
                     completion_operation_id,
                     Some(completion_target),
                     error,
