@@ -1,6 +1,8 @@
 //! Host-owned ACP provider process admission and connection lifetime.
 
 #[cfg(test)]
+mod acp_scripted_fixture;
+#[cfg(test)]
 mod approval_dispatch_tests;
 mod approval_presentation;
 mod external_approval_dispatch;
