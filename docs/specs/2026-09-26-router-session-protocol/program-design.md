@@ -237,7 +237,11 @@ Proposed:
 - **Existing Sessions.** Existing Sessions are named by SessionRef in `session/load`'s `_meta.router.sessionRef`; a bare session ID is resolved on the endpoint that created it.
 - **Commands and output.** `session/prompt`, `_session/steering`, `session/cancel` and `_session/queue/*` for a provider Session go to `SessionCommandPort`; its output comes from the hub.
 - **Actor.** The connection's actor is `_meta.router.actor` from `initialize`, self-declared, as SessionRefs are everywhere in Router (PR #79). Approval and question requests for a Session are sent to this connection only when the actor is that Session's Approver. Otherwise they are visible through `_session/state` as `requires_action`, with no decision path.
-- **Unchanged path:** Codex Sessions through `codex-acp-adapter`.
+- **Connection ownership (decided 2026-09-26 during implementation, lane C 4.4).** The 'unchanged adapter path' assumption failed. `codex-acp-adapter` owns the whole connection today: the transport, `initialize`, and every `session/*` method in `route_connection` (`acp_connection_dispatch.rs:29-65`). Endpoint selection happens in `session/new`, after `initialize`, and one connection can hold Sessions from different back doors. So:
+  - A single **connection-level ACP router** owns the transport, `initialize` (including the actor), and a per-Session dispatch table over an `AcpSessionRoute` trait. It lives in the `codex-acp-adapter` crate, because the adapter's existing public `serve_acp_connection` tests must keep passing, and `collaboration-service` depends on the adapter, not the reverse. `collaboration-service` implements the provider route (over `SessionCommandPort` and the hub) and composes the router with both routes for `codex-acp.sock`. `serve_acp_connection` is the same router composed with only the Codex route: one connection shell, not two. Renaming the crate to `acp-agent-face`, to match what it now owns, is a follow-up.
+  - `codex-acp-adapter` is refactored into an **in-process per-Session route** for Codex Sessions: create, load and resume; prompt, steer and cancel; the catalog. Its observable Codex behaviour is unchanged, which the existing adapter tests prove by passing unmodified (characterization first).
+  - Codex generation admission moves from the connection to each Codex Session. Provider Sessions route to `SessionCommandPort` and the hub.
+  - There is no second socket, and no replayed `initialize` into an inner adapter.
 
 ## Session state
 
