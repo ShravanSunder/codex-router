@@ -7,6 +7,101 @@ struct HeldSelectableFloorPeer {
 
 struct ImmediateSelectableFloorPeer;
 
+#[tokio::test]
+async fn floor_reconnect_supervisor_delivers_signal_after_local_pump_finishes_first() {
+    let (router_local_stream, client_stream) = duplex(4096);
+    let (router_upstream_stream, upstream_stream) = duplex(4096);
+    let router_local =
+        WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+    let router_upstream =
+        WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+    let _upstream_peer =
+        WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+    let (mut local_write, local_read) = router_local.split();
+    let (upstream_write, _upstream_read) = router_upstream.split();
+    let (_intent_sender, intent) = watch::channel(FloorSwitchIntent::default());
+    let hard_reconnect = CancellationToken::new();
+    hard_reconnect.cancel();
+    let early_reconnect = CancellationToken::new();
+    let tunnel_shutdown = CancellationToken::new();
+    let revocation = CancellationToken::new();
+    let session_shutdown = CancellationToken::new();
+    let floor_admission = FloorSwitchAdmission::new(
+        intent,
+        early_reconnect.clone(),
+        hard_reconnect.clone(),
+        None,
+        None,
+        false,
+    );
+    let (local_done_sender, local_done_receiver) = tokio::sync::oneshot::channel();
+    let local_task = tokio::spawn(pump_local_to_upstream(
+        local_read,
+        upstream_write,
+        LocalToUpstreamPumpContext {
+            revocation: revocation.clone(),
+            session_shutdown: session_shutdown.clone(),
+            tunnel_shutdown: tunnel_shutdown.clone(),
+            active_turn_reservation: ActiveTurnReservationState::new(None),
+            session_affinity_activity_handle: None,
+            floor_switch_admission: floor_admission,
+            early_floor_reconnect: early_reconnect,
+            quota_floor_reconnect: hard_reconnect,
+        },
+    ));
+    let local_task = tokio::spawn(async move {
+        let result = local_task.await.expect("local pump should join");
+        let _ = local_done_sender.send(());
+        result
+    });
+    let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        release_receiver
+            .await
+            .map_err(|_| WebSocketTunnelError::TaskJoin("signal release missing".to_owned()))?;
+        local_write
+            .send(Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL))
+            .await
+            .map_err(WebSocketTunnelError::Transport)?;
+        local_write
+            .close()
+            .await
+            .map_err(WebSocketTunnelError::Transport)
+    });
+    let supervisor = supervise_websocket_pumps(
+        &revocation,
+        &session_shutdown,
+        &tunnel_shutdown,
+        local_task,
+        upstream_task,
+    );
+    let observe_client = async {
+        local_done_receiver
+            .await
+            .expect("local pump should finish before signal release");
+        assert!(
+            tunnel_shutdown.is_cancelled(),
+            "local floor exit must retain the signal pump under supervision"
+        );
+        release_sender
+            .send(())
+            .expect("signal pump should remain live");
+        let reconnect = client
+            .next()
+            .await
+            .expect("client should receive reconnect frame")
+            .expect("reconnect frame should decode");
+        assert_eq!(reconnect.to_string(), CODEX_WEBSOCKET_RECONNECT_SIGNAL);
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(supervisor, observe_client)
+    })
+    .await
+    .expect("supervised floor reconnect should complete");
+    assert!(result.is_ok(), "floor reconnect should finish: {result:?}");
+}
+
 impl LiveFloorSwitchPeerAssessor for ImmediateSelectableFloorPeer {
     fn assess_peer<'a>(
         &'a self,

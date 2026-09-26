@@ -5656,11 +5656,11 @@ mod tests {
             )
         });
 
-        let handled = match runtime.serve_http_connections(1) {
-            Ok(handled) => handled,
-            Err(error) => panic!("router runtime should serve one client connection: {error}"),
-        };
-        assert_eq!(handled, 1);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server_thread = thread::spawn(move || {
+            runtime.serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+        });
         let response = match client_thread.join() {
             Ok(response) => response,
             Err(error) => panic!("client thread panicked: {error:?}"),
@@ -5684,6 +5684,19 @@ mod tests {
         match upstream_thread.join() {
             Ok(()) => {}
             Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+
+        wait_for_durable_quota_exhaustion(&state, &[primary.account_id()]);
+        wait_for_repository_selected_account(
+            &state,
+            fallback.account_id(),
+            "durable quota state should select the fallback while serving",
+        );
+        shutdown.cancel();
+        match server_thread.join() {
+            Ok(Ok(handled)) => assert_eq!(handled, 1),
+            Ok(Err(error)) => panic!("router shutdown should succeed: {error}"),
+            Err(error) => panic!("router server thread panicked: {error:?}"),
         }
 
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));

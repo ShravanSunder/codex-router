@@ -1426,6 +1426,7 @@ mod async_forwarding_tests {
     use super::WebSocketProtocolRouter;
     use super::WebSocketQuotaFloorNotifier;
     use super::WebSocketRevocationRegistry;
+    use super::WebSocketTunnelError;
     use super::capacity_retry_thread_id;
     use super::current_unix_seconds;
     use super::forward_duplex_until_complete;
@@ -1435,6 +1436,7 @@ mod async_forwarding_tests {
     use super::provider_error_classification_from_message;
     use super::pump_local_to_upstream;
     use super::record_forwarded_websocket_metadata;
+    use super::supervise_websocket_pumps;
     use super::websocket_affinity_owner_record;
     use crate::account_selection::FloorSwitchPeerAssessment;
     use crate::account_selection::LiveFloorSwitchPeerAssessor;
@@ -5996,7 +5998,7 @@ where
     let session_affinity_activity_handle = affinity_owner_context
         .as_ref()
         .and_then(|context| context.session_affinity_activity_handle.clone());
-    let mut local_to_upstream = tokio::spawn(async move {
+    let local_to_upstream = tokio::spawn(async move {
         pump_local_to_upstream(
             local_read,
             upstream_write,
@@ -6013,7 +6015,7 @@ where
         )
         .await
     });
-    let mut upstream_to_local = tokio::spawn(async move {
+    let upstream_to_local = tokio::spawn(async move {
         pump_upstream_to_local(
             upstream_read,
             local_write,
@@ -6038,13 +6040,33 @@ where
         .await
     });
 
-    let result = tokio::select! {
-        () = context.revocation.cancelled() => {
+    let result = supervise_websocket_pumps(
+        context.revocation,
+        context.session_shutdown,
+        &tunnel_shutdown,
+        local_to_upstream,
+        upstream_to_local,
+    )
+    .await;
+
+    drop(session_registration);
+    result
+}
+
+async fn supervise_websocket_pumps(
+    revocation: &CancellationToken,
+    session_shutdown: &CancellationToken,
+    tunnel_shutdown: &CancellationToken,
+    mut local_to_upstream: JoinHandle<Result<(), WebSocketTunnelError>>,
+    mut upstream_to_local: JoinHandle<Result<(), WebSocketTunnelError>>,
+) -> Result<(), WebSocketTunnelError> {
+    tokio::select! {
+        () = revocation.cancelled() => {
             abort_websocket_pump(&mut local_to_upstream).await;
             abort_websocket_pump(&mut upstream_to_local).await;
             Ok(())
         }
-        () = context.session_shutdown.cancelled() => {
+        () = session_shutdown.cancelled() => {
             abort_websocket_pump(&mut local_to_upstream).await;
             abort_websocket_pump(&mut upstream_to_local).await;
             Ok(())
@@ -6062,10 +6084,7 @@ where
             abort_websocket_pump(&mut local_to_upstream).await;
             flatten_websocket_pump_join(result)
         }
-    };
-
-    drop(session_registration);
-    result
+    }
 }
 
 struct LocalToUpstreamPumpContext {
@@ -6102,11 +6121,15 @@ where
         tokio::select! {
             biased;
             () = quota_floor_reconnect.cancelled() => {
-                close_websocket_sink_best_effort(&mut upstream_write).await?;
+                // Let the other pump deliver the client reconnect signal before this
+                // pump's completion can make the supervisor abort it.
+                tunnel_shutdown.cancel();
+                let _ = close_websocket_sink_best_effort(&mut upstream_write).await;
                 return Ok(());
             }
             () = early_floor_reconnect.cancelled() => {
-                close_websocket_sink_best_effort(&mut upstream_write).await?;
+                tunnel_shutdown.cancel();
+                let _ = close_websocket_sink_best_effort(&mut upstream_write).await;
                 return Ok(());
             }
             () = tunnel_shutdown.cancelled() => {
