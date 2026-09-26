@@ -2,7 +2,7 @@
 
 import json
 import os
-import signal
+import socket
 import sys
 import traceback
 
@@ -96,11 +96,11 @@ for step_number, step in enumerate(steps, start=1):
         send_message(step["message"])
     elif action == "exit":
         sys.exit(0)
-    elif action == "wait_for_signal":
-        signal.signal(signal.SIGUSR1, lambda _signal, _frame: sys.exit(0))
-        with open(step["processIdPath"], "w", encoding="utf-8") as destination:
-            destination.write(str(os.getpid()))
-        signal.pause()
+    elif action == "exit_on_socket_signal":
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(step["socketPath"])
+            connection.recv(1)
+        os._exit(0)
     elif action == "write_marker":
         with open(step["path"], "w", encoding="utf-8") as destination:
             destination.write("observed")

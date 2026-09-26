@@ -391,6 +391,7 @@ async fn request_naming_unknown_session_receives_method_not_found() {
         .send(serde_json::json!({"jsonrpc": "2.0", "id": 91, "method": "session/unknown", "params": {"sessionId": "not-loaded"}}))
         .expect_message(serde_json::json!({"jsonrpc": "2.0", "id": 91, "error": {"code": -32601}}))
         .write_marker(&marker)
+        .exit()
         .record_diagnostics(root.path().join("fixture-diagnostics.txt"))
         .launch();
     let runtime = ExternalProviderRuntime::initialize(fixture)
@@ -400,19 +401,19 @@ async fn request_naming_unknown_session_receives_method_not_found() {
         .create_session(root.path().to_owned())
         .await
         .expect("session created");
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !marker.exists() {
-            tokio::task::yield_now().await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        runtime.retirement().cancelled(),
+    )
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "unknown session request was not answered: {}",
+            "fixture did not finish unknown-session exchange: {}",
             std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
                 .unwrap_or_default()
         )
     });
+    assert!(marker.exists(), "fixture did not observe -32601 response");
     runtime.shutdown().await;
 }
 
@@ -559,6 +560,7 @@ async fn permission_request_naming_unknown_session_receives_method_not_found() {
         .send(serde_json::json!({"jsonrpc": "2.0", "id": 92, "method": "session/request_permission", "params": {"sessionId": "not-loaded", "toolCall": {"toolCallId": "unknown-tool", "title": "Unknown session permission", "kind": "execute"}, "options": [{"optionId": "reject", "name": "Reject", "kind": "reject_once"}]}}))
         .expect_message(serde_json::json!({"jsonrpc": "2.0", "id": 92, "error": {"code": -32601}}))
         .write_marker(&marker)
+        .exit()
         .record_diagnostics(root.path().join("fixture-diagnostics.txt"))
         .launch();
     let runtime = ExternalProviderRuntime::initialize(fixture)
@@ -568,19 +570,19 @@ async fn permission_request_naming_unknown_session_receives_method_not_found() {
         .create_session(root.path().to_owned())
         .await
         .expect("session created");
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !marker.exists() {
-            tokio::task::yield_now().await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        runtime.retirement().cancelled(),
+    )
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "unknown session permission was not rejected: {}",
+            "fixture did not finish unknown-permission exchange: {}",
             std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
                 .unwrap_or_default()
         )
     });
+    assert!(marker.exists(), "fixture did not observe -32601 response");
     runtime.shutdown().await;
 }
 

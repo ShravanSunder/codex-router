@@ -101,6 +101,17 @@ impl ProviderAcpMessageFifo {
             let _result = worker.await;
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_workers(&self) {
+        let workers = match self.workers.lock() {
+            Ok(mut workers) => std::mem::take(&mut *workers),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+        for worker in workers {
+            worker.await.expect("provider queue worker completes");
+        }
+    }
 }
 
 impl Drop for ProviderAcpMessageFifo {

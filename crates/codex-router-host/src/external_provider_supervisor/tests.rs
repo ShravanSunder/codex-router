@@ -444,24 +444,14 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
         .expect("provider runtime")
         .shutdown()
         .await;
-    let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let snapshot = backend
-                .queued_operation_registry()
-                .snapshot(&queued_id)
-                .expect("queued operation snapshot")
-                .expect("queued operation exists");
-            if matches!(
-                snapshot.queue_state,
-                Some(collaboration_protocol::ConversationOperationQueueState::NotSubmitted { .. })
-            ) {
-                break snapshot;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("queued operation settles");
+    tokio::time::timeout(Duration::from_secs(5), queue.wait_for_workers())
+        .await
+        .expect("queued operation worker settles after provider retirement");
+    let snapshot = backend
+        .queued_operation_registry()
+        .snapshot(&queued_id)
+        .expect("queued operation snapshot")
+        .expect("queued operation exists");
     assert!(matches!(
         snapshot.queue_state,
         Some(collaboration_protocol::ConversationOperationQueueState::NotSubmitted { reason })

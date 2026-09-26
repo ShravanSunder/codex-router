@@ -12,11 +12,13 @@ use collaboration_service::{
     SessionMessageDelivery,
 };
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
+use tokio::io::AsyncWriteExt as _;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-struct AcceptedApprovalNoticeDelivery;
+struct AcceptedApprovalNoticeDelivery(Arc<Notify>);
 
 impl SessionMessageDelivery for AcceptedApprovalNoticeDelivery {
     fn deliver<'a>(
@@ -24,7 +26,9 @@ impl SessionMessageDelivery for AcceptedApprovalNoticeDelivery {
         _: DeliveryRequest,
         _: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async {
+        let notice_delivered = Arc::clone(&self.0);
+        Box::pin(async move {
+            notice_delivered.notify_one();
             Ok(DeliveryReceipt {
                 outcome: DeliveryOutcome::Started,
                 reachability: Some(SessionReachability::ProviderAcp),
@@ -164,6 +168,7 @@ fn permission_during_cancel_fixture() -> ExternalProviderLaunch {
 
 async fn wait_for_pending_approval<TPromptFuture>(
     broker: &ServiceApprovalBroker,
+    approval_notice: &Notify,
     mut pending_request: Pin<&mut TPromptFuture>,
 ) -> TestResult
 where
@@ -171,22 +176,16 @@ where
         Future<Output = Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>>,
 {
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                result = pending_request.as_mut() => {
-                    return Err::<(), Box<dyn std::error::Error + Send + Sync>>(
-                        format!("permission prompt settled before its cancellation test: {result:?}").into()
-                    );
-                }
-                () = tokio::task::yield_now() => {}
-            }
-            if !broker.list(true).await.approvals.is_empty() {
-                return Ok::<(), Box<dyn std::error::Error + Send + Sync>>(());
-            }
+        tokio::select! {
+            result = pending_request.as_mut() => Err::<(), Box<dyn std::error::Error + Send + Sync>>(
+                format!("permission prompt settled before its cancellation test: {result:?}").into()
+            ),
+            () = approval_notice.notified() => Ok(()),
         }
     })
     .await
     .map_err(|_| "permission request did not become pending")??;
+    assert!(!broker.list(true).await.approvals.is_empty());
     Ok(())
 }
 
@@ -208,7 +207,7 @@ async fn approval_broker_fixture(
     root: &tempfile::TempDir,
     service_id: &UuidIdentity,
     generation: &CodexGeneration,
-) -> TestResult<Arc<ServiceApprovalBroker>> {
+) -> TestResult<(Arc<ServiceApprovalBroker>, Arc<Notify>)> {
     let gate = NativeGenerationGate::default();
     gate.activate(
         generation.clone(),
@@ -228,8 +227,11 @@ async fn approval_broker_fixture(
         root.path().join("approval-routes.json"),
     )
     .await?;
-    broker.install_session_delivery(Arc::new(AcceptedApprovalNoticeDelivery))?;
-    Ok(broker)
+    let approval_notice = Arc::new(Notify::new());
+    broker.install_session_delivery(Arc::new(AcceptedApprovalNoticeDelivery(Arc::clone(
+        &approval_notice,
+    ))))?;
+    Ok((broker, approval_notice))
 }
 
 #[tokio::test]
@@ -242,7 +244,8 @@ async fn permission_decision_survives_late_agent_withdrawal_and_peer_turn_progre
         generation: GenerationNumber::try_from(1)?,
     };
     let runtime = ExternalProviderRuntime::initialize(permission_dispatch_fixture()).await?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
     runtime.create_session(root.path().to_owned()).await?;
     runtime.create_session(root.path().to_owned()).await?;
@@ -262,21 +265,7 @@ async fn permission_decision_survives_late_agent_withdrawal_and_peer_turn_progre
         },
     );
     tokio::pin!(prompt_a);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                result = &mut prompt_a => {
-                    return Err(format!("permission prompt settled before approval: {result:?}").into());
-                }
-                () = tokio::task::yield_now() => {}
-            }
-            if !broker.list(true).await.approvals.is_empty() {
-                break Ok::<(), Box<dyn std::error::Error + Send + Sync>>(());
-            }
-        }
-    })
-    .await
-    .map_err(|_| "permission request did not become pending")??;
+    wait_for_pending_approval(&broker, &approval_notice, prompt_a.as_mut()).await?;
 
     let prompt_b = runtime.prompt_with_approval_context(
         "session-b".to_owned(),
@@ -329,7 +318,8 @@ async fn expired_approval_broker_refusal_carries_typed_operation_reason() -> Tes
     runtime.set_endpoint_id("cursor-local".to_owned()).await;
     runtime.create_session(PathBuf::from("/tmp")).await?;
     let root = tempfile::tempdir()?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, _approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(broker.clone()).await;
     drop(broker);
     let operation_id = OperationId::generate();
@@ -379,7 +369,8 @@ async fn peer_cancellation_and_binding_retirement_settle_permission_history_once
             cancellation_source,
         ))
         .await?;
-        let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+        let (broker, approval_notice) =
+            approval_broker_fixture(&root, &service_id, &generation).await?;
         runtime.install_approval_broker(Arc::clone(&broker)).await;
         runtime.create_session(root.path().to_owned()).await?;
         let requester = session_ref(&service_id, "codex-local", "approver")?;
@@ -398,7 +389,7 @@ async fn peer_cancellation_and_binding_retirement_settle_permission_history_once
             },
         ));
         if cancellation_source == "retirement" {
-            wait_for_pending_approval(&broker, prompt.as_mut()).await?;
+            wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
             retirement.cancel();
         }
         let prompt_result = tokio::time::timeout(Duration::from_secs(5), &mut prompt).await?;
@@ -434,7 +425,8 @@ async fn permission_wait_does_not_block_steering_reply_dispatch() -> TestResult 
         generation: GenerationNumber::try_from(1)?,
     };
     let runtime = ExternalProviderRuntime::initialize(permission_during_steer_fixture()).await?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
     runtime.create_session(root.path().to_owned()).await?;
     let requester = session_ref(&service_id, "codex-local", "approver")?;
@@ -451,7 +443,7 @@ async fn permission_wait_does_not_block_steering_reply_dispatch() -> TestResult 
             binding_retirement: CancellationToken::new(),
         },
     ));
-    wait_for_pending_approval(&broker, prompt.as_mut()).await?;
+    wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
 
     let steer = tokio::time::timeout(
         Duration::from_secs(2),
@@ -494,7 +486,8 @@ async fn permission_wait_observes_cancellation_during_provider_cancel() -> TestR
         generation: GenerationNumber::try_from(1)?,
     };
     let runtime = ExternalProviderRuntime::initialize(permission_during_cancel_fixture()).await?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
     runtime.create_session(root.path().to_owned()).await?;
     let requester = session_ref(&service_id, "codex-local", "approver")?;
@@ -511,7 +504,7 @@ async fn permission_wait_observes_cancellation_during_provider_cancel() -> TestR
             binding_retirement: CancellationToken::new(),
         },
     ));
-    wait_for_pending_approval(&broker, prompt.as_mut()).await?;
+    wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
     runtime.cancel_active_prompt("session-a".to_owned()).await?;
 
     let outcome = tokio::time::timeout(Duration::from_secs(5), &mut prompt).await??;
@@ -534,7 +527,8 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
     // ACP v1 prompt-turn.mdx:365-367 ends a Turn only at the agent's prompt
     // result. Specification R5 projects connection loss as providerRetired.
     let root = tempfile::tempdir_in("/private/tmp")?;
-    let process_id_path = root.path().join("fixture-process-id");
+    let exit_socket_path = root.path().join("fixture-exit.sock");
+    let exit_listener = tokio::net::UnixListener::bind(&exit_socket_path)?;
     let fixture = acp_scripted_fixture::AcpFixtureScript::new()
         .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
         .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "loss-fixture", "version": "1"}}))
@@ -542,8 +536,7 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
         .respond("create", serde_json::json!({"sessionId": "session-a"}))
         .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId": "session-a"}))
         .send(serde_json::json!({"jsonrpc": "2.0", "id": 91, "method": "session/request_permission", "params": {"sessionId": "session-a", "toolCall": {"toolCallId": "permission-a", "title": "Run an approved command", "kind": "execute"}, "options": [{"optionId": "allow-a", "name": "Allow once", "kind": "allow_once"}]}}))
-        .wait_for_signal(&process_id_path)
-        .exit()
+        .exit_on_socket_signal(&exit_socket_path)
         .record_diagnostics(root.path().join("fixture-diagnostics.txt"))
         .launch();
     let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
@@ -552,7 +545,8 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
         generation: GenerationNumber::try_from(1)?,
     };
     let runtime = ExternalProviderRuntime::initialize(fixture).await?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
     runtime.create_session(root.path().to_owned()).await?;
     let approver = session_ref(&service_id, "codex-local", "approver")?;
@@ -568,32 +562,16 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
             binding_retirement: runtime.retirement(),
         },
     ));
-    if let Err(error) = wait_for_pending_approval(&broker, prompt.as_mut()).await {
+    if let Err(error) = wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await
+    {
         let diagnostics = std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
             .unwrap_or_default();
         return Err(format!("{error}; fixture: {diagnostics}").into());
     }
-    let process_id = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Ok(value) = std::fs::read_to_string(&process_id_path)
-                && let Ok(process_id) = value.parse::<i32>()
-            {
-                break process_id;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| {
-        format!(
-            "fixture process did not become ready for signal: {}",
-            std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
-                .unwrap_or_default()
-        )
-    })?;
-    let process_id =
-        rustix::process::Pid::from_raw(process_id).ok_or("invalid fixture process ID")?;
-    rustix::process::kill_process(process_id, rustix::process::Signal::USR1)?;
+    let (mut exit_signal, _) = tokio::time::timeout(Duration::from_secs(5), exit_listener.accept())
+        .await
+        .map_err(|_| "fixture did not arm its exit signal")??;
+    exit_signal.write_all(b"x").await?;
     let prompt_result = tokio::time::timeout(Duration::from_secs(5), &mut prompt)
         .await
         .map_err(|_| "prompt did not settle after fixture agent exited")?;
@@ -604,29 +582,17 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
         ),
         "{prompt_result:?}"
     );
-    let history_result = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let history = broker.list(false).await.approvals;
-            if history[0].state == collaboration_protocol::ApprovalState::Cancelled {
-                break history;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    let history = match history_result {
-        Ok(history) => history,
-        Err(_) => {
-            return Err(format!(
-                "approval history did not settle after fixture agent exited: {:?}",
-                broker.list(false).await.approvals
-            )
-            .into());
-        }
-    };
+    tokio::time::timeout(Duration::from_secs(5), runtime.retirement().cancelled())
+        .await
+        .map_err(|_| "provider connection did not retire after fixture exit")?;
+    runtime.shutdown().await;
+    let history = broker.list(false).await.approvals;
     assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].state,
+        collaboration_protocol::ApprovalState::Cancelled
+    );
     assert_eq!(history[0].reason.as_deref(), Some("providerRetired"));
     assert!(broker.list(true).await.approvals.is_empty());
-    runtime.shutdown().await;
     Ok(())
 }
