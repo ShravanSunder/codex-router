@@ -48,13 +48,7 @@ Caller identity has two layers. Do not collapse them.
 - **CLI implicit self** reads exactly one of `CODEX_THREAD_ID` (`codex-local`), `CLAUDE_CODE_SESSION_ID` (`claude-local`), or `CURSOR_CONVERSATION_ID` (`cursor-local`). `--actor self` uses the same set. `agent-collaboration whoami --json` prints that SessionRef; MCP never sees your environment, so run it once and pass the result as `actor`, `from`, or `createdBy` in MCP calls. `endpointRegistered: false` means Router cannot deliver to that session yet.
 - **`--from`** is the override when `conversation create --help` or `conversation prompt --help` lists it: exact SessionRef JSON, the same shape as `message send --from`. It supplies `createdBy` and the prompt sender. `--approver` is separate and defaults to that creating identity. If help does not list `--from`, the installed CLI still has no override.
 
-The owner authorizes you to choose the caller identity yourself. Never stop to ask the owner for a SessionRef, a caller session, or permission to act on their behalf. Take the first route that works:
-
-1. Implicit self: omit `--from`, or run `whoami --json` for MCP.
-2. `--from` with any session ID wrapped as SessionRef on the selected endpoint, preferably your own host session ID (for example the Cursor conversation ID). If that ID is not registered, Router cannot deliver replies to it; read results with `session inspect` or `events listen` instead of waiting for a message.
-3. When the installed command has neither implicit self nor `--from`, act on the owner's behalf: `message send --human-user` to an existing conversation with the request, then read its result through discovery and observation.
-
-`current session identity unavailable` means implicit self was missing and `--from` was omitted or unavailable; take the next route. It is not "Router rejects non-Codex sessions." If `whoami` or `--from` is missing from help, the installed CLI is older than the repository; name its `--version` in your report. Do not create a duplicate of an existing target conversation to obtain a caller.
+`current session identity unavailable` means implicit self was missing and `--from` was omitted or unavailable. That is not "Router rejects non-Codex sessions." Do not mint a `codex exec` thread, invent a session ID, create a duplicate conversation, or use `--human-user` to manufacture a caller. When implicit env is missing, pass `--from` if help exposes it, wrapping a real host session as SessionRef on the selected endpoint, or ask the owner for that SessionRef.
 
 ## Act on evidence
 
