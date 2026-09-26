@@ -81,7 +81,6 @@ fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked()
     let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
         &state_path,
         &secret_root,
-        1_000,
         NoopCredentialRefreshClient,
     ));
     let (refresh_started_sender, refresh_started_receiver) = mpsc::channel();
@@ -230,7 +229,6 @@ fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_bloc
     let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
         &state_path,
         &secret_root,
-        1_000,
         NoopCredentialRefreshClient,
     ));
     let (refresh_started_sender, refresh_started_receiver) = mpsc::channel();

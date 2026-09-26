@@ -357,6 +357,20 @@ impl OpenAiOAuthRefreshClient {
             serde_json::from_str::<RefreshTokenResponse>(&body).map_err(|_| {
                 CredentialRefreshFailure::ambiguous(CredentialFailureClass::MalformedResponse)
             })?;
+        if refresh_response.access_token.trim().is_empty() {
+            return Err(CredentialRefreshFailure::ambiguous(
+                CredentialFailureClass::MalformedResponse,
+            ));
+        }
+        if refresh_response
+            .refresh_token
+            .as_deref()
+            .is_some_and(|replacement| replacement.trim().is_empty())
+        {
+            return Err(CredentialRefreshFailure::ambiguous(
+                CredentialFailureClass::MalformedResponse,
+            ));
+        }
         let mut refreshed = AccountCredentialBundle::imported_codex_auth(
             refresh_response.access_token,
             Some(

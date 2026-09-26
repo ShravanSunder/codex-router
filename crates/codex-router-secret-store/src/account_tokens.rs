@@ -93,6 +93,11 @@ impl AccountCredentialBundle {
 
     /// Serializes the bundle into one secret-store payload.
     pub fn to_secret_string(&self) -> Result<SecretString, SecretStoreError> {
+        if self.access_token.expose_secret().trim().is_empty() {
+            return Err(SecretStoreError::InvalidSecretPayload {
+                message: "account credential bundle missing access token".to_owned(),
+            });
+        }
         let payload = AccountCredentialBundlePayload {
             version: ACCOUNT_CREDENTIAL_BUNDLE_VERSION,
             access_token: self.access_token.expose_secret(),

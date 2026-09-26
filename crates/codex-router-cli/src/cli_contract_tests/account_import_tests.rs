@@ -191,7 +191,6 @@ fn device_relogin_waits_for_claimed_refresh_then_wins_the_active_generation() {
         let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
             &refresh_state_path,
             &refresh_secret_root,
-            1_000,
             refresh_client,
         ));
         must_ok(resolver.resolve_provider_credentials(&refresh_account)).credential_generation()

@@ -72,7 +72,6 @@ fn quota_401_renews_once_and_retries_with_the_committed_generation() {
         let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
             &state_path,
             &secret_root,
-            1_000,
             refresh_client.clone(),
         ));
         let provider = FirstUnauthorizedQuotaProvider {
@@ -107,6 +106,204 @@ fn quota_401_renews_once_and_retries_with_the_committed_generation() {
                 AccountStatus::Enabled
             }
         );
+    }
+}
+
+struct ConcurrentGenerationQuotaProvider {
+    state_path: PathBuf,
+    secret_root: PathBuf,
+    account_id: AccountId,
+    seen_tokens: Mutex<Vec<String>>,
+}
+
+impl QuotaRefreshProvider for ConcurrentGenerationQuotaProvider {
+    async fn fetch_quota(
+        &self,
+        request: QuotaRefreshProviderRequest,
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+        let call = {
+            let mut seen_tokens = lock_test_mutex(&self.seen_tokens, "quota generation race");
+            seen_tokens.push(request.access_token().expose_secret().to_owned());
+            seen_tokens.len()
+        };
+        if call == 1 {
+            let secrets = must_ok(FileSecretStore::open(&self.secret_root));
+            let successor_key = must_ok(account_credential_bundle_key(&self.account_id, 2));
+            let successor = AccountCredentialBundle::imported_codex_auth(
+                "concurrent-access-canary",
+                Some("concurrent-refresh-canary".to_owned()),
+            )
+            .with_expires_unix_seconds(5_000_000_000);
+            must_ok(secrets.write_secret(&successor_key, &must_ok(successor.to_secret_string())));
+            let state = must_ok(SqliteStateStore::open(&self.state_path));
+            must_ok(AccountStateRepository::upsert_account(
+                &state,
+                &AccountRecord::new(
+                    self.account_id.clone(),
+                    "quota-race",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(2),
+            ));
+            return Err(crate::quota::QuotaCommandError::ProviderStatus { status: 401 });
+        }
+        Ok(QuotaRefreshProviderResponse {
+            windows: vec![QuotaRefreshProviderWindow {
+                limit_window_seconds: 18_000,
+                remaining_headroom: 42,
+                reset_unix_seconds: Some(2_000),
+                effective: true,
+            }],
+            reset_credits_available: None,
+        })
+    }
+}
+
+#[test]
+fn quota_401_reuses_a_concurrently_committed_generation_without_oauth_refresh() {
+    let test_root = TestRoot::new("quota-401-generation-race");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let account_id = account_id("quota-401-race-account");
+    must_ok(AccountStateRepository::upsert_account(
+        &state,
+        &AccountRecord::new(account_id.clone(), "quota-race", AccountStatus::Enabled)
+            .with_active_credential_generation(1),
+    ));
+    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active = AccountCredentialBundle::imported_codex_auth(
+        "rejected-access-canary",
+        Some("original-refresh-canary".to_owned()),
+    )
+    .with_expires_unix_seconds(4_000_000_000);
+    must_ok(secrets.write_secret(&active_key, &must_ok(active.to_secret_string())));
+    let refresh_client = RecordingRefreshClient::new(
+        "quota-401-race-account",
+        "original-refresh-canary",
+        AccountCredentialBundle::imported_codex_auth("unexpected-refresh", None),
+    );
+    let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+        &state_path,
+        &secret_root,
+        refresh_client.clone(),
+    ));
+    let provider = ConcurrentGenerationQuotaProvider {
+        state_path: state_path.clone(),
+        secret_root: secret_root.clone(),
+        account_id: account_id.clone(),
+        seen_tokens: Mutex::new(Vec::new()),
+    };
+    let mut output = Vec::new();
+    must_ok(refresh_quota_store_paths_with_dependencies(
+        &mut output,
+        &state_path,
+        &secret_root,
+        "https://chatgpt.com/backend-api".to_owned(),
+        &resolver,
+        &provider,
+        1_100,
+    ));
+    assert_eq!(refresh_client.calls(), 0);
+    let seen_tokens = lock_test_mutex(&provider.seen_tokens, "quota generation race");
+    assert_eq!(seen_tokens[0], "rejected-access-canary");
+    assert!(
+        seen_tokens[1..]
+            .iter()
+            .all(|token| token == "concurrent-access-canary")
+    );
+    let account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+        .expect("account should remain");
+    assert_eq!(account.active_credential_generation(), Some(2));
+    assert_eq!(account.status(), AccountStatus::Enabled);
+}
+
+#[test]
+fn quota_401_does_not_bypass_terminal_or_retry_cooldown_maintenance() {
+    use codex_router_state::credential_maintenance::CredentialMaintenanceState;
+
+    for (scenario, expected_state) in [
+        ("terminal", CredentialMaintenanceState::Unrefreshable),
+        ("cooldown", CredentialMaintenanceState::Retrying),
+    ] {
+        let test_root = TestRoot::new(&format!("quota-401-{scenario}"));
+        must_ok(fs::create_dir(test_root.path()));
+        let state_path = test_root.path().join("state.sqlite");
+        let secret_root = test_root.path().join("secrets");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account_id = account_id("quota-401-maintenance-account");
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(account_id.clone(), "maintenance", AccountStatus::Enabled)
+                .with_active_credential_generation(1),
+        ));
+        let secrets = must_ok(FileSecretStore::open(&secret_root));
+        let key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let bundle = AccountCredentialBundle::imported_codex_auth(
+            "rejected-access-canary",
+            Some("refresh-canary".to_owned()),
+        )
+        .with_expires_unix_seconds(5_000_000_000);
+        must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+        let async_state =
+            must_ok(test_async_runtime().block_on(AsyncSqliteStateStore::open(&state_path)));
+        let changed =
+            if scenario == "terminal" {
+                must_ok(
+                    test_async_runtime()
+                        .block_on(async_state.mark_credential_unrefreshable(&account_id, 1)),
+                )
+            } else {
+                must_ok(test_async_runtime().block_on(
+                    async_state.record_pre_provider_local_failure(&account_id, 1, 4_000_000_000),
+                ))
+            };
+        assert!(changed);
+        let refresh_client = RecordingRefreshClient::new(
+            "quota-401-maintenance-account",
+            "refresh-canary",
+            AccountCredentialBundle::imported_codex_auth("unexpected-refresh", None),
+        );
+        let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            &secret_root,
+            refresh_client.clone(),
+        ));
+        let provider = FirstUnauthorizedQuotaProvider {
+            seen_tokens: Mutex::new(Vec::new()),
+            reject_retry: false,
+        };
+        let mut output = Vec::new();
+        let _result = refresh_quota_store_paths_with_dependencies(
+            &mut output,
+            &state_path,
+            &secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            1_100,
+        );
+        assert_eq!(refresh_client.calls(), 0, "{scenario}");
+        assert_eq!(
+            lock_test_mutex(&provider.seen_tokens, "quota maintenance provider").as_slice(),
+            ["rejected-access-canary"],
+            "{scenario}"
+        );
+        let account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .expect("account should remain");
+        assert_eq!(account.status(), AccountStatus::Enabled, "{scenario}");
+        assert_eq!(
+            account.active_credential_generation(),
+            Some(1),
+            "{scenario}"
+        );
+        let maintenance = must_ok(
+            test_async_runtime().block_on(async_state.load_credential_maintenance(&account_id)),
+        )
+        .expect("maintenance should remain");
+        assert_eq!(maintenance.state, expected_state, "{scenario}");
     }
 }
 
@@ -284,7 +481,6 @@ fn quota_refresh_store_paths_uses_current_thread_runtime_without_nested_runtime(
     let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
         &state_path,
         &secret_root,
-        1_000,
         NoopCredentialRefreshClient,
     ));
     let provider = RecordingQuotaRefreshProvider::new(61);

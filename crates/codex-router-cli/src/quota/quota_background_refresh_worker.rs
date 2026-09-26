@@ -167,7 +167,7 @@ pub(crate) fn start_background_quota_refresh_worker(
     interval: Duration,
     quota_floor_notifier: WebSocketQuotaFloorNotifier,
 ) -> Result<BackgroundQuotaRefreshWorker, QuotaCommandError> {
-    let resolver = CliCredentialResolver::open(&state_db, &secret_root, current_unix_seconds())?;
+    let resolver = CliCredentialResolver::open(&state_db, &secret_root)?;
     let provider = HttpQuotaRefreshProvider::new()?;
     Ok(start_background_quota_refresh_worker_with_reporter(
         state_db,

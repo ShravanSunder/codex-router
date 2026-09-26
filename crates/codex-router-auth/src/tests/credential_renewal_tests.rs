@@ -1,6 +1,181 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_expiring_during_secret_read_cannot_be_emitted() {
+    let temp_dir = AuthTestTempDir::new("expires-during-secret-read");
+    let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
+    let file_secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let account_id = account_id("expires-during-read-account");
+    must_ok(
+        state
+            .upsert_account(
+                &AccountRecord::new(account_id.clone(), "expiring", AccountStatus::Enabled)
+                    .with_active_credential_generation(1),
+            )
+            .await,
+    );
+    let expiry = must_ok(crate::resolver::current_unix_seconds()).saturating_add(3);
+    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    must_ok(
+        file_secrets.write_secret(
+            &active_key,
+            &must_ok(
+                AccountCredentialBundle::imported_codex_auth("expiring-access-canary", None)
+                    .with_expires_unix_seconds(expiry)
+                    .to_secret_string(),
+            ),
+        ),
+    );
+    let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+    let (release_sender, release_receiver) = std::sync::mpsc::channel();
+    let secrets = HeldActiveSecretReadStore {
+        inner: file_secrets,
+        entered_sender,
+        release_receiver: Arc::new(Mutex::new(release_receiver)),
+        held_once: Arc::new(AtomicBool::new(false)),
+    };
+    let resolver =
+        AsyncRouterCredentialResolver::new(state, secrets, NoopCredentialRefreshClient, None);
+    let resolved_account = account_id.clone();
+    let resolution = tokio::spawn(async move {
+        resolver
+            .resolve_provider_credentials(&resolved_account)
+            .await
+    });
+    must_ok(
+        tokio::task::spawn_blocking(move || entered_receiver.recv_timeout(Duration::from_secs(2)))
+            .await,
+    )
+    .expect("active secret read should begin");
+    assert!(
+        must_ok(crate::resolver::current_unix_seconds()) < expiry,
+        "fixture must enter the read before the known expiry"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while must_ok(crate::resolver::current_unix_seconds()) < expiry {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expiry did not arrive"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    must_ok(release_sender.send(()));
+    assert_eq!(
+        must_ok(must_ok(
+            tokio::time::timeout(Duration::from_secs(2), resolution).await
+        )),
+        Err(CredentialResolverError::RefreshUnavailable)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replacement_expiring_during_held_refresh_cannot_be_emitted() {
+    let temp_dir = AuthTestTempDir::new("expires-during-refresh");
+    let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
+    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let account_id = account_id("expires-during-refresh-account");
+    must_ok(
+        state
+            .upsert_account(
+                &AccountRecord::new(account_id.clone(), "expiring", AccountStatus::Enabled)
+                    .with_active_credential_generation(1),
+            )
+            .await,
+    );
+    let now = must_ok(crate::resolver::current_unix_seconds());
+    let replacement_expiry = now.saturating_add(3);
+    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    must_ok(
+        secrets.write_secret(
+            &active_key,
+            &must_ok(
+                AccountCredentialBundle::imported_codex_auth(
+                    "expired-access-canary",
+                    Some("refresh-token-canary".to_owned()),
+                )
+                .with_expires_unix_seconds(now.saturating_sub(1))
+                .to_secret_string(),
+            ),
+        ),
+    );
+    let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+    let (release_sender, release_receiver) = std::sync::mpsc::channel();
+    let refresh_client = HeldRefreshClient {
+        calls: Arc::new(AtomicUsize::new(0)),
+        entered_sender,
+        release_receiver: Arc::new(Mutex::new(release_receiver)),
+        response_expiry_unix_seconds: replacement_expiry,
+    };
+    let resolver =
+        AsyncRouterCredentialResolver::new(state.clone(), secrets, refresh_client.clone(), None);
+    let resolved_account = account_id.clone();
+    let resolution = tokio::spawn(async move {
+        resolver
+            .resolve_provider_credentials(&resolved_account)
+            .await
+    });
+    must_ok(
+        tokio::task::spawn_blocking(move || entered_receiver.recv_timeout(Duration::from_secs(2)))
+            .await,
+    )
+    .expect("refresh should begin");
+    assert!(
+        must_ok(crate::resolver::current_unix_seconds()) < replacement_expiry,
+        "fixture must enter refresh before replacement expiry"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while must_ok(crate::resolver::current_unix_seconds()) < replacement_expiry {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expiry did not arrive"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    must_ok(release_sender.send(()));
+    assert_eq!(
+        must_ok(must_ok(
+            tokio::time::timeout(Duration::from_secs(2), resolution).await
+        )),
+        Err(CredentialResolverError::RefreshUnavailable)
+    );
+    assert_eq!(refresh_client.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        must_ok(state.load_account(&account_id).await)
+            .expect("account")
+            .active_credential_generation(),
+        Some(2)
+    );
+}
+
+#[derive(Clone)]
+struct HeldActiveSecretReadStore {
+    inner: FileSecretStore,
+    entered_sender: std::sync::mpsc::Sender<()>,
+    release_receiver: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    held_once: Arc<AtomicBool>,
+}
+
+impl SecretStore for HeldActiveSecretReadStore {
+    fn write_secret(&self, key: &SecretKey, secret: &SecretString) -> Result<(), SecretStoreError> {
+        self.inner.write_secret(key, secret)
+    }
+
+    fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError> {
+        if key.as_str().ends_with(".1") && !self.held_once.swap(true, Ordering::SeqCst) {
+            self.entered_sender
+                .send(())
+                .expect("read should report entry");
+            self.release_receiver
+                .lock()
+                .expect("release lock")
+                .recv_timeout(Duration::from_secs(5))
+                .expect("read should be released");
+        }
+        self.inner.read_secret(key)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_waiter_does_not_cancel_provider_rotation_or_release_account_lock() {
     let temp_dir = AuthTestTempDir::new("cancelled-refresh-waiter");
     let database_path = temp_dir.path().join("state.sqlite");
@@ -35,6 +210,7 @@ async fn cancelled_waiter_does_not_cancel_provider_rotation_or_release_account_l
         calls: Arc::new(AtomicUsize::new(0)),
         entered_sender,
         release_receiver: Arc::new(Mutex::new(release_receiver)),
+        response_expiry_unix_seconds: 2_000,
     };
     let first_resolver = AsyncRouterCredentialResolver::new(
         state.clone(),
@@ -519,6 +695,7 @@ struct HeldRefreshClient {
     calls: Arc<AtomicUsize>,
     entered_sender: std::sync::mpsc::Sender<()>,
     release_receiver: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    response_expiry_unix_seconds: u64,
 }
 
 impl CredentialRefreshClient for HeldRefreshClient {
@@ -532,12 +709,12 @@ impl CredentialRefreshClient for HeldRefreshClient {
         self.release_receiver
             .lock()
             .expect("release lock")
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(std::time::Duration::from_secs(5))
             .expect("provider should be released");
         Ok(AccountCredentialBundle::imported_codex_auth(
             "replacement-access-canary",
             Some("replacement-refresh-canary".to_owned()),
         )
-        .with_expires_unix_seconds(2_000))
+        .with_expires_unix_seconds(self.response_expiry_unix_seconds))
     }
 }

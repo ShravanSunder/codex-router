@@ -122,12 +122,8 @@ where
         &self,
         account_id: &AccountId,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        let now_unix_seconds = match self.fixed_now_unix_seconds {
-            Some(now_unix_seconds) => now_unix_seconds,
-            None => current_unix_seconds()
-                .map_err(|_error| CredentialResolverError::RefreshUnavailable)?,
-        };
         let (active_generation, bundle) = self.read_active_bundle(account_id).await?;
+        let now_unix_seconds = self.observed_now_unix_seconds()?;
         if self.bundle_is_expired(&bundle, now_unix_seconds) {
             let (resolved_generation, refreshed, _provider_used) = self
                 .renew_credentials(account_id, now_unix_seconds, RenewalTrigger::ExpiredAccess)
@@ -262,7 +258,9 @@ where
                 })
                 .await
                 .map_err(|_| CredentialResolverError::RefreshUnavailable)??;
-            if !self.bundle_is_expired(&bundle, now_unix_seconds) {
+            let completed_now_unix_seconds =
+                self.observed_now_unix_seconds()?.max(now_unix_seconds);
+            if !self.bundle_is_expired(&bundle, completed_now_unix_seconds) {
                 return Ok((generation, bundle, provider_used));
             }
             if provider_used || attempt == 1 {
@@ -370,6 +368,7 @@ where
             }
         };
         let (current_generation, bundle) = self.read_active_bundle(account_id).await?;
+        let now_unix_seconds = self.observed_now_unix_seconds()?.max(now_unix_seconds);
         if let RenewalTrigger::UnauthorizedGeneration(rejected_generation) = trigger
             && current_generation > rejected_generation
         {
@@ -447,15 +446,21 @@ where
                 return Err(CredentialResolverError::RefreshUnavailable);
             }
         }
+        let current_maintenance = maintenance
+            .as_ref()
+            .filter(|record| record.credential_generation == current_generation);
+        let elapsed_retry_is_due = current_maintenance.is_some_and(|record| {
+            record.state == CredentialMaintenanceState::Retrying
+                && record
+                    .next_attempt_unix_seconds
+                    .is_some_and(|deadline| deadline <= now_unix_seconds)
+        });
         let renewal_due = match trigger {
             RenewalTrigger::ExpiredAccess => self.bundle_is_expired(&bundle, now_unix_seconds),
-            RenewalTrigger::Proactive => credential_renewal_is_due(
-                &bundle,
-                maintenance
-                    .as_ref()
-                    .filter(|record| record.credential_generation == current_generation),
-                now_unix_seconds,
-            ),
+            RenewalTrigger::Proactive => {
+                elapsed_retry_is_due
+                    || credential_renewal_is_due(&bundle, current_maintenance, now_unix_seconds)
+            }
             RenewalTrigger::UnauthorizedGeneration(_) => true,
         };
         if !renewal_due {
@@ -534,24 +539,31 @@ where
                             .max(bounded_backoff),
                     )
                 });
-                let recorded = self
-                    .state_store
-                    .finish_credential_refresh_claim(
-                        account_id,
-                        current_generation,
-                        successor_generation,
-                        if failure.confirmed_unspent {
-                            CredentialMaintenanceState::Retrying
-                        } else {
-                            CredentialMaintenanceState::ReauthRequired
-                        },
-                        failure.failure_class,
-                        retry_deadline,
-                    )
-                    .await
-                    .map_err(map_state_error)?;
-                if !recorded {
-                    return Err(CredentialResolverError::RefreshUnavailable);
+                let disposition_started = std::time::Instant::now();
+                loop {
+                    match self
+                        .state_store
+                        .finish_credential_refresh_claim(
+                            account_id,
+                            current_generation,
+                            successor_generation,
+                            if failure.confirmed_unspent {
+                                CredentialMaintenanceState::Retrying
+                            } else {
+                                CredentialMaintenanceState::ReauthRequired
+                            },
+                            failure.failure_class,
+                            retry_deadline,
+                        )
+                        .await
+                    {
+                        Ok(true) => break,
+                        Ok(false) => return Err(CredentialResolverError::RefreshUnavailable),
+                        Err(_) if disposition_started.elapsed() < Duration::from_secs(30) => {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                        }
+                        Err(_) => return Err(CredentialResolverError::RefreshUnavailable),
+                    }
                 }
                 return Err(CredentialResolverError::RefreshUnavailable);
             }

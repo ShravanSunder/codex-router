@@ -28,6 +28,18 @@ fn loopback_oauth_outcomes_keep_retry_safety_and_redacted_failure_class() {
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
             CredentialRefreshFailure::ambiguous(CredentialFailureClass::MalformedResponse),
         ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\n{\"access_token\":\"\"}",
+            CredentialRefreshFailure::ambiguous(CredentialFailureClass::MalformedResponse),
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 44\r\n\r\n{\"access_token\":\"access\",\"refresh_token\":\"\"}",
+            CredentialRefreshFailure::ambiguous(CredentialFailureClass::MalformedResponse),
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 47\r\n\r\n{\"access_token\":\"access\",\"refresh_token\":\"   \"}",
+            CredentialRefreshFailure::ambiguous(CredentialFailureClass::MalformedResponse),
+        ),
     ] {
         let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
         let address = must_ok(listener.local_addr());
@@ -49,6 +61,33 @@ fn loopback_oauth_outcomes_keep_retry_safety_and_redacted_failure_class() {
         assert!(!format!("{expected:?}").contains("refresh-token-canary"));
         must_ok(server_thread.join().map_err(|_| "loopback server failed"));
     }
+}
+
+#[test]
+fn loopback_oauth_response_without_replacement_reuses_refresh_token() {
+    let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
+    let address = must_ok(listener.local_addr());
+    let server_thread = thread::spawn(move || {
+        let (mut stream, _) = must_ok(listener.accept());
+        let mut request = [0_u8; 2048];
+        let _ = must_ok(stream.read(&mut request));
+        must_ok(stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 26\r\n\r\n{\"access_token\":\"renewed\"}",
+        ));
+    });
+    let client = OpenAiOAuthRefreshClient::new_with_endpoint(
+        format!("http://{address}/oauth/token"),
+        "test-client",
+    );
+    let bundle = must_ok(client.refresh_credentials(
+        &account_id("loopback-reuse"),
+        &SecretString::new("refresh-token-canary"),
+    ));
+    assert_eq!(
+        bundle.refresh_token().map(SecretString::expose_secret),
+        Some("refresh-token-canary")
+    );
+    must_ok(server_thread.join().map_err(|_| "loopback server failed"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -436,6 +475,184 @@ async fn typed_refresh_failures_persist_retry_or_reauth_without_reusing_ambiguou
             assert_eq!(refresh_client.calls.load(Ordering::SeqCst), 2);
         }
     }
+}
+
+#[tokio::test]
+async fn elapsed_retry_deadline_renews_even_when_ordinary_renewal_is_not_due() {
+    use crate::resolver::CredentialRefreshFailure;
+    use codex_router_state::credential_maintenance::CredentialFailureClass;
+    use codex_router_state::credential_maintenance::CredentialMaintenanceState;
+
+    let temp_dir = AuthTestTempDir::new("elapsed-retry-deadline");
+    let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
+    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let account_id = account_id("elapsed-retry-account");
+    must_ok(
+        state
+            .upsert_account(
+                &AccountRecord::new(account_id.clone(), "retry", AccountStatus::Enabled)
+                    .with_active_credential_generation(1),
+            )
+            .await,
+    );
+    assert!(must_ok(
+        state.claim_credential_refresh(&account_id, 1, 2).await
+    ));
+    let active_key = must_ok(account_credential_bundle_key(&account_id, 2));
+    must_ok(
+        secrets.write_secret(
+            &active_key,
+            &must_ok(
+                AccountCredentialBundle::imported_codex_auth(
+                    "valid-access-canary",
+                    Some("refresh-token-canary".to_owned()),
+                )
+                .with_expires_unix_seconds(10_000)
+                .to_secret_string(),
+            ),
+        ),
+    );
+    assert!(must_ok(
+        state
+            .activate_claimed_credential_generation(&account_id, 1, 2, 1_000)
+            .await
+    ));
+    assert!(must_ok(
+        state
+            .record_pre_provider_local_failure(&account_id, 2, 1_000)
+            .await
+    ));
+    let refresh_client = RejectingRefreshClient {
+        failure: CredentialRefreshFailure::confirmed_unspent(
+            CredentialFailureClass::RateLimited,
+            None,
+        ),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let resolver = AsyncRouterCredentialResolver::new(
+        state.clone(),
+        secrets,
+        refresh_client.clone(),
+        Some(1_060),
+    );
+
+    assert_eq!(
+        resolver.maintain_account_credentials(&account_id).await,
+        Err(CredentialResolverError::RefreshUnavailable)
+    );
+    assert_eq!(refresh_client.calls.load(Ordering::SeqCst), 1);
+    let health = must_ok(state.load_credential_maintenance(&account_id).await).expect("health");
+    assert_eq!(health.state, CredentialMaintenanceState::Retrying);
+    assert!(
+        health
+            .next_attempt_unix_seconds
+            .is_some_and(|due| due > 1_060)
+    );
+    assert_eq!(
+        must_ok(
+            resolver
+                .next_maintenance_due_unix_seconds(&account_id)
+                .await
+        ),
+        health.next_attempt_unix_seconds
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_unspent_failure_retries_transient_sqlite_disposition_without_provider_reuse() {
+    use crate::resolver::CredentialRefreshFailure;
+    use codex_router_state::credential_maintenance::CredentialFailureClass;
+    use codex_router_state::credential_maintenance::CredentialMaintenanceState;
+    use sqlx::Connection as _;
+
+    let temp_dir = AuthTestTempDir::new("transient-retry-disposition");
+    let database_path = temp_dir.path().join("state.sqlite");
+    let state = must_ok(AsyncSqliteStateStore::open(&database_path).await);
+    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let account_id = account_id("transient-disposition-account");
+    must_ok(
+        state
+            .upsert_account(
+                &AccountRecord::new(account_id.clone(), "retry", AccountStatus::Enabled)
+                    .with_active_credential_generation(1),
+            )
+            .await,
+    );
+    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    must_ok(
+        secrets.write_secret(
+            &active_key,
+            &must_ok(
+                AccountCredentialBundle::imported_codex_auth(
+                    "expired-access-canary",
+                    Some("refresh-token-canary".to_owned()),
+                )
+                .with_expires_unix_seconds(900)
+                .to_secret_string(),
+            ),
+        ),
+    );
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&database_path)
+        .create_if_missing(false);
+    let mut fault_connection = must_ok(sqlx::SqliteConnection::connect_with(&options).await);
+    must_ok(
+        sqlx::query(
+            "CREATE TRIGGER fail_retry_disposition
+         BEFORE UPDATE OF state ON credential_maintenance
+         WHEN NEW.state = 'retrying'
+         BEGIN SELECT RAISE(ABORT, 'fixture transient write failure'); END;",
+        )
+        .execute(&mut fault_connection)
+        .await,
+    );
+    must_ok(fault_connection.close().await);
+    let release_path = database_path.clone();
+    let release_fault = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(release_path)
+            .create_if_missing(false);
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .expect("fault database");
+        sqlx::query("DROP TRIGGER fail_retry_disposition")
+            .execute(&mut connection)
+            .await
+            .expect("release disposition fault");
+        connection.close().await.expect("fault connection close");
+    });
+    let refresh_client = RejectingRefreshClient {
+        failure: CredentialRefreshFailure::confirmed_unspent(
+            CredentialFailureClass::RateLimited,
+            Some(120),
+        ),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let resolver = AsyncRouterCredentialResolver::new(
+        state.clone(),
+        secrets,
+        refresh_client.clone(),
+        Some(1_000),
+    );
+
+    let result = must_ok(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            resolver.resolve_provider_credentials(&account_id),
+        )
+        .await,
+    );
+    assert!(result.is_err());
+    must_ok(release_fault.await);
+    let health = must_ok(state.load_credential_maintenance(&account_id).await).expect("health");
+    assert_eq!(health.state, CredentialMaintenanceState::Retrying);
+    assert_eq!(
+        health.failure_class,
+        Some(CredentialFailureClass::RateLimited)
+    );
+    assert_eq!(health.next_attempt_unix_seconds, Some(1_120));
+    assert_eq!(refresh_client.calls.load(Ordering::SeqCst), 1);
 }
 
 #[derive(Clone)]

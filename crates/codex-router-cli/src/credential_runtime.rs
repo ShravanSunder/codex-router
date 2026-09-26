@@ -10,7 +10,6 @@ use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
 use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_auth::resolver::ResolvedProviderCredential;
-use codex_router_auth::resolver::current_unix_seconds;
 use codex_router_core::ids::AccountId;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -47,7 +46,6 @@ where
     state_db_path: PathBuf,
     state_store: AsyncSqliteStateStore,
     secret_store: CliRuntimeSecretStore,
-    fallback_now_unix_seconds: u64,
     refresh_client: C,
     refresh_leases: AsyncRefreshLeaseRegistry,
 }
@@ -73,7 +71,6 @@ impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
     pub fn open(
         state_db_path: &Path,
         secret_root: &Path,
-        now_unix_seconds: u64,
     ) -> Result<Self, CliCredentialResolverOpenError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -84,7 +81,6 @@ impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
             state_db_path: state_db_path.to_path_buf(),
             state_store,
             secret_store: open_cli_secret_store(secret_root)?,
-            fallback_now_unix_seconds: now_unix_seconds,
             refresh_client: OpenAiOAuthRefreshClient::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
@@ -99,7 +95,6 @@ where
     pub(crate) fn open_with_refresh_client(
         state_db_path: &Path,
         secret_root: &Path,
-        now_unix_seconds: u64,
         refresh_client: C,
     ) -> Result<Self, CliCredentialResolverOpenError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -111,7 +106,6 @@ where
             state_db_path: state_db_path.to_path_buf(),
             state_store,
             secret_store: open_cli_secret_store(secret_root)?,
-            fallback_now_unix_seconds: now_unix_seconds,
             refresh_client,
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
@@ -130,7 +124,7 @@ where
             self.state_store.clone(),
             self.secret_store.clone(),
             self.refresh_client.clone(),
-            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
+            None,
             self.refresh_leases.clone(),
         );
         self.runtime
@@ -146,7 +140,6 @@ where
 {
     state_store: AsyncSqliteStateStore,
     secret_store: CliRuntimeSecretStore,
-    fallback_now_unix_seconds: u64,
     refresh_client: C,
     refresh_leases: AsyncRefreshLeaseRegistry,
 }
@@ -156,7 +149,6 @@ impl AsyncCliCredentialResolver<OpenAiOAuthRefreshClient> {
     pub(crate) async fn open(
         state_db_path: &Path,
         secret_root: &Path,
-        now_unix_seconds: u64,
     ) -> Result<Self, CliCredentialResolverOpenError> {
         let state_store = AsyncSqliteStateStore::open(state_db_path).await?;
         let secret_root = secret_root.to_path_buf();
@@ -165,7 +157,6 @@ impl AsyncCliCredentialResolver<OpenAiOAuthRefreshClient> {
         Ok(Self {
             state_store,
             secret_store,
-            fallback_now_unix_seconds: now_unix_seconds,
             refresh_client: OpenAiOAuthRefreshClient::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
@@ -184,7 +175,7 @@ where
             self.state_store.clone(),
             self.secret_store.clone(),
             self.refresh_client.clone(),
-            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
+            None,
             self.refresh_leases.clone(),
         );
         resolver.resolve_provider_credentials(account_id).await
@@ -199,7 +190,7 @@ where
             self.state_store.clone(),
             self.secret_store.clone(),
             self.refresh_client.clone(),
-            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
+            None,
             self.refresh_leases.clone(),
         );
         resolver
@@ -223,7 +214,7 @@ where
             state_store,
             self.secret_store.clone(),
             self.refresh_client.clone(),
-            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
+            None,
             self.refresh_leases.clone(),
         );
         resolver.resolve_provider_credentials(account_id).await
@@ -241,7 +232,7 @@ where
             state_store,
             self.secret_store.clone(),
             self.refresh_client.clone(),
-            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
+            None,
             self.refresh_leases.clone(),
         );
         resolver
