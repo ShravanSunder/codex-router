@@ -83,6 +83,10 @@ async fn acp_listener_reports_unavailable_codex_without_closing_the_connection()
     assert_eq!(provider_response["id"], 3);
     assert_eq!(provider_response["result"]["sessionId"], "claude-session-1");
     assert_eq!(
+        provider_response["result"]["_meta"]["router"]["approver"],
+        serde_json::to_value(&provider.approver).unwrap()
+    );
+    assert_eq!(
         provider_response["result"]["_meta"]["router"]["sessionRef"],
         serde_json::to_value(&provider.session).unwrap()
     );
@@ -158,6 +162,10 @@ async fn acp_listener_reports_unavailable_codex_without_closing_the_connection()
         listed["result"]["sessions"][0]["_meta"]["router"]["sessionRef"],
         serde_json::to_value(&provider.session).unwrap()
     );
+    assert_eq!(
+        listed["result"]["sessions"][0]["_meta"]["router"]["approver"],
+        serde_json::to_value(&provider.approver).unwrap()
+    );
     *provider.state.lock().unwrap() = SessionState::Unloaded;
     let wrong_cwd = serde_json::json!({"jsonrpc":"2.0","id":15,"method":"session/load","params":{
         "sessionId":"claude-session-1","cwd":"/other","mcpServers":[],
@@ -201,6 +209,10 @@ async fn acp_listener_reports_unavailable_codex_without_closing_the_connection()
         .unwrap();
     let loaded: serde_json::Value = serde_json::from_str(&loaded).unwrap();
     assert_eq!(
+        loaded["result"]["_meta"]["router"]["approver"],
+        serde_json::to_value(&provider.approver).unwrap()
+    );
+    assert_eq!(
         loaded["result"]["_meta"]["sessionProfile"]["historyUnavailable"],
         false
     );
@@ -233,6 +245,10 @@ async fn acp_listener_reports_unavailable_codex_without_closing_the_connection()
         .unwrap()
         .unwrap();
     let resumed: serde_json::Value = serde_json::from_str(&resumed).unwrap();
+    assert_eq!(
+        resumed["result"]["_meta"]["router"]["approver"],
+        serde_json::to_value(&provider.approver).unwrap()
+    );
     assert_eq!(
         resumed["result"]["_meta"]["sessionProfile"]["historyUnavailable"],
         true
@@ -462,6 +478,17 @@ async fn acp_listener_reports_unavailable_codex_without_closing_the_connection()
             .unwrap();
     let anonymous_response: Value = serde_json::from_str(&anonymous_response).unwrap();
     assert_eq!(anonymous_response["error"]["code"], -32602);
+    anonymous_write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/list\",\"params\":{\"_meta\":{\"router\":{\"endpoint\":\"claude-local\"}}}}\n").await.unwrap();
+    let anonymous_list = tokio::time::timeout(Duration::from_secs(2), anonymous_lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let anonymous_list: Value = serde_json::from_str(&anonymous_list).unwrap();
+    assert_eq!(
+        anonymous_list["result"]["sessions"][0]["sessionId"],
+        "claude-session-1"
+    );
     let plain = tokio::net::UnixStream::connect(&path).await.unwrap();
     let (plain_read, mut plain_write) = plain.into_split();
     let mut plain_lines = BufReader::new(plain_read).lines();

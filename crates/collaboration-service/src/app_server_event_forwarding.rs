@@ -2,14 +2,15 @@
 use crate::router_session_app_server::thread_alias;
 use crate::{
     ApprovalPresentation, ApprovalReply, HubEvent, InteractionDisplayContext, QuestionPresentation,
-    QuestionReply, ServiceApprovalBroker, map_approval_reply, map_question_form_reply,
-    translate_approval_request, translate_question_request, translate_session_item,
+    QuestionReply, ServiceApprovalBroker, group_historical_turns, map_approval_reply,
+    map_question_form_reply, render_historical_turn, translate_approval_request,
+    translate_question_request, translate_session_item,
 };
 use collaboration_protocol::QuestionResponse;
 use message_board::{Identity, SessionRef};
 use serde_json::{Value, json};
 use session_event_model::{
-    ApprovalRequest, PendingInteraction, SessionEvent, StopReason, TurnOutcome,
+    ApprovalRequest, PendingInteraction, SessionEvent, SessionItem, StopReason, TurnOutcome,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -40,6 +41,42 @@ fn render_turn_event(session: &SessionRef, event: &HubEvent) -> Option<Value> {
             }
         }
     }))
+}
+
+pub(crate) fn historical_turns(session: &SessionRef, snapshot: &[HubEvent]) -> Vec<Value> {
+    let mut items = Vec::<SessionItem>::new();
+    let mut item_positions = HashMap::<String, usize>::new();
+    let mut active_turn: Option<String> = None;
+    let mut active_item_start = 0;
+    for event in snapshot {
+        match &event.event {
+            SessionEvent::TurnStarted { turn_id, .. } => {
+                active_turn = Some(turn_id.clone());
+                active_item_start = items.len();
+            }
+            SessionEvent::TurnEnded { turn_id, .. } if active_turn.as_deref() == Some(turn_id) => {
+                active_turn = None;
+            }
+            SessionEvent::ItemStarted { item } | SessionEvent::ItemUpdated { item } => {
+                if let Some(index) = item_positions.get(&item.item_id).copied() {
+                    if let Some(existing) = items.get_mut(index) {
+                        *existing = item.clone();
+                    }
+                } else {
+                    item_positions.insert(item.item_id.clone(), items.len());
+                    items.push(item.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    if active_turn.is_some() {
+        items.truncate(active_item_start);
+    }
+    group_historical_turns(session, &items)
+        .iter()
+        .map(render_historical_turn)
+        .collect()
 }
 
 enum PendingAppServerInteraction {

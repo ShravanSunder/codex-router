@@ -16,6 +16,7 @@ use tokio::sync::{Notify, broadcast};
 pub(super) struct ScriptedSessionBackend {
     pub(super) endpoint: SessionEndpointRef,
     pub(super) session: SessionRef,
+    pub(super) approver: Identity,
     pub(super) durable_inventory: Mutex<Vec<HubSessionSummary>>,
     pub(super) live_states: Mutex<HashMap<SessionRef, SessionState>>,
     pub(super) create_commands: Mutex<Vec<CreateSessionCommand>>,
@@ -25,6 +26,7 @@ pub(super) struct ScriptedSessionBackend {
     pub(super) cancel_commands: Mutex<Vec<SessionTargetCommand>>,
     pub(super) created: Notify,
     pub(super) events: broadcast::Sender<crate::HubEvent>,
+    pub(super) history: Mutex<Vec<crate::HubEvent>>,
 }
 
 impl ScriptedSessionBackend {
@@ -37,10 +39,12 @@ impl ScriptedSessionBackend {
             "endpoint":endpoint,
             "sessionId":"19e49a31-daa3-428c-b985-e0c7373a89ed"
         }))?;
+        let approver = Self::actor()?;
         let (events, _) = broadcast::channel(16);
         Ok(Arc::new(Self {
             endpoint,
             session,
+            approver,
             durable_inventory: Mutex::new(Vec::new()),
             live_states: Mutex::new(HashMap::new()),
             create_commands: Mutex::new(Vec::new()),
@@ -50,6 +54,7 @@ impl ScriptedSessionBackend {
             cancel_commands: Mutex::new(Vec::new()),
             created: Notify::new(),
             events,
+            history: Mutex::new(Vec::new()),
         }))
     }
 
@@ -69,6 +74,7 @@ impl SessionCommandPort for ScriptedSessionBackend {
             .expect("test lock")
             .push(HubSessionSummary {
                 session: self.session.clone(),
+                approver: self.approver.clone(),
                 working_directory: command.working_directory,
                 updated_at_seconds: 1_700_000_000,
                 preview: String::new(),
@@ -162,12 +168,8 @@ impl SessionCommandPort for ScriptedSessionBackend {
 impl SessionEventHub for ScriptedSessionBackend {
     fn attach(&self, _: SessionRef) -> HubFuture<'_, SessionEventAttachment> {
         let receiver = self.events.subscribe();
-        Box::pin(async move {
-            Ok(SessionEventAttachment {
-                snapshot: Vec::new(),
-                receiver,
-            })
-        })
+        let snapshot = self.history.lock().expect("test lock").clone();
+        Box::pin(async move { Ok(SessionEventAttachment { snapshot, receiver }) })
     }
     fn state(&self, session: SessionRef) -> HubFuture<'_, SessionState> {
         let exists = self

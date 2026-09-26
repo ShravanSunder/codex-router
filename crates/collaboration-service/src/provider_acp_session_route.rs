@@ -127,18 +127,26 @@ fn content_blocks(params: &Value) -> Result<Vec<CommandContent>, ()> {
         .collect()
 }
 
-fn session_result(
+async fn session_result(
+    events: &dyn SessionEventHub,
     session: &SessionRef,
     capabilities: CapabilityReport,
     history_unavailable: bool,
-) -> Value {
-    json!({
+) -> Result<Value, ()> {
+    let summary = events
+        .sessions(session.endpoint.clone())
+        .await
+        .map_err(|_| ())?
+        .into_iter()
+        .find(|summary| summary.session == *session)
+        .ok_or(())?;
+    Ok(json!({
         "sessionId":session.session_id.as_str(),
         "_meta":{
-            "router":{"sessionRef":session},
+            "router":{"sessionRef":session,"approver":summary.approver},
             "sessionProfile":{"capabilities":capabilities,"historyUnavailable":history_unavailable}
         }
-    })
+    }))
 }
 
 async fn current_turn_id(events: &dyn SessionEventHub, session: SessionRef) -> Option<String> {
@@ -177,6 +185,36 @@ async fn validate_load_request(
         return Err((-32602, "Session working directory does not match"));
     }
     Ok(())
+}
+
+async fn list_sessions_result(
+    id: Value,
+    params: &Value,
+    schema: &mut AcpSchemaCatalog,
+    events: &dyn SessionEventHub,
+    endpoint: SessionEndpointRef,
+) -> Value {
+    if !schema
+        .validate("ListSessionsRequest", params)
+        .unwrap_or(false)
+    {
+        return failure(id, -32602, "Invalid session list parameters");
+    }
+    match events.sessions(endpoint).await {
+        Ok(summaries) => response(
+            id,
+            json!({
+                "sessions":summaries.into_iter().map(|summary| json!({
+                    "sessionId":summary.session.session_id.as_str(),
+                    "cwd":summary.working_directory,
+                    "title":summary.name,
+                    "_meta":{"router":{"sessionRef":summary.session,"approver":summary.approver},
+                        "sessionProfile":{"state":summary.state}}
+                })).collect::<Vec<_>>()
+            }),
+        ),
+        Err(_) => failure(id, -32000, "Session inventory unavailable"),
+    }
 }
 
 async fn serve_provider_sessions(
@@ -258,6 +296,22 @@ async fn serve_provider_sessions(
         let Some(id) = id else {
             continue;
         };
+        if method == "session/list" {
+            router
+                .output
+                .send(
+                    list_sessions_result(
+                        id,
+                        &params,
+                        &mut schema,
+                        route.events.as_ref(),
+                        route.endpoint.clone(),
+                    )
+                    .await,
+                )
+                .await?;
+            continue;
+        }
         let Some(actor) = actor.clone() else {
             router
                 .output
@@ -266,30 +320,6 @@ async fn serve_provider_sessions(
             continue;
         };
         let result = match method {
-            "session/list" => {
-                if !schema
-                    .validate("ListSessionsRequest", &params)
-                    .unwrap_or(false)
-                {
-                    failure(id, -32602, "Invalid session list parameters")
-                } else {
-                    match route.events.sessions(route.endpoint.clone()).await {
-                        Ok(summaries) => response(
-                            id,
-                            json!({
-                                "sessions":summaries.into_iter().map(|summary| json!({
-                                    "sessionId":summary.session.session_id.as_str(),
-                                    "cwd":summary.working_directory,
-                                    "title":summary.name,
-                                    "_meta":{"router":{"sessionRef":summary.session},
-                                        "sessionProfile":{"state":summary.state}}
-                                })).collect::<Vec<_>>()
-                            }),
-                        ),
-                        Err(_) => failure(id, -32000, "Session inventory unavailable"),
-                    }
-                }
-            }
             "session/new" => {
                 if !schema
                     .validate("NewSessionRequest", &params)
@@ -313,9 +343,19 @@ async fn serve_provider_sessions(
                         {
                             Ok(session) => {
                                 match observers.attach(session.clone(), false, false).await {
-                                    Ok(report) => {
-                                        response(id, session_result(&session, report, false))
-                                    }
+                                    Ok(report) => match session_result(
+                                        route.events.as_ref(),
+                                        &session,
+                                        report,
+                                        false,
+                                    )
+                                    .await
+                                    {
+                                        Ok(result) => response(id, result),
+                                        Err(()) => {
+                                            failure(id, -32000, "Session inventory unavailable")
+                                        }
+                                    },
                                     Err(()) => failure(id, -32000, "Session event hub unavailable"),
                                 }
                             }
@@ -363,14 +403,19 @@ async fn serve_provider_sessions(
                                         .attach(session.clone(), method == "session/load", true)
                                         .await
                                     {
-                                        Ok(report) => response(
-                                            id,
-                                            session_result(
-                                                &session,
-                                                report,
-                                                method == "session/resume",
-                                            ),
-                                        ),
+                                        Ok(report) => match session_result(
+                                            route.events.as_ref(),
+                                            &session,
+                                            report,
+                                            method == "session/resume",
+                                        )
+                                        .await
+                                        {
+                                            Ok(result) => response(id, result),
+                                            Err(()) => {
+                                                failure(id, -32000, "Session inventory unavailable")
+                                            }
+                                        },
                                         Err(()) => {
                                             failure(id, -32000, "Session event hub unavailable")
                                         }

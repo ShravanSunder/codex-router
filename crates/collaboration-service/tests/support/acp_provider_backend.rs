@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 pub(crate) struct ScriptedProviderBackend {
     pub(crate) endpoint: SessionEndpointRef,
     pub(crate) session: SessionRef,
+    pub(crate) approver: Identity,
     pub(crate) created_by: Mutex<Vec<Identity>>,
     pub(crate) prompted_by: Mutex<Vec<Identity>>,
     pub(crate) loaded_by: Mutex<Vec<Identity>>,
@@ -35,10 +36,13 @@ impl ScriptedProviderBackend {
         let session = serde_json::from_value(serde_json::json!({
             "endpoint":endpoint,"sessionId":"claude-session-1"
         }))?;
+        let approver =
+            serde_json::from_value(serde_json::json!({"kind":"human","humanId":"owner"}))?;
         let (events, _) = broadcast::channel(16);
         Ok(Self {
             endpoint,
             session,
+            approver,
             created_by: Mutex::new(Vec::new()),
             prompted_by: Mutex::new(Vec::new()),
             loaded_by: Mutex::new(Vec::new()),
@@ -254,6 +258,7 @@ impl SessionEventHub for ScriptedProviderBackend {
         let result = if endpoint == self.endpoint {
             vec![HubSessionSummary {
                 session: self.session.clone(),
+                approver: self.approver.clone(),
                 working_directory: "/tmp".into(),
                 updated_at_seconds: 1,
                 preview: String::new(),

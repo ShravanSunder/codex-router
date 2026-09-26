@@ -3,13 +3,14 @@ use crate::{
     CommandContent, CreateSessionCommand, HubEvent, HubSessionSummary, PromptSessionCommand,
     SessionCommandPort, SessionEventHub, SessionEventHubError, SessionSettingsCommand,
     SessionSteerOutcome, SessionTargetCommand, SteerSessionCommand,
-    app_server_event_forwarding::AppServerEventForwarding,
+    app_server_event_forwarding::{AppServerEventForwarding, historical_turns},
     app_server_model_catalog::{ProviderModelEntry, render_model_list},
     private_socket_listener::PrivateSocketListener,
 };
 use futures_util::{SinkExt, StreamExt};
 use message_board::{Identity, SessionEndpointRef, SessionRef};
 use serde_json::{Value, json};
+use session_event_model::SessionEvent;
 use std::{
     collections::HashSet,
     io,
@@ -253,9 +254,11 @@ pub async fn serve_router_session_app_server_connection(
                     .map_err(|_| AppServerConnectionError::HubUnavailable)?;
                 for event in attachment.snapshot {
                     for notification in forwarding.project(&session, &event) {
-                        websocket
-                            .send(Message::Text(notification.to_string().into()))
-                            .await?;
+                        if matches!(&event.event, SessionEvent::InteractionRequested { .. }) {
+                            websocket
+                                .send(Message::Text(notification.to_string().into()))
+                                .await?;
+                        }
                     }
                 }
                 let mut receiver = attachment.receiver;
@@ -388,17 +391,40 @@ async fn handle_app_server_thread_request(
                         .find(|current| current.session == summary.session)
                         .ok_or(ThreadMethodError::NotFound)?;
                 }
-                let _attachment =
-                    events
+                let attachment = events
+                    .attach(summary.session.clone())
+                    .await
+                    .map_err(|error| match error {
+                        SessionEventHubError::SessionNotFound => ThreadMethodError::NotFound,
+                        SessionEventHubError::Unavailable => ThreadMethodError::Unavailable,
+                    })?;
+                let mut result = thread_start_response(&summary);
+                if params.get("excludeTurns").and_then(Value::as_bool) != Some(true)
+                    && let Some(thread) = result.get_mut("thread").and_then(Value::as_object_mut)
+                {
+                    thread.insert(
+                        "turns".into(),
+                        json!(historical_turns(&summary.session, &attachment.snapshot)),
+                    );
+                }
+                Ok(result)
+            } else {
+                let mut thread = render_thread(&summary);
+                if params.get("includeTurns").and_then(Value::as_bool) != Some(false)
+                    && summary.state != session_event_model::SessionState::Unloaded
+                {
+                    let attachment = events
                         .attach(summary.session.clone())
                         .await
-                        .map_err(|error| match error {
-                            SessionEventHubError::SessionNotFound => ThreadMethodError::NotFound,
-                            SessionEventHubError::Unavailable => ThreadMethodError::Unavailable,
-                        })?;
-                Ok(thread_start_response(&summary))
-            } else {
-                Ok(json!({"thread":render_thread(&summary)}))
+                        .map_err(|_| ThreadMethodError::Unavailable)?;
+                    if let Some(thread) = thread.as_object_mut() {
+                        thread.insert(
+                            "turns".into(),
+                            json!(historical_turns(&summary.session, &attachment.snapshot)),
+                        );
+                    }
+                }
+                Ok(json!({"thread":thread}))
             }
         }
         _ => Err(ThreadMethodError::InvalidParams),

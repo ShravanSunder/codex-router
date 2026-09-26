@@ -1,6 +1,6 @@
 use super::test_support::ScriptedSessionBackend;
 use super::*;
-use session_event_model::SessionState;
+use session_event_model::{SessionEvent, SessionItem, SessionItemKind, SessionState};
 use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
 use tokio::net::UnixListener;
 use tokio_tungstenite::client_async;
@@ -192,6 +192,7 @@ async fn durable_unloaded_session_has_a_stable_uuid_alias() -> Result<(), Box<dy
         .expect("test lock")
         .push(HubSessionSummary {
             session: stored.clone(),
+            approver: backend.approver.clone(),
             working_directory: PathBuf::from("/tmp"),
             updated_at_seconds: 1_700_000_000,
             preview: "saved input".into(),
@@ -235,6 +236,7 @@ async fn thread_resume_loads_an_unloaded_provider_session() -> Result<(), Box<dy
         .expect("test lock")
         .push(HubSessionSummary {
             session: backend.session.clone(),
+            approver: backend.approver.clone(),
             working_directory: PathBuf::from("/tmp"),
             updated_at_seconds: 1_700_000_000,
             preview: String::new(),
@@ -260,6 +262,76 @@ async fn thread_resume_loads_an_unloaded_provider_session() -> Result<(), Box<dy
             actor
         }]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_resume_returns_replayed_items_grouped_into_historical_turns()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = ScriptedSessionBackend::new()?;
+    backend
+        .durable_inventory
+        .lock()
+        .expect("test lock")
+        .push(HubSessionSummary {
+            session: backend.session.clone(),
+            approver: backend.approver.clone(),
+            working_directory: PathBuf::from("/tmp"),
+            updated_at_seconds: 1_700_000_000,
+            preview: String::new(),
+            name: None,
+            model: None,
+            state: SessionState::Unloaded,
+        });
+    *backend.history.lock().expect("test lock") = vec![
+        HubEvent {
+            sequence: 1,
+            event: SessionEvent::ItemStarted {
+                item: SessionItem {
+                    item_id: "user-1".into(),
+                    kind: SessionItemKind::UserMessage,
+                    text: Some("Earlier prompt".into()),
+                },
+            },
+        },
+        HubEvent {
+            sequence: 2,
+            event: SessionEvent::ItemStarted {
+                item: SessionItem {
+                    item_id: "reply-1".into(),
+                    kind: SessionItemKind::AgentMessage,
+                    text: Some("Earlier reply".into()),
+                },
+            },
+        },
+    ];
+    let resumed = handle_app_server_thread_request(
+        "thread/resume",
+        json!({"threadId":backend.session.session_id.as_str()}),
+        Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
+        Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        backend.endpoint.clone(),
+        ScriptedSessionBackend::actor()?,
+    )
+    .await?;
+    assert_eq!(
+        resumed["thread"]["turns"][0]["items"][0]["type"],
+        "userMessage"
+    );
+    assert_eq!(
+        resumed["thread"]["turns"][0]["items"][1]["text"],
+        "Earlier reply"
+    );
+    let read = handle_app_server_thread_request(
+        "thread/read",
+        json!({"threadId":backend.session.session_id.as_str()}),
+        Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
+        Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        backend.endpoint.clone(),
+        ScriptedSessionBackend::actor()?,
+    )
+    .await?;
+    assert_eq!(read["thread"]["turns"], resumed["thread"]["turns"]);
     Ok(())
 }
 
