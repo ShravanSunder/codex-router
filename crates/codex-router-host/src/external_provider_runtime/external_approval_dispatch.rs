@@ -28,6 +28,9 @@ pub(super) fn spawn_external_approval_dispatch(
     #[cfg(test)] permission_outcome: Arc<std::sync::atomic::AtomicU8>,
 ) -> Result<(), Error> {
     let request_cancellation = responder.cancellation();
+    let response_gate = context
+        .as_ref()
+        .map(|context| Arc::clone(&context.response_gate));
     connection.spawn(async move {
         let outcome = match (broker, context) {
             (Some(broker), Some(context)) => {
@@ -41,6 +44,16 @@ pub(super) fn spawn_external_approval_dispatch(
                 .await
             }
             _ => RequestPermissionOutcome::Cancelled,
+        };
+        let response_guard = response_gate.as_ref().and_then(|gate| gate.lock().ok());
+        let outcome = if response_gate.is_some()
+            && response_guard
+                .as_ref()
+                .is_none_or(|cancelling| **cancelling)
+        {
+            RequestPermissionOutcome::Cancelled
+        } else {
+            outcome
         };
         #[cfg(test)]
         permission_outcome.store(
@@ -62,9 +75,6 @@ async fn handle_contextual_permission_request(
     request: RequestPermissionRequest,
     request_cancellation: agent_client_protocol::RequestCancellation,
 ) -> RequestPermissionOutcome {
-    if turn_cancellation.is_cancelled() {
-        return RequestPermissionOutcome::Cancelled;
-    }
     let approval_target = context.target.clone();
     let presentation = approval_presentation(&request.tool_call.fields);
     let operation_metadata = ExternalApprovalOperationMetadata {
@@ -73,26 +83,31 @@ async fn handle_contextual_permission_request(
         binding_generation: context.binding_generation.clone(),
         method: "session/request_permission",
     };
-    let options = match map_external_permission_options(request.options) {
-        ExternalPermissionOptionMapping::Mapped(options) => options,
-        ExternalPermissionOptionMapping::Refused { reason, options } => {
-            if let Err(error) = broker
-                .record_external_refusal(ExternalApprovalRefusal {
-                    requester: context.requester,
-                    approver: context.approver,
-                    generation: context.binding_generation,
-                    operation_metadata,
-                    offered_options: options,
-                    presentation: Some(presentation),
-                    reason: reason.to_owned(),
-                })
-                .await
-            {
-                tracing::error!(%error, "failed to record refused provider permission request");
-            }
-            return RequestPermissionOutcome::Cancelled;
-        }
+    let (options, refusal_reason) = match map_external_permission_options(request.options) {
+        ExternalPermissionOptionMapping::Mapped(options) => (options, None),
+        ExternalPermissionOptionMapping::Refused { reason, options } => (options, Some(reason)),
     };
+    if let Some(reason) = turn_cancellation
+        .is_cancelled()
+        .then_some("turn cancelled")
+        .or(refusal_reason)
+    {
+        if let Err(error) = broker
+            .record_external_refusal(ExternalApprovalRefusal {
+                requester: context.requester,
+                approver: context.approver,
+                generation: context.binding_generation,
+                operation_metadata,
+                offered_options: options,
+                presentation: Some(presentation),
+                reason: reason.to_owned(),
+            })
+            .await
+        {
+            tracing::error!(%error, "failed to record refused provider permission request");
+        }
+        return RequestPermissionOutcome::Cancelled;
+    }
 
     let cancellation = CancellationToken::new();
     let broker_request = broker.request_external(ExternalApprovalRequest {

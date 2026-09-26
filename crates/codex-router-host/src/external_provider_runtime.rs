@@ -31,6 +31,7 @@ use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines,
 };
 pub(crate) use approval_turn_cancellation::ProviderTurnCancellation;
+use approval_turn_cancellation::{ActiveApprovalContext, active_turn_cancellation};
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
 use external_approval_dispatch::spawn_external_approval_dispatch;
 use provider_acp_error_mapping::acp_load_session_error;
@@ -269,12 +270,6 @@ pub struct ExternalProviderApprovalContext {
     pub operation_id: OperationId,
     pub binding_generation: CodexGeneration,
     pub binding_retirement: CancellationToken,
-}
-
-#[derive(Clone)]
-struct ActiveApprovalContext {
-    approval: ExternalProviderApprovalContext,
-    cancelling: CancellationToken,
 }
 
 struct ApprovalContextGuard {
@@ -863,15 +858,7 @@ impl ExternalProviderRuntime {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                                                 continue;
                                             };
-                                            let turn_cancellation = task_approval_contexts.lock().ok().and_then(|contexts| {
-                                                contexts.get(&provider_session_id).and_then(|context| {
-                                                    (Some(&context.approval.operation_id) == operation_id.as_ref()).then(|| ProviderTurnCancellation {
-                                                        cancelling: context.cancelling.clone(),
-                                                        target: context.approval.target.clone(),
-                                                        approval_broker: Arc::clone(&task_approval_broker),
-                                                    })
-                                                })
-                                            });
+                                            let turn_cancellation = operation_id.as_ref().and_then(|operation_id| active_turn_cancellation(&task_approval_contexts, &task_approval_broker, &provider_session_id, Some(operation_id)));
                                             if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, turn_cancellation, dispatch, reply }).await
                                                 && let ProviderSessionCommand::Prompt { dispatch: Some(dispatch), .. } = error.0
                                             {
