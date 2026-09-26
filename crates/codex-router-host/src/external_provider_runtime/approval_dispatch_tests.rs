@@ -137,31 +137,28 @@ sys.stdin.read()
 }
 
 fn permission_during_cancel_fixture() -> ExternalProviderLaunch {
-    let fixture = r#"
-import json,sys
-def send(value):
-    print(json.dumps(value)); sys.stdout.flush()
-initialize=json.loads(sys.stdin.readline())
-send({'jsonrpc':'2.0','id':initialize['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'permission-cancel-fixture','version':'1'}}})
-create=json.loads(sys.stdin.readline())
-send({'jsonrpc':'2.0','id':create['id'],'result':{'sessionId':'session-a'}})
-prompt=json.loads(sys.stdin.readline())
-send({'jsonrpc':'2.0','id':91,'method':'session/request_permission','params':{'sessionId':'session-a','toolCall':{'toolCallId':'permission-a','title':'Run an approved command','kind':'execute'},'options':[{'optionId':'allow-a','name':'Allow once','kind':'allow_once'}]}})
-cancel=json.loads(sys.stdin.readline())
-assert cancel['method']=='session/cancel'
-send({'jsonrpc':'2.0','method':'$/cancel_request','params':{'requestId':91}})
-permission=json.loads(sys.stdin.readline())
-assert permission['id']==91
-assert permission['result']['outcome']['outcome']=='cancelled'
-send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'session-a','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'session-a-cancelled'}}}})
-send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})
-sys.stdin.read()
-"#;
-    ExternalProviderLaunch {
-        executable: PathBuf::from("/usr/bin/python3"),
-        arguments: vec!["-c".to_owned(), fixture.to_owned()],
-        environment: Vec::new(),
-    }
+    // ACP v1 prompt-turn.mdx:336-350 requires the client to answer every
+    // pending permission with `cancelled` after it sends session/cancel.
+    acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+        .respond("initialize", serde_json::json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {},
+            "agentInfo": {"name": "permission-cancel-fixture", "version": "1"}
+        }))
+        .expect_request("create", "session/new", serde_json::json!({}))
+        .respond("create", serde_json::json!({"sessionId": "session-a"}))
+        .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId": "session-a"}))
+        .send(serde_json::json!({
+            "jsonrpc": "2.0", "id": 91, "method": "session/request_permission",
+            "params": {"sessionId": "session-a", "toolCall": {"toolCallId": "permission-a", "title": "Run an approved command", "kind": "execute"},
+                "options": [{"optionId": "allow-a", "name": "Allow once", "kind": "allow_once"}]}
+        }))
+        .expect_message(serde_json::json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "session-a"}}))
+        .expect_message(serde_json::json!({"jsonrpc": "2.0", "id": 91, "result": {"outcome": {"outcome": "cancelled"}}}))
+        .send(serde_json::json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-a", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "session-a-cancelled"}}}}))
+        .respond("prompt", serde_json::json!({"stopReason": "cancelled"}))
+        .launch()
 }
 
 async fn wait_for_pending_approval<TPromptFuture>(

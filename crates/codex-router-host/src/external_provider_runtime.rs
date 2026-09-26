@@ -5,6 +5,7 @@ mod acp_scripted_fixture;
 #[cfg(test)]
 mod approval_dispatch_tests;
 mod approval_presentation;
+mod approval_turn_cancellation;
 mod external_approval_dispatch;
 mod external_permission_options;
 mod provider_approval_dispatch;
@@ -1150,6 +1151,11 @@ impl ExternalProviderRuntime {
         provider_session_id: String,
         expected_operation_id: Option<OperationId>,
     ) -> Result<(), ExternalProviderRuntimeError> {
+        let approval_target = self.approval_contexts.lock().ok().and_then(|contexts| {
+            contexts
+                .get(&provider_session_id)
+                .map(|context| context.target.clone())
+        });
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
             .send(ProviderCommand::Cancel {
@@ -1163,7 +1169,13 @@ impl ExternalProviderRuntime {
             })?;
         result.await.map_err(|_| {
             ExternalProviderRuntimeError::Operation("provider runtime closed".to_owned())
-        })?
+        })??;
+        approval_turn_cancellation::cancel_pending_approvals(
+            &self.approval_broker,
+            approval_target.as_ref(),
+        )
+        .await;
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
