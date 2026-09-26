@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT target_session_id,working_directory,requested_policy_json,\n                    created_by_json,approver_json,updated_at_ms\n             FROM provider_session_records\n             WHERE target_service_id=? AND target_endpoint_id=?\n             ORDER BY updated_at_ms DESC,target_session_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "target_session_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "target_session_id"
+          }
+        }
+      },
+      {
+        "name": "working_directory",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "working_directory"
+          }
+        }
+      },
+      {
+        "name": "requested_policy_json",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "requested_policy_json"
+          }
+        }
+      },
+      {
+        "name": "created_by_json",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "created_by_json"
+          }
+        }
+      },
+      {
+        "name": "approver_json",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "approver_json"
+          }
+        }
+      },
+      {
+        "name": "updated_at_ms",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "updated_at_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "353134dbf5080a650ac9ff0630e8ac4665891ef414746385bc614f01ebfebb78"
+}

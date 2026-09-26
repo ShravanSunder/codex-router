@@ -25,7 +25,6 @@ pub struct SessionEventAttachment {
 pub struct HubSessionSummary {
     pub session: SessionRef,
     pub working_directory: PathBuf,
-    pub created_at_seconds: i64,
     pub updated_at_seconds: i64,
     pub preview: String,
     pub name: Option<String>,

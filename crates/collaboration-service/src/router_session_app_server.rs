@@ -414,7 +414,8 @@ fn render_thread(summary: &HubSessionSummary) -> Value {
         "preview":summary.preview,"ephemeral":false,
         "modelProvider":summary.session.endpoint.endpoint_id.as_str(),
         "model":summary.model,
-        "createdAt":summary.created_at_seconds,
+        // Router has no creation timestamp for provider Sessions, including legacy rows.
+        "createdAt":summary.updated_at_seconds,
         "updatedAt":summary.updated_at_seconds,
         "status":status,
         "cwd":summary.working_directory,

@@ -68,7 +68,6 @@ impl SessionCommandPort for ScriptedSessionBackend {
             .push(HubSessionSummary {
                 session: self.session.clone(),
                 working_directory: command.working_directory,
-                created_at_seconds: 1_700_000_000,
                 updated_at_seconds: 1_700_000_000,
                 preview: String::new(),
                 name: None,

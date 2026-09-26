@@ -193,7 +193,6 @@ async fn durable_unloaded_session_has_a_stable_uuid_alias() -> Result<(), Box<dy
         .push(HubSessionSummary {
             session: stored.clone(),
             working_directory: PathBuf::from("/tmp"),
-            created_at_seconds: 1_700_000_000,
             updated_at_seconds: 1_700_000_000,
             preview: "saved input".into(),
             name: None,

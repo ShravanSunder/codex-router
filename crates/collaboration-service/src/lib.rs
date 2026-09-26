@@ -29,13 +29,16 @@ pub use codex_acp_adapter::ConversationOperationRecorder;
 pub use codex_conversation_operation_recorder::{
     CodexConversationOperationRecorder, UnavailableConversationOperationRecorder,
 };
+mod provider_session_event_hub;
 mod provider_session_record;
+mod session_event_hub;
 pub use provider_operation_store::{
     ProviderOperationAdmission, ProviderOperationAdmissionResult, ProviderOperationRecord,
     ProviderOperationStore, ProviderOperationStoreError,
 };
 mod delivery_acceptance_effect;
 mod delivery_route_projection;
+pub use provider_session_event_hub::{HubReceiveError, ProviderSessionEventHub, receive_hub_event};
 pub use provider_session_record::ProviderSessionRecord;
 mod app_server_item_translation;
 mod app_server_model_catalog;
@@ -66,7 +69,6 @@ pub use router_session_app_server::{
 };
 mod session_delivery_contract;
 mod session_delivery_router;
-mod session_event_hub;
 mod stored_delivery_receipt;
 mod stored_run_receipt;
 pub use collaboration_protocol::{DeliveryClientReceipt, DeliveryReceipt};
