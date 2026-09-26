@@ -56,7 +56,15 @@ impl FloorSwitchAdmission {
             if self.hard_reconnect.is_cancelled() || self.early_reconnect.is_cancelled() {
                 return true;
             }
-            let mut active_turn = self.active_turn.lock().await;
+            let mut active_turn = tokio::select! {
+                biased;
+                () = self.hard_reconnect.cancelled() => return true,
+                () = self.early_reconnect.cancelled() => return true,
+                active_turn = self.active_turn.lock() => active_turn,
+            };
+            if self.hard_reconnect.is_cancelled() || self.early_reconnect.is_cancelled() {
+                return true;
+            }
             let observed_intent = *self.intent.borrow();
             if observed_intent.pending && *active_turn {
                 drop(active_turn);
@@ -77,6 +85,9 @@ impl FloorSwitchAdmission {
             }
             if *self.intent.borrow() != observed_intent {
                 continue;
+            }
+            if self.hard_reconnect.is_cancelled() || self.early_reconnect.is_cancelled() {
+                return true;
             }
             *active_turn = true;
             self.turn_activity.send_replace(true);

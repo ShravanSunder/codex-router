@@ -1404,6 +1404,10 @@ mod registry_tests {
 #[cfg(test)]
 #[path = "websocket-tests"]
 mod async_forwarding_tests {
+    #[path = "floor-switch-supervisor-tests.rs"]
+    mod floor_switch_supervisor_tests;
+    #[path = "floor-switch-terminal-tests.rs"]
+    mod floor_switch_terminal_tests;
     #[path = "floor-switch-tests.rs"]
     mod floor_switch_tests;
 
