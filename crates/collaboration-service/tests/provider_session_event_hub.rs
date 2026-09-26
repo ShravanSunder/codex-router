@@ -212,6 +212,12 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
     let cold = hub.sessions(target.endpoint.clone()).await?;
     ensure_eq!(cold.len(), 1);
     ensure_eq!(cold[0].updated_at_seconds, 3);
+    ensure_eq!(
+        cold[0].approver,
+        message_board::Identity::Session {
+            session: target.clone()
+        }
+    );
     ensure_eq!(cold[0].state, SessionState::Unloaded);
     ensure_eq!(cold[0].preview, "");
     ensure!(cold[0].name.is_none() && cold[0].model.is_none());
@@ -233,8 +239,12 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
             .sequence,
         1
     );
-    let live = hub.sessions(target.endpoint).await?;
+    let live = hub.sessions(target.endpoint.clone()).await?;
     ensure_eq!(live[0].state, SessionState::Running);
+    ensure_eq!(
+        live[0].approver,
+        message_board::Identity::Session { session: target }
+    );
     Ok(())
 }
 

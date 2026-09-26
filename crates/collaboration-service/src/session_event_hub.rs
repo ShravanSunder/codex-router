@@ -2,7 +2,7 @@
 //!
 //! The event hub implementation belongs to the Session model slice. The
 //! app-server and ACP-agent faces consume this trait without owning state.
-use message_board::{SessionEndpointRef, SessionRef};
+use message_board::{Identity, SessionEndpointRef, SessionRef};
 use session_event_model::{SessionEvent, SessionState};
 use std::{future::Future, path::PathBuf, pin::Pin};
 use tokio::sync::broadcast;
@@ -24,6 +24,7 @@ pub struct SessionEventAttachment {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HubSessionSummary {
     pub session: SessionRef,
+    pub approver: Identity,
     pub working_directory: PathBuf,
     pub updated_at_seconds: i64,
     pub preview: String,
