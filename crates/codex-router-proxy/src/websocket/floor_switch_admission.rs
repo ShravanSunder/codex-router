@@ -1,5 +1,6 @@
 //! Serialized graceful floor-switch decision at established WebSocket turn boundaries.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use codex_router_core::ids::AccountId;
@@ -83,14 +84,19 @@ impl FloorSwitchAdmission {
         }
     }
 
-    pub(super) async fn after_terminal_turn(&self) {
+    pub(super) async fn deliver_terminal_and_release_turn<E>(
+        &self,
+        delivery: impl Future<Output = Result<(), E>>,
+    ) -> Result<(), E> {
         let mut active_turn = self.active_turn.lock().await;
+        delivery.await?;
         *active_turn = false;
         self.turn_activity.send_replace(false);
         let observed_intent = *self.intent.borrow();
         if observed_intent.pending {
             let _switched = self.switch_if_safe(&mut active_turn, observed_intent).await;
         }
+        Ok(())
     }
 
     pub(super) async fn on_idle_intent(&self) {

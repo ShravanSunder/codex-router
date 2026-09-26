@@ -6161,7 +6161,8 @@ where
                 let is_response_create = is_response_create(&local_message);
                 if is_response_create {
                     if floor_switch_admission.before_next_create().await {
-                        close_websocket_sink_best_effort(&mut upstream_write).await?;
+                        tunnel_shutdown.cancel();
+                        let _ = close_websocket_sink_best_effort(&mut upstream_write).await;
                         return Ok(());
                     }
                     active_turn_reservation.reserve_if_idle(current_unix_seconds());
@@ -6283,19 +6284,36 @@ where
                     close_websocket_sink_best_effort(&mut local_write).await?;
                     return Ok(());
                 }
-                local_write.send(upstream_message.message).await?;
-                context.session_registry.note_upstream_message_forwarded(context.session_id);
+                let is_completed = metadata_text
+                    .as_ref()
+                    .is_some_and(|text| is_response_completed_text(text));
+                let is_terminal = is_completed
+                    || metadata_text
+                        .as_ref()
+                        .is_some_and(|text| is_response_failed_text(text));
+                if is_terminal {
+                    context
+                        .floor_switch_admission
+                        .deliver_terminal_and_release_turn(async {
+                            local_write.send(upstream_message.message).await?;
+                            context
+                                .session_registry
+                                .note_upstream_message_forwarded(context.session_id);
+                            if is_completed {
+                                context.session_registry.clear_capacity_retry(context.session_id);
+                                context.session_registry.note_response_completed(context.session_id);
+                            }
+                            context.active_turn_reservation.release_current();
+                            Ok::<(), WebSocketTunnelError>(())
+                        })
+                        .await?;
+                } else {
+                    local_write.send(upstream_message.message).await?;
+                    context
+                        .session_registry
+                        .note_upstream_message_forwarded(context.session_id);
+                }
                 if let Some(metadata_text) = metadata_text {
-                    if is_response_completed_text(&metadata_text) {
-                        context.session_registry.clear_capacity_retry(context.session_id);
-                        context.session_registry.note_response_completed(context.session_id);
-                    }
-                    if is_response_completed_text(&metadata_text)
-                        || is_response_failed_text(&metadata_text)
-                    {
-                        context.active_turn_reservation.release_current();
-                        context.floor_switch_admission.after_terminal_turn().await;
-                    }
                     let affinity_owner_context = context.affinity_owner_context.clone();
                     let async_affinity_owner_recorder =
                         context.async_affinity_owner_recorder.clone();

@@ -5365,6 +5365,10 @@ mod tests {
             Err(error) => panic!("mock upstream thread panicked: {error:?}"),
         }
 
+        // The retry excludes the primary in process before its queued SQLite
+        // exhaustion write completes. Establish the durable row before asking
+        // a new repository selector to make the post-retry decision.
+        wait_for_durable_quota_exhaustion(&state, &[primary.account_id()]);
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
         wait_for_repository_selected_account(
             &runtime_state,

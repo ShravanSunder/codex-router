@@ -1,4 +1,81 @@
 use super::*;
+use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Waker;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
+use tokio::io::DuplexStream;
+use tokio::io::ReadBuf;
+
+struct HeldFlushGate {
+    held: AtomicBool,
+    entered: Notify,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl HeldFlushGate {
+    fn new() -> Self {
+        Self {
+            held: AtomicBool::new(true),
+            entered: Notify::new(),
+            waker: Mutex::new(None),
+        }
+    }
+
+    fn release(&self) {
+        self.held.store(false, Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().expect("flush waker lock").take() {
+            waker.wake();
+        }
+    }
+}
+
+struct HeldFlushIo {
+    inner: DuplexStream,
+    gate: Arc<HeldFlushGate>,
+}
+
+impl AsyncRead for HeldFlushIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for HeldFlushIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(context, bytes)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.gate.held.load(Ordering::SeqCst) {
+            *self.gate.waker.lock().expect("flush waker lock") = Some(context.waker().clone());
+            self.gate.entered.notify_one();
+            return Poll::Pending;
+        }
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
+    }
+}
 
 struct HeldSelectableFloorPeer {
     entered: Arc<Notify>,
@@ -8,7 +85,158 @@ struct HeldSelectableFloorPeer {
 struct ImmediateSelectableFloorPeer;
 
 #[tokio::test]
+async fn terminal_delivery_blocks_next_create_until_turn_state_commits() {
+    let (router_local_stream, client_stream) = duplex(4096);
+    let (router_upstream_stream, upstream_stream) = duplex(4096);
+    let flush_gate = Arc::new(HeldFlushGate::new());
+    let router_local = WebSocketStream::from_raw_socket(
+        HeldFlushIo {
+            inner: router_local_stream,
+            gate: Arc::clone(&flush_gate),
+        },
+        Role::Server,
+        None,
+    )
+    .await;
+    let mut client = WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+    let router_upstream =
+        WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+    let mut upstream = WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+    let registry = WebSocketRevocationRegistry::new();
+    let account_id = AccountId::new("acct_terminal_turn_gate").expect("fixture account id");
+    let session = registry.register_cancellation_with_peer_addr(
+        TokenGeneration::new(1),
+        account_id.clone(),
+        None,
+    );
+    let revocation = session.cancellation().clone();
+    let session_shutdown = CancellationToken::new();
+    let notifier = WebSocketQuotaFloorNotifier::new(registry);
+    let affinity_secret = RouterAffinityHashSecret::new(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
+    .expect("fixture affinity secret");
+    let affinity_owner_context = WebSocketAffinityOwnerContext {
+        affinity_secret,
+        account_id,
+        credential_generation: 1,
+        active_reservation_guard: None,
+        session_affinity_activity_handle: None,
+    };
+    let router_task = forward_duplex_until_complete(
+        router_local,
+        router_upstream,
+        WebSocketForwardingContext {
+            session_registration: session,
+            affinity_owner_recorder: None,
+            async_affinity_owner_recorder: None,
+            affinity_record_tasks: TaskTracker::new(),
+            affinity_owner_context: Some(&affinity_owner_context),
+            provider_error_observer: None,
+            floor_switch_peer_assessor: Some(Arc::new(ImmediateSelectableFloorPeer)),
+            initial_turn_active: true,
+            revocation: &revocation,
+            session_shutdown: &session_shutdown,
+        },
+    );
+    let peer_task = async {
+        upstream
+            .send(Message::text(r#"{"type":"response.completed","turn":1}"#))
+            .await
+            .expect("first terminal frame should send");
+        let first_terminal = client
+            .next()
+            .await
+            .expect("client should see first terminal")
+            .expect("first terminal should decode");
+        assert_eq!(
+            first_terminal.to_string(),
+            r#"{"type":"response.completed","turn":1}"#
+        );
+        flush_gate.entered.notified().await;
+        client
+            .send(Message::text(r#"{"type":"response.create","turn":2}"#))
+            .await
+            .expect("second turn should queue");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), upstream.next())
+                .await
+                .is_err(),
+            "second create must not reach upstream before terminal state commits"
+        );
+        flush_gate.release();
+        let second_create = tokio::time::timeout(Duration::from_secs(2), upstream.next())
+            .await
+            .expect("second turn should reach upstream after release")
+            .expect("second create should exist")
+            .expect("second create should decode");
+        assert_eq!(
+            second_create.to_string(),
+            r#"{"type":"response.create","turn":2}"#
+        );
+        notifier.request_weekly_quota_floor_switch(&affinity_owner_context.account_id);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), client.next())
+                .await
+                .is_err(),
+            "later floor intent must not interrupt active second turn"
+        );
+        upstream
+            .send(Message::text(r#"{"type":"response.completed","turn":2}"#))
+            .await
+            .expect("second terminal frame should send");
+        let second_terminal = tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await
+            .expect("second terminal should arrive")
+            .expect("second terminal should exist")
+            .expect("second terminal should decode");
+        assert_eq!(
+            second_terminal.to_string(),
+            r#"{"type":"response.completed","turn":2}"#
+        );
+        let reconnect = tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await
+            .expect("floor reconnect should follow second terminal")
+            .expect("reconnect should exist")
+            .expect("reconnect should decode");
+        assert_eq!(reconnect.to_string(), CODEX_WEBSOCKET_RECONNECT_SIGNAL);
+        drop(client);
+        drop(upstream);
+    };
+    let (router_result, ()) = tokio::time::timeout(Duration::from_secs(4), async {
+        tokio::join!(router_task, peer_task)
+    })
+    .await
+    .expect("terminal turn gate fixture should finish");
+    assert!(
+        router_result.is_ok(),
+        "router should finish: {router_result:?}"
+    );
+}
+
+#[derive(Clone, Copy)]
+enum LocalFloorExit {
+    PreCancelledHard,
+    EarlyDecision,
+    HardDuringPeerAssessment,
+}
+
+#[tokio::test]
 async fn floor_reconnect_supervisor_delivers_signal_after_local_pump_finishes_first() {
+    assert_local_floor_exit_delivers_signal(LocalFloorExit::PreCancelledHard).await;
+}
+
+#[tokio::test]
+async fn early_floor_decision_delivers_signal_after_local_pump_finishes_first() {
+    assert_local_floor_exit_delivers_signal(LocalFloorExit::EarlyDecision).await;
+}
+
+#[tokio::test]
+async fn hard_floor_during_peer_assessment_delivers_signal_after_local_pump_finishes_first() {
+    assert_local_floor_exit_delivers_signal(LocalFloorExit::HardDuringPeerAssessment).await;
+}
+
+async fn assert_local_floor_exit_delivers_signal(exit: LocalFloorExit) {
     let (router_local_stream, client_stream) = duplex(4096);
     let (router_upstream_stream, upstream_stream) = duplex(4096);
     let router_local =
@@ -20,21 +248,44 @@ async fn floor_reconnect_supervisor_delivers_signal_after_local_pump_finishes_fi
         WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
     let (mut local_write, local_read) = router_local.split();
     let (upstream_write, _upstream_read) = router_upstream.split();
-    let (_intent_sender, intent) = watch::channel(FloorSwitchIntent::default());
+    let pending = !matches!(exit, LocalFloorExit::PreCancelledHard);
+    let (_intent_sender, intent) = watch::channel(FloorSwitchIntent {
+        epoch: u64::from(pending),
+        pending,
+    });
     let hard_reconnect = CancellationToken::new();
-    hard_reconnect.cancel();
+    if matches!(exit, LocalFloorExit::PreCancelledHard) {
+        hard_reconnect.cancel();
+    }
+    let hard_for_observation = hard_reconnect.clone();
     let early_reconnect = CancellationToken::new();
     let tunnel_shutdown = CancellationToken::new();
     let revocation = CancellationToken::new();
     let session_shutdown = CancellationToken::new();
+    let peer_entered = Arc::new(Notify::new());
+    let peer_release = Arc::new(Notify::new());
+    let peer_assessor: Option<Arc<dyn LiveFloorSwitchPeerAssessor>> = match exit {
+        LocalFloorExit::PreCancelledHard => None,
+        LocalFloorExit::EarlyDecision => Some(Arc::new(ImmediateSelectableFloorPeer)),
+        LocalFloorExit::HardDuringPeerAssessment => Some(Arc::new(HeldSelectableFloorPeer {
+            entered: Arc::clone(&peer_entered),
+            release: peer_release,
+        })),
+    };
     let floor_admission = FloorSwitchAdmission::new(
         intent,
         early_reconnect.clone(),
         hard_reconnect.clone(),
-        None,
-        None,
+        pending.then(|| AccountId::new("acct_local_floor_exit").expect("fixture account id")),
+        peer_assessor,
         false,
     );
+    if pending {
+        client
+            .send(Message::text(r#"{"type":"response.create"}"#))
+            .await
+            .expect("next create should queue at the local pump");
+    }
     let (local_done_sender, local_done_receiver) = tokio::sync::oneshot::channel();
     let local_task = tokio::spawn(pump_local_to_upstream(
         local_read,
@@ -77,6 +328,10 @@ async fn floor_reconnect_supervisor_delivers_signal_after_local_pump_finishes_fi
         upstream_task,
     );
     let observe_client = async {
+        if matches!(exit, LocalFloorExit::HardDuringPeerAssessment) {
+            peer_entered.notified().await;
+            hard_for_observation.cancel();
+        }
         local_done_receiver
             .await
             .expect("local pump should finish before signal release");
