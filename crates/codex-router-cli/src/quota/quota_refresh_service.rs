@@ -1,17 +1,34 @@
 use super::*;
 
-pub(crate) trait WeeklyQuotaFloorReachedObserver: Send + Sync {
-    fn weekly_quota_floor_reached(&self, account_id: &AccountId);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WeeklyQuotaFloorIntent {
+    GracefulSwitch,
+    HardStop,
+    Clear,
+}
+
+pub(crate) trait WeeklyQuotaFloorIntentObserver: Send + Sync {
+    fn weekly_quota_floor_intent(&self, account_id: &AccountId, intent: WeeklyQuotaFloorIntent);
 }
 
 pub(crate) struct QuotaRefreshObservationContext<'a> {
     pub(crate) observed_unix_seconds: u64,
-    pub(crate) weekly_floor_observer: Option<&'a dyn WeeklyQuotaFloorReachedObserver>,
+    pub(crate) weekly_floor_observer: Option<&'a dyn WeeklyQuotaFloorIntentObserver>,
 }
 
-impl WeeklyQuotaFloorReachedObserver for WebSocketQuotaFloorNotifier {
-    fn weekly_quota_floor_reached(&self, account_id: &AccountId) {
-        self.signal_weekly_quota_floor_reached(account_id);
+impl WeeklyQuotaFloorIntentObserver for WebSocketQuotaFloorNotifier {
+    fn weekly_quota_floor_intent(&self, account_id: &AccountId, intent: WeeklyQuotaFloorIntent) {
+        match intent {
+            WeeklyQuotaFloorIntent::GracefulSwitch => {
+                self.request_weekly_quota_floor_switch(account_id);
+            }
+            WeeklyQuotaFloorIntent::HardStop => {
+                self.signal_weekly_quota_floor_reached(account_id);
+            }
+            WeeklyQuotaFloorIntent::Clear => {
+                self.clear_weekly_quota_floor_switch(account_id);
+            }
+        }
     }
 }
 
@@ -333,17 +350,32 @@ where
                 )
                 .await?;
             if *route_band == USER_QUOTA_ROUTE_BAND
-                && let Some(floor_basis_points) =
-                    weekly_quota_floors.get(account.account_id()).copied()
-                && let Some(effective_stop) =
-                    weekly_quota_effective_stop_basis_points(Some(floor_basis_points))
-                && response.windows.iter().any(|window| {
-                    window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS
-                        && window.remaining_headroom.saturating_mul(100) <= effective_stop
-                })
                 && let Some(observer) = weekly_floor_observer
             {
-                observer.weekly_quota_floor_reached(account.account_id());
+                let floor = weekly_quota_floors.get(account.account_id()).copied();
+                let weekly_remaining_basis_points = response
+                    .windows
+                    .iter()
+                    .find(|window| window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS)
+                    .map(|window| window.remaining_headroom.saturating_mul(100));
+                let intent = match (floor, weekly_remaining_basis_points) {
+                    (None, _) => Some(WeeklyQuotaFloorIntent::Clear),
+                    (Some(floor), Some(remaining)) if remaining <= floor => {
+                        Some(WeeklyQuotaFloorIntent::HardStop)
+                    }
+                    (Some(floor), Some(remaining))
+                        if remaining
+                            <= weekly_quota_switch_at_basis_points(Some(floor))
+                                .unwrap_or(floor) =>
+                    {
+                        Some(WeeklyQuotaFloorIntent::GracefulSwitch)
+                    }
+                    (Some(_), Some(_)) => Some(WeeklyQuotaFloorIntent::Clear),
+                    (Some(_), None) => None,
+                };
+                if let Some(intent) = intent {
+                    observer.weekly_quota_floor_intent(account.account_id(), intent);
+                }
             }
             let snapshot = PersistedQuotaSnapshot::new(
                 account.account_id().clone(),

@@ -164,9 +164,9 @@ fn weekly_floor_guard_summary(row: &QuotaStatusRow) -> String {
         .weekly_quota_floor_basis_points
         .map_or(base.clone(), |floor| {
             format!(
-                "{base} / floor {}% / stops at {}%",
+                "switches at {}% / floor {}% / {base}",
+                weekly_quota_switch_at_basis_points(Some(floor)).unwrap_or(floor) / 100,
                 floor / 100,
-                weekly_quota_effective_stop_basis_points(Some(floor)).unwrap_or(floor) / 100,
             )
         });
     match oauth_maintenance_state(row.oauth_maintenance.as_ref()) {

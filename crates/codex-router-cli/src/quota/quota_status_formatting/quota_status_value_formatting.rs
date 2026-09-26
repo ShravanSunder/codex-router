@@ -436,6 +436,7 @@ pub(in crate::quota) fn format_routing_reason(reason: RoutingReason) -> &'static
         RoutingReason::HeldReserve => "held by quota: reserve",
         RoutingReason::HeldUnknown => "held by quota: needs refresh",
         RoutingReason::HeldShortWindowGuard => "held by quota: 5h guard",
+        RoutingReason::HeldFloorSwitch => "held by quota: healthy peer at floor switch",
         RoutingReason::UnknownFallbackPreferred => "fallback by quota: needs refresh",
         RoutingReason::UnknownFallbackAvailable => "fallback by quota: same unknown pool",
         RoutingReason::ExcludedDisabled => "excluded: account disabled",
@@ -465,7 +466,8 @@ pub(in crate::quota) fn format_next_use_from_routing_reason(reason: RoutingReaso
         RoutingReason::AvailableSamePool => "available by quota",
         RoutingReason::HeldReserve
         | RoutingReason::HeldUnknown
-        | RoutingReason::HeldShortWindowGuard => "held by quota",
+        | RoutingReason::HeldShortWindowGuard
+        | RoutingReason::HeldFloorSwitch => "held by quota",
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
             "fallback by quota"
         }

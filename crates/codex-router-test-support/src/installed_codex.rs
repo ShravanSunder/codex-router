@@ -1,5 +1,7 @@
 //! Installed Codex smoke harness.
 
+#[cfg(test)]
+mod floor_switch;
 mod retry;
 
 pub use retry::run_all_weekly_exhausted_terminal;

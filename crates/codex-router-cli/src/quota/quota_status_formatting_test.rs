@@ -212,13 +212,10 @@ fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
     );
     assert_eq!(json["accounts"][0]["weekly_quota_floor_percent"], 15);
     assert_eq!(
-        json["accounts"][0]["weekly_quota_effective_stop_basis_points"],
+        json["accounts"][0]["weekly_quota_switch_at_basis_points"],
         1_800
     );
-    assert_eq!(
-        json["accounts"][0]["weekly_quota_effective_stop_percent"],
-        18
-    );
+    assert_eq!(json["accounts"][0]["weekly_quota_switch_at_percent"], 18);
     assert_eq!(
         json["accounts"][0]["routing_exclusion"],
         "excluded_weekly_quota_floor"
@@ -232,7 +229,12 @@ fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
     must_ok(write_quota_plain(&mut plain_output, &report));
     let plain = must_ok(String::from_utf8(plain_output));
     assert!(plain.contains("weekly floor"));
-    assert!(plain.contains("\tfloor 15% / stops at 18%\t"));
+    assert!(plain.contains("\tswitches at 18% / floor 15%\t"));
+    assert!(
+        json["accounts"][0]
+            .get("weekly_quota_effective_stop_basis_points")
+            .is_none()
+    );
     assert!(plain.contains("blocked: weekly quota floor"));
 
     let view_model = quota_status_view_model(&report, report.rows(), 120);
@@ -241,7 +243,7 @@ fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
         .unwrap_or_else(|| panic!("capture should include selected details"));
     assert_eq!(selected.reason, "blocked: weekly quota floor");
     assert!(selected.guards.contains("floor 15%"));
-    assert!(selected.guards.contains("stops at 18%"));
+    assert!(selected.guards.contains("switches at 18%"));
 
     for width in [48, 160] {
         let mut tui_output = Vec::new();

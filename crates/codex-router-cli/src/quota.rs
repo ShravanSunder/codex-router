@@ -40,7 +40,7 @@ use codex_router_selection::burn_down::SelectedPool;
 use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
 use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
 use codex_router_selection::burn_down::assess_route_band;
-use codex_router_selection::burn_down::weekly_quota_effective_stop_basis_points;
+use codex_router_selection::burn_down::weekly_quota_switch_at_basis_points;
 use codex_router_selection::run_rate::QuotaRunRateConfidence;
 use codex_router_selection::run_rate::QuotaRunRateEstimate;
 use codex_router_selection::run_rate::QuotaRunRateEstimator;

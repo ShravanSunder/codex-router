@@ -69,9 +69,9 @@ pub(super) fn write_quota_plain(
             row.weekly_quota_floor_basis_points.map_or_else(
                 || "disabled".to_owned(),
                 |floor| format!(
-                    "floor {}% / stops at {}%",
+                    "switches at {}% / floor {}%",
+                    weekly_quota_switch_at_basis_points(Some(floor)).unwrap_or(floor) / 100,
                     floor / 100,
-                    weekly_quota_effective_stop_basis_points(Some(floor)).unwrap_or(floor) / 100,
                 )
             ),
             plain_reset_pace_summary(&reset_pace),

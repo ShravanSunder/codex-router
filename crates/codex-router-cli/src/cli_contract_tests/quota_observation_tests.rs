@@ -1,6 +1,103 @@
 use super::*;
 
 #[test]
+fn quota_status_projects_held_switch_and_distinct_saved_floor_thresholds() {
+    let test_root = TestRoot::new("quota-status-floor-switch");
+    must_ok(fs::create_dir(test_root.path()));
+    let router_root = test_root.path().join("router");
+    must_ok(fs::create_dir_all(&router_root));
+    let state_path = router_root.join("state.sqlite");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let protected_id = account_id("acct_status_floor_source");
+    let peer_id = account_id("acct_status_floor_peer");
+    for (account_id, label, remaining, weekly_reset) in [
+        (&protected_id, "source", 8, 10_000),
+        (&peer_id, "peer", 80, 400_000),
+    ] {
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(account_id.clone(), label, AccountStatus::Enabled)
+                .with_active_credential_generation(1),
+        ));
+        let windows = [
+            PersistedSelectorQuotaWindow::new(
+                account_id.clone(),
+                "responses",
+                18_000,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(100)
+            .with_reset_unix_seconds(18_000)
+            .with_effective(true)
+            .with_observed_unix_seconds(1_000),
+            PersistedSelectorQuotaWindow::new(
+                account_id.clone(),
+                "responses",
+                604_800,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(remaining)
+            .with_reset_unix_seconds(weekly_reset)
+            .with_observed_unix_seconds(1_000),
+        ];
+        must_ok(
+            SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+                &state,
+                account_id,
+                "responses",
+                &windows,
+                1_000,
+                2_000,
+            ),
+        );
+    }
+    let mutation = must_ok(
+        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
+    );
+    must_ok(
+        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
+            &protected_id,
+            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+        )),
+    );
+    let status = run_cli(
+        [
+            "codex-router",
+            "quota",
+            "status",
+            "--router-root",
+            path_to_str(&router_root),
+            "--format",
+            "json",
+            "--no-refresh",
+            "--now-unix-seconds",
+            "1100",
+        ],
+        CliContext::new(Vec::new()),
+    );
+    let json: serde_json::Value = must_ok(serde_json::from_str(&status.stdout));
+    let accounts = json["accounts"]
+        .as_array()
+        .expect("accounts should be present");
+    let source = accounts
+        .iter()
+        .find(|account| account["safe_account_label"] == "source")
+        .expect("source should be present");
+    let peer = accounts
+        .iter()
+        .find(|account| account["safe_account_label"] == "peer")
+        .expect("peer should be present");
+    assert_eq!(source["routing_reason"], "held_floor_switch");
+    assert_eq!(source["routing_exclusion"], "none");
+    assert_eq!(source["preferred_next"], false);
+    assert_eq!(peer["preferred_next"], true);
+    assert_eq!(source["weekly_quota_floor_percent"], 5);
+    assert_eq!(source["weekly_quota_switch_at_percent"], 8);
+    assert!(source.get("weekly_quota_effective_stop_percent").is_none());
+    test_async_runtime().block_on(mutation.close());
+}
+
+#[test]
 fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
     let test_root = TestRoot::new("quota-status-json");
     must_ok(fs::create_dir(test_root.path()));
@@ -164,8 +261,13 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
         "sqlx_mirror"
     );
     assert_eq!(parsed["accounts"][0]["next_use"], "preferred by quota");
-    assert!(parsed["accounts"][0]["weekly_quota_effective_stop_basis_points"].is_null());
-    assert!(parsed["accounts"][0]["weekly_quota_effective_stop_percent"].is_null());
+    assert!(parsed["accounts"][0]["weekly_quota_switch_at_basis_points"].is_null());
+    assert!(parsed["accounts"][0]["weekly_quota_switch_at_percent"].is_null());
+    assert!(
+        parsed["accounts"][0]
+            .get("weekly_quota_effective_stop_basis_points")
+            .is_none()
+    );
     assert_eq!(parsed["accounts"][0]["oauth_maintenance_state"], "retrying");
     assert_eq!(
         parsed["accounts"][0]["oauth_next_attempt_unix_seconds"],

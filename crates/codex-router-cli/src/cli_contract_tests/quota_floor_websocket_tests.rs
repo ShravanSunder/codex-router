@@ -2,40 +2,6 @@ use super::quota_snapshot_tests::FaultingFloorRefreshProvider;
 use super::*;
 use sqlx::Connection;
 
-struct JoinedFloorCrossingProvider {
-    floor_account_id: AccountId,
-}
-
-impl QuotaRefreshProvider for JoinedFloorCrossingProvider {
-    async fn fetch_quota(
-        &self,
-        request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
-        let weekly_remaining = if request.account_id() == &self.floor_account_id {
-            8
-        } else {
-            80
-        };
-        Ok(QuotaRefreshProviderResponse {
-            windows: vec![
-                QuotaRefreshProviderWindow {
-                    limit_window_seconds: 18_000,
-                    remaining_headroom: 100,
-                    reset_unix_seconds: Some(18_000),
-                    effective: true,
-                },
-                QuotaRefreshProviderWindow {
-                    limit_window_seconds: 604_800,
-                    remaining_headroom: weekly_remaining,
-                    reset_unix_seconds: Some(604_800),
-                    effective: false,
-                },
-            ],
-            reset_credits_available: None,
-        })
-    }
-}
-
 #[test]
 #[allow(clippy::result_large_err)]
 fn saved_floor_refresh_reconnects_established_websocket_before_later_response_create() {
@@ -152,6 +118,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     let upstream_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
     let upstream_address = must_ok(upstream_listener.local_addr());
     let (upstream_sender, upstream_receiver) = mpsc::channel();
+    let (completion_ack_sender, completion_ack_receiver) = mpsc::channel();
     let upstream_thread = thread::spawn(move || {
         for connection_index in 0..2 {
             let (stream, _) = must_ok(upstream_listener.accept());
@@ -194,6 +161,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
                     r#"{"type":"response.create","turn":3}"#
                 );
                 must_ok(websocket.send(Message::text(r#"{"type":"response.completed"}"#)));
+                must_ok(completion_ack_receiver.recv_timeout(Duration::from_secs(2)));
             }
         }
     });
@@ -214,7 +182,12 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     let mut first_client = connect_tokenless_websocket_with_retry(router_port);
     must_ok(first_client.send(Message::text(r#"{"type":"response.create","turn":1}"#)));
     assert_eq!(
-        must_ok(first_client.read()).to_string(),
+        first_client
+            .read()
+            .unwrap_or_else(|error| panic!(
+                "first floor socket initial response read failed: {error}"
+            ))
+            .to_string(),
         r#"{"type":"response.output_text.delta"}"#
     );
     assert_eq!(
@@ -295,7 +268,12 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     assert!(failed.to_string().contains("sqlite state store failed"));
     must_ok(first_client.send(Message::text(r#"{"type":"response.create","turn":2}"#)));
     assert_eq!(
-        must_ok(first_client.read()).to_string(),
+        first_client
+            .read()
+            .unwrap_or_else(|error| panic!(
+                "first floor socket second response read failed: {error}"
+            ))
+            .to_string(),
         r#"{"type":"response.output_text.delta","turn":2}"#
     );
     let options = sqlx::sqlite::SqliteConnectOptions::new()
@@ -335,7 +313,10 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
                 window.limit_window_seconds() == 604_800 && window.remaining_headroom() == 8
             })
     }));
-    let reconnect = must_ok(first_client.read()).to_string();
+    let reconnect = first_client
+        .read()
+        .unwrap_or_else(|error| panic!("first floor socket reconnect read failed: {error}"))
+        .to_string();
     assert!(reconnect.contains("websocket_connection_limit_reached"));
     let _ = first_client.send(Message::text(r#"{"type":"response.create","turn":3}"#));
     drop(first_client);
@@ -343,9 +324,13 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     let mut second_client = connect_tokenless_websocket_with_retry(router_port);
     must_ok(second_client.send(Message::text(r#"{"type":"response.create","turn":3}"#)));
     assert_eq!(
-        must_ok(second_client.read()).to_string(),
+        second_client
+            .read()
+            .unwrap_or_else(|error| panic!("fallback floor socket completion read failed: {error}"))
+            .to_string(),
         r#"{"type":"response.completed"}"#
     );
+    must_ok(completion_ack_sender.send(()));
     assert_eq!(
         must_ok(upstream_receiver.recv_timeout(Duration::from_secs(2))),
         "Bearer healthy-socket-access-canary"

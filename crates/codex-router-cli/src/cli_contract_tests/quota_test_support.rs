@@ -1,5 +1,39 @@
 use super::*;
 
+pub(super) struct JoinedFloorCrossingProvider {
+    pub(super) floor_account_id: AccountId,
+}
+
+impl QuotaRefreshProvider for JoinedFloorCrossingProvider {
+    async fn fetch_quota(
+        &self,
+        request: QuotaRefreshProviderRequest,
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+        let weekly_remaining = if request.account_id() == &self.floor_account_id {
+            8
+        } else {
+            80
+        };
+        Ok(QuotaRefreshProviderResponse {
+            windows: vec![
+                QuotaRefreshProviderWindow {
+                    limit_window_seconds: 18_000,
+                    remaining_headroom: 100,
+                    reset_unix_seconds: Some(18_000),
+                    effective: true,
+                },
+                QuotaRefreshProviderWindow {
+                    limit_window_seconds: 604_800,
+                    remaining_headroom: weekly_remaining,
+                    reset_unix_seconds: Some(604_800),
+                    effective: false,
+                },
+            ],
+            reset_credits_available: None,
+        })
+    }
+}
+
 pub(super) fn refresh_quota_with_dependencies<R, P>(
     stdout: &mut impl Write,
     router_root: PathBuf,
@@ -75,11 +109,13 @@ where
 #[derive(Default)]
 pub(super) struct RecordingWeeklyFloorObserver {
     pub(super) account_ids: Mutex<Vec<AccountId>>,
+    pub(super) intents: Mutex<Vec<WeeklyQuotaFloorIntent>>,
 }
 
-impl WeeklyQuotaFloorReachedObserver for RecordingWeeklyFloorObserver {
-    fn weekly_quota_floor_reached(&self, account_id: &AccountId) {
+impl WeeklyQuotaFloorIntentObserver for RecordingWeeklyFloorObserver {
+    fn weekly_quota_floor_intent(&self, account_id: &AccountId, intent: WeeklyQuotaFloorIntent) {
         lock_test_mutex(&self.account_ids, "weekly floor observer").push(account_id.clone());
+        lock_test_mutex(&self.intents, "weekly floor intents").push(intent);
     }
 }
 

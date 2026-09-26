@@ -10,7 +10,7 @@ pub(crate) struct BackgroundQuotaRefreshRuntime<C, D> {
     observed_clock: C,
     diagnostic_reporter: D,
     interval: Duration,
-    quota_floor_notifier: Option<Arc<dyn WeeklyQuotaFloorReachedObserver>>,
+    quota_floor_notifier: Option<Arc<dyn WeeklyQuotaFloorIntentObserver>>,
 }
 
 impl<C, D> BackgroundQuotaRefreshRuntime<C, D> {

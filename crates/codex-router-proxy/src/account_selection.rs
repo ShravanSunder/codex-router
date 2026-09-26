@@ -24,6 +24,7 @@ use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
 use codex_router_selection::burn_down::RoutingExclusion;
+use codex_router_selection::burn_down::RoutingReason;
 use codex_router_selection::burn_down::SelectedPool;
 use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
 use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
@@ -67,6 +68,12 @@ use crate::session_account_affinity_cache::SharedSessionAccountAffinityCache;
 use crate::session_account_affinity_cache::lookup_session_account_affinity;
 use crate::session_account_affinity_cache::publish_session_account_affinity;
 use crate::session_account_affinity_cache::reconcile_persisted_session_account_affinity;
+
+#[path = "account_selection/floor_switch_peer.rs"]
+mod floor_switch_peer;
+pub(crate) use floor_switch_peer::FloorSwitchPeerAssessment;
+pub(crate) use floor_switch_peer::LiveFloorSwitchPeerAssessor;
+pub(crate) use floor_switch_peer::RuntimeFloorSwitchPeerAssessor;
 
 /// Process-lifetime weighted state partitioned by route band.
 pub type RouteBandWeightedSelectors = Arc<Mutex<HashMap<String, WeightedDeficitSelector>>>;
@@ -1130,17 +1137,6 @@ where
                 selector_accounts,
             );
             let assessment = assess_route_band(assessment_input);
-            if assessment.selected_pool() == SelectedPool::None {
-                if let Some(retry_after_seconds) = short_quota_wait_delay_seconds {
-                    return Err(HttpProxyError::Selection {
-                        reason: QuotaAwareAccountSelectorError::ShortQuotaExhausted {
-                            retry_after_seconds,
-                        },
-                    });
-                }
-                return Err(empty_assessment_selection_error(&assessment));
-            }
-
             let affinity_owner_account_id = if route_kind.previous_response_affinity_capable() {
                 match previous_response_id(request)? {
                     Some(previous_response_id) => {
@@ -1168,6 +1164,26 @@ where
             } else {
                 None
             };
+            if assessment.selected_pool() == SelectedPool::None {
+                if affinity_owner_account_id.as_ref().is_some_and(|owner_id| {
+                    assessment.accounts().iter().any(|account| {
+                        account.account_id() == owner_id
+                            && account.routing_exclusion() == RoutingExclusion::WeeklyQuotaFloor
+                    })
+                }) {
+                    return Err(HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
+                    });
+                }
+                if let Some(retry_after_seconds) = short_quota_wait_delay_seconds {
+                    return Err(HttpProxyError::Selection {
+                        reason: QuotaAwareAccountSelectorError::ShortQuotaExhausted {
+                            retry_after_seconds,
+                        },
+                    });
+                }
+                return Err(empty_assessment_selection_error(&assessment));
+            }
             let session_id = if route_kind.previous_response_affinity_capable() {
                 request
                     .header_value("session-id")
@@ -1273,6 +1289,10 @@ where
 
             if let Some(session_affinity) = session_affinity.as_ref()
                 && assessment_account_is_available(&assessment, session_affinity.account_id())
+                && !assessment_account_yields_for_floor_switch(
+                    &assessment,
+                    session_affinity.account_id(),
+                )
             {
                 let selected = select_affinity_owner(
                     route_band,
@@ -1387,6 +1407,16 @@ fn assessment_account_is_available(
                 account.availability(),
                 AccountAvailability::Usable | AccountAvailability::Reserve
             )
+    })
+}
+
+fn assessment_account_yields_for_floor_switch(
+    assessment: &BurnDownRouteBandAssessmentResult,
+    account_id: &AccountId,
+) -> bool {
+    assessment.accounts().iter().any(|account| {
+        account.account_id() == account_id
+            && account.routing_reason() == RoutingReason::HeldFloorSwitch
     })
 }
 

@@ -75,6 +75,7 @@ use crate::account_selection::RouteBandQueueHealth;
 use crate::account_selection::RouteBandReservationBooks;
 use crate::account_selection::RouteBandRuntimeExhaustions;
 use crate::account_selection::RouteBandWeightedSelectors;
+use crate::account_selection::RuntimeFloorSwitchPeerAssessor;
 use crate::account_selection::SelectionReservationLock;
 use crate::account_selection::SqliteActiveClientLeaseReporter;
 use crate::account_selection::mark_runtime_quota_exhausted;
@@ -1248,8 +1249,7 @@ impl LoopbackProtocolConnectionHandler {
         path: String,
         local_peer_addr: Option<SocketAddr>,
     ) -> Result<(), LoopbackRouterRuntimeError> {
-        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
-            &self.selection_state_store,
+        let selection_runtime_state =
             AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
                 Arc::clone(&self.weighted_selectors),
                 Arc::clone(&self.account_holds),
@@ -1258,7 +1258,15 @@ impl LoopbackProtocolConnectionHandler {
                 Arc::clone(&self.route_band_queue_health),
                 Arc::clone(&self.selection_reservation_lock),
                 Arc::clone(&self.session_affinity_cache),
-            ),
+            );
+        let floor_switch_peer_assessor = RuntimeFloorSwitchPeerAssessor::new(
+            self.selection_state_store.clone(),
+            &selection_runtime_state,
+            self.runtime_clock(),
+        );
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &self.selection_state_store,
+            selection_runtime_state,
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
         )
@@ -1288,6 +1296,7 @@ impl LoopbackProtocolConnectionHandler {
             )
         }
         .with_revocation_registry(self.websocket_revocations.clone())
+        .with_floor_switch_peer_assessor(Arc::new(floor_switch_peer_assessor))
         .with_session_shutdown(self.session_shutdown.clone())
         .with_affinity_secret_provider(&self.affinity_secret_provider)
         .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder))

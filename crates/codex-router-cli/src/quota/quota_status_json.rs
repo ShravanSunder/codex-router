@@ -49,8 +49,8 @@ pub(super) struct JsonQuotaStatusAccount {
     pub(super) weekly_survival_margin_basis_points: Option<i64>,
     pub(super) weekly_quota_floor_basis_points: Option<u32>,
     pub(super) weekly_quota_floor_percent: Option<u32>,
-    pub(super) weekly_quota_effective_stop_basis_points: Option<u32>,
-    pub(super) weekly_quota_effective_stop_percent: Option<u32>,
+    pub(super) weekly_quota_switch_at_basis_points: Option<u32>,
+    pub(super) weekly_quota_switch_at_percent: Option<u32>,
     pub(super) oauth_maintenance_state: &'static str,
     pub(super) oauth_last_success_unix_seconds: Option<u64>,
     pub(super) oauth_next_attempt_unix_seconds: Option<u64>,
@@ -94,10 +94,10 @@ impl JsonQuotaStatusAccount {
             weekly_quota_floor_percent: row
                 .weekly_quota_floor_basis_points
                 .map(|basis_points| basis_points / 100),
-            weekly_quota_effective_stop_basis_points: weekly_quota_effective_stop_basis_points(
+            weekly_quota_switch_at_basis_points: weekly_quota_switch_at_basis_points(
                 row.weekly_quota_floor_basis_points,
             ),
-            weekly_quota_effective_stop_percent: weekly_quota_effective_stop_basis_points(
+            weekly_quota_switch_at_percent: weekly_quota_switch_at_basis_points(
                 row.weekly_quota_floor_basis_points,
             )
             .map(|basis_points| basis_points / 100),

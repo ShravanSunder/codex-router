@@ -207,6 +207,10 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
         *lock_test_mutex(&floor_observer.account_ids, "weekly floor observer"),
         vec![account_id]
     );
+    assert_eq!(
+        *lock_test_mutex(&floor_observer.intents, "weekly floor intents"),
+        vec![WeeklyQuotaFloorIntent::HardStop]
+    );
 
     let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
         &state,
@@ -335,8 +339,108 @@ fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
 
     assert_eq!(
         *lock_test_mutex(&floor_observer.account_ids, "weekly floor observer"),
-        vec![floor_account_id]
+        vec![floor_account_id, provider.healthy_account_id.clone()]
     );
+    assert_eq!(
+        *lock_test_mutex(&floor_observer.intents, "weekly floor intents"),
+        vec![
+            WeeklyQuotaFloorIntent::HardStop,
+            WeeklyQuotaFloorIntent::Clear
+        ]
+    );
+}
+
+#[test]
+fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
+    let test_root = TestRoot::new("quota-switch-clear-intents");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let account_id = account_id("acct_switch_intent");
+    must_ok(AccountStateRepository::upsert_account(
+        &state,
+        &AccountRecord::new(account_id.clone(), "switch-intent", AccountStatus::Enabled)
+            .with_active_credential_generation(1),
+    ));
+    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let bundle = AccountCredentialBundle::imported_codex_auth(
+        "switch-intent-access",
+        Some("switch-intent-refresh".to_owned()),
+    )
+    .with_expires_unix_seconds(2_000);
+    must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+    let resolver =
+        RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+    let mutation = must_ok(
+        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
+    );
+    must_ok(
+        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
+            &account_id,
+            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+        )),
+    );
+    let observer = RecordingWeeklyFloorObserver::default();
+    for (index, remaining) in [8, 9, 8, 8].into_iter().enumerate() {
+        if index == 3 {
+            must_ok(
+                test_async_runtime()
+                    .block_on(mutation.set_weekly_quota_floor_by_account_id(&account_id, None)),
+            );
+        }
+        let provider = StaticQuotaRefreshProvider::new(vec![
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 18_000,
+                remaining_headroom: 100,
+                reset_unix_seconds: Some(20_000),
+                effective: true,
+            },
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 604_800,
+                remaining_headroom: remaining,
+                reset_unix_seconds: Some(604_800),
+                effective: false,
+            },
+        ]);
+        let observed_unix_seconds = 1_100 + u64::try_from(index).expect("small index") * 100;
+        let mut output = Vec::new();
+        must_ok(refresh_quota_store_paths_with_floor_observer(
+            &mut output,
+            &state_path,
+            &secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            QuotaRefreshObservationContext {
+                observed_unix_seconds,
+                weekly_floor_observer: Some(&observer),
+            },
+        ));
+        let saved = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
+            &state,
+            "responses",
+            observed_unix_seconds,
+        ));
+        assert!(saved.iter().any(|account| {
+            account.account_id() == &account_id
+                && account.windows().iter().any(|window| {
+                    window.limit_window_seconds() == 604_800
+                        && window.remaining_headroom() == remaining
+                })
+        }));
+    }
+    assert_eq!(
+        *lock_test_mutex(&observer.intents, "weekly floor intents"),
+        vec![
+            WeeklyQuotaFloorIntent::GracefulSwitch,
+            WeeklyQuotaFloorIntent::Clear,
+            WeeklyQuotaFloorIntent::GracefulSwitch,
+            WeeklyQuotaFloorIntent::Clear,
+        ]
+    );
+    test_async_runtime().block_on(mutation.close());
 }
 
 #[test]

@@ -36,9 +36,9 @@ pub const MAX_WEEKLY_QUOTA_FLOOR_BASIS_POINTS: u32 = 1_500;
 /// Protective space above an explicitly configured weekly floor.
 pub const WEEKLY_QUOTA_FLOOR_CUSHION_BASIS_POINTS: u32 = 300;
 
-/// Effective stop for every new selection; absence keeps the floor disabled.
+/// Graceful switch point above a configured hard floor.
 #[must_use]
-pub fn weekly_quota_effective_stop_basis_points(configured_floor: Option<u32>) -> Option<u32> {
+pub fn weekly_quota_switch_at_basis_points(configured_floor: Option<u32>) -> Option<u32> {
     configured_floor.map(|floor| {
         floor
             .saturating_add(WEEKLY_QUOTA_FLOOR_CUSHION_BASIS_POINTS)
@@ -490,6 +490,7 @@ pub struct BurnDownAccountAssessment {
     projected_burn_pressure: u32,
     routing_weight: Option<u32>,
     routing_reason: RoutingReason,
+    weekly_floor_switch_band: bool,
     preferred_next: bool,
     far_idle_priority: bool,
     current_active_sessions: u32,
@@ -591,6 +592,40 @@ impl BurnDownAccountAssessment {
     #[must_use]
     pub const fn routing_reason(&self) -> RoutingReason {
         self.routing_reason
+    }
+
+    /// Whether fresh eligible weekly evidence is above the hard floor and at the switch point.
+    #[must_use]
+    pub const fn in_weekly_floor_switch_band(&self) -> bool {
+        self.weekly_floor_switch_band
+    }
+
+    /// Whether this account is a safe peer for an early floor switch.
+    #[must_use]
+    pub fn is_healthy_floor_switch_peer(&self) -> bool {
+        if self.weekly_floor_switch_band
+            || self.routing_exclusion != RoutingExclusion::None
+            || self.quota_evidence_reason != QuotaEvidenceReason::Ok
+            || self.freshness != QuotaEvidenceFreshness::Fresh
+            || !matches!(
+                self.availability,
+                AccountAvailability::Usable | AccountAvailability::Reserve
+            )
+        {
+            return false;
+        }
+        match self.projected_weekly_runway_seconds {
+            Some(runway) => runway >= REACTIVE_RECONNECT_MIN_RUNWAY_SECONDS,
+            None => {
+                self.current_active_sessions == 0
+                    && (matches!(
+                        self.weekly_burn_rate_confidence,
+                        QuotaRunRateConfidence::Unknown
+                            | QuotaRunRateConfidence::Insufficient
+                            | QuotaRunRateConfidence::Stale
+                    ) || self.weekly_projected_candidate_burn_basis_points_per_hour == Some(0))
+            }
+        }
     }
 
     /// Returns whether this is neutral preferred next.
@@ -770,6 +805,8 @@ pub enum RoutingReason {
     UnknownFallbackAvailable,
     /// Preferred real initial work for eligible idle allowance beyond 48 hours.
     PreferredIdleFarResetAdmission,
+    /// Above-floor account yields new work to a healthy peer at its switch point.
+    HeldFloorSwitch,
     /// Excluded because the account is disabled.
     ExcludedDisabled,
     /// Excluded because the account has no active credential.
@@ -802,6 +839,7 @@ impl RoutingReason {
             Self::UnknownFallbackPreferred => "unknown_fallback_preferred",
             Self::UnknownFallbackAvailable => "unknown_fallback_available",
             Self::PreferredIdleFarResetAdmission => "preferred_idle_far_reset",
+            Self::HeldFloorSwitch => "held_floor_switch",
             Self::ExcludedDisabled => "excluded_disabled",
             Self::ExcludedMissingCredential => "excluded_missing_credential",
             Self::ExcludedWeeklyQuotaFloor => "excluded_weekly_quota_floor",
@@ -834,6 +872,7 @@ impl RoutingReason {
             Self::UnknownFallbackPreferred => "fallback: needs refresh",
             Self::UnknownFallbackAvailable => "fallback: same unknown pool",
             Self::PreferredIdleFarResetAdmission => "preferred next: idle far-reset allowance",
+            Self::HeldFloorSwitch => "held: weekly floor switch",
             Self::ExcludedDisabled => "blocked: disabled",
             Self::ExcludedMissingCredential => "blocked: missing credential",
             Self::ExcludedWeeklyQuotaFloor => "blocked: weekly quota floor",
@@ -934,9 +973,37 @@ pub fn assess_route_band(
     let mut accounts = input
         .accounts
         .iter()
-        .map(|account| assess_account(account, input.now_unix_seconds, input.policy))
+        .map(|account| {
+            let mut assessment = assess_account(account, input.now_unix_seconds, input.policy);
+            assessment.weekly_floor_switch_band = account
+                .weekly_quota_floor_basis_points
+                .zip(assessment.weekly_remaining_headroom)
+                .is_some_and(|(floor, remaining_percent)| {
+                    assessment.routing_exclusion == RoutingExclusion::None
+                        && assessment.quota_evidence_reason == QuotaEvidenceReason::Ok
+                        && assessment.freshness == QuotaEvidenceFreshness::Fresh
+                        && matches!(
+                            assessment.availability,
+                            AccountAvailability::Usable | AccountAvailability::Reserve
+                        )
+                        && remaining_percent.saturating_mul(100) > floor
+                        && remaining_percent.saturating_mul(100)
+                            <= weekly_quota_switch_at_basis_points(Some(floor)).unwrap_or(10_000)
+                });
+            assessment
+        })
         .collect::<Vec<_>>();
     accounts.sort_by(|left, right| left.account_id.cmp(&right.account_id));
+    let healthy_peer_preference = accounts
+        .iter()
+        .any(|account| account.weekly_floor_switch_band)
+        && accounts
+            .iter()
+            .any(BurnDownAccountAssessment::is_healthy_floor_switch_peer);
+    let all_account_assessments = healthy_peer_preference.then(|| accounts.clone());
+    if healthy_peer_preference {
+        accounts.retain(BurnDownAccountAssessment::is_healthy_floor_switch_peer);
+    }
     let ordinary_routing_weights = accounts
         .iter()
         .map(|account| (account.account_id.clone(), account.routing_weight))
@@ -1022,6 +1089,25 @@ pub fn assess_route_band(
         account.routing_reason = routing_reason_for_account(account, reason_context);
     }
 
+    if let Some(mut all_accounts) = all_account_assessments {
+        for account in &mut all_accounts {
+            if let Some(selected) = accounts
+                .iter()
+                .find(|selected| selected.account_id == account.account_id)
+            {
+                *account = selected.clone();
+            } else if account.routing_exclusion == RoutingExclusion::None
+                && matches!(
+                    account.availability,
+                    AccountAvailability::Usable | AccountAvailability::Reserve
+                )
+            {
+                account.routing_reason = RoutingReason::HeldFloorSwitch;
+            }
+        }
+        accounts = all_accounts;
+    }
+
     BurnDownRouteBandAssessmentResult {
         route_band: input.route_band,
         route_status: RouteBandAssessmentStatus::Supported,
@@ -1054,6 +1140,7 @@ fn assess_account(
         projected_burn_pressure: 0,
         routing_weight: Some(DEFAULT_UNKNOWN_FALLBACK_WEIGHT),
         routing_reason: RoutingReason::UnknownFallbackAvailable,
+        weekly_floor_switch_band: false,
         preferred_next: false,
         far_idle_priority: false,
         current_active_sessions: input.current_active_sessions,
@@ -1288,8 +1375,7 @@ fn weekly_quota_floor_excludes(input: &BurnDownAccountInput, windows: &[WindowAs
     }
 
     let current_remaining_basis_points = weekly_window.remaining_headroom.saturating_mul(100);
-    current_remaining_basis_points
-        <= weekly_quota_effective_stop_basis_points(Some(floor_basis_points)).unwrap_or(10_000)
+    current_remaining_basis_points <= floor_basis_points
 }
 
 fn account_display_metrics(
@@ -3014,8 +3100,155 @@ mod tests {
     }
 
     #[test]
-    fn configured_floor_stops_at_three_points_above_floor_without_implicit_floor() {
-        for (remaining, excluded) in [(7, true), (8, true), (9, false)] {
+    fn weekly_floor_switch_prefers_peer_but_hard_stop_waits_for_configured_floor() {
+        let assess = |protected_remaining, include_peer| {
+            let mut accounts = vec![
+                account(
+                    "acct_protected",
+                    vec![
+                        window(FIVE_HOURS, 100, 4 * 3_600),
+                        window(WEEKLY, protected_remaining, 20 * 3_600),
+                    ],
+                )
+                .with_weekly_quota_floor_basis_points(500),
+            ];
+            if include_peer {
+                accounts.push(
+                    account(
+                        "acct_healthy_peer",
+                        vec![
+                            window(FIVE_HOURS, 100, 4 * 3_600),
+                            window_with_per_connection_burn_basis_points_per_hour(
+                                WEEKLY,
+                                80,
+                                5 * 86_400,
+                                20,
+                            ),
+                        ],
+                    )
+                    .with_current_active_sessions(1),
+                );
+            }
+            assess_route_band(input(accounts))
+        };
+
+        let above_switch = assess(9, true);
+        assert_eq!(
+            above_switch.preferred_next().map(AccountId::as_str),
+            Some("acct_protected")
+        );
+        let switching = assess(8, true);
+        let protected = account_assessment(&switching, "acct_protected");
+        assert_eq!(protected.routing_exclusion(), RoutingExclusion::None);
+        assert_eq!(protected.routing_reason().as_str(), "held_floor_switch");
+        assert_eq!(
+            switching.preferred_next().map(AccountId::as_str),
+            Some("acct_healthy_peer")
+        );
+        let no_peer = assess(8, false);
+        assert_eq!(
+            no_peer.preferred_next().map(AccountId::as_str),
+            Some("acct_protected")
+        );
+        let hard_stop = assess(5, true);
+        assert_eq!(
+            account_assessment(&hard_stop, "acct_protected").routing_exclusion(),
+            RoutingExclusion::WeeklyQuotaFloor
+        );
+        assert_eq!(
+            hard_stop.preferred_next().map(AccountId::as_str),
+            Some("acct_healthy_peer")
+        );
+    }
+
+    #[test]
+    fn switch_band_falls_back_without_a_healthy_peer_or_with_only_short_runway() {
+        let band_account = |account_id_value| {
+            account(
+                account_id_value,
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window(WEEKLY, 8, 20 * 3_600),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(500)
+        };
+        let both_in_band = assess_route_band(input(vec![
+            band_account("acct_first_band"),
+            band_account("acct_second_band"),
+        ]));
+        assert_eq!(both_in_band.weighted_candidates().len(), 2);
+        assert!(both_in_band.accounts().iter().all(|account| {
+            account.routing_exclusion() == RoutingExclusion::None
+                && account.routing_reason() != RoutingReason::HeldFloorSwitch
+        }));
+
+        let short_runway_peer = account(
+            "acct_short_runway_peer",
+            vec![
+                window(FIVE_HOURS, 100, 4 * 3_600),
+                window(WEEKLY, 50, 5 * 86_400)
+                    .with_projected_exhaustion_unix_seconds(NOW + 600)
+                    .with_per_connection_burn_basis_points_per_hour(100)
+                    .with_burn_rate_confidence(QuotaRunRateConfidence::Normal),
+            ],
+        );
+        let no_safe_peer = assess_route_band(input(vec![
+            band_account("acct_protected"),
+            short_runway_peer,
+        ]));
+        assert_eq!(
+            no_safe_peer.preferred_next().map(AccountId::as_str),
+            Some("acct_protected")
+        );
+        assert_ne!(
+            account_assessment(&no_safe_peer, "acct_protected").routing_reason(),
+            RoutingReason::HeldFloorSwitch
+        );
+    }
+
+    #[test]
+    fn switch_band_filters_before_near_and_far_idle_promotion() {
+        for protected_reset in [20 * 3_600, 53 * 3_600] {
+            let protected = account(
+                "acct_yielding_early_reset",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window(WEEKLY, 8, protected_reset),
+                ],
+            )
+            .with_weekly_quota_floor_basis_points(500);
+            let healthy_far_idle = account(
+                "acct_healthy_far_idle",
+                vec![
+                    window(FIVE_HOURS, 100, 4 * 3_600),
+                    window_with_per_connection_burn_basis_points_per_hour(
+                        WEEKLY,
+                        60,
+                        97 * 3_600,
+                        14,
+                    ),
+                ],
+            );
+            let assessment = assess_route_band(input(vec![protected, healthy_far_idle]));
+            assert_eq!(
+                assessment.preferred_next().map(AccountId::as_str),
+                Some("acct_healthy_far_idle")
+            );
+            assert_eq!(
+                account_assessment(&assessment, "acct_healthy_far_idle").routing_reason(),
+                RoutingReason::PreferredIdleFarResetAdmission
+            );
+            assert_eq!(
+                account_assessment(&assessment, "acct_yielding_early_reset").routing_reason(),
+                RoutingReason::HeldFloorSwitch
+            );
+        }
+    }
+
+    #[test]
+    fn configured_floor_is_hard_stop_and_switch_band_is_not_excluded() {
+        for (remaining, excluded) in [(5, true), (7, false), (8, false), (9, false)] {
             let assessment = assess_route_band(input(vec![
                 account(
                     "acct_floor_threshold",
@@ -5085,11 +5318,11 @@ mod tests {
     }
 
     #[test]
-    fn weekly_quota_floor_blocks_at_or_below_effective_stop_threshold() {
+    fn weekly_quota_floor_blocks_at_or_below_configured_floor() {
         let cases = [
             (4, RoutingExclusion::WeeklyQuotaFloor, false),
             (5, RoutingExclusion::WeeklyQuotaFloor, false),
-            (8, RoutingExclusion::WeeklyQuotaFloor, false),
+            (8, RoutingExclusion::None, true),
             (9, RoutingExclusion::None, true),
         ];
 
@@ -5120,7 +5353,7 @@ mod tests {
     fn weekly_quota_floor_supports_fifteen_percent_and_rejects_above_maximum() {
         for (remaining_percent, expected_exclusion) in [
             (15, RoutingExclusion::WeeklyQuotaFloor),
-            (18, RoutingExclusion::WeeklyQuotaFloor),
+            (18, RoutingExclusion::None),
             (19, RoutingExclusion::None),
         ] {
             let assessment = assess_route_band(input(vec![
@@ -5247,7 +5480,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_floor_cushion_excludes_two_percent_even_with_safe_runway() {
+    fn configured_floor_switch_band_keeps_two_percent_without_a_peer() {
         let account_input = account(
             "acct_protected",
             vec![
@@ -5256,7 +5489,7 @@ mod tests {
             ],
         );
         let without_policy = assess_route_band(input(vec![account_input.clone()]));
-        let protected_below_two_percent = assess_route_band(input(vec![
+        let protected_at_two_percent = assess_route_band(input(vec![
             account_input.with_weekly_quota_floor_basis_points(100),
         ]));
 
@@ -5265,11 +5498,11 @@ mod tests {
             RoutingExclusion::None
         );
         assert_eq!(
-            account_assessment(&protected_below_two_percent, "acct_protected").routing_exclusion(),
-            RoutingExclusion::WeeklyQuotaFloor
+            account_assessment(&protected_at_two_percent, "acct_protected").routing_exclusion(),
+            RoutingExclusion::None
         );
         assert!(without_policy.preferred_next().is_some());
-        assert!(protected_below_two_percent.preferred_next().is_none());
+        assert!(protected_at_two_percent.preferred_next().is_some());
     }
 
     #[test]
