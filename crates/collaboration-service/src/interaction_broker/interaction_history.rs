@@ -131,6 +131,7 @@ pub enum InteractionHistoryState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InteractionHistoryError {
     AlreadyExists,
+    AlreadySettled,
     NotPending,
     WrongActor,
     SelfApprover,
@@ -234,10 +235,38 @@ impl InteractionHistoryStore {
         }) {
             return Err(InteractionHistoryError::Unavailable);
         }
-        Ok(Self {
+        let store = Self {
             path,
             records: Mutex::new(records),
-        })
+        };
+        let mut recovered = store.records.lock().await.clone();
+        let mut had_pending = false;
+        for record in recovered.values_mut() {
+            match record {
+                InteractionHistoryRecord::Approval { state, .. }
+                    if state == &InteractionHistoryState::Pending =>
+                {
+                    *state = InteractionHistoryState::Cancelled {
+                        reason: "hostRestarted".to_owned(),
+                    };
+                    had_pending = true;
+                }
+                InteractionHistoryRecord::Question { state, .. }
+                    if state == &QuestionHistoryState::Pending =>
+                {
+                    *state = QuestionHistoryState::Cancelled {
+                        reason: "hostRestarted".to_owned(),
+                    };
+                    had_pending = true;
+                }
+                _ => {}
+            }
+        }
+        if had_pending {
+            store.persist(&recovered).await?;
+            *store.records.lock().await = recovered;
+        }
+        Ok(store)
     }
 
     pub(super) async fn record(
@@ -279,7 +308,7 @@ impl InteractionHistoryStore {
             .collect()
     }
 
-    pub(super) async fn approval(&self, request_id: &str) -> Option<InteractionHistoryRecord> {
+    pub(super) async fn interaction(&self, request_id: &str) -> Option<InteractionHistoryRecord> {
         self.records.lock().await.get(request_id).cloned()
     }
 
@@ -341,7 +370,7 @@ impl InteractionHistoryStore {
             return Err(InteractionHistoryError::WrongActor);
         }
         if state != &QuestionHistoryState::Pending {
-            return Err(InteractionHistoryError::NotPending);
+            return Err(InteractionHistoryError::AlreadySettled);
         }
         if let QuestionResponse::Answered { content } = response {
             validate_question_content(request, content)?;
@@ -414,7 +443,7 @@ impl InteractionHistoryStore {
             return Err(InteractionHistoryError::NotPending);
         };
         if state != &QuestionHistoryState::Pending {
-            return Err(InteractionHistoryError::NotPending);
+            return Err(InteractionHistoryError::AlreadySettled);
         }
         *state = QuestionHistoryState::Cancelled {
             reason: reason.to_owned(),
@@ -442,7 +471,7 @@ impl InteractionHistoryStore {
             return Err(InteractionHistoryError::WrongActor);
         }
         if record.approval_state() != Some(&InteractionHistoryState::Pending) {
-            return Err(InteractionHistoryError::NotPending);
+            return Err(InteractionHistoryError::AlreadySettled);
         }
         let request = record
             .approval_request()

@@ -86,6 +86,7 @@ impl From<InteractionHistoryError> for ApprovalDecisionError {
                 Self::PersistentChoiceNotAcknowledged { persistent_target }
             }
             InteractionHistoryError::WrongActor => Self::Code("wrongActor"),
+            InteractionHistoryError::AlreadySettled => Self::Code("alreadySettled"),
             InteractionHistoryError::SelfApprover => Self::Code("selfDecision"),
             InteractionHistoryError::NotPending => Self::Code("approvalNotPending"),
             InteractionHistoryError::InvalidOptionId => Self::Code("invalidOptionId"),
@@ -445,6 +446,12 @@ impl ServiceApprovalBroker {
     ) -> Result<(), InteractionHistoryError> {
         let mut pending = self.pending_questions.lock().await;
         if !pending.contains_key(request_id) {
+            if let Some(InteractionHistoryRecord::Question { state, .. }) =
+                self.interaction_history.interaction(request_id).await
+                && state != QuestionHistoryState::Pending
+            {
+                return Err(InteractionHistoryError::AlreadySettled);
+            }
             return Err(InteractionHistoryError::NotPending);
         }
         self.interaction_history
@@ -483,6 +490,12 @@ impl ServiceApprovalBroker {
     ) -> Result<(), InteractionHistoryError> {
         let mut pending = self.pending_questions.lock().await;
         if !pending.contains_key(request_id) {
+            if let Some(InteractionHistoryRecord::Question { state, .. }) =
+                self.interaction_history.interaction(request_id).await
+                && state != QuestionHistoryState::Pending
+            {
+                return Err(InteractionHistoryError::AlreadySettled);
+            }
             return Err(InteractionHistoryError::NotPending);
         }
         self.interaction_history
@@ -505,6 +518,12 @@ impl ServiceApprovalBroker {
     ) -> Result<session_event_model::OfferedOptionId, InteractionHistoryError> {
         let mut pending = self.typed_pending_approvals.lock().await;
         if !pending.contains_key(request_id) {
+            if let Some(InteractionHistoryRecord::Approval { state, .. }) =
+                self.interaction_history.interaction(request_id).await
+                && state != InteractionHistoryState::Pending
+            {
+                return Err(InteractionHistoryError::AlreadySettled);
+            }
             return Err(InteractionHistoryError::NotPending);
         }
         let selected = self
@@ -820,7 +839,7 @@ impl ServiceApprovalBroker {
         {
             let record = self
                 .interaction_history
-                .approval(&params.request_id)
+                .interaction(&params.request_id)
                 .await
                 .ok_or(ApprovalDecisionError::Code("approvalNotPending"))?;
             let option_id = match (&params.option_id, params.decision) {
@@ -849,6 +868,14 @@ impl ServiceApprovalBroker {
                 option_id: params.option_id.map(|_| selected.as_str().to_owned()),
                 scope: None,
             });
+        }
+        if let Some(InteractionHistoryRecord::Approval { state, .. }) = self
+            .interaction_history
+            .interaction(&params.request_id)
+            .await
+            && state != InteractionHistoryState::Pending
+        {
+            return Err(ApprovalDecisionError::Code("alreadySettled"));
         }
         let mut pending = self.pending.lock().await;
         let request = pending

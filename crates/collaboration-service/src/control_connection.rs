@@ -649,6 +649,9 @@ async fn dispatch_interaction(
                         crate::interaction_broker::InteractionHistoryError::NotPending => {
                             ("questionNotPending", None)
                         }
+                        crate::interaction_broker::InteractionHistoryError::AlreadySettled => {
+                            ("alreadySettled", None)
+                        }
                         crate::interaction_broker::InteractionHistoryError::InvalidAnswer {
                             field_id,
                         } => ("invalidAnswer", Some(field_id)),

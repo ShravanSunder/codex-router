@@ -363,6 +363,7 @@ pub fn control_schema_document(
         "approval/decide",
         &[
             "approvalNotPending",
+            "alreadySettled",
             "wrongActor",
             "selfDecision",
             "decisionNotOffered",
@@ -383,6 +384,7 @@ pub fn control_schema_document(
         "question/answer",
         &[
             "questionNotPending",
+            "alreadySettled",
             "wrongActor",
             "invalidAnswer",
             "unavailable",

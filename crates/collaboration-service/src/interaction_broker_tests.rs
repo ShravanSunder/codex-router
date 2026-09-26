@@ -1240,7 +1240,7 @@ async fn populated_old_approval_reader_survives_human_interaction_history() {
         broker
             .decide_typed_interaction("human-approval-1", &human, "allow-once", false)
             .await,
-        Err(crate::interaction_broker::InteractionHistoryError::NotPending)
+        Err(crate::interaction_broker::InteractionHistoryError::AlreadySettled)
     ));
 
     let old_bytes = tokio::fs::read(directory.join("approval-history.json"))
@@ -1668,4 +1668,106 @@ async fn agent_withdrawal_cancels_one_question_without_touching_the_next() {
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
     assert_eq!(broker.list_questions(true).await.len(), 1);
+}
+
+// R5: after a host restart, no pending interaction is answerable by the lost
+// agent connection. Keep both rows in history with one explicit cause.
+#[tokio::test]
+async fn restart_cancels_populated_pending_interaction_history() {
+    use message_board::{HumanId, Identity};
+
+    let (broker, generation, directory) = fixture_broker().await;
+    let expiry = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+    let (_legacy_params, _legacy_receiver) = insert_pending(&broker, generation, expiry).await;
+    let frozen_before = tokio::fs::read(directory.join("approval-history.json"))
+        .await
+        .expect("frozen history");
+    let requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let approver = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+    };
+    let approval_receiver = broker
+        .request_typed_approval(
+            requester.clone(),
+            approver.clone(),
+            typed_approval_request("restart-approval"),
+        )
+        .await
+        .expect("approval");
+    let question = serde_json::from_value(json!({
+        "requestId":"restart-question","prompt":"Proceed?","fields":[
+            {"kind":"boolean","fieldId":"yes","label":"Yes","description":null,"required":true}
+        ]
+    }))
+    .expect("question");
+    let question_receiver = broker
+        .request_question(requester, approver.clone(), question)
+        .await
+        .expect("question");
+    let service_id = broker.service_id.clone();
+    let backend = broker.backend.clone();
+    drop(broker);
+    let broker_after_restart =
+        ServiceApprovalBroker::load(service_id, backend, directory.join("approval-routes.json"))
+            .await
+            .expect("reload");
+    assert_eq!(
+        tokio::fs::read(directory.join("approval-history.json"))
+            .await
+            .expect("frozen history"),
+        frozen_before
+    );
+    assert!(
+        broker_after_restart
+            .list_typed_approvals(true)
+            .await
+            .is_empty()
+    );
+    assert!(broker_after_restart.list_questions(true).await.is_empty());
+    let records: std::collections::BTreeMap<
+        String,
+        crate::interaction_broker::InteractionHistoryRecord,
+    > = serde_json::from_slice(
+        &tokio::fs::read(directory.join("interaction-history.json"))
+            .await
+            .expect("history"),
+    )
+    .expect("persisted rows");
+    assert!(matches!(records["restart-approval"].approval_state(),
+        Some(crate::interaction_broker::InteractionHistoryState::Cancelled { reason }) if reason == "hostRestarted"));
+    assert!(matches!(&records["restart-question"],
+        crate::interaction_broker::InteractionHistoryRecord::Question {
+            state: crate::interaction_broker::QuestionHistoryState::Cancelled { reason }, ..
+        } if reason == "hostRestarted"));
+    assert!(matches!(
+        broker_after_restart
+            .decide_typed_interaction("restart-approval", &approver, "allow-once", false)
+            .await,
+        Err(crate::interaction_broker::InteractionHistoryError::AlreadySettled)
+    ));
+    assert!(matches!(
+        broker_after_restart
+            .decide(ApprovalDecideParams {
+                request_id: "restart-approval".into(),
+                decision: None,
+                option_id: Some("allow-once".into()),
+                acknowledge_persistent: false,
+                actor: approver.clone(),
+            })
+            .await,
+        Err(ApprovalDecisionError::Code("alreadySettled"))
+    ));
+    assert!(matches!(
+        broker_after_restart
+            .respond_question(
+                "restart-question",
+                &approver,
+                crate::interaction_broker::QuestionResponse::Declined
+            )
+            .await,
+        Err(crate::interaction_broker::InteractionHistoryError::AlreadySettled)
+    ));
+    assert!(approval_receiver.await.is_err());
+    assert!(question_receiver.await.is_err());
 }
