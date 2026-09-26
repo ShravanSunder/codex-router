@@ -33,6 +33,79 @@ pub fn observed_service_version() -> Option<String> {
         .and_then(|value| value.lock().ok().map(|version| version.clone()))
         .filter(|version| !version.is_empty())
 }
+
+static ROUTER_VERSION_WARNING_PRINTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn warn_on_router_version_mismatch(
+    client_name: &str,
+    client_version: &str,
+    service_version: &str,
+) {
+    let executable_name = std::env::current_exe().ok().and_then(|path| {
+        path.file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::to_owned)
+    });
+    if let Some(warning) = router_version_warning(
+        client_name,
+        client_version,
+        service_version,
+        executable_name.as_deref(),
+    ) && !ROUTER_VERSION_WARNING_PRINTED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!("{warning}");
+    }
+}
+
+fn router_version_warning(
+    client_name: &str,
+    client_version: &str,
+    service_version: &str,
+    executable_name: Option<&str>,
+) -> Option<String> {
+    ((client_name == "agent-collaboration"
+        || executable_name == Some("agent-collaboration"))
+        && !service_version.is_empty()
+        && client_version != service_version)
+        .then(|| {
+            format!(
+                "⚠ Router Host is stale (running {service_version}, CLI {client_version}); run `codex-router host restart`"
+            )
+        })
+}
+
+#[cfg(test)]
+mod router_version_warning_tests {
+    use super::router_version_warning;
+
+    #[test]
+    fn only_agent_collaboration_version_mismatch_warns() {
+        assert_eq!(
+            router_version_warning("agent-collaboration", "0.1.37", "0.1.36", None).as_deref(),
+            Some(
+                "⚠ Router Host is stale (running 0.1.36, CLI 0.1.37); run `codex-router host restart`"
+            )
+        );
+        assert_eq!(
+            router_version_warning("other-client", "0.1.37", "0.1.36", None),
+            None
+        );
+        assert!(
+            router_version_warning(
+                "conversation-client",
+                "0.1.37",
+                "0.1.36",
+                Some("agent-collaboration")
+            )
+            .is_some()
+        );
+        assert_eq!(
+            router_version_warning("agent-collaboration", "0.1.37", "0.1.37", None),
+            None
+        );
+    }
+}
 mod service_discovery;
 
 pub use collaboration_protocol::JournalStatus;
@@ -47,7 +120,18 @@ pub use observation_session::{
 
 mod acp_conversation;
 pub use acp_conversation::AcpConversation;
+mod conversation_client;
 mod conversation_contract;
+mod conversation_operation_result;
+mod conversation_session_operations;
+pub use conversation_client::{
+    ConversationCancelInput, ConversationClient, ConversationClientError, ConversationCreateInput,
+    ConversationCreatePromptInput, ConversationLoadInput, ConversationPromptInput,
+};
+pub use conversation_operation_result::{
+    ConversationCreatePromptOutcome, ConversationOperationResult, ConversationSettlement,
+    ConversationSettlementDetail, ConversationStopReason, ProviderLoadOutput, ProviderPromptOutput,
+};
 mod provider_conversation_operations;
 pub use conversation_contract::{
     ConversationCreatePromptError, ConversationCreatePromptRequest, ConversationCreatePromptResult,

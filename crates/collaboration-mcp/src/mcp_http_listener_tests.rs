@@ -566,7 +566,7 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
     assert!(tool_names.contains(&"endpoints_list"));
-    assert_eq!(tool_names.len(), 97);
+    assert_eq!(tool_names.len(), 95);
     let tools = tools_body
         .pointer("/result/tools")
         .and_then(Value::as_array)
@@ -575,10 +575,7 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
         ("wake_send", "native input acceptance"),
         ("schedule_prepare", "Preparation mutates"),
         ("board_message_post", "Saving the message"),
-        (
-            "conversation_create_and_prompt",
-            "same call-local ACP connection",
-        ),
+        ("conversation_create_and_prompt", "advertised client"),
     ] {
         let description = tools
             .iter()
@@ -619,13 +616,23 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
     );
     let create = client.post(listener.local_url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-session-id",session_id.clone()).header("mcp-protocol-version","2025-11-25").json(&json!({
             "jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"conversation_create","arguments":{
-                "endpoint":endpoint,"cwd":temporary.path(),"session":null,"fork":null,
+                "operationId":collaboration_protocol::OperationId::generate(),
+                "endpoint":endpoint,"workingDirectory":temporary.path(),"fork":null,
                 "model":"gpt-5.6-luna","effort":"low","access":"workspace-write",
                 "createdBy":{"endpoint":endpoint,"sessionId":"mcp-creator"},
                 "approver":{"endpoint":endpoint,"sessionId":"mcp-approver"},"rootMessageId":null
             }}
         })).send().await.expect("conversation create response");
     let create_body = protocol_response_json(create).await;
+    assert_eq!(
+        create_body.pointer("/result/structuredContent/kind"),
+        Some(&json!("created"))
+    );
+    assert!(
+        create_body
+            .pointer("/result/structuredContent/operationId")
+            .is_some()
+    );
     let created_target = create_body
         .pointer("/result/structuredContent/target")
         .cloned()
@@ -674,7 +681,9 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
     assert!(reconnect_initialized.status().is_success());
     let resumed = client.post(listener.local_url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-session-id",reconnect_session_id.clone()).header("mcp-protocol-version","2025-11-25").json(&json!({
             "jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"conversation_prompt","arguments":{
-                "target":created_target.clone(),"cwd":temporary.path(),"prompt":{"message":{"kind":"humanUser","text":"resume without replay"},"effort":null,"timeoutSeconds":3}
+                "target":created_target.clone(),"workingDirectory":temporary.path(),
+                "requestedBy":created_target.clone(),
+                "message":{"kind":"humanUser","text":"resume without replay"},"timeoutSeconds":3
             }}
         })).send().await.expect("reconnect prompt response");
     let resumed_body = protocol_response_json(resumed).await;
@@ -690,7 +699,9 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
     let active_prompt = tokio::spawn(async move {
         active_client.post(active_url).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-session-id",active_session_id).header("mcp-protocol-version","2025-11-25").json(&json!({
                 "jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"conversation_prompt","arguments":{
-                    "target":active_target,"cwd":active_cwd,"prompt":{"message":{"kind":"humanUser","text":"active shutdown proof"},"effort":null,"timeoutSeconds":60}
+                    "target":active_target.clone(),"workingDirectory":active_cwd,
+                    "requestedBy":active_target,
+                    "message":{"kind":"humanUser","text":"active shutdown proof"},"timeoutSeconds":60
                 }}
             })).send().await
     });
@@ -930,7 +941,9 @@ async fn run_initialized_mcp_resumed_prompt_after_load(load_error: Option<Value>
         .header("mcp-protocol-version", "2025-11-25")
         .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"conversation_prompt","arguments":{
             "target":{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"resumed-thread"},
-            "cwd":temporary.path(),"prompt":{"message":{"kind":"humanUser","text":"resume proof"},"effort":null,"timeoutSeconds":3}
+            "workingDirectory":temporary.path(),
+            "requestedBy":{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"resumed-thread"},
+            "message":{"kind":"humanUser","text":"resume proof"},"timeoutSeconds":3
         }}}))
         .send()
         .await
@@ -968,7 +981,7 @@ async fn initialized_http_message_response_loss_retains_known_target() {
         let (stream, _) = control.accept().await.expect("Control accept");
         let (read, mut write) = stream.into_split();
         let mut lines = BufReader::new(read).lines();
-        for method in ["control/initialize", "endpoint/list", "codex/messageSend"] {
+        for method in ["control/initialize", "message/send"] {
             let request: Value = serde_json::from_str(
                 &lines
                     .next_line()
@@ -978,19 +991,11 @@ async fn initialized_http_message_response_loss_retains_known_target() {
             )
             .expect("Control JSON");
             assert_eq!(request["method"], method);
-            if method == "codex/messageSend" {
+            if method == "message/send" {
                 assert_eq!(request["params"]["target"]["sessionId"], "http-thread");
                 break;
             }
-            let result = if method == "control/initialize" {
-                json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"controlSchemaDigest":digest})
-            } else {
-                json!({"serviceEpoch":epoch,"sequence":0,"endpoints":[{
-                    "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"HTTP fixture",
-                    "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
-                    "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":{"serviceEpoch":epoch,"generation":1}}]
-                }]})
-            };
+            let result = json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"controlSchemaDigest":digest});
             write
                 .write_all(
                     format!(
@@ -1044,7 +1049,7 @@ async fn initialized_http_message_response_loss_retains_known_target() {
             .header("mcp-protocol-version", "2025-11-25")
             .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"message_send","arguments":{
                 "target":{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"http-thread"},
-                "message":{"kind":"humanUser","text":"proof"},"delivery":"auto","generationGuard":null,"clientUserMessageId":null
+                "message":{"kind":"humanUser","text":"proof"},"delivery":"auto","generationGuard":null,"correlation":null
             }}}))
             .send()
             .await
@@ -1421,7 +1426,8 @@ async fn run_initialized_mcp_create_response_loss(
     let session_id = initialize_mcp_session(&client, &listener, "create-loss-proof").await;
     let response = client.post(listener.local_url()).header(CONTENT_TYPE, "application/json").header(ACCEPT, "application/json, text/event-stream").header("mcp-session-id", session_id).header("mcp-protocol-version", "2025-11-25").json(&json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"conversation_create","arguments":{
-            "endpoint":endpoint,"cwd":temporary.path(),"session":null,"fork":if fork { json!("fork-source") } else { Value::Null },
+            "operationId":collaboration_protocol::OperationId::generate(),
+            "endpoint":endpoint,"workingDirectory":temporary.path(),"fork":if fork { json!("fork-source") } else { Value::Null },
             "model":"gpt-5.6-luna","effort":if fork { Value::Null } else { json!("low") },"access":"workspace-write",
             "createdBy":{"endpoint":endpoint,"sessionId":"mcp-creator"},
             "approver":{"endpoint":endpoint,"sessionId":"mcp-approver"},"rootMessageId":null
@@ -1486,6 +1492,119 @@ async fn initialize_mcp_session(
         .expect("MCP initialized");
     assert!(initialized.status().is_success());
     session_id
+}
+
+#[tokio::test]
+async fn schema_required_fields_reach_each_tool_without_missing_field_errors() {
+    let temporary = tempfile::tempdir().expect("temporary service directory");
+    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
+        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
+        service_directory: temporary.path().to_owned(),
+        allowed_origins: Vec::new(),
+    })
+    .await
+    .expect("MCP listener starts");
+    let client = reqwest::Client::new();
+    let session = initialize_mcp_session(&client, &listener, "schema-required-inputs").await;
+    let server = crate::mcp_server::CollaborationMcpServer::new(temporary.path().to_owned());
+    let definitions = server
+        .resolved_tools()
+        .into_iter()
+        .map(|tool| {
+            let schema =
+                serde_json::to_value(tool.input_schema.as_ref()).expect("input schema JSON");
+            (tool.name.into_owned(), schema)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for (index, (name, schema)) in definitions.iter().enumerate() {
+        let arguments = schema_required_object(schema, &schema["$defs"]);
+        let response = client
+            .post(listener.local_url())
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header("mcp-session-id", session.clone())
+            .header("mcp-protocol-version", "2025-11-25")
+            .json(&json!({
+                "jsonrpc":"2.0","id":index + 2,"method":"tools/call",
+                "params":{"name":name,"arguments":arguments}
+            }))
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("{name} HTTP call: {error}"));
+        let response = protocol_response_json(response).await;
+        let encoded = response.to_string();
+        assert!(
+            !encoded.contains("missing field") && !encoded.contains("requires "),
+            "{name} rejected the schema-required input as incomplete: {encoded}"
+        );
+        if name == "wake_send" {
+            assert!(
+                !encoded.contains("explicit nullable generationGuard"),
+                "wake_send must accept an omitted optional generationGuard: {encoded}"
+            );
+        }
+    }
+}
+
+fn schema_required_object(schema: &Value, definitions: &Value) -> Value {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let name = reference.strip_prefix("#/$defs/").unwrap_or_default();
+        return schema_required_object(&definitions[name], definitions);
+    }
+    if let Some(constant) = schema.get("const") {
+        return constant.clone();
+    }
+    if let Some(variants) = schema.get("enum").and_then(Value::as_array) {
+        return variants.first().cloned().unwrap_or(Value::Null);
+    }
+    for keyword in ["oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(keyword).and_then(Value::as_array) {
+            return variants
+                .first()
+                .map(|variant| schema_required_object(variant, definitions))
+                .unwrap_or(Value::Null);
+        }
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            let mut object = serde_json::Map::new();
+            for field in required.iter().filter_map(Value::as_str) {
+                object.insert(
+                    field.to_owned(),
+                    schema_required_object(&schema["properties"][field], definitions),
+                );
+            }
+            Value::Object(object)
+        }
+        Some("array") => Value::Array(Vec::new()),
+        Some("integer") => schema.get("minimum").cloned().unwrap_or(json!(1)),
+        Some("number") => schema.get("minimum").cloned().unwrap_or(json!(1)),
+        Some("boolean") => Value::Bool(false),
+        Some("string") => {
+            if schema.get("format").and_then(Value::as_str) == Some("date-time") {
+                json!("2026-09-24T00:00:00Z")
+            } else if schema
+                .get("pattern")
+                .and_then(Value::as_str)
+                .is_some_and(|pattern| pattern.contains("7[0-9a-f]{3}"))
+            {
+                json!("019f0000-0000-7000-8000-000000000001")
+            } else if schema
+                .get("pattern")
+                .and_then(Value::as_str)
+                .is_some_and(|pattern| pattern.contains("[a-z]"))
+            {
+                json!("fixture")
+            } else if schema.get("minLength").and_then(Value::as_u64).unwrap_or(0) > 0 {
+                json!("x")
+            } else {
+                json!("")
+            }
+        }
+        _ => Value::Null,
+    }
 }
 
 #[tokio::test]

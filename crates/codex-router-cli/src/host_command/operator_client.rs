@@ -264,6 +264,9 @@ mod tests {
                 remote_control: RemoteControlCondition::Unavailable,
                 remote_control_identity: None,
                 executable_relation: ExecutableRelation::Unknown,
+                router_executable_relation: codex_router_host::RouterExecutableRelation::Unknown {
+                    reason: "operator response unavailable".to_owned(),
+                },
                 recovery_budget: RecoveryBudget::Available,
                 last_lifecycle_outcome: Some(LifecycleOutcome {
                     operation: HostOperation::Status,

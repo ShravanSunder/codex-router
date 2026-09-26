@@ -1,4 +1,5 @@
-use super::CollaborationMcpServer;
+use super::{CollaborationMcpServer, conversation_create_tool_result};
+use collaboration_protocol::{ConversationCreateOutcome, OperationId};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -68,192 +69,40 @@ fn message_adapter_preserves_preparation_and_submission_effects() {
 }
 
 #[test]
-fn create_and_prompt_failure_retains_created_target_and_unknown_effect() {
-    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
-        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-        "sessionId":"created-thread"
-    }))
-    .expect("target");
-    let result = super::create_prompt_tool_result(Err(
-        collaboration_client::OperationError::after_dispatch(
-            "prompt",
-            Some(target.clone()),
-            None,
-            collaboration_client::ClientError::Rejected {
-                code: -32603,
-                data: Some(serde_json::json!({"reason":"prompt rejected"})),
-            },
-        ),
-    ));
-    assert_eq!(result.is_error, Some(true));
-    let structured = result.structured_content.expect("structured error");
-    assert_eq!(structured["target"], serde_json::json!(target));
-    assert_eq!(structured["effect"], "unknown");
-    assert_eq!(structured["kind"], "rejected");
-}
+fn native_control_errors_keep_service_detail_and_only_uncertain_effects_are_unknown() {
+    let unsupported = super::structured_result::<serde_json::Value>(
+        Err(collaboration_client::ClientError::Rejected {
+            code: -32050,
+            data: Some(serde_json::json!({
+                "kind":"unsupportedCapability",
+                "stage":"rename",
+                "message":"Codex app-server method `thread/name/set` is missing from its cached schema"
+            })),
+        }),
+        collaboration_protocol::OperationEffect::Unknown,
+    );
+    let unsupported = unsupported.structured_content.expect("unsupported detail");
+    assert_eq!(
+        unsupported["message"],
+        "Codex app-server method `thread/name/set` is missing from its cached schema"
+    );
+    assert_eq!(unsupported["effect"], "none");
+    assert_eq!(unsupported["data"]["kind"], "unsupportedCapability");
 
-#[test]
-fn resumed_prompt_failure_retains_known_target_and_rejection_evidence() {
-    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
-        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-        "sessionId":"existing-thread"
-    }))
-    .expect("target");
-    let result = super::existing_prompt_tool_result(Err(
-        collaboration_client::OperationError::after_dispatch(
-            "prompt",
-            Some(target.clone()),
-            None,
-            collaboration_client::ClientError::Rejected {
-                code: -32603,
-                data: Some(serde_json::json!({"kind":"nativeRejected","detail":"busy"})),
-            },
-        ),
-    ));
-    assert_eq!(result.is_error, Some(true));
-    let structured = result.structured_content.expect("structured error");
-    assert_eq!(structured["target"], serde_json::json!(target));
-    assert_eq!(structured["effect"], "unknown");
-    assert_eq!(structured["kind"], "rejected");
-    assert_eq!(structured["serviceKind"], "nativeRejected");
-    assert_eq!(structured["code"], -32603);
-    assert_eq!(structured["data"]["detail"], "busy");
-}
-
-#[test]
-fn prompt_carrier_preserves_permission_required_and_explicit_approver() {
-    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
-        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-        "sessionId":"created-thread"
-    }))
-    .expect("target");
-    let approver: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
-        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-        "sessionId":"approver-thread"
-    }))
-    .expect("approver");
-    let request = collaboration_client::ConversationCreatePromptRequest {
-        create: collaboration_client::ConversationCreateRequest {
-            endpoint: target.endpoint.clone(),
-            cwd: "/tmp/collaboration-mcp-fixture".into(),
-            session: None,
-            fork: None,
-            model: Some("gpt-5.6-sol".into()),
-            effort: Some("low".into()),
-            access: Some("workspace-write".into()),
-            created_by: Some(approver.clone()),
-            approver: Some(approver.clone()),
-            root_message_id: None,
-        },
-        prompt: collaboration_client::ConversationPromptRequest {
-            message: collaboration_client::PublicPromptContent::HumanUser {
-                text: "permission fixture"
-                    .to_owned()
-                    .try_into()
-                    .expect("prompt text"),
-            },
-            effort: Some("low".into()),
-            timeout_seconds: 3,
-        },
-    };
-    let encoded = serde_json::to_value(&request).expect("request encoding");
-    assert_eq!(encoded["create"]["approver"], serde_json::json!(approver));
-
-    let result = super::create_prompt_tool_result(Ok(
-        collaboration_client::ConversationCreatePromptResult {
-            target,
-            end: collaboration_client::ConversationEnd::Cancelled,
-            updates: vec![],
-            permission_required: true,
-            result: Some(serde_json::json!({"stopReason":"cancelled"})),
-        },
-    ));
-    assert_eq!(result.is_error, Some(false));
-    let structured = result.structured_content.expect("structured result");
-    assert_eq!(structured["permissionRequired"], true);
-    assert_eq!(structured["end"], "cancelled");
-}
-
-#[test]
-fn prompt_carrier_preserves_busy_precondition_rejection_without_auto_retry() {
-    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
-        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-        "sessionId":"busy-thread"
-    }))
-    .expect("target");
-    let result = super::existing_prompt_tool_result(Err(
-        collaboration_client::OperationError::after_dispatch(
-            "prompt",
-            Some(target),
-            None,
-            collaboration_client::ClientError::Rejected {
-                code: -32050,
-                data: Some(serde_json::json!({
-                    "kind":"nativeRejected",
-                    "stage":"prompt",
-                    "reason":"busy",
-                    "nextAction":"inspectTarget"
-                })),
-            },
-        ),
-    ));
-    assert_eq!(result.is_error, Some(true));
-    let structured = result.structured_content.expect("structured rejection");
-    assert_eq!(structured["kind"], "rejected");
-    assert_eq!(structured["serviceKind"], "nativeRejected");
-    assert_eq!(structured["stage"], "prompt");
-    assert_eq!(structured["effect"], "unknown");
-    assert_eq!(structured["data"]["reason"], "busy");
-    assert_eq!(structured["data"]["nextAction"], "inspectTarget");
-}
-
-#[test]
-fn resumed_prompt_preflight_failure_retains_requested_target_without_effect() {
-    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
-        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-        "sessionId":"existing-thread"
-    }))
-    .expect("target");
-    let result = super::existing_prompt_tool_result(Err(
-        collaboration_client::OperationError::before_dispatch(
-            "validation",
-            Some(target.clone()),
-            collaboration_client::ClientError::InvalidRequest(
-                "prompt timeout must be at least one second",
-            ),
-        ),
-    ));
-    let structured = result.structured_content.expect("structured error");
-    assert_eq!(structured["target"], serde_json::json!(target));
-    assert_eq!(structured["effect"], "none");
-    assert_eq!(structured["kind"], "protocolViolation");
-    assert_eq!(structured["stage"], "validation");
-}
-
-#[test]
-fn resumed_prompt_load_response_loss_retains_target_with_unknown_effect() {
-    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
-        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-        "sessionId":"existing-thread"
-    }))
-    .expect("target");
-    let result = super::existing_prompt_tool_result(Err(
-        collaboration_client::OperationError::after_dispatch(
-            "load",
-            Some(target.clone()),
-            None,
-            collaboration_client::ClientError::Transport(std::io::Error::new(
-                std::io::ErrorKind::ConnectionReset,
-                "fixture",
-            )),
-        ),
-    ));
-    let structured = result.structured_content.expect("structured error");
-    assert_eq!(structured["target"], serde_json::json!(target));
-    assert_eq!(structured["effect"], "unknown");
-    assert_eq!(structured["kind"], "unavailable");
-    assert_eq!(structured["stage"], "load");
-    assert_eq!(structured["data"]["ioKind"], "ConnectionReset");
+    let lost_after_send = super::structured_result::<serde_json::Value>(
+        Err(collaboration_client::ClientError::Protocol(
+            "connection closed after dispatch",
+        )),
+        collaboration_protocol::OperationEffect::Unknown,
+    );
+    let lost_after_send = lost_after_send
+        .structured_content
+        .expect("transport detail");
+    assert_eq!(lost_after_send["effect"], "unknown");
+    assert_eq!(
+        lost_after_send["message"],
+        "Control protocol violation: connection closed after dispatch"
+    );
 }
 
 #[test]
@@ -261,14 +110,14 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let tools = server.resolved_tools();
-    assert_eq!(tools.len(), 97);
+    assert_eq!(tools.len(), 95);
     let mut names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 97);
+    assert_eq!(names.len(), 95);
     for tool in tools {
         let input = serde_json::to_value(&tool.input_schema).expect("input schema JSON");
         jsonschema::validator_for(&input)
@@ -312,6 +161,214 @@ fn typed_tool_names_cover_every_control_domain_operation() {
         ])
         .collect::<BTreeSet<_>>();
     assert_eq!(actual, expected);
+    assert!(
+        actual
+            .iter()
+            .all(|name| !name.starts_with("provider_conversation_")),
+        "the MCP catalog must expose one conversation surface"
+    );
+}
+
+#[test]
+fn conversation_catalog_defers_operation_id_requirement_until_route_selection() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let tools = server.tool_router.list_all();
+    for name in ["conversation_load", "conversation_prompt"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("common tool");
+        let required = tool.input_schema["required"]
+            .as_array()
+            .expect("required fields");
+        assert!(
+            !required.contains(&serde_json::json!("operationId")),
+            "{name} selects its client before requiring an operation ID"
+        );
+    }
+    let create = tools
+        .iter()
+        .find(|tool| tool.name == "conversation_create")
+        .expect("create tool");
+    assert!(
+        create.input_schema["required"]
+            .as_array()
+            .expect("create required fields")
+            .contains(&serde_json::json!("operationId"))
+    );
+    let convenience = tools
+        .iter()
+        .find(|tool| tool.name == "conversation_create_and_prompt")
+        .expect("create and prompt tool");
+    assert!(
+        !convenience.input_schema["required"]
+            .as_array()
+            .expect("convenience required fields")
+            .contains(&serde_json::json!("promptOperationId"))
+    );
+}
+
+#[test]
+fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let tools = server.resolved_tools();
+    let schema_for = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("missing tool {name}"))
+            .input_schema
+            .as_ref()
+            .clone()
+            .into()
+    };
+    fn required_for(schema: &Value) -> &[Value] {
+        schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("schema has no required list: {schema}"))
+    }
+
+    let create_schema = schema_for("conversation_create");
+    assert!(!required_for(&create_schema).contains(&serde_json::json!("approver")));
+    assert!(
+        create_schema["allOf"].is_array(),
+        "Codex create requirements must be conditional"
+    );
+    let create_and_prompt_schema = schema_for("conversation_create_and_prompt");
+    assert!(
+        create_and_prompt_schema["allOf"].is_array(),
+        "Codex create-and-prompt requirements must be conditional"
+    );
+    let service_id = "00000000-0000-4000-8000-000000000001";
+    let caller = serde_json::json!({
+        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"schema-caller"
+    });
+    let provider_create = serde_json::json!({
+        "operationId":"019f0000-0000-7000-8000-000000000201",
+        "endpoint":{"serviceId":service_id,"endpointId":"cursor-local"},
+        "workingDirectory":"/tmp/project","access":"workspace-write","createdBy":caller
+    });
+    let create_validator = jsonschema::validator_for(&create_schema).expect("create schema");
+    assert!(create_validator.is_valid(&provider_create));
+    let mut provider_with_model = provider_create.clone();
+    provider_with_model["model"] = serde_json::json!("gpt-5.6-sol");
+    assert!(!create_validator.is_valid(&provider_with_model));
+    let mut provider_with_effort = provider_create.clone();
+    provider_with_effort["effort"] = serde_json::json!("medium");
+    assert!(!create_validator.is_valid(&provider_with_effort));
+    for (field, value) in [
+        ("fork", serde_json::json!("source-thread")),
+        (
+            "rootMessageId",
+            serde_json::json!("019f0000-0000-7000-8000-000000000301"),
+        ),
+    ] {
+        let mut provider_with_codex_only_field = provider_create.clone();
+        provider_with_codex_only_field[field] = value;
+        assert!(
+            !create_validator.is_valid(&provider_with_codex_only_field),
+            "provider create schema must reject {field}"
+        );
+    }
+    let mut empty_codex_create = provider_create.clone();
+    empty_codex_create["endpoint"]["endpointId"] = serde_json::json!("codex-local");
+    assert!(!create_validator.is_valid(&empty_codex_create));
+    empty_codex_create["model"] = serde_json::json!("gpt-5.6-sol");
+    empty_codex_create["effort"] = serde_json::json!("medium");
+    assert!(create_validator.is_valid(&empty_codex_create));
+
+    let create_and_prompt_validator =
+        jsonschema::validator_for(&create_and_prompt_schema).expect("create-and-prompt schema");
+    let provider_create_and_prompt = serde_json::json!({
+        "create":provider_create,
+        "message":{"kind":"humanUser","text":"hello"}
+    });
+    assert!(create_and_prompt_validator.is_valid(&provider_create_and_prompt));
+    let mut provider_create_and_prompt_with_effort = provider_create_and_prompt;
+    provider_create_and_prompt_with_effort["create"]["effort"] = serde_json::json!("medium");
+    assert!(!create_and_prompt_validator.is_valid(&provider_create_and_prompt_with_effort));
+    for (field, value) in [
+        ("fork", serde_json::json!("source-thread")),
+        (
+            "rootMessageId",
+            serde_json::json!("019f0000-0000-7000-8000-000000000302"),
+        ),
+    ] {
+        let mut provider_create_and_prompt = serde_json::json!({
+            "create":provider_create,
+            "message":{"kind":"humanUser","text":"hello"}
+        });
+        provider_create_and_prompt["create"][field] = value;
+        assert!(
+            !create_and_prompt_validator.is_valid(&provider_create_and_prompt),
+            "provider create-and-prompt schema must reject {field}"
+        );
+    }
+
+    let schedule_schema = schema_for("schedule_create");
+    let schedule_definition = &schedule_schema["$defs"]["ScheduleDefinition"];
+    assert!(
+        schedule_definition["required"]
+            .as_array()
+            .is_some_and(|fields| fields.contains(&serde_json::json!("effort"))),
+        "{schedule_schema}"
+    );
+    assert!(schedule_definition["allOf"].is_array());
+    let mut fresh_schedule = serde_json::json!({
+        "operationId":"019f0000-0000-7000-8000-000000000202",
+        "definition":{
+            "instructionId":"019f0000-0000-7000-8000-000000000203",
+            "timing":{"kind":"after","seconds":60},"enabled":false,
+            "destination":{"kind":"freshEachRun","endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"cwd":"/tmp/project"},
+            "effort":"medium"
+        }
+    });
+    let schedule_validator = jsonschema::validator_for(&schedule_schema).expect("schedule schema");
+    assert!(!schedule_validator.is_valid(&fresh_schedule));
+    fresh_schedule["definition"]["model"] = serde_json::json!("gpt-5.6-sol");
+    assert!(schedule_validator.is_valid(&fresh_schedule));
+
+    let run_schema = schema_for("run_list");
+    assert!(!required_for(&run_schema).contains(&serde_json::json!("cursor")));
+
+    let listen = schema_for("board_thread_listen");
+    assert!(listen["required"].is_array());
+    let descriptions = tools
+        .iter()
+        .map(|tool| {
+            (
+                tool.name.as_ref(),
+                tool.description.as_deref().unwrap_or_default(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let listen_description = descriptions
+        .get("board_thread_listen")
+        .expect("listen description");
+    assert!(listen_description.contains("--lifetime short"));
+    assert!(listen_description.contains("board_thread_join"));
+    let join_description = descriptions
+        .get("board_thread_join")
+        .expect("join description");
+    assert!(join_description.contains("--role participant"));
+
+    for tool in ["conversation_create", "conversation_create_and_prompt"] {
+        let description = descriptions
+            .get(tool)
+            .expect("conversation create description");
+        assert!(
+            description.contains("required for Codex endpoints"),
+            "{description}"
+        );
+        assert!(
+            description.contains("rejected for provider endpoints"),
+            "{description}"
+        );
+        assert!(description.contains("rootMessageId"), "{description}");
+        assert!(description.contains("fork"), "{description}");
+    }
 }
 
 #[test]
@@ -319,12 +376,94 @@ fn sdk_only_operations_are_advertised_by_both_cli_and_mcp_catalogs() {
     let help = agent_collaboration::command_help();
     for (tool, cli_command) in [
         ("conversation_create", "conversation create"),
+        ("conversation_load", "conversation load"),
         ("conversation_create_and_prompt", "conversation prompt"),
         ("conversation_prompt", "conversation prompt"),
+        ("conversation_cancel", "conversation cancel"),
         ("events_observe", "events observe"),
     ] {
         assert!(help.contains(cli_command), "CLI adapter missing for {tool}");
     }
+}
+
+#[test]
+fn conversation_create_tool_preserves_created_and_pending_operation_identity() {
+    let operation_id = OperationId::generate();
+    let target = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"created-thread"
+    }))
+    .expect("target");
+    let created = conversation_create_tool_result(
+        Ok(ConversationCreateOutcome::Created {
+            operation_id: operation_id.clone(),
+            target,
+        }),
+        operation_id.clone(),
+    );
+    assert_eq!(created.is_error, Some(false));
+    assert_eq!(
+        created.structured_content.as_ref().unwrap()["kind"],
+        "created"
+    );
+    assert_eq!(
+        created.structured_content.as_ref().unwrap()["operationId"],
+        serde_json::json!(operation_id)
+    );
+    assert_eq!(
+        created.structured_content.as_ref().unwrap()["target"]["sessionId"],
+        "created-thread"
+    );
+
+    let pending = conversation_create_tool_result(
+        Ok(ConversationCreateOutcome::Pending {
+            operation_id: operation_id.clone(),
+        }),
+        operation_id.clone(),
+    );
+    assert_eq!(pending.is_error, Some(false));
+    assert_eq!(
+        pending.structured_content.as_ref().unwrap()["kind"],
+        "pending"
+    );
+    assert_eq!(
+        pending.structured_content.as_ref().unwrap()["operationId"],
+        serde_json::json!(operation_id)
+    );
+    assert!(
+        pending
+            .structured_content
+            .as_ref()
+            .unwrap()
+            .get("target")
+            .is_none()
+    );
+}
+
+#[test]
+fn conversation_create_tool_reports_endpoint_named_unsupported_input() {
+    let operation_id = OperationId::generate();
+    let endpoint = serde_json::from_value(serde_json::json!({
+        "serviceId":"00000000-0000-4000-8000-000000000001", "endpointId":"cursor-local"
+    }))
+    .expect("endpoint");
+    let response = conversation_create_tool_result(
+        Err(
+            collaboration_client::ConversationClientError::UnsupportedInput {
+                endpoint,
+                field: "model",
+                fix: "omit model for cursor-local".to_owned(),
+            },
+        ),
+        operation_id.clone(),
+    );
+    assert_eq!(response.is_error, Some(true));
+    let content = response.structured_content.expect("structured error");
+    assert_eq!(content["kind"], "unsupportedCapability");
+    assert_eq!(content["operationId"], serde_json::json!(operation_id));
+    assert_eq!(content["endpoint"]["endpointId"], "cursor-local");
+    assert_eq!(content["field"], "model");
+    assert_eq!(content["fix"], "omit model for cursor-local");
 }
 
 #[test]
@@ -350,11 +489,7 @@ fn representative_catalog_descriptions_explain_operation_specific_behavior() {
         ("message_send", &["accepted", "replayed"][..]),
         (
             "conversation_create_and_prompt",
-            &[
-                "same call-local ACP connection",
-                "completed turn",
-                "peer reply",
-            ][..],
+            &["advertised client", "completed turn", "peer reply"][..],
         ),
         (
             "wake_send",
@@ -680,6 +815,10 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
             "board_message_show",
             "board_thread_listen_cancel",
             "board_thread_listen_show",
+            "conversation_create",
+            "conversation_create_and_prompt",
+            "conversation_load",
+            "conversation_prompt",
             "journal_status"
         ]
     );
@@ -719,6 +858,24 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
         ("board_message_show", message),
         ("board_thread_listen_cancel", listen.clone()),
         ("board_thread_listen_show", listen),
+        (
+            "conversation_create",
+            serde_json::json!({"kind":"pending","operationId":OperationId::generate()}),
+        ),
+        (
+            "conversation_create_and_prompt",
+            serde_json::json!({"kind":"createPending","operationId":OperationId::generate()}),
+        ),
+        (
+            "conversation_load",
+            serde_json::json!({"kind":"pending","operationId":OperationId::generate(),
+                "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"fixture"}}),
+        ),
+        (
+            "conversation_prompt",
+            serde_json::json!({"kind":"pending","operationId":OperationId::generate(),
+                "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"fixture"}}),
+        ),
         (
             "journal_status",
             serde_json::json!({"storage":"unavailable"}),
@@ -857,10 +1014,107 @@ async fn inspect_tool_rejects_well_shaped_wrong_target_response_like_typed_sdk()
         .expect("peer join");
 }
 
+#[tokio::test]
+async fn inspect_tool_exposes_native_rejection_message() {
+    use rmcp::handler::server::wrapper::Parameters;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private directory");
+    }
+    let digest = format!("sha256:{}", "a".repeat(64));
+    std::fs::write(
+        temporary.path().join("service.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version":2,
+            "serviceId":"00000000-0000-4000-8000-000000000001",
+            "serviceEpoch":"00000000-0000-4000-8000-000000000002",
+            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "controlSchemaDigest":digest,
+            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+        }))
+        .expect("manifest JSON"),
+    )
+    .expect("manifest write");
+    let listener = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
+        .expect("Control bind");
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("Control accept");
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let initialize: serde_json::Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read init")
+                .expect("init frame"),
+        )
+        .expect("init JSON");
+        let initialized = serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
+            "version":{"major":1,"minor":0},"serviceId":"00000000-0000-4000-8000-000000000001",
+            "serviceEpoch":"00000000-0000-4000-8000-000000000002","controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
+        }});
+        write
+            .write_all(format!("{initialized}\n").as_bytes())
+            .await
+            .expect("write init");
+        let inspect: serde_json::Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read inspect")
+                .expect("inspect frame"),
+        )
+        .expect("inspect JSON");
+        assert_eq!(inspect["method"], "codex/sessionInspect");
+        let message = "native thread is unreadable: fixture refusal";
+        let response = serde_json::json!({"jsonrpc":"2.0","id":inspect["id"],"error":{
+            "code":-32050,"message":message,"data":{
+                "kind":"nativeRejected","stage":"inspect","message":message,
+                "reason":"unknown","nextAction":"inspectTarget","nativeCode":-32600
+            }
+        }});
+        write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .expect("write rejection");
+    });
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"unreadable-thread"
+    }))
+    .expect("target");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+
+    let result = server
+        .session_inspect(Parameters(collaboration_protocol::NativeInspectParams {
+            target,
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured rejection");
+    assert_eq!(
+        structured["message"],
+        "native thread is unreadable: fixture refusal"
+    );
+    assert_eq!(
+        structured["data"]["message"],
+        "native thread is unreadable: fixture refusal"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), peer)
+        .await
+        .expect("Control fixture traffic deadline")
+        .expect("peer join");
+}
+
 fn expected_tool_name(method: &str) -> String {
     if let Some(provider_method) = method.strip_prefix("conversation/") {
         return format!(
-            "provider_conversation_{}",
+            "conversation_{}",
             provider_method
                 .chars()
                 .flat_map(|character| {
@@ -878,7 +1132,7 @@ fn expected_tool_name(method: &str) -> String {
         "codex/sessionList" => return "sessions_list".to_owned(),
         "codex/sessionInspect" => return "session_inspect".to_owned(),
         "codex/sessionRename" => return "session_rename".to_owned(),
-        "codex/messageSend" => return "message_send".to_owned(),
+        "message/send" => return "message_send".to_owned(),
         "codex/turnInterrupt" => return "turn_interrupt".to_owned(),
         "lifecycleJournal/status" => return "journal_status".to_owned(),
         "lifecycleJournal/read" => return "journal_read".to_owned(),

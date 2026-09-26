@@ -13,7 +13,7 @@ pub struct SavedMessage {
     pub target: SessionRef,
     pub content: MessageContent,
     pub delivery: MessageDelivery,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_guard: Option<CodexGeneration>,
 }
 impl agent_automation::DurableMessage for SavedMessage {

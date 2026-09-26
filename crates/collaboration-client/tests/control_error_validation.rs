@@ -1,6 +1,9 @@
 //! Method-specific Control errors must obey the same published contract as success results.
 #[cfg(test)]
 mod tests {
+    use collaboration_client::protocol::{
+        DeliveryNextAction, DeliveryOutcome, DeliveryRejectionReason, SessionMessageSendParams,
+    };
     use collaboration_client::{ClientError, ControlClient};
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -23,17 +26,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_client_preserves_valid_cursor_and_message_effect_errors() {
+    async fn control_client_preserves_valid_cursor_errors() {
         // Arrange: valid errors have deliberately different data shapes.
         let cases = [
             ("addressBook/list", json!({"kind":"snapshotExpired"})),
             (
                 "lifecycleJournal/read",
                 json!({"kind":"historyExpired","current":{"journalId":"00000000-0000-4000-8000-000000000001","earliestSequence":4,"lastSequence":9}}),
-            ),
-            (
-                "codex/messageSend",
-                json!({"kind":"nativeRejected","stage":"start","message":"fixture rejection","reason":"childThread","nextAction":"inspectTarget","effects":{"resume":"accepted","submission":"rejected"},"clientUserMessageId":"correlation"}),
             ),
         ];
         for (method, data) in cases {
@@ -48,6 +47,57 @@ mod tests {
                 matches!(result,ClientError::Rejected {code:-32050,data:Some(actual)} if actual==data)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn message_result_preserves_native_rejection_reason_action_and_code() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let fixture = tokio::spawn(async move {
+            let mut stream = BufReader::new(server);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let init: Value = serde_json::from_str(&line).unwrap();
+            let response = json!({"jsonrpc":"2.0","id":init["id"],"result":{
+                "version":{"major":1,"minor":0},
+                "serviceId":"00000000-0000-4000-8000-000000000001",
+                "serviceEpoch":"00000000-0000-4000-8000-000000000002",
+                "controlSchemaDigest":format!("sha256:{}","a".repeat(64))
+            }});
+            stream
+                .get_mut()
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+            line.clear();
+            stream.read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "message/send");
+            let response = json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                "outcome":{"kind":"rejected","reason":"childThread","nextAction":"inspectTarget","clientCode":-32000,"detail":null},
+                "reachability":"codexAppServer","client":null
+            }});
+            stream
+                .get_mut()
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        let mut client = ControlClient::initialize(client, "error-contract", "1")
+            .await
+            .unwrap();
+        let request: SessionMessageSendParams = serde_json::from_value(json!({
+            "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"owned"},
+            "message":{"kind":"humanUser","text":"fixture"},"mode":"auto",
+            "generationGuard":null,"correlation":null
+        })).unwrap();
+        let receipt = client.send_human_input(request).await.unwrap();
+        assert!(
+            matches!(receipt.outcome, DeliveryOutcome::Rejected(rejection)
+            if rejection.reason == DeliveryRejectionReason::ChildThread
+                && rejection.next_action == DeliveryNextAction::InspectTarget
+                && rejection.client_code == Some(-32000))
+        );
+        fixture.await.unwrap();
     }
 
     async fn receive_error(method: &'static str, error: Value) -> ClientError {
@@ -82,12 +132,25 @@ mod tests {
             json!({"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"}),
         )
         .unwrap();
-        let result=match method {
-            "endpoint/list"=>client.list_endpoints().await.map(|_|()),
-            "addressBook/list"=>client.list_addresses(&endpoint,100,None).await.map(|_|()),
-            "lifecycleJournal/read"=>client.read_journal(&endpoint,serde_json::from_value(json!({"journalId":"00000000-0000-4000-8000-000000000001","sequence":0})).unwrap(),100,0).await.map(|_|()),
-            "codex/messageSend"=>client.send_human_input(serde_json::from_value(json!({"target":{"endpoint":endpoint,"sessionId":"owned"},"generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":1},"message":{"kind":"humanUser","text":"fixture"}})).unwrap()).await.map(|_|()),
-            _=>panic!("unexpected fixture method"),
+        let result = match method {
+            "endpoint/list" => client.list_endpoints().await.map(|_| ()),
+            "addressBook/list" => client
+                .list_addresses(&endpoint, 100, None)
+                .await
+                .map(|_| ()),
+            "lifecycleJournal/read" => client
+                .read_journal(
+                    &endpoint,
+                    serde_json::from_value(
+                        json!({"journalId":"00000000-0000-4000-8000-000000000001","sequence":0}),
+                    )
+                    .unwrap(),
+                    100,
+                    0,
+                )
+                .await
+                .map(|_| ()),
+            _ => panic!("unexpected fixture method"),
         };
         drop(client);
         fixture.await.unwrap();

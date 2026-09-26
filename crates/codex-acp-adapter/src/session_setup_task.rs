@@ -1,17 +1,23 @@
 //! Native setup runs outside frontend routing; the registry publishes the returned binding.
-use crate::{AcpSchemaCatalog, AcpSessionBinding, SessionSetupError, SessionSetupInputs};
+use crate::{
+    AcpSchemaCatalog, AcpSessionBinding, ConversationOperationRecorder, SessionSetupError,
+    SessionSetupInputs,
+};
 use codex_native_integration::{NativePayloadSchemas, NativeProtocolConnection};
-use collaboration_protocol::CodexGeneration;
+use collaboration_protocol::{CodexGeneration, OperationId, SessionId};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 
 pub(crate) struct SetupTaskInputs {
     pub known_session: Option<AcpSessionBinding>,
+    pub adopt_unmaterialized: bool,
     pub backend_path: PathBuf,
     pub schemas: Arc<NativePayloadSchemas>,
     pub generation: CodexGeneration,
     pub params: Value,
     pub create_new: bool,
+    pub operation_id: Option<OperationId>,
+    pub recorder: Arc<dyn ConversationOperationRecorder>,
     pub cancellation_barrier: Option<crate::CancellationBarrier>,
     pub approval_broker: Arc<dyn crate::ApprovalBroker>,
 }
@@ -30,6 +36,15 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
         }
     };
     if let Some(mut session) = inputs.known_session {
+        if inputs.adopt_unmaterialized {
+            let outcome = session
+                .adopt_unmaterialized(&mut catalog, &inputs.generation, &inputs.params)
+                .map(|()| (Vec::new(), json!({})));
+            return SetupTaskOutput {
+                binding: Some(session),
+                outcome,
+            };
+        }
         let outcome = match session
             .resume_with_receipt(&mut catalog, &inputs.generation, &inputs.params)
             .await
@@ -56,6 +71,26 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
             outcome,
         };
     }
+    let operation_id = inputs.operation_id.clone();
+    if inputs.create_new {
+        let Some(operation_id) = operation_id.as_ref() else {
+            return SetupTaskOutput {
+                binding: None,
+                outcome: Err(SessionSetupError::InvalidParameters),
+            };
+        };
+        if inputs
+            .recorder
+            .admit_create(operation_id, &inputs.generation)
+            .await
+            .is_err()
+        {
+            return SetupTaskOutput {
+                binding: None,
+                outcome: Err(SessionSetupError::Unavailable),
+            };
+        }
+    }
     let outcome = async {
         let connection = NativeProtocolConnection::connect(&inputs.backend_path)
             .await
@@ -66,9 +101,20 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
             generation: inputs.generation,
             params: inputs.params,
             approval_broker: inputs.approval_broker,
+            operation_id: operation_id.clone(),
+            recorder: Arc::clone(&inputs.recorder),
         };
         if inputs.create_new {
             let session = AcpSessionBinding::create(&mut catalog, setup).await?;
+            let session_id = SessionId::try_from(session.session_id().to_owned())
+                .map_err(|_| SessionSetupError::OutcomeUnknown)?;
+            if let Some(operation_id) = operation_id.as_ref() {
+                inputs
+                    .recorder
+                    .record_created(operation_id, &session_id)
+                    .await
+                    .map_err(|_| SessionSetupError::OutcomeUnknown)?;
+            }
             let result = session.new_session_result();
             Ok((session, Vec::new(), result))
         } else {
@@ -87,9 +133,34 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
             binding: Some(session),
             outcome: Ok((history, result)),
         },
-        Err(error) => SetupTaskOutput {
-            binding: None,
-            outcome: Err(error),
-        },
+        Err(error) => {
+            let known_not_submitted = matches!(
+                error,
+                SessionSetupError::InvalidParameters
+                    | SessionSetupError::ConfigurationMismatch
+                    | SessionSetupError::ModelMismatch { .. }
+                    | SessionSetupError::AccessMismatch { .. }
+                    | SessionSetupError::NativeRejected
+                    | SessionSetupError::SchemaUnavailable
+            );
+            let error = if let Some(operation_id) = operation_id.as_ref() {
+                if inputs
+                    .recorder
+                    .record_failure(operation_id, known_not_submitted)
+                    .await
+                    .is_err()
+                {
+                    SessionSetupError::OutcomeUnknown
+                } else {
+                    error
+                }
+            } else {
+                error
+            };
+            SetupTaskOutput {
+                binding: None,
+                outcome: Err(error),
+            }
+        }
     }
 }

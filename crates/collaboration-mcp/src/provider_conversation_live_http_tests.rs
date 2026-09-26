@@ -46,6 +46,7 @@ async fn live_current_source_catalog_is_accepted_by_cursor_and_claude() {
         backend_socket: root.path().join("backend.sock"),
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await
     .expect("current-source collaboration Host");
@@ -181,8 +182,9 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
             backend_socket: root.path().join("backend.sock"),
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
+            peer_registry_directory: None,
         },
-        vec![binding],
+        vec![codex_router_host::ExternalProviderStartup::Launch(binding)],
     )
     .await
     .expect("collaboration runtime with external provider");
@@ -224,8 +226,9 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
     let generation = json!({"serviceEpoch":inventory["result"]["structuredContent"]["serviceEpoch"],"generation":generation_number});
     let actor = json!({"endpoint":{"serviceId":endpoint["serviceId"],"endpointId":"codex-local"},"sessionId":"mcp-live-provider-caller"});
 
-    let create = call_tool(&client, &manifest.mcp.url, &session, 3, "provider_conversation_create", json!({"operationId":CREATE_OPERATION,"endpoint":endpoint,"generation":generation,"workingDirectory":provider_cwd,"createdBy":actor,"approver":actor,"requestedPolicy":{"access":"write-restricted"}})).await;
-    assert_tool_success(&create, "create admission");
+    let create = call_tool(&client, &manifest.mcp.url, &session, 3, "conversation_create", json!({"operationId":CREATE_OPERATION,"endpoint":endpoint,"generation":generation,"workingDirectory":provider_cwd,"createdBy":actor,"approver":actor,"access":"write-restricted","timeoutSeconds":20})).await;
+    assert_tool_success(&create, "conversation create");
+    assert_eq!(create["result"]["structuredContent"]["kind"], "created");
     let create_wait =
         wait_for_operation(&client, &manifest.mcp.url, &session, 4, CREATE_OPERATION).await;
     let target =
@@ -235,8 +238,21 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
         "created"
     );
 
-    let prompt = call_tool(&client, &manifest.mcp.url, &session, 5, "provider_conversation_prompt", json!({"operationId":PROMPT_OPERATION,"target":target,"generation":generation,"requestedBy":actor,"approver":actor,"prompt":{"kind":"humanUser","text":"Reply with exactly PR2_MCP_LIVE_PROVIDER_OK and no other text."}})).await;
-    assert_tool_success(&prompt, "prompt admission");
+    let prompt = call_tool(&client, &manifest.mcp.url, &session, 5, "conversation_prompt", json!({"operationId":PROMPT_OPERATION,"target":target,"generation":generation,"requestedBy":actor,"approver":actor,"message":{"kind":"humanUser","text":"Reply with exactly PR2_MCP_LIVE_PROVIDER_OK and no other text."},"timeoutSeconds":20})).await;
+    assert_tool_success(&prompt, "conversation prompt");
+    assert_eq!(prompt["result"]["structuredContent"]["kind"], "completed");
+    assert_eq!(
+        prompt["result"]["structuredContent"]["settlement"]["stopReason"],
+        "endTurn"
+    );
+    assert_eq!(
+        prompt["result"]["structuredContent"]["settlement"]["detail"]["output"]["kind"],
+        "available"
+    );
+    assert_eq!(
+        prompt["result"]["structuredContent"]["settlement"]["detail"]["output"]["text"],
+        "PR2_MCP_LIVE_PROVIDER_OK"
+    );
     let prompt_wait =
         wait_for_operation(&client, &manifest.mcp.url, &session, 6, PROMPT_OPERATION).await;
     assert_eq!(
@@ -266,7 +282,7 @@ async fn wait_for_operation(
         mcp_url,
         session,
         request_id,
-        "provider_conversation_operation_wait",
+        "conversation_operation_wait",
         json!({"operationId":operation_id,"timeoutSeconds":20}),
     )
     .await;

@@ -1,5 +1,6 @@
 use crate::mcp_server::CollaborationMcpServer;
 use bytes::Bytes;
+use collaboration_protocol::RouterExecutableRelation;
 use http::Request;
 use http_body_util::{BodyExt, Empty};
 use hyper::{body::Incoming, service::service_fn};
@@ -74,6 +75,15 @@ pub struct CollaborationMcpListener {
 
 impl CollaborationMcpListener {
     pub async fn start(config: CollaborationMcpListenerConfig) -> io::Result<Self> {
+        let (_sender, relation_receiver) =
+            tokio::sync::watch::channel(RouterExecutableRelation::Match);
+        Self::start_with_router_relation(config, relation_receiver).await
+    }
+
+    pub async fn start_with_router_relation(
+        config: CollaborationMcpListenerConfig,
+        relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(config.bind_address.socket_addr()).await?;
         let local_address = listener.local_addr()?;
         let shutdown = CancellationToken::new();
@@ -96,6 +106,7 @@ impl CollaborationMcpListener {
                     Ok(CollaborationMcpServer::with_lifecycle(
                         config.service_directory.clone(),
                         Arc::clone(&service_lifecycle),
+                        relation_receiver.clone(),
                     ))
                 },
                 Arc::clone(&session_manager),
@@ -275,8 +286,15 @@ mod mcp_http_listener_tests;
 mod mcp_remediation_tests;
 
 #[cfg(test)]
+#[path = "codex_conversation_cancel_http_tests.rs"]
+mod codex_conversation_cancel_http_tests;
+#[cfg(test)]
 #[path = "provider_conversation_http_tests.rs"]
 mod provider_conversation_http_tests;
+
+#[cfg(test)]
+#[path = "conversation_cancellation_http_tests.rs"]
+mod conversation_cancellation_http_tests;
 
 #[cfg(test)]
 #[path = "provider_conversation_live_http_tests.rs"]

@@ -37,6 +37,14 @@ pub struct EndpointSubscription {
     overflow: Arc<AtomicBool>,
 }
 impl EndpointDirectory {
+    pub fn read_endpoint(&self, endpoint: &EndpointRef) -> io::Result<Option<EndpointDescription>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("endpoint directory unavailable"))?;
+        Ok(state.endpoints.get(endpoint).cloned())
+    }
+
     #[must_use]
     pub fn new(service_id: UuidIdentity) -> Self {
         Self {
@@ -54,7 +62,12 @@ impl EndpointDirectory {
             .lock()
             .map_err(|_| io::Error::other("endpoint directory unavailable"))?;
         if endpoint.endpoint.service_id != state.service_id
-            || !(1..=2).contains(&endpoint.channels.len())
+            || endpoint.channels.len() > 2
+            || (endpoint.channels.is_empty()
+                && !matches!(
+                    endpoint.availability,
+                    collaboration_protocol::EndpointAvailability::Unavailable { .. }
+                ))
         {
             return Err(io::Error::other("invalid endpoint registration"));
         }

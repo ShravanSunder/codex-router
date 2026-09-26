@@ -1,6 +1,8 @@
 //! Initial summary admission preserves the Run's occupied execution slot.
 use crate::{AutomationStore, StorageError};
-use agent_automation::{RunId, SummaryAttempt};
+use agent_automation::{
+    RouteEffectEvidence, RouteSettlementState, RunId, SummaryAttempt, SummarySourceReference,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::Connection;
 pub struct SummaryAdmission {
@@ -10,7 +12,7 @@ pub struct SummaryAdmission {
 }
 impl AutomationStore {
     pub async fn begin_required_summary<
-        TTarget: Serialize + DeserializeOwned,
+        TTarget: Clone + Serialize + DeserializeOwned,
         TEndpoint: DeserializeOwned,
         TGeneration: Serialize + DeserializeOwned,
         TReceipt: DeserializeOwned,
@@ -27,21 +29,35 @@ impl AutomationStore {
             .await?;
         if record.phase != agent_automation::RunPhase::SummaryRequired
             || record.worker_outcome.is_none()
-            || record.evidence.native.cessation != agent_automation::CessationEvidence::Confirmed
         {
+            return Err(StorageError::InvalidRecord);
+        }
+        let route = record
+            .evidence
+            .route
+            .as_ref()
+            .ok_or(StorageError::InvalidRecord)?;
+        if route.settlement_state() != RouteSettlementState::NativeTurnConfirmed {
             return Err(StorageError::InvalidRecord);
         }
         let inventory = crate::run_inventory::load(&mut transaction, &record.schedule_id).await?;
         if inventory.occupying.as_ref() != Some(&request.run_id) {
             return Err(StorageError::InvalidRecord);
         }
+        let (source_target, source_reference) = match route {
+            RouteEffectEvidence::CodexAppServer(native) => (
+                native.target.clone().ok_or(StorageError::InvalidRecord)?,
+                SummarySourceReference::NativeTurn {
+                    turn_id: record.native_turn_id.ok_or(StorageError::InvalidRecord)?,
+                },
+            ),
+            RouteEffectEvidence::ProviderAcp(_) | RouteEffectEvidence::ClaudeCodePeer(_) => {
+                return Err(StorageError::InvalidRecord);
+            }
+        };
         let attempt = make_attempt(SummaryAttemptSeed {
-            source_target: record
-                .evidence
-                .native
-                .target
-                .ok_or(StorageError::InvalidRecord)?,
-            source_turn_id: record.native_turn_id.ok_or(StorageError::InvalidRecord)?,
+            source_target,
+            source_reference,
             timeout_seconds: request.timeout_seconds,
             now_ms: request.now_ms,
         })?;
@@ -53,7 +69,7 @@ impl AutomationStore {
 
 pub(crate) struct SummaryAttemptSeed<TTarget> {
     pub source_target: TTarget,
-    pub source_turn_id: String,
+    pub source_reference: agent_automation::SummarySourceReference,
     pub timeout_seconds: u32,
     pub now_ms: i64,
 }
@@ -65,7 +81,7 @@ pub(crate) fn make_attempt<TTarget, TGeneration>(
     Ok(SummaryAttempt {
         attempt_id: agent_automation::AttemptId::generate(),
         source_target: seed.source_target,
-        source_turn_id: seed.source_turn_id,
+        source_reference: seed.source_reference,
         target: None,
         native_turn_id: None,
         effective_timeout_seconds: seed.timeout_seconds,

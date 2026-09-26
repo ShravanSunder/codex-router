@@ -118,12 +118,23 @@ impl ApprovalFixture {
         };
         let broker = ServiceApprovalBroker::load(
             service_id.clone(),
-            endpoints,
             native_backend.clone(),
             directory.path().join("approval-routes.json"),
         )
         .await
         .expect("approval broker");
+        let route: Arc<dyn collaboration_service::SessionDeliveryRoute> =
+            Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(
+                service_id.clone(),
+                endpoints,
+                native_backend.clone(),
+                Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+            ));
+        broker
+            .install_session_delivery(Arc::new(collaboration_service::SessionDeliveryRouter::new(
+                vec![route],
+            )))
+            .expect("delivery injection");
         broker
             .register_route(ApprovalRoute {
                 thread_id: String::from(requester.session_id.clone()),
@@ -858,6 +869,7 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
         (2, Value::Null, local_identity.clone()),
         (3, foreign_identity, local_identity.clone()),
     ] {
+        let missing_creator = created_by.is_null();
         let response = mcp_call(
             &client,
             &listener.local_url(),
@@ -865,16 +877,27 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
             id,
             "conversation_create",
             json!({
-                "endpoint":endpoint,"cwd":"/tmp", "session":null, "fork":null,
+                "operationId":collaboration_protocol::OperationId::generate(),
+                "endpoint":endpoint,"workingDirectory":"/tmp", "fork":null,
                 "model":"gpt-5.6-sol", "effort":"low", "access":"workspace-write",
                 "createdBy":created_by, "approver":approver, "rootMessageId":null
             }),
         )
         .await;
+        if missing_creator {
+            assert_eq!(response["result"]["isError"], true);
+            assert!(
+                response["result"]["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("expected struct SessionRef"))
+            );
+            assert!(response["result"].get("structuredContent").is_none());
+            continue;
+        }
         let failure = &response["result"]["structuredContent"];
         assert_eq!(response["result"]["isError"], true);
         assert_eq!(failure["target"], Value::Null);
-        assert_eq!(failure["effect"], "none");
+        assert_eq!(failure["effect"], "none", "{response}");
         assert_eq!(failure["stage"], "validation");
     }
 
@@ -885,7 +908,8 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
         4,
         "conversation_create",
         json!({
-            "endpoint":endpoint,"cwd":"/tmp", "session":null, "fork":null,
+            "operationId":collaboration_protocol::OperationId::generate(),
+            "endpoint":endpoint,"workingDirectory":"/tmp", "fork":null,
             "model":"gpt-5.6-sol", "effort":"low", "access":"workspace-write",
             "createdBy":local_identity, "approver":local_identity, "rootMessageId":null
         }),
@@ -893,7 +917,7 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
     .await;
     let failure = &response["result"]["structuredContent"];
     assert_eq!(failure["effect"], "none");
-    assert_eq!(failure["stage"], "connect");
+    assert_eq!(failure["stage"], "manifest-read");
 
     let wake_response = mcp_call(
         &client,

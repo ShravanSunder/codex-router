@@ -3,7 +3,11 @@ use super::*;
 use agent_automation::{
     ContinuityInput, InstructionText, OperationId, ScheduleDefinition, TimingRule,
 };
-use automation_storage::{RunAdmission, ScheduleCreate, ScheduleEdit, ScheduleMutation};
+use automation_storage::{
+    RunAdmission, RunPreparedTarget, ScheduleCreate, ScheduleEdit, ScheduleMutation,
+    ThreadBindingClaim,
+};
+use collaboration_protocol::NativeSendReceipt;
 use serde_json::json;
 
 #[tokio::test]
@@ -85,15 +89,27 @@ async fn exercise_input_validation(
     let socket_path = root.join("native.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let gate = crate::NativeGenerationGate::default();
-    gate.activate(generation, socket_path, None)?;
+    gate.activate(generation.clone(), socket_path, None)?;
     if prepared {
-        let mut effects = store
+        let mut effects = crate::native_thread_preparation::initial_automation_effects(
+            &DestinationPreparation::Fresh {
+                endpoint: endpoint.clone(),
+                cwd: root.to_string_lossy().into_owned(),
+            },
+        );
+        effects.generation = Some(generation);
+        effects.allocation = PreparationEffect::Unknown;
+        store
             .lock()
             .await
-            .read_run::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(&run)
-            .await?
-            .evidence
-            .native;
+            .begin_run_preparation::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+                automation_storage::RunPreparationIntent {
+                    run_id: run.clone(),
+                    effects: effects.clone().into(),
+                },
+            )
+            .await?;
+        effects.allocation = PreparationEffect::Accepted;
         effects.target = Some(SessionRef {
             endpoint: endpoint.clone(),
             session_id: "prepared-thread".to_owned().try_into()?,
@@ -116,13 +132,15 @@ async fn exercise_input_validation(
             )
             .await?;
     }
+    let backend = NativeControlBackend {
+        endpoint,
+        gate,
+        codex_home: root.clone(),
+    };
     let worker = ScheduledRunWorker {
         store: store.clone(),
-        backend: Some(NativeControlBackend {
-            endpoint,
-            gate,
-            codex_home: root.clone(),
-        }),
+        execution: Arc::new(crate::CodexAppServerScheduledRuns::new(backend.clone())),
+        backend: Some(backend),
         configuration: crate::AutomationConfigurationHandle::default(),
     };
     worker.step(run.clone()).await?;
@@ -131,15 +149,26 @@ async fn exercise_input_validation(
         .await
         .read_run::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(&run)
         .await?;
+    let failed_native = failed
+        .evidence
+        .route
+        .as_ref()
+        .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+        .ok_or("expected Codex evidence")?;
+    let expected_allocation = if prepared {
+        PreparationEffect::Accepted
+    } else {
+        PreparationEffect::NotRequested
+    };
     if failed.phase != RunPhase::PreparationFailed
-        || failed.evidence.native.allocation != PreparationEffect::NotRequested
+        || failed_native.allocation != expected_allocation
         || failed.evidence.timing.is_some()
     {
         return Err(
             "local input failure became native uncertainty or consumed execution budget".into(),
         );
     }
-    if failed.evidence.native.target.is_some() != prepared {
+    if failed_native.target.is_some() != prepared {
         return Err("local validation lost earlier preparation evidence".into());
     }
     if tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())

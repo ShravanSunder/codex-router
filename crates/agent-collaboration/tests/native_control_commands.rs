@@ -93,6 +93,110 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
 }
 
 #[tokio::test]
+async fn session_inspect_cli_preserves_native_rejection_message() {
+    let root = std::path::PathBuf::from(format!("/tmp/session-inspect-cli-{}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .unwrap_or_else(|error| panic!("directory: {error}"));
+    let listener = tokio::net::UnixListener::bind(root.join("control.sock"))
+        .unwrap_or_else(|error| panic!("listener: {error}"));
+    let service_id = "00000000-0000-4000-8000-000000000001";
+    let epoch = "00000000-0000-4000-8000-000000000002";
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let manifest = serde_json::from_value(json!({
+        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
+        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+    }))
+    .unwrap_or_else(|error| panic!("manifest: {error}"));
+    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
+        .unwrap_or_else(|error| panic!("publish: {error}"));
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("Control accept");
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let initialize: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read init")
+                .expect("init frame"),
+        )
+        .expect("init JSON");
+        let initialized = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
+            "version":{"major":1,"minor":0},"serviceId":service_id,
+            "serviceEpoch":epoch,"serviceVersion":env!("CARGO_PKG_VERSION"),"controlSchemaDigest":digest
+        }});
+        write
+            .write_all(format!("{initialized}\n").as_bytes())
+            .await
+            .expect("write init");
+        let inspect: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read inspect")
+                .expect("inspect frame"),
+        )
+        .expect("inspect JSON");
+        assert_eq!(inspect["method"], "codex/sessionInspect");
+        let message = "native thread is unreadable: fixture refusal";
+        let response = json!({"jsonrpc":"2.0","id":inspect["id"],"error":{
+            "code":-32050,"message":message,"data":{
+                "kind":"nativeRejected","stage":"inspect","message":message,
+                "reason":"unknown","nextAction":"inspectTarget","nativeCode":-32600
+            }
+        }});
+        write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .expect("write rejection");
+    });
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args([
+                "session",
+                "inspect",
+                "--endpoint",
+                "codex-local",
+                "--session",
+                "unreadable-thread",
+                "--json",
+                "--service-directory",
+            ])
+            .arg(&root)
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("command deadline: {error}"))
+    .unwrap_or_else(|error| panic!("command: {error}"));
+    peer.await
+        .unwrap_or_else(|error| panic!("Control fixture: {error}"));
+    drop(publication);
+    std::fs::remove_file(root.join("control.sock"))
+        .unwrap_or_else(|error| panic!("socket cleanup: {error}"));
+    std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
+    assert_eq!(
+        result["error"]["message"],
+        "native thread is unreadable: fixture refusal"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[tokio::test]
 async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distinct() {
     for (label, rejection_kind, expected_exit) in [
         ("response-loss", None, 5),
@@ -122,7 +226,7 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
             let (stream, _) = listener.accept().await.expect("Control accept");
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
-            for method in ["control/initialize", "endpoint/list", "codex/messageSend"] {
+            for method in ["control/initialize", "message/send"] {
                 let request: Value = serde_json::from_str(
                     &lines
                         .next_line()
@@ -132,21 +236,17 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
                 )
                 .expect("Control JSON");
                 assert_eq!(request["method"], method);
-                if method == "codex/messageSend" {
+                if method == "message/send" {
                     assert_eq!(request["params"]["target"]["sessionId"], "proof-thread");
                     if let Some(kind) = rejection_kind {
-                        let mut data = json!({
-                            "kind":kind,"stage":"start","message":"Message operation failed",
-                            "effects":{"resume":"notRequested","submission":"unknown"}
-                        });
-                        if kind == "nativeRejected" {
-                            let fields = data.as_object_mut().expect("rejection fields");
-                            fields.insert("reason".to_owned(), json!("busy"));
-                            fields.insert("nextAction".to_owned(), json!("inspectTarget"));
-                        }
+                        let outcome = if kind == "nativeRejected" {
+                            json!({"kind":"rejected","reason":"busy","nextAction":"inspectTarget","clientCode":-32000,"detail":"native client is busy"})
+                        } else {
+                            json!({"kind":"unknown"})
+                        };
                         let response = json!({
                             "jsonrpc":"2.0","id":request["id"],
-                            "error":{"code":-32050,"message":"native response failed","data":data}
+                            "result":{"outcome":outcome,"reachability":"codexAppServer","client":null}
                         });
                         write
                             .write_all(format!("{response}\n").as_bytes())
@@ -156,7 +256,7 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
                     break;
                 }
                 let result = if method == "control/initialize" {
-                    json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"controlSchemaDigest":digest})
+                    json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"serviceVersion":env!("CARGO_PKG_VERSION"),"controlSchemaDigest":digest})
                 } else {
                     json!({"serviceEpoch":epoch,"sequence":0,"endpoints":[{
                         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"Fixture Codex",
@@ -217,10 +317,29 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
             Value,
             collaboration_client::protocol::AdapterOperationFailure,
         > = serde_json::from_value(result.clone()).expect("published finite message record");
-        assert_eq!(result["target"]["sessionId"], "proof-thread", "{label}");
-        assert_eq!(result["error"]["effect"], "unknown", "{label}");
         if let Some(kind) = rejection_kind {
-            assert_eq!(result["error"]["serviceKind"], kind, "{label}: {result}");
+            assert_eq!(
+                result["result"]["record"]["reachability"], "codexAppServer",
+                "{label}"
+            );
+            let outcome = &result["result"]["record"]["outcome"];
+            assert_eq!(
+                outcome["kind"],
+                if kind == "nativeRejected" {
+                    "rejected"
+                } else {
+                    "unknown"
+                },
+                "{label}: {result}"
+            );
+            if kind == "nativeRejected" {
+                assert_eq!(outcome["reason"], "busy");
+                assert_eq!(outcome["nextAction"], "inspectTarget");
+                assert_eq!(outcome["clientCode"], -32000);
+            }
+        } else {
+            assert_eq!(result["target"]["sessionId"], "proof-thread", "{label}");
+            assert_eq!(result["error"]["effect"], "unknown", "{label}");
         }
         assert!(output.stderr.is_empty(), "{label}");
     }

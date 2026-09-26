@@ -1,9 +1,8 @@
 //! Generation-scoped Control calls; no provider policy or native process ownership.
-use crate::NativeGenerationGate;
+use crate::{NativeGenerationGate, native_control_request::NativeControlRequest};
 use codex_native_integration::{NativeConnectionError, NativeOperation, NativeProtocolConnection};
 use collaboration_protocol::{
-    CodexGeneration, EndpointDescription, EndpointRef, NativeInspectParams, NativeInterruptParams,
-    SessionRef, UuidIdentity,
+    CodexGeneration, EndpointRef, NativeInspectParams, NativeInterruptParams, SessionRef,
 };
 use serde_json::{Value, json};
 
@@ -14,25 +13,9 @@ pub struct NativeControlBackend {
     pub codex_home: std::path::PathBuf,
 }
 
-pub(crate) struct NativeControlRequest<'a> {
-    pub method: &'a str,
-    pub params: Value,
-    pub id: Value,
-    pub service_id: &'a UuidIdentity,
-    pub backend: Option<&'a NativeControlBackend>,
-    pub endpoints: &'a [EndpointDescription],
-    pub stored_observation:
-        Option<crate::stored_inventory_observation::StoredInventoryObservation<'a>>,
-    /// Recorded Router access routes. `session inspect` reports the access the
-    /// broker holds for a thread; a thread without a route has none to report.
-    pub access_routes: Option<&'a crate::ServiceApprovalBroker>,
-}
 pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value {
     if request.method == "codex/sessionList" {
         return crate::session_inventory_dispatch::dispatch_inventory(request).await;
-    }
-    if request.method == "codex/messageSend" {
-        return crate::native_message_dispatch::dispatch_message(request).await;
     }
     if request.method == "codex/sessionRename" {
         return dispatch_rename(request).await;
@@ -221,9 +204,11 @@ async fn dispatch_rename(request: NativeControlRequest<'_>) -> Value {
             .map(|value| String::from(value.clone()))
             .as_deref()
             != Some(schemas.schema_digest())
-        || !schemas.supports_operation(NativeOperation::SetThreadName)
     {
         return failure(request.id, "unsupportedCapability", "rename");
+    }
+    if !schemas.supports_operation(NativeOperation::SetThreadName) {
+        return rename_method_unsupported(request.id);
     }
     let Ok(mut connection) = NativeProtocolConnection::connect(admission.backend_path()).await
     else {
@@ -386,34 +371,75 @@ fn native_call_failure(
         NativeConnectionError::Rejected { code } => {
             let (reason, next_action) =
                 crate::message_effect_state::classify_native_rejection(*code, native);
+            let native_message = native
+                .and_then(|value| value.get("message"))
+                .and_then(Value::as_str)
+                .filter(|message| !message.is_empty());
+            let message = native_message.unwrap_or("Native control operation failed");
             let mut data = json!({"kind":"nativeRejected","stage":stage,
-                "message":"Native control operation failed",
+                "message":message,
                 "reason":reason,"nextAction":next_action});
             if reason == "unknown"
                 && let Some(fields) = data.as_object_mut()
             {
                 fields.insert("nativeCode".into(), json!(code));
             }
-            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Native control operation failed","data":data}})
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":message,"data":data}})
         }
         NativeConnectionError::Unavailable if !mutation => failure(id, "unavailable", stage),
-        _ => failure(id, "outcomeUnknown", stage),
+        NativeConnectionError::UnavailableWithCause(cause) if !mutation => failure_with_message(
+            id,
+            "unavailable",
+            stage,
+            &format!("Native {stage} failed before dispatch: {cause}"),
+        ),
+        error if mutation => failure_with_message(
+            id,
+            "outcomeUnknown",
+            stage,
+            &format!(
+                "Native {stage} outcome is unknown after dispatch: {error}; no request was replayed"
+            ),
+        ),
+        error => failure_with_message(
+            id,
+            "unavailable",
+            stage,
+            &format!("Native {stage} read did not complete: {error}"),
+        ),
     }
 }
 
 fn failure(id: Value, kind: &str, stage: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Native control operation failed","data":{"kind":kind,"stage":stage,"message":"Native control operation failed"}}})
+    failure_with_message(id, kind, stage, "Native control operation failed")
+}
+
+fn rename_method_unsupported(id: Value) -> Value {
+    let method_name = NativeOperation::SetThreadName.method_name();
+    failure_with_message(
+        id,
+        "unsupportedCapability",
+        "rename",
+        &format!(
+            "Codex app-server method `{method_name}` is missing from its cached schema; update Codex so its app-server schema defines ThreadSetNameParams and ThreadSetNameResponse, then restart the Router Host"
+        ),
+    )
+}
+
+fn failure_with_message(id: Value, kind: &str, stage: &str, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":message,"data":{"kind":kind,"stage":stage,"message":message}}})
 }
 
 #[cfg(test)]
 mod native_failure_tests {
     use super::{NativeConnectionError, native_call_failure, rename_echo_mismatch};
+    use codex_native_integration::NativeOperation;
     use serde_json::json;
 
     #[test]
     fn every_native_error_class_keeps_its_own_projection_on_the_rename_path() {
         // Arrange: one refusal with native evidence, plus the transport classes.
-        let rejection = json!({"error":{"message":"thread has an active turn"}});
+        let rejection = json!({"message":"thread has an active turn"});
 
         // Act & assert: a refusal carries its reason and corrective action.
         let refused = native_call_failure(
@@ -426,6 +452,10 @@ mod native_failure_tests {
         assert_eq!(refused["error"]["data"]["kind"], "nativeRejected");
         assert_eq!(refused["error"]["data"]["reason"], "busy");
         assert_eq!(refused["error"]["data"]["nextAction"], "useDeliverySteer");
+        assert_eq!(
+            refused["error"]["data"]["message"],
+            "thread has an active turn"
+        );
 
         // Assert: an unclassified refusal names the native code instead of guessing.
         let unknown = native_call_failure(
@@ -483,5 +513,75 @@ mod native_failure_tests {
         assert_eq!(mismatch["error"]["data"]["requested"], "Review");
         assert_eq!(mismatch["error"]["data"]["effective"], "Old name");
         assert_eq!(mismatch["error"]["data"]["stage"], "rename");
+    }
+
+    #[test]
+    fn missing_thread_rename_schema_names_the_app_server_method_and_repair() {
+        let mut definitions = serde_json::Map::new();
+        for operation in [
+            "ThreadRead",
+            "ThreadResume",
+            "ThreadStart",
+            "ThreadLoadedList",
+            "TurnStart",
+            "TurnSteer",
+            "TurnInterrupt",
+        ] {
+            definitions.insert(format!("{operation}Params"), json!({"type":"object"}));
+            definitions.insert(format!("{operation}Response"), json!({"type":"object"}));
+        }
+        let bundle = codex_native_integration::NativeSchemaBundle::from_documents(
+            std::collections::BTreeMap::from([(
+                "codex_app_server_protocol.schemas.json".to_owned(),
+                serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))
+                    .unwrap_or_else(|error| panic!("schema: {error}")),
+            )]),
+        )
+        .unwrap_or_else(|error| panic!("bundle: {error}"));
+        let schemas = codex_native_integration::NativePayloadSchemas::from_bundle(&bundle)
+            .unwrap_or_else(|error| panic!("native operations: {error}"));
+        assert!(!schemas.supports_operation(NativeOperation::SetThreadName));
+        let response = super::rename_method_unsupported(json!("1"));
+
+        assert_eq!(
+            response["error"]["data"]["message"],
+            "Codex app-server method `thread/name/set` is missing from its cached schema; update Codex so its app-server schema defines ThreadSetNameParams and ThreadSetNameResponse, then restart the Router Host"
+        );
+    }
+
+    #[test]
+    fn an_unknown_post_dispatch_result_includes_the_native_transport_class() {
+        let response = native_call_failure(
+            json!("1"),
+            "interrupt",
+            true,
+            &NativeConnectionError::OutcomeUnknown,
+            None,
+        );
+
+        assert_eq!(response["error"]["data"]["kind"], "outcomeUnknown");
+        assert!(
+            response["error"]["data"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("native request outcome is unknown"))
+        );
+    }
+
+    #[test]
+    fn a_failed_inspection_does_not_claim_an_unknown_mutation_effect() {
+        let response = native_call_failure(
+            json!("1"),
+            "inspect",
+            false,
+            &NativeConnectionError::OutcomeUnknown,
+            None,
+        );
+
+        assert_eq!(response["error"]["data"]["kind"], "unavailable");
+        assert!(
+            response["error"]["data"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("native request outcome is unknown"))
+        );
     }
 }

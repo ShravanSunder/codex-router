@@ -30,7 +30,7 @@ impl AutomationStore {
         ) {
             return Err(StorageError::InvalidRecord);
         }
-        record.evidence.native = request.effects;
+        record.evidence.route = Some(request.effects.into());
         sqlx::query("UPDATE workflow_runs SET run_status='uncertain',execution_evidence_json=? WHERE run_id=?").bind(serde_json::to_string(&record.evidence).map_err(|_|StorageError::InvalidRecord)?).bind(request.run_id.as_str()).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(())

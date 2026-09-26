@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO provider_session_records (\n                target_service_id,target_endpoint_id,target_session_id,\n                working_directory,requested_policy_json,created_by_json,approver_json,updated_at_ms\n            ) VALUES (?,?,?,?,?,?,?,?)\n            ON CONFLICT(target_service_id,target_endpoint_id,target_session_id) DO UPDATE SET\n                working_directory=excluded.working_directory,\n                requested_policy_json=excluded.requested_policy_json,\n                approver_json=excluded.approver_json,\n                updated_at_ms=excluded.updated_at_ms",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "4e006886fab20a2e8efb8e5bfdf1a09a31e5b50315292107792b441410ce6e93"
+}

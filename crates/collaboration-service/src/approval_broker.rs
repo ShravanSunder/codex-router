@@ -1,32 +1,49 @@
 //! Service-owned routing for client-exposed Codex approval callbacks.
-use crate::{EndpointDirectory, NativeControlBackend};
+use crate::{
+    DeliveryPrecondition, DeliveryRequest, NativeControlBackend, SessionMessageDelivery,
+    session_delivery_contract::UnstoredAttemptEvidenceSink,
+};
 use codex_acp_adapter::{
     ApprovalBroker, ApprovalBrokerError, ApprovalRoute, BrokeredApprovalOutcome,
     BrokeredApprovalRequest,
 };
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListResult,
-    ApprovalRequestRecord, ApprovalState, MessageContent, MessageDelivery, NativeSendParams,
-    SessionRef, UuidIdentity,
+    ApprovalOfferedOption, ApprovalOptionScope, ApprovalPresentation, ApprovalRequestRecord,
+    ApprovalState, DeliveryOutcome, EndpointRef, MessageContent, MessageDelivery, SessionRef,
+    UuidIdentity,
 };
 use serde::Serialize;
-use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 use tokio::sync::{Mutex, oneshot};
+
+mod external_requests;
+#[cfg(test)]
+use external_requests::map_external_options;
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExternalApprovalOptionScope {
     AllowOnce,
     AllowAlways,
     RejectOnce,
     RejectAlways,
+    Unsupported { provider_kind: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalApprovalOption {
     pub option_id: String,
+    pub label: Option<String>,
     pub scope: ExternalApprovalOptionScope,
 }
 
@@ -36,9 +53,21 @@ pub struct ExternalApprovalRequest {
     pub approver: SessionRef,
     pub generation: collaboration_protocol::CodexGeneration,
     pub retirement: tokio_util::sync::CancellationToken,
+    pub cancellation: tokio_util::sync::CancellationToken,
     pub operation_metadata: ExternalApprovalOperationMetadata,
-    pub transient_presentation: Option<Value>,
+    pub presentation: Option<ApprovalPresentation>,
     pub options: Vec<ExternalApprovalOption>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExternalApprovalRefusal {
+    pub requester: SessionRef,
+    pub approver: SessionRef,
+    pub generation: collaboration_protocol::CodexGeneration,
+    pub operation_metadata: ExternalApprovalOperationMetadata,
+    pub offered_options: Vec<ExternalApprovalOption>,
+    pub presentation: Option<ApprovalPresentation>,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,10 +120,51 @@ enum ApprovalGenerationAuthority {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeApprovalRefusalReason {
+    MissingRoute,
+}
+
+impl NativeApprovalRefusalReason {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::MissingRoute => "nativeApprovalRouteUnavailable",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NativeApprovalRefusalDiagnostic {
+    endpoint: String,
+    provider_session_id: String,
+    method: &'static str,
+    reason_code: &'static str,
+}
+
+fn native_approval_refusal_diagnostic(
+    endpoint: &EndpointRef,
+    provider_session_id: &str,
+    request: &Value,
+    reason: NativeApprovalRefusalReason,
+) -> NativeApprovalRefusalDiagnostic {
+    let method = match request.get("method").and_then(Value::as_str) {
+        Some("item/commandExecution/requestApproval") => "item/commandExecution/requestApproval",
+        Some("item/fileChange/requestApproval") => "item/fileChange/requestApproval",
+        Some("item/permissions/requestApproval") => "item/permissions/requestApproval",
+        _ => "unknownNativeApprovalMethod",
+    };
+    NativeApprovalRefusalDiagnostic {
+        endpoint: String::from(endpoint.endpoint_id.clone()),
+        provider_session_id: provider_session_id.to_owned(),
+        method,
+        reason_code: reason.code(),
+    }
+}
+
 pub struct ServiceApprovalBroker {
     service_id: UuidIdentity,
-    endpoints: EndpointDirectory,
     backend: NativeControlBackend,
+    session_delivery: OnceLock<Arc<dyn SessionMessageDelivery>>,
     routes_path: PathBuf,
     routes: Mutex<BTreeMap<String, ApprovalRoute>>,
     pending: Arc<Mutex<BTreeMap<String, PendingApproval>>>,
@@ -103,89 +173,8 @@ pub struct ServiceApprovalBroker {
 }
 
 impl ServiceApprovalBroker {
-    pub async fn request_external(
-        &self,
-        request: ExternalApprovalRequest,
-    ) -> Result<BrokeredApprovalOutcome, ApprovalBrokerError> {
-        if request.requester.endpoint.service_id != self.service_id
-            || request.approver.endpoint.service_id != self.service_id
-        {
-            return Err(ApprovalBrokerError::RouteUnavailable);
-        }
-        if request.requester == request.approver {
-            return Ok(BrokeredApprovalOutcome::Cancelled);
-        }
-        let offered = map_external_options(request.options)?;
-        let request_id = format!(
-            "approval-{}",
-            String::from(crate::new_service_uuid().map_err(|_| ApprovalBrokerError::Unavailable)?)
-        );
-        let record = ApprovalRequestRecord {
-            request_id: request_id.clone(),
-            requester: request.requester,
-            approver: request.approver,
-            generation: request.generation,
-            state: ApprovalState::PendingClientDecision,
-            decision: None,
-            operation: serde_json::to_value(request.operation_metadata)
-                .map_err(|_| ApprovalBrokerError::Unavailable)?,
-            expires_at: (chrono::Utc::now()
-                + chrono::Duration::seconds(APPROVAL_TIMEOUT.as_secs() as i64))
-            .to_rfc3339(),
-        };
-        let (completion, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(
-            request_id.clone(),
-            PendingApproval {
-                record: record.clone(),
-                offered,
-                completion,
-                generation_authority: ApprovalGenerationAuthority::External {
-                    generation: record.generation.clone(),
-                    retirement: request.retirement.clone(),
-                },
-            },
-        );
-        self.record(record.clone()).await?;
-        let mut cancellation = CancellationMarker {
-            request_id: request_id.clone(),
-            pending: Arc::clone(&self.pending),
-            history: Arc::clone(&self.history),
-            history_path: self.history_path.clone(),
-            armed: true,
-        };
-        if self
-            .deliver_with_presentation(&record, request.transient_presentation.as_ref())
-            .await
-            .is_err()
-        {
-            self.pending.lock().await.remove(&request_id);
-            let mut terminal = record;
-            terminal.state = ApprovalState::ApproverUnreachable;
-            self.record(terminal).await?;
-            cancellation.armed = false;
-            return Ok(BrokeredApprovalOutcome::Cancelled);
-        }
-        tokio::select! {
-            biased;
-            () = request.retirement.cancelled() => {
-                self.transition_pending(&request_id, ApprovalState::Cancelled).await?;
-                cancellation.armed = false;
-                Ok(BrokeredApprovalOutcome::Cancelled)
-            }
-            result = tokio::time::timeout(APPROVAL_TIMEOUT, receiver) => match result {
-            Ok(Ok(outcome)) => {
-                cancellation.armed = false;
-                Ok(outcome)
-            }
-            _ => Ok(BrokeredApprovalOutcome::Cancelled),
-            }
-        }
-    }
-
     pub async fn load(
         service_id: UuidIdentity,
-        endpoints: EndpointDirectory,
         backend: NativeControlBackend,
         routes_path: PathBuf,
     ) -> Result<Arc<Self>, ApprovalBrokerError> {
@@ -209,14 +198,23 @@ impl ServiceApprovalBroker {
         };
         Ok(Arc::new(Self {
             service_id,
-            endpoints,
             backend,
+            session_delivery: OnceLock::new(),
             routes_path,
             routes: Mutex::new(routes),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             history_path,
             history: Arc::new(Mutex::new(history)),
         }))
+    }
+
+    pub fn install_session_delivery(
+        &self,
+        delivery: Arc<dyn SessionMessageDelivery>,
+    ) -> Result<(), ApprovalBrokerError> {
+        self.session_delivery
+            .set(delivery)
+            .map_err(|_| ApprovalBrokerError::Unavailable)
     }
 
     async fn persist_routes(&self) -> Result<(), ApprovalBrokerError> {
@@ -255,12 +253,45 @@ impl ServiceApprovalBroker {
         request_id: &str,
         state: ApprovalState,
     ) -> Result<(), ApprovalBrokerError> {
-        let removed = self.pending.lock().await.remove(request_id);
-        if let Some(mut pending) = removed {
-            pending.record.state = state;
-            self.record(pending.record).await?;
+        let reason = match state {
+            ApprovalState::TimedOut => Some("approval expired before a decision"),
+            ApprovalState::Cancelled => {
+                Some("approval was cancelled because its provider generation ended")
+            }
+            _ => None,
+        };
+        self.finish_pending(request_id, state, reason)
+            .await
+            .map(|_| ())
+    }
+
+    async fn finish_pending(
+        &self,
+        request_id: &str,
+        state: ApprovalState,
+        reason: Option<&str>,
+    ) -> Result<bool, ApprovalBrokerError> {
+        let Some(mut pending) = self.pending.lock().await.remove(request_id) else {
+            return Ok(false);
+        };
+        pending.record.state = state;
+        pending.record.reason = reason.map(str::to_owned);
+        if let Err(error) = self.record(pending.record.clone()).await {
+            pending.record.reason = Some(
+                "approval ended, but its history could not be persisted; inspect Router diagnostics"
+                    .to_owned(),
+            );
+            let mut history = self.history.lock().await;
+            if let Some(existing) = history
+                .iter_mut()
+                .find(|item| item.request_id == pending.record.request_id)
+            {
+                *existing = pending.record;
+            }
+            tracing::error!(%error, request_id, "failed to persist terminal approval state");
+            return Err(error);
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn expire_or_cancel_stale(
@@ -274,29 +305,58 @@ impl ServiceApprovalBroker {
     }
 }
 
-fn map_external_options(
-    options: Vec<ExternalApprovalOption>,
-) -> Result<BTreeMap<ApprovalDecision, String>, ApprovalBrokerError> {
+fn native_option_records(options: &[Value]) -> Vec<ApprovalOfferedOption> {
+    options
+        .iter()
+        .filter_map(|option| {
+            let option_id = option.get("optionId")?.as_str()?.to_owned();
+            let scope = match option_id.as_str() {
+                "native-accept" => ApprovalOptionScope::AllowOnce,
+                "native-accept-session" => ApprovalOptionScope::AllowForSession,
+                "native-decline" => ApprovalOptionScope::RejectOnce,
+                _ => ApprovalOptionScope::Unsupported {
+                    provider_kind: "native".to_owned(),
+                },
+            };
+            Some(ApprovalOfferedOption {
+                option_id,
+                label: option
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|label| label.chars().take(120).collect()),
+                scope,
+            })
+        })
+        .collect()
+}
+
+fn map_native_options(
+    options: &[Value],
+) -> Result<BTreeMap<ApprovalDecision, String>, &'static str> {
     let mut identifiers = std::collections::BTreeSet::new();
     let mut offered = BTreeMap::new();
     for option in options {
-        if !identifiers.insert(option.option_id.clone()) {
-            return Err(ApprovalBrokerError::Unavailable);
+        let option_id = option
+            .get("optionId")
+            .and_then(Value::as_str)
+            .ok_or("native permission option has no valid optionId")?;
+        if !identifiers.insert(option_id) {
+            return Err("native permission options contain a duplicate optionId");
         }
-        let decision = match option.scope {
-            ExternalApprovalOptionScope::AllowOnce => Some(ApprovalDecision::Allow),
-            ExternalApprovalOptionScope::RejectOnce => Some(ApprovalDecision::Deny),
-            ExternalApprovalOptionScope::AllowAlways
-            | ExternalApprovalOptionScope::RejectAlways => None,
+        let decision = match option_id {
+            "native-accept" => Some(ApprovalDecision::Allow),
+            "native-accept-session" => Some(ApprovalDecision::AllowForSession),
+            "native-decline" => Some(ApprovalDecision::Deny),
+            _ => None,
         };
         if let Some(decision) = decision
-            && offered.insert(decision, option.option_id).is_some()
+            && offered.insert(decision, option_id.to_owned()).is_some()
         {
-            return Err(ApprovalBrokerError::Unavailable);
+            return Err("native permission options contain duplicate decisions");
         }
     }
     if offered.is_empty() {
-        return Err(ApprovalBrokerError::Unavailable);
+        return Err("native permission request has no supported decision option");
     }
     Ok(offered)
 }
@@ -307,23 +367,26 @@ async fn record_history(
     record: ApprovalRequestRecord,
 ) -> Result<(), ApprovalBrokerError> {
     let mut history = history.lock().await;
-    if let Some(existing) = history
+    let mut updated_history = history.clone();
+    if let Some(existing) = updated_history
         .iter_mut()
         .find(|item| item.request_id == record.request_id)
     {
         *existing = record;
     } else {
-        history.push(record);
+        updated_history.push(record);
     }
-    let bytes =
-        serde_json::to_vec_pretty(&*history).map_err(|_| ApprovalBrokerError::Unavailable)?;
+    let bytes = serde_json::to_vec_pretty(&updated_history)
+        .map_err(|_| ApprovalBrokerError::Unavailable)?;
     let temporary = history_path.with_extension("json.tmp");
     tokio::fs::write(&temporary, bytes)
         .await
         .map_err(|_| ApprovalBrokerError::Unavailable)?;
     tokio::fs::rename(&temporary, history_path)
         .await
-        .map_err(|_| ApprovalBrokerError::Unavailable)
+        .map_err(|_| ApprovalBrokerError::Unavailable)?;
+    *history = updated_history;
+    Ok(())
 }
 
 struct CancellationMarker {
@@ -346,7 +409,24 @@ impl Drop for CancellationMarker {
         tokio::spawn(async move {
             if let Some(mut request) = pending.lock().await.remove(&request_id) {
                 request.record.state = ApprovalState::Cancelled;
-                let _ = record_history(&history_path, &history, request.record).await;
+                request.record.reason =
+                    Some("approval handler ended before a decision was recorded".to_owned());
+                if let Err(error) =
+                    record_history(&history_path, &history, request.record.clone()).await
+                {
+                    request.record.reason = Some(
+                        "approval ended, but its history could not be persisted; inspect Router diagnostics"
+                            .to_owned(),
+                    );
+                    let mut history = history.lock().await;
+                    if let Some(existing) = history
+                        .iter_mut()
+                        .find(|item| item.request_id == request_id)
+                    {
+                        *existing = request.record;
+                    }
+                    tracing::error!(%error, request_id, "failed to persist dropped approval state");
+                }
             }
         });
     }
@@ -397,7 +477,11 @@ impl ServiceApprovalBroker {
                 .await?;
             return Err("oldGeneration");
         }
-        if params.actor == request.record.requester {
+        if matches!(
+            &request.generation_authority,
+            ApprovalGenerationAuthority::Native
+        ) && params.actor == request.record.requester
+        {
             return Err("selfDecision");
         }
         if params.actor != request.record.approver {
@@ -408,14 +492,15 @@ impl ServiceApprovalBroker {
             .get(&params.decision)
             .cloned()
             .ok_or("decisionNotOffered")?;
+        let mut record = request.record.clone();
+        record.state = ApprovalState::Decided;
+        record.reason = None;
+        record.decision = Some(params.decision);
+        self.record(record).await.map_err(|_| "unavailable")?;
         let request = pending
             .remove(&params.request_id)
             .ok_or("approvalNotPending")?;
-        let mut record = request.record.clone();
-        record.state = ApprovalState::Decided;
-        record.decision = Some(params.decision);
         drop(pending);
-        self.record(record).await.map_err(|_| "unavailable")?;
         request
             .completion
             .send(BrokeredApprovalOutcome::Selected { option_id })
@@ -430,67 +515,39 @@ impl ServiceApprovalBroker {
     }
 
     async fn deliver(&self, record: &ApprovalRequestRecord) -> Result<(), ApprovalBrokerError> {
-        self.deliver_with_presentation(record, None).await
-    }
-
-    async fn deliver_with_presentation(
-        &self,
-        record: &ApprovalRequestRecord,
-        transient_presentation: Option<&Value>,
-    ) -> Result<(), ApprovalBrokerError> {
-        if String::from(record.approver.endpoint.endpoint_id.clone()) != "codex-local" {
-            return Err(ApprovalBrokerError::RouteUnavailable);
-        }
-        let mut delivered_record = record.clone();
-        if let Some(presentation) = transient_presentation
-            && let Value::Object(operation) = &mut delivered_record.operation
-        {
-            operation.insert("presentation".to_owned(), presentation.clone());
-        }
-        let text = serde_json::to_string(&delivered_record)
-            .map_err(|_| ApprovalBrokerError::Unavailable)?;
-        let params = NativeSendParams {
+        let text = serde_json::to_string(record).map_err(|_| ApprovalBrokerError::Unavailable)?;
+        let request = DeliveryRequest {
             target: record.approver.clone(),
-            generation: self
-                .backend
-                .gate
-                .acquire()
-                .map_err(|_| ApprovalBrokerError::Unavailable)?
-                .generation()
-                .clone(),
             message: MessageContent::Agent {
                 sender: record.requester.clone(),
                 text: text
                     .try_into()
                     .map_err(|_| ApprovalBrokerError::Unavailable)?,
             },
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            precondition: DeliveryPrecondition::Unpinned,
+            correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
+            attempt: agent_automation::AttemptId::generate(),
         };
-        let endpoints = self
-            .endpoints
-            .subscribe()
-            .and_then(|subscription| subscription.snapshot())
-            .map_err(|_| ApprovalBrokerError::Unavailable)?
-            .endpoints;
-        let response = crate::native_message_dispatch::dispatch_message(
-            crate::native_control_dispatch::NativeControlRequest {
-                method: "codex/messageSend",
-                params: serde_json::to_value(params)
-                    .map_err(|_| ApprovalBrokerError::Unavailable)?,
-                id: json!(record.request_id),
-                service_id: &self.service_id,
-                backend: Some(&self.backend),
-                endpoints: &endpoints,
-                stored_observation: None,
-                access_routes: None,
-            },
-        )
-        .await;
-        response
-            .get("result")
-            .ok_or(ApprovalBrokerError::RouteUnavailable)
-            .map(|_| ())
+        let delivery = self
+            .session_delivery
+            .get()
+            .ok_or(ApprovalBrokerError::Unavailable)?;
+        let receipt = delivery
+            .deliver(request, &UnstoredAttemptEvidenceSink)
+            .await
+            .map_err(|_| ApprovalBrokerError::Unavailable)?;
+        match receipt.outcome {
+            DeliveryOutcome::Started
+            | DeliveryOutcome::Steered
+            | DeliveryOutcome::StartedOrSteered
+            | DeliveryOutcome::Queued
+            | DeliveryOutcome::PeerMessageWritten
+            | DeliveryOutcome::Unknown => Ok(()),
+            DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
+                Err(ApprovalBrokerError::RouteUnavailable)
+            }
+        }
     }
 }
 
@@ -526,13 +583,6 @@ impl ApprovalBroker for ServiceApprovalBroker {
         >,
     > {
         Box::pin(async move {
-            let route = self
-                .routes
-                .lock()
-                .await
-                .get(&request.thread_id)
-                .cloned()
-                .ok_or(ApprovalBrokerError::RouteUnavailable)?;
             let requester = SessionRef {
                 endpoint: self.backend.endpoint.clone(),
                 session_id: request
@@ -541,30 +591,80 @@ impl ApprovalBroker for ServiceApprovalBroker {
                     .try_into()
                     .map_err(|_| ApprovalBrokerError::Unavailable)?,
             };
-            if requester == route.approver {
-                return Ok(BrokeredApprovalOutcome::Cancelled);
-            }
-            let options = request
+            let route = self.routes.lock().await.get(&request.thread_id).cloned();
+            let Some(route) = route else {
+                let diagnostic = native_approval_refusal_diagnostic(
+                    &self.backend.endpoint,
+                    &request.thread_id,
+                    &request.request,
+                    NativeApprovalRefusalReason::MissingRoute,
+                );
+                tracing::warn!(
+                    endpoint = %diagnostic.endpoint,
+                    provider_session_id = %diagnostic.provider_session_id,
+                    method = diagnostic.method,
+                    reason_code = diagnostic.reason_code,
+                    "native approval request refused before route lookup",
+                );
+                return Err(ApprovalBrokerError::RouteUnavailable);
+            };
+            let native_options = request
                 .request
                 .pointer("/params/options")
                 .and_then(Value::as_array)
-                .ok_or(ApprovalBrokerError::Unavailable)?;
-            let offered = options
-                .iter()
-                .filter_map(|option| {
-                    let id = option.get("optionId")?.as_str()?.to_owned();
-                    let decision = match id.as_str() {
-                        "native-accept" => ApprovalDecision::Allow,
-                        "native-accept-session" => ApprovalDecision::AllowForSession,
-                        "native-decline" => ApprovalDecision::Deny,
-                        _ => return None,
-                    };
-                    Some((decision, id))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let offered_options = native_option_records(native_options);
+            if requester == route.approver {
+                let request_id = format!(
+                    "approval-{}",
+                    String::from(
+                        crate::new_service_uuid().map_err(|_| ApprovalBrokerError::Unavailable)?
+                    )
+                );
+                self.record(ApprovalRequestRecord {
+                    request_id,
+                    requester,
+                    approver: route.approver,
+                    generation: request.generation,
+                    state: ApprovalState::ApproverIsRequester,
+                    reason: Some("set a different approver".to_owned()),
+                    offered_options,
+                    presentation: None,
+                    decision: None,
+                    operation: request.request,
+                    expires_at: chrono::Utc::now().to_rfc3339(),
                 })
-                .collect::<BTreeMap<_, _>>();
-            if offered.is_empty() {
-                return Err(ApprovalBrokerError::Unavailable);
+                .await?;
+                return Ok(BrokeredApprovalOutcome::Cancelled);
             }
+            let offered = match map_native_options(native_options) {
+                Ok(offered) => offered,
+                Err(reason) => {
+                    let request_id = format!(
+                        "approval-{}",
+                        String::from(
+                            crate::new_service_uuid()
+                                .map_err(|_| { ApprovalBrokerError::Unavailable })?
+                        )
+                    );
+                    self.record(ApprovalRequestRecord {
+                        request_id,
+                        requester,
+                        approver: route.approver,
+                        generation: request.generation,
+                        state: ApprovalState::Cancelled,
+                        reason: Some(reason.to_owned()),
+                        offered_options,
+                        presentation: None,
+                        decision: None,
+                        operation: request.request,
+                        expires_at: chrono::Utc::now().to_rfc3339(),
+                    })
+                    .await?;
+                    return Ok(BrokeredApprovalOutcome::Cancelled);
+                }
+            };
             let request_id = format!(
                 "approval-{}",
                 String::from(
@@ -580,10 +680,14 @@ impl ApprovalBroker for ServiceApprovalBroker {
                 approver: route.approver,
                 generation: request.generation,
                 state: ApprovalState::PendingClientDecision,
+                reason: None,
+                offered_options,
+                presentation: None,
                 operation: request.request,
                 expires_at,
                 decision: None,
             };
+            self.record(record.clone()).await?;
             let (completion, receiver) = oneshot::channel();
             self.pending.lock().await.insert(
                 request_id.clone(),
@@ -594,7 +698,6 @@ impl ApprovalBroker for ServiceApprovalBroker {
                     generation_authority: ApprovalGenerationAuthority::Native,
                 },
             );
-            self.record(record.clone()).await?;
             let mut cancellation = CancellationMarker {
                 request_id: request_id.clone(),
                 pending: Arc::clone(&self.pending),
@@ -602,31 +705,53 @@ impl ApprovalBroker for ServiceApprovalBroker {
                 history_path: self.history_path.clone(),
                 armed: true,
             };
-            if self.deliver(&record).await.is_err() {
-                self.pending.lock().await.remove(&request_id);
-                let mut terminal = record;
-                terminal.state = ApprovalState::ApproverUnreachable;
-                self.record(terminal).await?;
+            let deadline = tokio::time::Instant::now() + APPROVAL_TIMEOUT;
+            let delivery = self.deliver(&record);
+            tokio::pin!(delivery);
+            let delivery_result = tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => {
+                    self.finish_pending(
+                        &request_id,
+                        ApprovalState::TimedOut,
+                        Some("approval timed out before the notice reached its approver"),
+                    ).await?;
+                    cancellation.armed = false;
+                    return Ok(BrokeredApprovalOutcome::Cancelled);
+                }
+                result = &mut delivery => result,
+            };
+            if delivery_result.is_err() {
+                self.finish_pending(
+                    &request_id,
+                    ApprovalState::ApproverUnreachable,
+                    Some("approval notice could not be delivered to the configured approver"),
+                )
+                .await?;
                 cancellation.armed = false;
                 return Ok(BrokeredApprovalOutcome::Cancelled);
             }
-            match tokio::time::timeout(APPROVAL_TIMEOUT, receiver).await {
-                Ok(Ok(outcome)) => {
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => {
+                    self.finish_pending(
+                        &request_id,
+                        ApprovalState::TimedOut,
+                        Some("approval timed out before an approver decided"),
+                    ).await?;
+                    cancellation.armed = false;
+                    Ok(BrokeredApprovalOutcome::Cancelled)
+                }
+                result = receiver => match result {
+                Ok(outcome) => {
                     cancellation.armed = false;
                     Ok(outcome)
                 }
-                Ok(Err(_)) => {
-                    cancellation.armed = false;
-                    Ok(BrokeredApprovalOutcome::Cancelled)
-                }
                 Err(_) => {
-                    self.pending.lock().await.remove(&request_id);
-                    let mut terminal = record;
-                    terminal.state = ApprovalState::TimedOut;
-                    self.record(terminal).await?;
                     cancellation.armed = false;
                     Ok(BrokeredApprovalOutcome::Cancelled)
                 }
+            }
             }
         })
     }

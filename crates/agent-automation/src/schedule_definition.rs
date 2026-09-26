@@ -58,8 +58,12 @@ pub enum ContinuityInput<TTarget> {
         source_run_id: RunId,
         #[serde(rename = "sourceTarget")]
         source_target: TTarget,
-        #[serde(rename = "sourceTurnId")]
-        source_turn_id: String,
+        #[serde(
+            rename = "sourceReference",
+            alias = "sourceTurnId",
+            deserialize_with = "crate::summary_source_reference::deserialize_stored_source_reference"
+        )]
+        source_reference: crate::SummarySourceReference,
     },
     ImportedSummary {
         text: String,
@@ -98,8 +102,12 @@ pub enum SummarySource<TTarget> {
     Completed {
         #[serde(rename = "sourceTarget")]
         source_target: TTarget,
-        #[serde(rename = "sourceTurnId")]
-        source_turn_id: String,
+        #[serde(
+            rename = "sourceReference",
+            alias = "sourceTurnId",
+            deserialize_with = "crate::summary_source_reference::deserialize_stored_source_reference"
+        )]
+        source_reference: crate::SummarySourceReference,
         #[serde(rename = "summaryAttemptId")]
         summary_attempt_id: crate::AttemptId,
     },

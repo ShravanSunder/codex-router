@@ -127,6 +127,9 @@ pub(super) enum ThreadCommand {
     /// Stop watching a thread. Existing message history remains readable.
     Unwatch(ThreadWatchArguments),
     /// List project threads and reader watch status.
+    #[command(
+        long_about = "List project threads and reader watch status. With neither --project-id nor --repository-path, use the current Git repository when available. Example outside a repository: agent-collaboration board thread list --repository-path '<path-in-repository>' (or --project-id <project-id>). --watched-only requires --project-id."
+    )]
     List(ThreadListArguments),
     /// Wait for Thread Activity. Delivery marks it seen; acknowledgement remains separate.
     Listen(ThreadListenArguments),
@@ -647,7 +650,7 @@ pub(super) struct ThreadListenArguments {
     /// Wait for the first Batch set and exit.
     #[arg(long, conflicts_with = "lifetime")]
     pub once: bool,
-    /// Fixed repeating lifetime.
+    /// Fixed repeating lifetime. Session delivery accepts `short` (25 minutes) or `long` (75 minutes).
     #[arg(long, value_enum)]
     pub lifetime: Option<ThreadListenLifetimeKind>,
     /// Shorten a stdout repeating listen without extending its fixed lifetime.
@@ -656,7 +659,7 @@ pub(super) struct ThreadListenArguments {
     /// Once maximum wait: integer followed by s, m, h, or d.
     #[arg(long, requires = "once")]
     pub max_wait: Option<String>,
-    /// Deliver batches to stdout or arm background delivery into the calling Codex session.
+    /// Deliver batches to stdout or arm delivery into the calling session. Session delivery requires an existing thread participant and --lifetime short|long (or --once).
     #[arg(long, value_enum, default_value = "stdout")]
     pub deliver: ThreadListenDeliveryKind,
     /// Initialize the Delivered position for a first Listen from this Activity sequence.

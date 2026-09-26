@@ -1,33 +1,57 @@
-//! Exact persisted turn observations may finish a Run; reconciliation cannot start or interrupt work.
-use crate::{NativeAdmission, NativeControlBackend};
-use agent_automation::{RunPhase, RunRecord, WorkerOutcome};
-use automation_storage::{AutomationStore, RunCompletion, StorageError};
-use collaboration_protocol::{CodexGeneration, EndpointRef, NativeSendReceipt, SessionRef};
+//! Reconciliation asks the recorded route for exact settlement and never resubmits work.
+use crate::{
+    DeliveryContractError, NativeControlBackend, RunObservationContext, RunReconciliation,
+    RunSettlement, ScheduledRunExecution,
+};
+use agent_automation::{RouteEffectEvidence, RunPhase, RunRecord, WorkerOutcome};
+use automation_storage::{AutomationStore, RunCompletion, RunStopIdentity, StorageError};
+use collaboration_protocol::{CodexGeneration, EndpointRef, SessionRef};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+pub(crate) type StoredRun = RunRecord<
+    SessionRef,
+    EndpointRef,
+    CodexGeneration,
+    crate::stored_run_receipt::StoredRunReceipt,
+>;
+
 pub(crate) async fn reconcile(
     store: &Arc<Mutex<AutomationStore>>,
+    execution: Option<&Arc<dyn ScheduledRunExecution>>,
     backend: Option<&NativeControlBackend>,
-    record: RunRecord<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>,
+    record: StoredRun,
 ) -> Result<(), StorageError> {
-    let Some(backend) = backend else {
-        return Ok(());
-    };
-    let Some(target) = record.evidence.native.target.as_ref() else {
-        return Ok(());
-    };
-    if target.endpoint != backend.endpoint {
-        return Ok(());
-    }
-    let Ok(admission) = backend.gate.acquire() else {
-        return Ok(());
-    };
     match record.phase {
         RunPhase::Executing | RunPhase::Stopping | RunPhase::Uncertain => {
-            observe_worker(store, &admission, &record).await?;
+            let Some(execution) = execution else {
+                return Ok(());
+            };
+            let Some(recorded) = record.evidence.route.clone() else {
+                return Ok(());
+            };
+            let inputs = record.inputs.clone().ok_or(StorageError::InvalidRecord)?;
+            let observation = execution
+                .reconcile_run(RunObservationContext {
+                    run_id: record.run_id.clone(),
+                    phase: record.phase,
+                    recorded,
+                    inputs,
+                })
+                .await;
+            match observation {
+                Ok(RunReconciliation::Settled { settlement }) => {
+                    persist_settlement(store, &record, settlement).await?;
+                }
+                Ok(RunReconciliation::KnownNotSubmitted | RunReconciliation::StillUnknown)
+                | Err(DeliveryContractError::ClientOperation) => {}
+                Err(_) => return Err(StorageError::InvalidRecord),
+            }
         }
         RunPhase::SummaryRunning | RunPhase::SummaryBlocked => {
+            let Some(backend) = backend else {
+                return Ok(());
+            };
             let Some(attempt) = record.summary_attempt.as_ref() else {
                 return Err(StorageError::InvalidRecord);
             };
@@ -38,10 +62,15 @@ pub(crate) async fn reconcile(
             {
                 return Ok(());
             }
+            let Ok(admission) = backend.gate.acquire() else {
+                return Ok(());
+            };
             let timeout_seconds = attempt.effective_timeout_seconds;
             crate::summary_native_worker::step(crate::summary_native_worker::SummaryStep {
                 store,
                 admission: &admission,
+                summary_endpoint: backend.endpoint.clone(),
+                source: None,
                 record,
                 timeout_seconds,
                 work: crate::summary_native_worker::SummaryWork::ObserveOnly,
@@ -53,60 +82,55 @@ pub(crate) async fn reconcile(
     Ok(())
 }
 
-/// Shared by background observation and explicit reconciliation; never issues a native mutation.
-/// True means exact terminal evidence was found, including a concurrently recorded completion.
-pub(crate) async fn observe_worker(
+pub(crate) async fn persist_settlement(
     store: &Arc<Mutex<AutomationStore>>,
-    admission: &NativeAdmission,
-    record: &RunRecord<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>,
+    record: &StoredRun,
+    settlement: RunSettlement,
 ) -> Result<bool, StorageError> {
-    let (Some(target), Some(turn_id)) = (&record.evidence.native.target, &record.native_turn_id)
-    else {
-        return Ok(false);
+    let outcome = match settlement {
+        RunSettlement::Pending => return Ok(false),
+        RunSettlement::Completed { .. } => WorkerOutcome::Completed { explanation: None },
+        RunSettlement::Failed { reason } => WorkerOutcome::Failed {
+            explanation: Some(reason),
+        },
+        RunSettlement::Interrupted => WorkerOutcome::Interrupted {
+            explanation: Some(if record.phase == RunPhase::Stopping {
+                "Native history confirms the recorded turn is interrupted; timeout stopping intent was recorded, but attribution to that request is not confirmed.".into()
+            } else {
+                "Native turn was interrupted.".into()
+            }),
+        },
+        RunSettlement::WrittenWithoutCompletion => WorkerOutcome::PeerMessageWritten {
+            explanation: "Peer message written; receiver completion was not observed.".into(),
+        },
     };
-    let retired = admission.retirement();
-    let observed = tokio::select! {
-        biased;
-        _ = retired.cancelled() => return Ok(false),
-        observed = tokio::time::timeout(std::time::Duration::from_secs(20), crate::scheduled_native_observation::read_turn_and_choice(admission, target, turn_id)) => observed,
-    };
-    let Ok(Ok(Some(observed_turn))) = observed else {
-        return Ok(false);
-    };
-    let Some(inputs) = record.inputs.as_ref() else {
-        return Err(StorageError::InvalidRecord);
-    };
-    if observed_turn.effort.as_deref() != inputs.execution_configuration.effort.as_deref() {
-        return Err(StorageError::InvalidRecord);
-    }
-    if matches!(
-        inputs.execution_configuration.destination,
-        agent_automation::ExecutionDestination::FreshEachRun { .. }
-    ) && observed_turn.model.as_deref() != inputs.execution_configuration.model.as_deref()
-    {
-        return Err(StorageError::InvalidRecord);
-    }
-    let turn = observed_turn.turn;
-    if retired.is_cancelled() {
-        return Ok(false);
-    }
-    let outcome = match turn.get("status").and_then(serde_json::Value::as_str) {
-        Some("completed") => WorkerOutcome::Completed { explanation: None },
-        Some("failed") => WorkerOutcome::Failed { explanation: Some("Native turn failed; inspect its recorded output.".into()) },
-        Some("interrupted") => WorkerOutcome::Interrupted { explanation: Some(if record.phase == RunPhase::Stopping { "Native history confirms the recorded turn is interrupted; timeout stopping intent was recorded, but attribution to that request is not confirmed." } else { "Native turn was interrupted." }.into()) },
-        _ => return Ok(false),
+    let recorded = record
+        .evidence
+        .route
+        .as_ref()
+        .ok_or(StorageError::InvalidRecord)?;
+    let identity = match recorded {
+        RouteEffectEvidence::CodexAppServer(_) => RunStopIdentity::NativeTurn(
+            record
+                .native_turn_id
+                .clone()
+                .ok_or(StorageError::InvalidRecord)?,
+        ),
+        RouteEffectEvidence::ProviderAcp(provider) => {
+            RunStopIdentity::ProviderOperation(provider.attempt_id.clone())
+        }
+        RouteEffectEvidence::ClaudeCodePeer(_) => RunStopIdentity::PeerMessageWritten,
     };
     store
         .lock()
         .await
-        .complete_run_turn::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+        .complete_run_settlement::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(
             RunCompletion {
                 run_id: record.run_id.clone(),
-                native_turn_id: turn_id.clone(),
+                settlement: identity,
                 outcome,
                 now_ms: chrono::Utc::now().timestamp_millis(),
             },
         )
-        .await?;
-    Ok(true)
+        .await
 }

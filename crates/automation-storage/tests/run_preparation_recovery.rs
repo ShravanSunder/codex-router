@@ -53,12 +53,12 @@ async fn known_preparation_rejection_finishes_but_unknown_effects_do_not()
     store
         .begin_run_preparation::<_, String, _, String>(RunPreparationIntent {
             run_id: run_id.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
         })
         .await?;
     let attempt = automation_storage::RunPreparationFailure {
         run_id: run_id.clone(),
-        effects: effects.clone(),
+        effects: effects.clone().into(),
         explanation: "connection lost".into(),
         now_ms: 61000,
     };
@@ -73,7 +73,7 @@ async fn known_preparation_rejection_finishes_but_unknown_effects_do_not()
     store
         .fail_run_preparation::<_, String, _, String>(automation_storage::RunPreparationFailure {
             run_id: run_id.clone(),
-            effects,
+            effects: effects.into(),
             explanation: "native allocation rejected".into(),
             now_ms: 62000,
         })

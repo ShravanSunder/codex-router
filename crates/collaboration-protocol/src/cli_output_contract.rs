@@ -60,6 +60,12 @@ pub enum ObservationCloseReason {
     deny_unknown_fields
 )]
 pub enum ConversationRecord {
+    ConversationCreateStarted {
+        operation_id: crate::OperationId,
+    },
+    ConversationOperationStarted {
+        operation_id: crate::OperationId,
+    },
     ConversationCreated {
         target: SessionRef,
     },

@@ -539,6 +539,7 @@ mod tests {
             remote_control: RemoteControlCondition::Connected,
             remote_control_identity: None,
             executable_relation: ExecutableRelation::Match,
+            router_executable_relation: codex_router_host::RouterExecutableRelation::Match,
             recovery_budget: RecoveryBudget::Available,
             last_lifecycle_outcome: None,
         })

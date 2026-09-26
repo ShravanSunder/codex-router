@@ -127,6 +127,11 @@ async fn exercise_scheduled_run(
     )?;
     let gate = NativeGenerationGate::default();
     gate.activate(generation, path.clone(), Some(schemas))?;
+    let native_backend = NativeControlBackend {
+        endpoint: target.endpoint.clone(),
+        gate,
+        codex_home: root.clone(),
+    };
     let identity = ServiceIdentity::new(
         service_id,
         service_id,
@@ -134,11 +139,10 @@ async fn exercise_scheduled_run(
     )?
     .with_endpoints(vec![description])?
     .with_automation_store(store.clone())
-    .with_native_backend(NativeControlBackend {
-        endpoint: target.endpoint.clone(),
-        gate,
-        codex_home: root.clone(),
-    })?;
+    .with_scheduled_run_execution(Arc::new(
+        collaboration_service::CodexAppServerScheduledRuns::new(native_backend.clone()),
+    ))
+    .with_native_backend(native_backend)?;
     let shutdown = tokio_util::sync::CancellationToken::new();
     let schedule_worker = identity
         .schedule_timing_worker()
@@ -338,7 +342,7 @@ async fn exercise_scheduled_run(
                 }
                 let ids = backend_store.lock().await.observable_run_ids(None).await?;
                 let run_id = ids.first().ok_or("busy Run missing")?;
-                let run=backend_store.lock().await.read_run::<SessionRef,collaboration_protocol::EndpointRef,CodexGeneration,collaboration_protocol::NativeSendReceipt>(run_id).await?;
+                let run=backend_store.lock().await.read_run::<SessionRef,collaboration_protocol::EndpointRef,CodexGeneration,collaboration_protocol::DeliveryReceipt>(run_id).await?;
                 if run.evidence.timing.is_some() {
                     return Err("busy wait consumed execution budget".into());
                 }
@@ -441,7 +445,7 @@ async fn exercise_scheduled_run(
                 known_run = page.records.first().map(|run|run.run_id.clone());
             }
             if let Some(run_id)=&known_run{
-                let run=store.lock().await.read_run::<SessionRef,collaboration_protocol::EndpointRef,CodexGeneration,collaboration_protocol::NativeSendReceipt>(run_id).await?;
+                let run=store.lock().await.read_run::<SessionRef,collaboration_protocol::EndpointRef,CodexGeneration,collaboration_protocol::DeliveryReceipt>(run_id).await?;
                 if resume_rejected && run.phase == agent_automation::RunPhase::Uncertain {
                     resume_uncertainty_observed.notify_one();
                 }
@@ -539,6 +543,46 @@ async fn exercise_scheduled_run(
     ) || public.summary.is_none() != skip_failed_summary
     {
         return Err("public Run snapshot lost finished worker or summary".into());
+    }
+    let collaboration_protocol::RunState::Finished {
+        execution: collaboration_protocol::RunExecution::CodexAppServer(native_execution),
+        ..
+    } = &public.state
+    else {
+        return Err("legacy native Run lost its app-server execution variant".into());
+    };
+    if record.native_turn_id.as_deref() != Some(native_execution.turn_id.as_str())
+        || !matches!(
+            public.execution_evidence.route.as_ref(),
+            Some(collaboration_protocol::DeliveryRouteEvidence::CodexAppServer(_))
+        )
+    {
+        return Err("native Run turn or route evidence changed at inspection".into());
+    }
+    let native_receipt = match public
+        .execution_evidence
+        .acceptance
+        .as_ref()
+        .and_then(|receipt| receipt.client.as_ref())
+    {
+        Some(collaboration_protocol::DeliveryClientReceipt::CodexAppServer(receipt)) => receipt,
+        _ => return Err("native Run receipt was not nested under app-server".into()),
+    };
+    if serde_json::to_value(
+        public
+            .execution_evidence
+            .acceptance
+            .as_ref()
+            .ok_or("public native receipt missing")?,
+    )? != serde_json::to_value(
+        record
+            .evidence
+            .acceptance
+            .as_ref()
+            .ok_or("stored native receipt missing")?,
+    )? || String::from(native_receipt.client_user_message_id.clone()) != record.run_id.as_str()
+    {
+        return Err("native Run receipt identifiers changed at inspection".into());
     }
     let summaries = client
         .read_run_summaries(collaboration_protocol::RunSummariesRequest {

@@ -76,6 +76,25 @@ impl ListenFixture {
         registry: &ThreadListenRegistry,
         mode: ThreadListenMode,
     ) -> ThreadListenSnapshot {
+        self.register_with_delivery(registry, mode, ThreadListenDelivery::Stdout)
+            .await
+    }
+
+    async fn register_session_delivery(
+        &self,
+        registry: &ThreadListenRegistry,
+        mode: ThreadListenMode,
+    ) -> ThreadListenSnapshot {
+        self.register_with_delivery(registry, mode, ThreadListenDelivery::Session)
+            .await
+    }
+
+    async fn register_with_delivery(
+        &self,
+        registry: &ThreadListenRegistry,
+        mode: ThreadListenMode,
+        delivery: ThreadListenDelivery,
+    ) -> ThreadListenSnapshot {
         let request = ThreadListenRequest {
             reader: self.reader.clone(),
             selection: ThreadListenSelection::Roots {
@@ -84,7 +103,7 @@ impl ListenFixture {
             mode,
             from_activity_sequence: None,
             acknowledge: false,
-            delivery: ThreadListenDelivery::Stdout,
+            delivery,
         };
         let context = self
             .store
@@ -615,7 +634,7 @@ async fn long_session_delivery_heartbeats_only_at_silent_marks_then_finalizes() 
     let fixture = ListenFixture::create("session-heartbeat").await;
     let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
     let listen = fixture
-        .register(
+        .register_session_delivery(
             &registry,
             ThreadListenMode::Repeating {
                 lifetime_seconds: ThreadListenLifetime::Long.seconds(),
@@ -714,7 +733,7 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
     let fixture = ListenFixture::create("rejection-reset").await;
     let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
     let listen = fixture
-        .register(
+        .register_session_delivery(
             &registry,
             ThreadListenMode::Repeating {
                 lifetime_seconds: ThreadListenLifetime::Long.seconds(),
@@ -752,13 +771,100 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
     fixture.finish().await;
 }
 
+struct RetryOnceSink {
+    records: Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
+    attempts: Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl BatchSink for RetryOnceSink {
+    fn deliver<'a>(
+        &'a self,
+        record: ListenDeliveryRecord,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), BatchSinkFailure>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if matches!(record, ListenDeliveryRecord::Batch(_))
+                && self.attempts.fetch_add(1, Ordering::Relaxed) == 0
+            {
+                return Err(BatchSinkFailure::Unavailable);
+            }
+            self.records.lock().await.push(record);
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_succeeds() {
+    let fixture = ListenFixture::create("retryable-unavailable").await;
+    let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
+    let listen = fixture
+        .register_session_delivery(
+            &registry,
+            ThreadListenMode::Repeating {
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
+            },
+        )
+        .await;
+    assert_eq!(listen.delivery, ThreadListenDelivery::Session);
+    fixture.reply("Retry this provider push").await;
+    let records = Arc::new(TokioMutex::new(Vec::new()));
+    let attempts = Arc::new(std::sync::atomic::AtomicU8::new(0));
+
+    registry.spawn_session_delivery(
+        listen.listen_id.clone(),
+        Arc::clone(&fixture.store),
+        Arc::new(RetryOnceSink {
+            records: Arc::clone(&records),
+            attempts: Arc::clone(&attempts),
+        }),
+    );
+    drive_session_delivery(&records, 30, |seen| {
+        seen.iter()
+            .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)))
+    })
+    .await;
+
+    let mut snapshot = registry
+        .show(&listen.listen_id)
+        .await
+        .expect("retrying listen remains active");
+    for _ in 0..1_000 {
+        if snapshot.batches_delivered >= 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+        snapshot = registry
+            .show(&listen.listen_id)
+            .await
+            .expect("retrying listen remains active");
+    }
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    assert_eq!(snapshot.batches_delivered, 1);
+    assert!(records.lock().await.iter().any(|record| matches!(
+        record,
+        ListenDeliveryRecord::Batch(batch_set)
+            if batch_set.batches[0].messages[0].text.as_str() == "Retry this provider push"
+    )));
+    registry
+        .cancel(&listen.listen_id)
+        .await
+        .expect("cancel listen");
+    drive_session_delivery(&records, 5, |seen| {
+        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
+    })
+    .await;
+    fixture.finish().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
     // Arrange: a long session listen with activity waiting in its first mark window.
     let fixture = ListenFixture::create("mark-suppression").await;
     let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
     let listen = fixture
-        .register(
+        .register_session_delivery(
             &registry,
             ThreadListenMode::Repeating {
                 lifetime_seconds: ThreadListenLifetime::Long.seconds(),
@@ -812,7 +918,7 @@ async fn a_third_consecutive_rejection_ends_the_listen_with_its_evidence() {
     let fixture = ListenFixture::create("rejection-terminal").await;
     let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
     let listen = fixture
-        .register(
+        .register_session_delivery(
             &registry,
             ThreadListenMode::Repeating {
                 lifetime_seconds: ThreadListenLifetime::Long.seconds(),

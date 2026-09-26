@@ -125,11 +125,16 @@ pub(crate) async fn dispatch(request: AttemptRequest<'_>) -> Value {
                 let id = serde_json::from_value(id).map_err(|_| StorageError::InvalidRecord)?;
                 let attempt =
                     serde_json::from_value(record.body).map_err(|_| StorageError::InvalidRecord)?;
-                Ok::<_, StorageError>((id, attempt))
+                let receipt = record
+                    .receipt
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| StorageError::InvalidRecord)?;
+                Ok::<_, StorageError>((id, attempt, receipt))
             })();
             match parsed {
-                Ok((id, attempt)) => {
-                    crate::attempt_history_projection::delivery(&mut store, &id, attempt)
+                Ok((id, attempt, receipt)) => {
+                    crate::attempt_history_projection::delivery(&mut store, &id, attempt, receipt)
                         .await
                         .and_then(|record| {
                             serde_json::to_value(record).map_err(|_| StorageError::InvalidRecord)

@@ -13,6 +13,7 @@ pub struct ScheduleTimingWorker {
 impl ScheduleTimingWorker {
     pub(crate) fn new(
         store: Arc<Mutex<AutomationStore>>,
+        execution: Arc<dyn crate::ScheduledRunExecution>,
         backend: Option<crate::NativeControlBackend>,
         configuration: crate::AutomationConfigurationHandle,
     ) -> Self {
@@ -20,6 +21,7 @@ impl ScheduleTimingWorker {
             store: Arc::clone(&store),
             runner: ScheduledRunWorker {
                 store,
+                execution,
                 backend,
                 configuration,
             },

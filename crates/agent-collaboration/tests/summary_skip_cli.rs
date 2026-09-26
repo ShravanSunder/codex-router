@@ -61,10 +61,20 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
     let mut effects: NativeEffectEvidence<SessionRef, CodexGeneration> = serde_json::from_value(
         json!({"target":target,"generation":generation,"clientUserMessageId":run_id,"nativeTurnId":null,"nativeSubmissionId":null,"allocation":"notRequested","resume":"notRequested","submission":"dispatching","cessation":"unconfirmed"}),
     )?;
+    let mut prepared = effects.clone();
+    prepared.submission = agent_automation::SubmissionEffect::NotDispatched;
+    store
+        .begin_run_preparation::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+            automation_storage::RunPreparationIntent {
+                run_id: run_id.clone(),
+                effects: prepared.into(),
+            },
+        )
+        .await?;
     store
         .begin_run_dispatch::<_, EndpointRef, _, NativeSendReceipt>(RunDispatchIntent {
             run_id: run_id.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
             configured_timeout_seconds: 3600,
             now_ms: 61000,
         })
@@ -77,7 +87,7 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
     store
         .record_run_submission::<_, EndpointRef, _, _>(automation_storage::RunSubmissionResult {
             run_id: run_id.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
             outcome: automation_storage::RunSubmissionOutcome::Accepted {
                 turn_id: "recorded-turn".into(),
                 receipt,
@@ -85,10 +95,10 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
         })
         .await?;
     store
-        .complete_run_turn::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+        .complete_run_settlement::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
             automation_storage::RunCompletion {
                 run_id: run_id.clone(),
-                native_turn_id: "recorded-turn".into(),
+                settlement: automation_storage::RunStopIdentity::NativeTurn("recorded-turn".into()),
                 outcome: agent_automation::WorkerOutcome::Completed { explanation: None },
                 now_ms: 62000,
             },

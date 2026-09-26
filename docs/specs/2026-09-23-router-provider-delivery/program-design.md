@@ -1,0 +1,509 @@
+# Router provider delivery — Program Design
+
+Realizes [specification.md](specification.md) (E1–E7; R1–R16, R19–R21, R26–R30; C1–C5; K1) for [requirements.md](requirements.md) (U1–U10).
+
+## The crux
+
+Today every Router feature that reaches a session builds a Codex app-server JSON-RPC request by hand and parses the raw `serde_json::Value` reply: message send (`native_control_dispatch.rs:35`), wakes (`wakeup_native_sender.rs:103`), board listen pushes (`session_delivery_sink.rs:56`), approval notices (`approval_broker.rs:476`). Scheduled runs prepare, activate, dispatch, observe, stop, and reconcile through native-only code (`schedule_preparation_dispatch.rs:157`, `schedule_activation.rs:74`, `scheduled_native_dispatch.rs`, `run_reconciliation.rs:15`). The records they persist are native-shaped too: run submission and completion require a native turn ID (`run_submission_outcomes.rs:38`), and wake reconciliation reads the native queue (`delivery_reconciliation.rs`). So **what** a feature wants (tell this session something, run this work) is welded to **how** Codex's app-server client does it, and every non-Codex target fails with `unsupportedCapability`.
+
+The design splits the two with interfaces and injection:
+
+```mermaid
+flowchart TB
+  subgraph features["Layer 1 — Router features (WHAT and WHEN; never see a client)"]
+    send["message send\nmessage/send"]
+    wake["wake sender"]
+    listen["board listen push"]
+    approval["approval notice"]
+    sched["schedule preparation, activation,\nrun worker, run reconciliation"]
+  end
+  subgraph seam["Seam — interfaces the features depend on"]
+    smd{{"SessionMessageDelivery\ndeliver · reconcile attempt"}}
+    sre{{"ScheduledRunExecution\nsupport · prepare · submit · observe · stop · reconcile"}}
+  end
+  router["SessionDeliveryRouter\nimplements both; picks the route (E7)"]
+  subgraph routes["Layer 2 — one route per client type (HOW)"]
+    app["CodexAppServerDeliveryRoute"]
+    acp["ProviderAcpDeliveryRoute"]
+    peer["ClaudeCodePeerDeliveryRoute"]
+  end
+  send & wake & listen & approval --> smd
+  sched --> sre
+  smd & sre --> router
+  router --> app & acp & peer
+  app --> codex["Codex app-server"]
+  acp --> prov["claude-agent-acp / Cursor agent"]
+  peer --> cc["Claude Code peer socket"]
+```
+
+- A feature holds only `Arc<dyn SessionMessageDelivery>` (or `Arc<dyn ScheduledRunExecution>`). It decides when to send and what to do with the outcome, and it persists whatever evidence the route reports. It never names an endpoint kind or a client.
+- A route knows exactly one client. It never knows which feature is calling. It reports the client evidence it produced; it does not own the feature's records.
+- The router knows neither features nor concrete clients. It holds a list of injected `Arc<dyn SessionDeliveryRoute>` and applies one selection rule.
+- The Host is the only place that knows all concrete types, and it wires them together at start (`collaboration_runtime.rs`, where `with_native_backend` and `with_provider_conversation_backend` already inject `Arc<dyn …>` dependencies today).
+
+## Alternatives considered
+
+| Option | Shape | Decision |
+|---|---|---|
+| A. Patch each feature | Each feature branches on endpoint and calls each client itself. | Rejected: five copies of the reachability policy, and each new client touches every feature (violates U10). |
+| **B. Features → one seam → per-client routes (selected)** | Features call a delivery interface; the router selects among injected routes. | One owner for reachability (E7) and outcome (E5); each side testable alone (K1). Cost: native-shaped receipts and stored evidence widen to per-route evidence. |
+| C. Everything over ACP | Reach Codex through its ACP adapter too, so there is one client. | Rejected: loses the app-server's native steer/queue semantics, and Claude Code sessions Router did not start have no ACP entry at all. |
+| D. One interface for schedules too | Schedules call `deliver` plus an optional settlement query. | Rejected: a run prepares a session, persists intent, dispatches, observes an exact execution, stops on timeout, and summarizes (`scheduled_native_dispatch.rs`, `native_thread_preparation.rs`, `summary_native_worker.rs`). Forcing that through `deliver` would hide a lifecycle behind a message call. Schedules get a second, per-client interface chosen by the same router. |
+
+Queue placement for provider messages: a **Router-held per-session FIFO in the provider route (selected)**, rather than the Claude adapter's own prompt queueing. That gives one mechanism for Claude and Cursor and keeps one prompt per session under Router's approval model. Debt: queued-but-unstarted messages are lost if the Host stops, and the caller bears that (they see `queued`, not `started`). Owner accepted, 2026-09-24. Scheduled runs do not use this queue (see Scheduled runs).
+
+Created-but-empty Codex conversations (R8): **hold the thread in the Codex route (selected)** rather than requiring a first message at create. Debt: held threads do not survive a Host restart. The holder is memory-only, so after a restart Router cannot tell a lost empty thread from any other missing thread, and no durable marker is added. When a Codex thread cannot be read, delivery reports `notSubmitted` with a truthful conditional explanation: "thread not found or never started; if it was created without a first message, it was lost when the Host restarted — create it again". Owner accepted, 2026-09-24.
+
+## Packages and modules
+
+Dependency direction is unchanged: `agent-automation` and `collaboration-protocol` at the bottom, `automation-storage` over `agent-automation`, `collaboration-service` over those (and over `codex-acp-adapter` and `codex-native-integration`, as today), `codex-router-host` over the service. The service cannot see the host, so the service defines the interfaces and the host supplies the implementations that need host-owned processes. This is the pattern `ProviderConversationBackend` already uses.
+
+```mermaid
+flowchart BT
+  auto["agent-automation\nroute_effect_evidence.rs"]
+  proto["collaboration-protocol\nsession_delivery_outcome.rs"]
+  store["automation-storage\n(transitions per evidence variant)"]
+  adapter["codex-acp-adapter\n(existing)"]
+  peercrate["claude-code-peer-messaging (new leaf crate)\nclaude_code_session_registry.rs\nclaude_code_peer_socket.rs"]
+  svc["collaboration-service\nsession_delivery_contract.rs\nscheduled_run_contract.rs\nsession_delivery_router.rs\ncodex_app_server_delivery_route.rs\ncodex_app_server_scheduled_runs.rs\nunmaterialized_thread_holder.rs"]
+  host["codex-router-host\nprovider_acp_delivery_route.rs\nprovider_acp_scheduled_runs.rs\nclaude_code_peer_delivery_route.rs\nprovider_configuration_file.rs\ncollaboration_runtime.rs (composition)"]
+  store --> auto
+  svc --> proto
+  svc --> store
+  svc --> adapter
+  host --> svc
+  host --> peercrate
+```
+
+| Crate | Module | Job | Reason to change |
+|---|---|---|---|
+| agent-automation | `route_effect_evidence.rs` | `RouteEffectEvidence`: the per-route evidence a wake attempt or run records (see Attempt and run evidence). The Codex variant is today's `NativeEffectEvidence`, unchanged. | A route's evidence changes |
+| automation-storage | existing transition modules | Transitions validate the evidence variant they receive: native checks unchanged for `codexAppServer`, new checks for `providerAcp` and `claudeCodePeer`. No SQL schema change (evidence lives in existing JSON `TEXT` columns). | Legal run/attempt transitions change |
+| collaboration-protocol | `session_delivery_outcome.rs` | E5 `DeliveryOutcome`, E7 `SessionReachability`, `DeliveryCorrelationId`. Attempt identity reuses the existing UUIDv7 `agent_automation::AttemptId` (no second attempt newtype). Wire types, because they appear in receipts, wake and run records, CLI, and MCP. Origin and mode reuse the existing `MessageContent` (`Agent{sender}` / `HumanUser` / `Router`) and `MessageDelivery` (`Auto` / `Queue` / `Steer`). | Outcome vocabulary changes |
+| collaboration-service | `session_delivery_contract.rs` | `DeliveryRequest`, `DeliveryPrecondition`, `SessionMessageDelivery` (feature-facing), `SessionDeliveryRoute` (client-facing), `RouteClaim`, `AttemptEvidenceSink`. | Seam shape changes |
+| | `scheduled_run_contract.rs` | `ScheduledRunExecution` (feature-facing), `ScheduledRunRoute` (client-facing), `ScheduleSupport`, `RunSettlement`, `RunEvidenceSink`. | Run lifecycle contract changes |
+| | `session_delivery_router.rs` | `SessionDeliveryRouter`: route selection (E7); dispatch of recorded-evidence operations to the route that produced the evidence; implements both feature-facing interfaces. | Selection policy changes |
+| | `codex_app_server_delivery_route.rs` | App-server route: today's `native_message_dispatch` returning a typed outcome, today's queue-evidence reconciliation (`delivery_reconciliation.rs`), and the held-thread check. | App-server protocol changes |
+| | `codex_app_server_scheduled_runs.rs` | `ScheduledRunRoute` for Codex: today's native preparation, activation checks, dispatch, observation, stop, and run reconciliation moved behind the interface with unchanged behaviour. | Native run mechanics change |
+| | `unmaterialized_thread_holder.rs` | Keeps ACP bindings of Codex threads created without a first turn (R8). | Codex materialization rules |
+| codex-router-host | `provider_acp_delivery_route.rs` | Provider route: per-session actor, `_session/steering`, Router-held FIFO, load-on-demand with a live-elsewhere recheck, provider session records. Wraps the existing supervisor and runtime. | Provider ACP behaviour |
+| | `provider_acp_scheduled_runs.rs` | `ScheduledRunRoute` for Claude/Cursor: create via the backend, submit only when idle, settle from `PromptCompleted`, stop via ACP cancel, reconcile from the provider operation store. | Provider run mechanics |
+| | `claude_code_peer_delivery_route.rs` | Peer route: maps registry state and socket results to E5, applies the mode rules (R15 column), and implements the live-elsewhere check the provider route consults. | Peer delivery policy |
+| | `provider_configuration_file.rs` | `providers.json` read, default creation, validation (E3, C1). | Config schema |
+| | `collaboration_runtime.rs` (existing) | Composition: builds each route and injects the list into the service. | New client type |
+| claude-code-peer-messaging (new) | `claude_code_session_registry.rs` | Reads `~/.claude/sessions/*.json` (injectable directory); returns a typed record per session: live or not (pid alive), status, peer protocol, socket path, auth key. Unknown formats are reported as "live, unsupported" when the pid is alive, never as absent. | Claude Code registry format |
+| | `claude_code_peer_socket.rs` | Writes one auth line plus one `user` line to the socket with bounded connect/write timeouts; reports whether the full frame was written. | Claude Code wire format |
+| collaboration-client, agent-collaboration, collaboration-mcp | existing conversation modules | One conversation surface (below). | Public surface |
+
+Why the peer client is its own crate: it is the only code bound to Claude Code's private registry and socket format. If a Claude Code release changes that format, the damage stays in one small crate with its own tests, and the service and host stay the same.
+
+Forbidden edges, checked in review and by a dependency test (K1):
+
+- Feature modules (`native_control_dispatch`, `wakeup_native_sender`, `session_delivery_sink`, `approval_broker`, `scheduled_run_worker`, `schedule_preparation_dispatch`, `schedule_activation`, `run_reconciliation`, `delivery_reconciliation`'s caller) import nothing from route modules, `native_message_dispatch`, `codex_native_integration`, or the provider backend.
+- Route modules import no feature module.
+- Only `collaboration_runtime.rs` names concrete route types.
+
+## Interfaces
+
+Sketches; exact signatures belong to implementation. Futures follow the existing boxed-future style of `ProviderConversationFuture`.
+
+```rust
+// collaboration-service::session_delivery_contract
+pub struct DeliveryRequest {
+    pub target: SessionRef,
+    pub message: MessageContent,            // carries origin: Agent{sender} | HumanUser | Router
+    pub mode: MessageDelivery,              // Auto | Queue | Steer
+    pub precondition: DeliveryPrecondition, // caller guard, enforced at route admission
+    pub correlation: DeliveryCorrelationId, // E4: same across attempts
+    pub attempt: AttemptId,         // fresh per attempt (R20)
+}
+
+/// The caller's existing guard, carried as data. Today's meanings are kept:
+/// a direct send's supplied generation and a wake's strict guard reject a stale
+/// endpoint before any I/O; an unpinned wake uses the current generation.
+pub enum DeliveryPrecondition {
+    Unpinned,
+    EndpointGeneration(EndpointGenerationGuard), // Codex generation or provider binding generation
+}
+
+/// What features depend on. Implemented by SessionDeliveryRouter; tests use a fake.
+pub trait SessionMessageDelivery: Send + Sync {
+    fn deliver(&self, request: DeliveryRequest, evidence: &dyn AttemptEvidenceSink)
+        -> DeliveryFuture<'_, DeliveryReceipt>;
+    fn reconcile_attempt(&self, context: AttemptReconciliationContext)
+        -> DeliveryFuture<'_, AttemptReconciliation>;
+}
+
+/// Supplied by the feature from its own attempt record. The route needs the original
+/// request, not just its evidence: native reconciliation proves acceptance only by a
+/// unique queue item whose text equals the rendered original message in queue mode.
+pub struct AttemptReconciliationContext {
+    pub target: SessionRef,
+    pub message: MessageContent,
+    pub mode: MessageDelivery,
+    pub recorded: RouteEffectEvidence,
+}
+
+/// One implementation per client type. Injected by the Host.
+pub trait SessionDeliveryRoute: Send + Sync {
+    fn reachability(&self) -> SessionReachability; // codexAppServer | providerAcp | claudeCodePeer
+    fn claim(&self, target: &SessionRef) -> DeliveryFuture<'_, RouteClaim>;
+    fn deliver(&self, request: DeliveryRequest, evidence: &dyn AttemptEvidenceSink)
+        -> DeliveryFuture<'_, DeliveryOutcome>;
+    fn reconcile_attempt(&self, context: AttemptReconciliationContext)
+        -> DeliveryFuture<'_, AttemptReconciliation>;
+    fn scheduled_runs(&self) -> Option<Arc<dyn ScheduledRunRoute>> { None }
+}
+
+pub enum RouteClaim {
+    NotMine,                                             // target's endpoint is not this route's client
+    Holds,                                               // this route can deliver now
+    CanLoad,                                             // provider only: loadable, not live elsewhere
+    LiveElsewhere { writable: bool },                    // peer only: a live Claude Code process owns it
+    Unavailable { reason: RouteUnavailableReason, retryable: bool },
+}
+
+/// Written by the route immediately before and after its client side effect;
+/// the feature's implementation persists it (wake: its attempt record; direct send: nothing).
+pub trait AttemptEvidenceSink: Send + Sync {
+    fn record(&self, evidence: RouteEffectEvidence) -> DeliveryFuture<'_, ()>;
+}
+
+pub struct DeliveryReceipt { pub outcome: DeliveryOutcome, pub reachability: SessionReachability }
+pub enum AttemptReconciliation { Accepted(DeliveryReceipt), KnownNotSubmitted, StillUnknown }
+```
+
+```rust
+// collaboration-service::scheduled_run_contract
+/// What schedule features depend on. Implemented by SessionDeliveryRouter.
+pub trait ScheduledRunExecution: Send + Sync {
+    fn support(&self, destination: &ScheduleDestination) -> DeliveryFuture<'_, ScheduleSupport>;
+    fn prepare_existing_target(&self, target: &SessionRef, sink: &dyn RunEvidenceSink)
+        -> DeliveryFuture<'_, PreparedTarget>;
+    fn prepare_fresh_session(&self, request: FreshSessionRequest, sink: &dyn RunEvidenceSink)
+        -> DeliveryFuture<'_, PreparedTarget>;
+    fn submit_run(&self, run: ScheduledRunSubmission, sink: &dyn RunEvidenceSink)
+        -> DeliveryFuture<'_, RunSubmission>;           // Started | NotStartedBusy | Rejected
+    fn observe_settlement(&self, recorded: &RouteEffectEvidence) -> DeliveryFuture<'_, RunSettlement>;
+    fn request_stop(&self, recorded: &RouteEffectEvidence) -> DeliveryFuture<'_, StopRequestOutcome>;
+    fn reconcile_run(&self, recorded: &RouteEffectEvidence) -> DeliveryFuture<'_, RunReconciliation>;
+}
+
+pub struct ScheduleSupport { pub can_create: bool, pub can_stop: bool, pub settlement: SettlementEvidence }
+pub enum SettlementEvidence { TurnCompletion, OperationSettlement, WriteOnly }
+
+pub enum RunSettlement {
+    Pending,
+    Completed { summary_source: RunSummarySource },
+    Stopped,
+    WrittenWithoutCompletion,                        // peer route: finalize as peerMessageWritten
+}
+pub enum RunSummarySource { NativeTurn(NativeTurnRef) } // summaries exist only for fresh-each-run (Codex) destinations
+```
+
+`ScheduledRunRoute` has the same operations per client. The sketch above is completed as follows:
+- **Inputs:** `FreshSessionRequest` carries the run's captured inputs (instruction text, model, effort, working directory). `ScheduledRunSubmission` carries run ID, target, text, captured inputs, and the recorded route evidence from preparation.
+- **Submission results:** `submit_run` returns `Started(RunAcceptance { execution: RunExecution, receipt: DeliveryReceipt })`, `NotStartedBusy`, `Rejected(DeliveryRejection)`, or `Unknown`. `RunExecution` is the exact native turn, the provider operation, or the peer write.
+- **Settlement:** observation takes the recorded evidence plus the captured inputs, so native model and effort validation is kept. It returns `Pending`, `Completed { summary_source }`, `Failed { reason }`, `Interrupted`, or `WrittenWithoutCompletion`.
+- **Persistence ownership** keeps the native crash write points unchanged:
+  - The worker implements `RunEvidenceSink` over the store.
+  - Immediately before client I/O the route calls the sink, which performs `begin_run_dispatch`, including budget admission. If admission refuses, the route does no I/O and returns not started.
+  - After the route returns, the worker persists the result with `record_run_submission`.
+  - The route never touches the store directly.
+- One rule for every schedule side effect: the route calls a feature-supplied sink immediately before the side effect, and the feature performs the store write inside that call. If the route cannot reach its client, it calls no sink and nothing is persisted. This preserves today's native crash boundaries.
+  - **Stop:** `request_stop(context, sink)` connects and validates the client, then calls `sink.record_stop_intent()` (the worker performs `begin_run_stop`), then sends the interrupt or ACP cancel on that same connection. A connect failure persists no `Stopping`, as today.
+  - **Explicit schedule preparation** (`schedule/prepare`, including fork): `prepare_destination(request, sink)`. The request carries the operation ID, schedule ID, destination, and inputs.
+    - Destinations are `Existing`, `Fresh`, or `Fork { source, throughTurn }`. Fork is Codex-only; the provider and peer routes report it unsupported.
+    - The `PreparationEvidenceSink` is implemented by the preparation feature over the store's operation-scoped preparation intent, completion, and failure writes.
+    - The result is the prepared target, or a detailed preparation failure.
+    - Preparation evidence is route-tagged, like wakes and runs. The stored preparation effects and the public `ScheduleEffects` / operation-receipt effects carry `DeliveryRouteEvidence` instead of native-only evidence, and legacy native JSON decodes as `codexAppServer`. The preparation feature gets its initial evidence from `initial_evidence` before admission. The sink accepts every route variant, with per-variant checks.
+  - **Activation:** `support(destination)` returns `Supported`, or `Unsupported { missing }` over a closed capability set: read target, start run, stop run, create session, fork session. The Codex route derives it from exactly today's required schema operations, so the native gate is unchanged.
+  - **Provider and peer destinations are existing sessions only.** Creating a fresh provider session per run would need a creator and approver that schedules do not carry, plus new recovery paths, and no accepted obligation needs it (R26 is about existing Claude and Cursor sessions). The provider and peer routes therefore report `createSession` and `forkSession` unsupported, so activation rejects a Fresh or Fork destination on those endpoints with the fix "create the session first (conversation create), then schedule it as an existing target". `providerAcp` evidence always names its target.
+  - **Route-neutral worker transitions:**
+    - A client-operation failure from any route records preparation failure with that route's latest evidence.
+    - `begin_run_dispatch` accepts `NotDispatched → Dispatching` for `providerAcp` and `claudeCodePeer`, as well as the native path.
+    - `reconcile_run` accepts `WrittenWithoutCompletion` and finalizes the run as `peerMessageWritten` with no completion claim.
+  - **Pre-I/O local rejection** (for example oversized input): `initial_evidence(destination)` returns the selected route's initial evidence with no client I/O. The router picks the route by endpoint for a fresh destination and by claim for an existing target. `fail_run_preparation` accepts any route variant. Every operation after preparation takes the **recorded** `RouteEffectEvidence`, and the router sends it to the route whose variant it is, without re-running selection. A run therefore keeps its route, binding, and operation after reachability changes or a restart. Fresh-session preparation is routed by endpoint: each route reports the endpoints it can create on (`codex-local` for the app-server route; `claude-local`/`cursor-local` for the provider route (existing sessions only); none for the peer route), so the router stays client-neutral.
+
+## Attempt and run evidence
+
+Stored records stay owned by `automation-storage`; the feature decides when to advance; the route reports what its client did; the store enforces legal transitions.
+
+`RouteEffectEvidence` (agent-automation) replaces the native-only evidence field in wake attempts (`latest_attempt_json`, `effect_evidence_json`) and run records (`execution_evidence_json`):
+
+| Variant | Recorded before the side effect | Recorded after | Settlement / stop / reconcile |
+|---|---|---|---|
+| `codexAppServer` | today's `NativeEffectEvidence` (target, generation, resume/allocation, `Dispatching`, client user message ID) | native turn/submission IDs | exactly today's native paths: turn completion, `InterruptTurn`, queue-list reconciliation (with the feature-supplied original mode and message, below) |
+| `providerAcp` | binding reference and generation, attempt ID (the provider operation ID is derived from it), `Dispatching` | operation admitted | the provider operation store: `PromptCompleted` settles, ACP `cancel` stops, operation lookup reconciles (never replays) |
+| `claudeCodePeer` | session ID, pid, `Dispatching` | `Written` once the full frame was written | none: written is final, there is no stop; an interrupted write stays `unknown` and is never replayed |
+
+- Evidence references: `agent-automation` sits below `collaboration-protocol`, so `providerAcp` evidence holds its own validated references (binding ID validated like `ProviderBindingId`, generation as the existing generic generation type, and the attempt's `AttemptId`), not the protocol's full `ProviderBindingIdentity`. The provider route converts them at its boundary and resolves the full binding through the provider operation store.
+- Before route selection: a wake attempt is claimed durably before any route is chosen (`delivery_claims.rs`), and a run is created `waiting` before any route is chosen (`schedule_evaluation.rs`). Their route evidence is therefore absent until the selected route's first sink write (the app-server route writes at today's `prepare_delivery` / `begin_run_preparation` points). Because every route records `Dispatching` before any client I/O, a crash while the evidence is absent is known not submitted. Completion requires evidence of the route that delivered.
+- Compatibility: existing JSON with the native field decodes as `codexAppServer` unchanged, so no data migration. Native transition checks (`run_submission_outcomes.rs:38`, `run_stop_state.rs:24`, `run_completion_state.rs:32`) apply to that variant exactly as today; the other variants get their own checks in the same modules.
+- Reconciliation inputs: the feature passes `AttemptReconciliationContext`, meaning the original target, message, and mode from its own attempt record plus the recorded evidence. The route keeps today's positive-evidence checks unchanged (`delivery_reconciliation.rs:29,48,136`): only a queue-mode original, and only a unique queue item whose text equals the rendered original message, recovers acceptance. A reused correlation with different text, duplicates, a missing entry, or a partial scan stays unknown. The route returns the result; the feature persists it.
+- Pre-effect persistence: the route calls the sink with `Dispatching` evidence before touching its client, and the feature persists it in the same transaction discipline it uses today (`prepare_delivery`, `begin_run_preparation`). A crash after that point leaves an uncertain record that only the owning route's reconcile can resolve.
+- Execution budget: admission still happens at actual dispatch (`run_dispatch_state.rs:29`), because provider runs submit only when the session is idle (below), never into a queue.
+- Summaries: only fresh-each-run destinations require a summary (today's native policy, `run_completion_state.rs:79-86`), and fresh-each-run is Codex-only, so summaries stay native. Summary provenance keeps today's native source turn; the earlier `providerOperation` reference and provider summary sources are removed as unused. Provider and peer runs on existing sessions finish without a summary.
+- Public run inspection (`run/show`, collections, events) is cut over the same way as wakes, in one change:
+  - `RunExecutionEvidence` carries `route: Option<DeliveryRouteEvidence>` and `acceptance: Option<DeliveryReceipt>` instead of the native-only fields.
+  - `RunState.execution` becomes a tagged `RunExecution` with three variants. `codexAppServer` has today's `NativeExecution` fields unchanged: target, `nativeTurnId`, start, deadline, timeout. `providerAcp` has target, `operationId`, start, deadline, timeout. `claudeCodePeer` has target and written-at.
+  - Validation is per variant. A native summary source must match the native turn. Provider and peer runs have no summary (existing-session destinations); a summary on either is rejected.
+  - Old stored native records decode at the storage boundary as `codexAppServer`. `NativeTurn` keeps today's summary worker input (`summary_native_worker.rs:286`). A peer run finalizes as `peerMessageWritten`.
+
+## Route selection (E7)
+
+`SessionDeliveryRouter` asks every injected route to `claim` the target and decides in this order:
+
+1. The first route whose claim is `Holds` delivers.
+2. If any route reports `LiveElsewhere`, no `CanLoad` claim may be used: `LiveElsewhere { writable: false }` (a live Claude Code process Router cannot message, for example an unknown peer protocol) gives `rejected` "session is live in a Claude Code process Router cannot message" (R28).
+3. Otherwise the first route whose claim is `CanLoad` delivers.
+4. Otherwise, if any route reports `Unavailable { retryable: true }`, the outcome is `notSubmitted { retryable: true }` with that reason, so existing wake and listen retry policy applies unchanged (R19; today's `wakeup_native_sender.rs:119`).
+5. Otherwise `rejected` with the collected reasons and fixes (R12). All `NotMine` gives "no route serves this endpoint".
+
+The Host injects `[CodexAppServer, ProviderAcp, ClaudeCodePeer]`. Each route's claims:
+
+| Route | `Holds` | `CanLoad` | `LiveElsewhere` | `Unavailable` | `NotMine` |
+|---|---|---|---|---|---|
+| Codex app-server | admitted app-server, or thread held unmaterialized | — | — | app-server gate closed (retryable) | non-Codex endpoints |
+| Provider ACP | session actor loaded | session record exists, provider available | — | provider starting or retired (retryable); disabled or not installed (not retryable) | `codex-local` |
+| Claude Code peer | live record, peer protocol 1 | — | live record with unsupported protocol or format (`writable: false`) | — | not `claude-local`, or no live record |
+
+Provider-held beats live peer (tier 1), live peer beats provider load (tiers 1–2), and only a session with no live registry record is ever provider-loaded.
+
+Race between claim and effect: the provider route receives an injected `LiveSessionOwnershipCheck` (implemented over the peer registry by the peer route module) and re-runs it immediately before `session/load`. If the session became live elsewhere, the route returns `notSubmitted { retryable: true }` without loading. The chosen route also re-checks its own state on deliver. The router never falls through to another route within one attempt, so one attempt never becomes two deliveries. No cross-process lock is claimed: a Claude Code process that starts after the recheck is outside Router's control.
+
+```mermaid
+sequenceDiagram
+  participant F as Feature (send / wake / listen / approval)
+  participant R as SessionDeliveryRouter
+  participant A as CodexAppServerDeliveryRoute
+  participant P as ProviderAcpDeliveryRoute
+  participant C as ClaudeCodePeerDeliveryRoute
+  F->>R: deliver(request, evidence sink)
+  par claims
+    R->>A: claim(target)
+    R->>P: claim(target)
+    R->>C: claim(target)
+  end
+  Note over R: Holds, else veto CanLoad if LiveElsewhere, else CanLoad, else retryable Unavailable, else rejected
+  R->>P: deliver(request, sink) (example: provider can load the session)
+  P->>C: LiveSessionOwnershipCheck (via injected interface)
+  C-->>P: not live
+  P->>F: sink.record(Dispatching providerAcp evidence)
+  P-->>R: DeliveryOutcome
+  R-->>F: DeliveryReceipt { outcome, reachability }
+```
+
+## Delivery receipts (E5, C4)
+
+`DeliveryOutcome` is one tagged enum in the protocol: `started`, `steered`, `startedOrSteered`, `queued`, `peerMessageWritten`, `notSubmitted { retryable, reason }`, `rejected { reason }`, `unknown`. The receipt adds the reachability used and keeps client identifiers beside it: native turn/submission IDs from the app-server route, and the provider operation ID from the provider route. Native receipts map without losing strength, so today's `StartedOrSteered` stays `startedOrSteered`. Records written before this change keep their native receipt meaning.
+
+Public inspection shape (wake show/history, delivery records; owned by `collaboration-protocol`):
+- `DeliveryReceipt { outcome, reachability, client }` moves to the protocol, where `client` is `Option<DeliveryClientReceipt>` and `DeliveryClientReceipt::{codexAppServer(NativeSendReceipt), providerAcp { operationId }, claudeCodePeer}`. The service uses the protocol type. `reachability` is `Option<SessionReachability>`: `Some` names the route selection chose (also when that route then reported `notSubmitted`), and `None` means no route was selected (all `NotMine`, or a retryable `Unavailable` decided before selection). `client` is `Some` only when a client produced receipt evidence; a stale guard, pre-I/O `notSubmitted`, a selection `rejected`, or an `unknown` without client IDs carries `None`. A client value is never fabricated.
+- `DeliveryRouteEvidence` is the public projection of stored route evidence: `codexAppServer(NativeEffectEvidence)` (today's public native evidence, unchanged inside), `providerAcp { bindingId, generation, target, operationId, submission }`, `claudeCodePeer { sessionId, write }`.
+- `DeliveryEvidence` variants carry `Option<DeliveryRouteEvidence>` (`None` before route selection) instead of `Option<NativeEffectEvidence>`, and `Accepted` carries `DeliveryReceipt` instead of `NativeSendReceipt`.
+- Rejections carry structured, client-neutral diagnostics: `rejected(DeliveryRejection { reason, nextAction, clientCode, detail })`.
+  - `reason` is a closed set: today's native reasons (`childThread`, `busy`, `notResumable`, `permissionDenied`, `unsupportedCapability`, `unknown`) plus route reasons (`endpointUnavailable`, `noRoute`, `liveElsewhere`, `steerUnsupported`, `queueUnsupported`, `staleGeneration`).
+  - `nextAction` is a closed set: today's `inspectTarget`, `useDeliverySteer`, `requestApproval`, `correctRequest`, `retryLater`.
+  - `clientCode` is the client's own code when one exists (the native JSON-RPC code for the app-server route; the provider error code for ACP).
+  - `detail` is optional human text, such as "steer unsupported by Cursor".
+  - The app-server route fills these from today's `classify_native_rejection`, so native diagnostics are unchanged in content.
+- `message/send` always returns a `DeliveryReceipt` for any delivery outcome, including `rejected`, `notSubmitted`, and `unknown`. Control errors are reserved for invalid requests and service failures (validation, overload). The CLI keeps a non-zero exit and prints the same reason and next action for rejected and not-submitted outcomes. The MCP tool marks them as errors while returning the receipt.
+- Stored and inspected wake attempts keep the full receipt for every completed attempt, not only accepted ones. A migration renames the stored column `accepted_receipt_json` to `outcome_receipt_json`. The service stores a `DeliveryReceipt` there for accepted, rejected, not-submitted, and unknown outcomes. Old native accepted rows still decode through the private stored-receipt type. Public `KnownNotSubmitted` and `OutcomeUnknown` gain `receipt: Option<DeliveryReceipt>`, which is `None` for legacy rows and pre-selection outcomes. So a rejected wake keeps its structured `DeliveryRejection`. When a later retry replaces the latest attempt, the archived `attemptCompleted` event carries that attempt's receipt too (an optional field; legacy archived events decode as `None`), so attempt history and the automation event history show every earlier attempt's receipt.
+- This is a hard cutover of the wire shape: Codex information is preserved, nested under `codexAppServer`. In-repo CLI, MCP, and the control schema are updated together. Stored rows decode through the storage types as already specified.
+
+Feature outcome handling, now written once per feature against E5 only:
+
+| Feature | On `notSubmitted { retryable: true }` | On `unknown` / accepted | On `rejected` |
+|---|---|---|---|
+| message send | return to caller (R19) | return to caller | return to caller |
+| wake | new attempt with a fresh `AttemptId` under the existing retry policy (R19, R20) | record; no further attempt; `unknown` goes to `reconcile_attempt` (R20) | record failure |
+| board listen push | retry batch under the existing policy | record batch delivered | end the listen after repeated rejects (existing) |
+| approval notice | deny the request (undeliverable) | wait for `approval decide` | deny |
+
+## Codex app-server route
+
+- Messages: `native_message_dispatch` stays the implementation but returns a typed `DeliveryOutcome` plus native IDs instead of a JSON-RPC `Value`, enforces `DeliveryPrecondition` exactly as it enforces generation today (`native_message_dispatch.rs:39`), and reports native evidence through the sink. Direct message send becomes a feature like the others: the Codex-only Control method `codex/messageSend` (`NativeSendParams -> NativeSendReceipt`) is replaced by one client-neutral method `message/send` (target, message, mode, optional generation guard as `DeliveryPrecondition`, optional correlation → `DeliveryReceipt`). It parses params, calls `SessionMessageDelivery`, and returns the receipt. For Codex targets the native receipt is carried unchanged inside `client: codexAppServer(NativeSendReceipt)`, so no native evidence is lost. This is a hard cutover: the in-repo client, CLI, MCP, and control schema move together, and there is no second method. Wake reconciliation (`delivery_reconciliation.rs`) moves into the route's `reconcile_attempt` unchanged.
+- Held threads (R8): the route checks `UnmaterializedThreadHolder` first. A held thread is loaded and idle, so it gets native semantics through the held binding: `auto` starts the first turn (`started`), `queue` uses native queue add (`queued`), and `steer` is `notSubmitted` "no running turn".
+- How threads get held: `session/new` runs `thread/start` (`session_creation.rs:313-326`), but the CLI exits and the ACP connection closes. `sessions.shutdown()` then drops the binding (`acp_connection_dispatch.rs:153`, `session_connection_registry.rs:183-198`), and upstream Codex refuses to resume or read an unmaterialized thread. On connection close, bindings whose thread has no turn move to the holder instead. A later `session/load` for a held thread adopts the held binding instead of calling `thread/resume`. The holder releases a binding once its first turn starts.
+- Scheduled runs: `codex_app_server_scheduled_runs.rs` holds today's reusable-target preparation (`schedule_preparation_dispatch.rs:157`), activation checks (`schedule_activation.rs:74-104`: ReadThread, StartTurn, InterruptTurn), fresh-thread preparation, idle-wait dispatch, observation, stop (`begin_run_stop` → `InterruptTurn` → observe), and run reconciliation (`run_reconciliation.rs`), moved behind `ScheduledRunRoute` with unchanged behaviour.
+
+## Provider ACP route (Claude, Cursor)
+
+The route wraps `ExternalProviderSupervisor` and its runtime. Delivery is a new supervisor entry, separate from `ProviderConversationBackend`: that trait keeps the `conversation/*` operations (create, load, prompt, cancel, show, wait, reconcile), and delivery does not widen it. Each attempt's `AttemptId` becomes the provider operation ID. A supplied `DeliveryPrecondition` is checked against the binding generation before any I/O (`staleGeneration`).
+
+```mermaid
+stateDiagram-v2
+  [*] --> NotLoaded
+  NotLoaded --> Loading: delivery arrives (not live elsewhere)
+  Loading --> Idle: session/load ok
+  Loading --> NotLoaded: load failed
+  Idle --> Running: prompt starts a turn
+  Running --> Idle: turn settled and queue empty
+  Idle --> NotLoaded: provider process retired
+  Running --> NotLoaded: provider process retired
+```
+
+| State | `auto` | `queue` | `steer` (Claude) | `steer` (Cursor) |
+|---|---|---|---|---|
+| NotLoaded | load, then as Idle | load, then as Idle | load, then as Idle | `rejected` "steer unsupported by Cursor" |
+| Loading fails | `notSubmitted` (load reason); never create a replacement | same | same | — |
+| Idle | Claude: steer returns `promptRequired`, so prompt → `started`. Cursor: prompt → `started` | enqueue and start at once → `queued` | `notSubmitted` "no running turn" | `rejected` "steer unsupported by Cursor" |
+| Running | Claude: `_session/steering` → `steered`. Cursor: enqueue → `queued` | enqueue → `queued` | `_session/steering` → `steered` | `rejected` "steer unsupported by Cursor" |
+| Running, turn settles with queue non-empty | next queued message starts as a new turn (stays Running) | | | |
+
+- Queued provider messages (evidence lifecycle):
+  - Accepting a message into the Router-held FIFO involves no client I/O. Before returning, the route records `providerAcp` evidence with submission `routerQueued` through the sink. `routerQueued` is a new `SubmissionEffect` that is legal only for this variant. The feature then completes the attempt as accepted with outcome `queued`. The feature's attempt is finished; its record never waits on the later submission.
+  - When the item reaches the head and the session is idle, the route submits it as its own provider operation. It uses today's supervisor admission (`prepare_operation`) with the item's `AttemptId` as the operation ID, and that evidence lives in the provider operation store, owned by the route.
+  - Reconciliation of `routerQueued` evidence looks the `AttemptId` up in that store. If it is absent, the queue was lost to a restart and the attempt is known not submitted and retryable. If it is present, the operation's state decides.
+  - The sink is never retained beyond `deliver`.
+  - Storage cannot see protocol receipt types, so the service passes a typed accepted effect with every accepted completion. It is `AcceptedDeliveryEffect` in agent-automation: `started`, `steered`, `startedOrSteered`, `queued`, or `peerMessageWritten`, mapped from `DeliveryOutcome`. Storage requires `queued` for `routerQueued` evidence and `peerMessageWritten` for a written peer, and it keeps the native accepted checks.
+- Provider `started` means the `session/prompt` request was actually sent. The delivery entry records `Dispatching`, marks the operation may-have-dispatched, sends `session/prompt`, and returns `started` only once the send succeeded. Completion stays with the existing background settlement.
+- Steered messages are not provider operations. `_session/steering` injects into the running prompt, which already is an operation, so no new public operation kind or settlement is added.
+  - Evidence: the route records `providerAcp` evidence (`Dispatching`, keyed by the attempt's `AttemptId`) before the steering request. On `injected` it returns `steered`, with receipt `providerAcp { operation_id }` naming the running prompt's operation.
+  - A crash between the request and the reply leaves the attempt `unknown`, and it is never replayed. Reconciliation of steer evidence reports still-unknown, because there is no store record to consult.
+- Approvals (R31), for all approvals:
+  - The provider runtime's `session/request_permission` handler forwards every request to the approval broker.
+  - `request_external` (Claude and Cursor) routes requester == approver like any other approver: notice, history record, `approval decide`.
+  - The native `request` path refuses a thread that is its own approver, with a recorded `approverIsRequester` state.
+  - No refusal is a silent `Cancelled`.
+    - Refusals with known identities go into approval history with their reason: an unmappable or reject-only option set, an unreachable approver, a provider session that is its own approver ("set a different approver"), a timeout on either path, and retirement.
+    - Refusals before an approver can be identified (no approval context, no broker, no native route) are recorded as a typed reason on the provider operation when one exists, and always as one structured, payload-free warning (endpoint, provider session, method, reason code). The approval history format is unchanged, and no identities are invented.
+  - Decision details (tool title, options with their IDs and scopes) are a bounded presentation carried in the `approval list` record; there is no separate `approval show`.
+- ACP runtime robustness (from the 2026-09-25 ACP inventory, reviewed by Astra):
+  - **Permission handling must not block the connection.** It releases the SDK's incoming dispatcher: approval waits are owned by a spawned task holding the responder, so other sessions' replies and updates keep flowing.
+  - **Output and update limits bound retained data, not observation.** Router keeps ownership of an active turn until it genuinely settles. If it must stop retaining data, it sends `session/cancel` and waits for settlement, and it reports a typed limit reason; it never labels a running turn idle.
+  - **Loading replays history without an event cap.** Replayed updates are drained and discarded, and never mixed into the next prompt's output.
+  - **Unknown session-scoped requests from the agent get an explicit method-not-found.** They are never silently consumed.
+  - **Transport frame policy:** ordinary large provider frames (large tool output) must not retire the provider. Retirement is reserved for frames that cannot be parsed or classified.
+  - **Terminal outcome evidence** (completed, cancelled, refused) is kept in the small durable operation record, so eviction or restart never turns a cancelled or refused run into completed.
+  - **Queue:** a terminal failure of the head item publishes that item's outcome and advances. Only real uncertainty waits.
+  - **Privacy:** payload-bearing ACP diagnostics (SDK trace lines, error data from malformed frames, initialization errors) never reach exported logs or user-facing reasons. Only method, code, stage, and size are kept.
+- Capabilities: the runtime keeps `InitializeResponse._meta.steering.supported` in the admission record. Steer is an untyped `_session/steering` request (`UntypedMessage::new`) with `_meta.steering.idleBehavior = "promptRequired"`, handled inside `run_provider_session` like the existing prompt (`runtime.rs:989-1060`). The existing `LocalBusy` rejection of a second prompt (`runtime.rs:800, 1047`) is replaced by the table.
+- Provider session records (target, cwd, access policy, creator, approver) are written when a create or load settles. They make `CanLoad` claims possible (R16) and supply the approver. They live in the provider operation store (SQLite, metadata only) under a new migration.
+- Scheduled runs (`provider_acp_scheduled_runs.rs`):
+  - Support: read target, start run, and stop run (ACP cancel), with `OperationSettlement`. Create and fork are unsupported (existing sessions only).
+  - Preparation: an existing target is validated against its session record (loadable, not live elsewhere).
+  - Submission waits for idle, like the native path (`scheduled_native_dispatch.rs` returns without submitting while the thread is active): if the session is running, `submit_run` returns `NotStartedBusy` and the run worker tries again on its next tick. So a running session is never steered, the Router-held message queue is not used, and budget admission stays at actual dispatch (R26).
+  - Completion: the operation's `PromptCompleted{stop_reason}` settles the run as completed with no summary source; no transcript is read.
+  - Timeout: the route issues ACP `cancel` for the recorded operation. The existing `Stopping` phase shows the run as cancelling, and the run finalizes only when that operation settles, so it is never falsely finalized, and a late cancel can never reach a later prompt because it names the exact operation.
+  - Reconciliation: the recorded operation ID is looked up in the provider operation store; nothing is replayed.
+
+## Claude Code peer route (U8)
+
+- Lookup: `claude-local/<id>` → the registry record with that `sessionId`, through `claude_code_session_registry`. The record's status is a typed, advisory enum (`Busy`, `Idle`, `Waiting`, `Shell`, `Unreported`, `Other`) and never decides reachability. Live with peer protocol 1 is `Holds`; live with anything else is `LiveElsewhere { writable: false }`; no live record is `NotMine` (R27, R28).
+- Message: the route renders the existing origin framing (`render_message`) plus a reply line naming the sender SessionRef and `message_send` (R30). It then writes an auth line using the published key and `{"type":"user","message":{"role":"user","content":<text>}}` through `claude_code_peer_socket` (C5).
+- Modes: `auto` writes. `steer` writes only when the registry status is `busy`, otherwise `notSubmitted` "no running turn". `queue` is `rejected` "queue unsupported for Claude Code sessions". A full write is `peerMessageWritten`. A connection refused before any byte is written is `notSubmitted { retryable: true }`; a write interrupted after bytes were sent is `unknown` (never replayed). There is no acknowledgement, and the receiver's own controls may hold or drop the message (R29).
+- Scheduled runs: support is `WriteOnly` with no create and no stop; activation accepts only an existing live `claude-local` target. `submit_run` writes like `auto`, and settlement is `WrittenWithoutCompletion`: the run finalizes as `peerMessageWritten` with a summary stating that no completion evidence exists.
+- Evidence: on 2026-09-24 a script's write of that line to this session's own socket (Claude Code 2.1.281) arrived mid-turn between tool calls. This is an unreviewed observation; the cross-session delivery and reply gate in the Specification's proof table remains required.
+- Open fact to check in implementation: whether the Claude Code process that `claude-agent-acp` runs also appears in the registry. Selection makes either answer safe, because a provider-held session is claimed by the provider route in tier 1.
+
+## Stale Host detection (R32)
+
+- `RouterExecutableObserver` (`codex-router-host/src/router_executable_observation.rs`) is the only observer.
+  - At start it records the launch path's stat identity (device, inode, size, mtime) and the running version. It does no hashing.
+  - On `host status` and every 120 s, it compares the stat identity. Only after a change does it run the installed executable's `--version` (bounded). The same version counts as a match; a different version or a missing file is `drift`; an unreadable file is `unknown`.
+- It publishes each observation on a `tokio::sync::watch` channel. Host composition passes the receiver to the MCP server, which reads only the latest value at `initialize`.
+- `RouterExecutableRelation` and the one-line warning formatter live in `collaboration-protocol`. The status line, the MCP instructions, and the single Host warning share that formatter.
+- The CLI's warning is separate: `agent-collaboration` compares its own version with the `serviceVersion` the Host reports.
+
+## Composition at Host start
+
+```mermaid
+flowchart LR
+  start["Host start"] --> cfg["ProviderConfigurationFile\nread or create providers.json"]
+  cfg --> launch["launch each enabled provider\n(isolated; flag overrides)"]
+  launch --> sup["ExternalProviderSupervisor\n(available providers)"]
+  start --> nb["NativeControlBackend\n(app-server)"]
+  start --> reg["ClaudeCodeSessionRegistry\n(~/.claude/sessions)"]
+  nb --> r1["CodexAppServerDeliveryRoute"]
+  sup --> r2["ProviderAcpDeliveryRoute"]
+  reg --> r3["ClaudeCodePeerDeliveryRoute"]
+  reg -. "LiveSessionOwnershipCheck" .-> r2
+  r1 & r2 & r3 --> router["SessionDeliveryRouter\n(routes in precedence order)"]
+  router --> svc["ServiceIdentity.with_session_delivery(router)"]
+  svc --> feats["features receive SessionMessageDelivery\nand ScheduledRunExecution"]
+```
+
+- A provider that is unavailable still yields a route, and that route claims `Unavailable` with the endpoint's reason, fix, and retryability. So the router never special-cases missing providers.
+- Tests compose the same router with fake routes (feature tests) or compose one real route with a fake client (route tests). This is the K1 proof seam.
+
+## Provider enablement at Host start
+
+```mermaid
+flowchart LR
+  start["Host start"] --> read{"providers.json?"}
+  read -- missing --> write["write defaults (both enabled)"] --> parse
+  read -- present --> parse{"valid?"}
+  parse -- malformed --> bad["both provider endpoints Unavailable\n(path + parse error); Codex starts"]
+  parse -- valid --> each["for each provider: flag override?\nenabled? resolve executable"]
+  each -- disabled --> dis["Unavailable: disabled in providers.json"]
+  each -- not found --> nf["Unavailable: executable not found; fix: install or set executable"]
+  each -- launch --> init{"initialize within timeout?"}
+  init -- no --> fail["Unavailable: launch/initialize error; fix"]
+  init -- yes --> ok["Available, advertising the ExternalProvider transport"]
+```
+
+- Host launch composition (`codex-router-cli` host command) merges file entries with command-line flags, and flags win per provider (R2). `executable: null` resolves on PATH. The replacement argv keeps only explicit flags, and the new Host re-reads the file.
+- `start_with_external_providers` stops using `?` per provider (`collaboration_runtime.rs:300-306`). Each result becomes that endpoint's description.
+- The endpoint rule (`control_service_context.rs:117-139`) allows an endpoint with an empty transport list only when its availability is `Unavailable`.
+- If the provider-operations store fails, providers are still disabled, but they appear as `Unavailable` endpoints rather than failing the Host.
+
+## One conversation surface
+
+- Client: one `ConversationClient` looks at the endpoint's advertised transport. `Acp` (Codex) goes to the existing ACP flow. `ExternalProvider` (Claude, Cursor) goes to Control `conversation/*`, and create waits for settlement within the caller timeout and returns the target (R7).
+- Operations: `create`, `prompt`, `load`, `cancel`, and `operation show|wait|reconcile`. `load` and `cancel` are the existing provider operations under the common name, with the same inputs and meaning: cancel names one exact active operation and binding generation, and detaching a wait never cancels. On `codex-local`, `load` uses the existing ACP `session/load` path; `cancel` is rejected with `unsupportedCapability` and the fix "use `turn interrupt` for a Codex session" (R6).
+- Create inputs, the same shape for every endpoint: endpoint, working directory, access, creator (self-declared or from the harness), optional approver, operation ID, optional model, optional effort, optional fork (Codex only), and optional root message ID. On a provider endpoint, a supplied model, effort, or fork is rejected with `unsupportedCapability` and a fix naming the endpoint. It is never silently ignored, because the provider create path cannot apply it.
+- Root message ID on a provider endpoint is rejected like model, effort, and fork. It only allocates Codex scratch sharing, which the provider create path has no equivalent for.
+- Prompt and load results, the same shape for every endpoint: `completed { target, operationId?, settlement }` or `pending { operationId, target }`.
+  - Provider prompt and load wait for their durable operation within the caller timeout, as create does. If it settles, the result is `completed`, with the operation ID and the provider settlement (stop reason and response text). If the timeout elapses, the result is `pending` with the operation ID for `operation wait`/`show`.
+  - Codex prompt keeps today's streamed settlement (updates, permission, result) as `completed` with no operation ID.
+  - `settlement` is one type: a common core (target, optional stop reason) plus a client-specific detail variant. The provider detail carries `output: available(text) | unavailable(reason)`. An operation whose effect was applied but whose output was not retained (for example `OutputUnavailable`) is still `completed`, with `output: unavailable` and no stop reason when that wasn't retained either. It is not reported as a failure.
+  - Operation IDs across the CLI and MCP: `operationId` is optional in the common schema and validated after route selection. For provider targets it is required on MCP mutations (R11; the error names the UUIDv7 format and a generator), and the CLI allocates one when omitted. For Codex prompt and load it is not inspectable, so a caller-supplied ID is rejected with `unsupportedCapability` and the fix "omit the operation ID for Codex prompts". Internally allocated client IDs are not shown.
+  - Cancel: exact provider operation; Codex is rejected with the `turn interrupt` fix.
+- Create result, the same shape for every endpoint: `created { operationId, target }` when the create settles within the caller timeout, `pending { operationId }` otherwise, or the existing structured failure. The CLI prints the operation ID first.
+- Codex create ownership: a create still in flight when its ACP frontend closes is not aborted. It is handed to the Host-lifetime `UnmaterializedThreadHolder`'s tracked task set, which completes it, records `sessionReady` through the operation recorder, holds the resulting empty binding, and is drained on Host shutdown. So a timed-out create's operation ID resolves to its target later.
+- Operation IDs for every create: the client supplies the operation ID (CLI-allocated when omitted). For Codex it travels in the ACP `session/new` `_meta.codexRouter.operationId`.
+  - Binding: `ProviderBindingIdentity` stays the external-provider identity used by the live supervisor. Operation storage and inspection use a new `ConversationBindingIdentity`: `externalProvider(ProviderBindingIdentity)` or `codexAcp { endpoint, listenerPath, generation }`. The supervisor wraps its binding at the operation boundary. Old stored objects decode as `externalProvider`, and the public snapshot is hard-cut over. The migration comes with a preservation test.
+  - Recording: `collaboration-service` owns a `ConversationOperationRecorder` interface over the store and injects it into the Codex ACP adapter when the Codex ACP listener starts. The adapter gains no store dependency. It records at admission (before `thread/start`), at `sessionReady` (target), and at the terminal result or failure.
+  - Lookup: `conversation/operationShow|Wait|Reconcile` read `codexAcp` records from the store. Wait observes the recorder's store notification. Reconcile reports `confirmed` when a target was recorded, otherwise `not_reconcilable`.
+- `generation` becomes `Option` on create/load/prompt/cancel. The service fills it in when omitted and keeps `staleGeneration` when a supplied value is stale (`provider_conversation_dispatch.rs:120,173,226,279`).
+- Cross-endpoint rule: `validate_conversation_create_request` (`acp_conversation.rs:768-786`) keeps the same-service checks and drops the endpoint-equality checks for `createdBy` and `approver` (R9).
+- CLI: `conversation create|prompt|load|cancel` handle every endpoint, and `--operation-id` is optional (allocated and printed first). `conversation provider …` is removed, and `conversation operation show|wait|reconcile` is added.
+- MCP: `conversation_create`, `conversation_prompt`, `conversation_create_and_prompt`, `conversation_load`, `conversation_cancel`, and `conversation_operation_show|wait|reconcile` dispatch by endpoint. The `provider_conversation_*` tools are removed. The `OperationId` validation error names UUIDv7 and a generator command.
+- Error schema fix: `codex/sessionInspect` and `rename` error data gain the same `reason`, `nextAction` and `nativeCode` fields that native send errors carry (`control_schema_document.rs:309-320,505-536`). Real native rejections then reach the caller instead of "Native control connection unavailable".
+
+## Failure and concurrency
+
+| Situation | Owner | Behaviour |
+|---|---|---|
+| Two deliveries race to one Claude/Cursor session | provider route session actor | Serialized; the second is steered (Claude) or queued. |
+| A session becomes live in Claude Code between claim and provider load | provider route (`LiveSessionOwnershipCheck` before `session/load`) | `notSubmitted { retryable: true }`; no load. |
+| A chosen route's state changes between claim and deliver | the chosen route | Re-checks on deliver; `notSubmitted { retryable: true }`. No fall-through to another route within one attempt. |
+| App-server or provider temporarily unavailable | router tier 4 | `notSubmitted { retryable: true }`; existing wake/listen retry applies. |
+| Same logical delivery retried | feature attempt record | A new attempt gets a fresh `AttemptId` only after the previous one is known-none; `unknown` goes to the owning route's `reconcile_attempt`; accepted stops retries (R20). |
+| Crash after `Dispatching` evidence was recorded | owning route's reconcile, with the feature-supplied original mode and message | Native: today's queue-evidence reconciliation (unique exact-text queue match only). Provider: operation-store lookup. Peer: stays `unknown`. Never replayed. |
+| Provider process exits | CollaborationRuntime | Endpoint `Unavailable` (existing retirement); sessions `NotLoaded`; queued messages dropped; in-flight runs settle as the operation store reports. |
+| Peer socket refuses before writing | peer route | `notSubmitted { retryable: true }`; the registry is re-read on the next attempt; never provider-loads a session that was live. |
+| Peer write interrupted after bytes were sent | peer route | `unknown`; never replayed. |
+| Registry format or peer protocol unknown for a live pid | peer registry reader | `LiveElsewhere { writable: false }`; no provider load (fail closed). |
+| Host restart | — | Held unmaterialized threads and Router-held message queues are gone (accepted costs). |
+
+## Trust
+
+Attribution stays self-declared (U6). The peer route reads only the owner's own registry and published keys, which are owner-only files. The Host passes no new secrets, and auth key values are never logged.
+
+## Requirement → design → proof
+
+| Req | Realized by | Proof seam |
+|---|---|---|
+| R1–R5 | ProviderConfigurationFile, launch composition, CollaborationRuntime | Host tests with fixture providers (missing/malformed file, missing binary, failing init, flag override); debug Router run |
+| R6–R11 | Conversation surface (create, prompt, load, cancel, operations), optional generation, validation change | CLI/MCP integration tests, including load and exact-operation cancel; MCP catalog test; Luna debug transcript |
+| R8 | UnmaterializedThreadHolder + app-server route | Integration test: create, close connection, then message succeeds |
+| R12 | Unavailable reasons, route claim reasons, error schema fix | Control/CLI tests on reason text; inspect rejection test |
+| R13, R14, R19, R20 | Features → SessionMessageDelivery → router; `DeliveryPrecondition` | Feature tests with a fake `SessionMessageDelivery` (each E5 outcome; stale strict guard submits nothing; unpinned wake refreshes); router tests with fake routes (each tier, veto, retryable unavailable, all-`NotMine`); native reconcile tests: unique exact queue/text match recovers, reused correlation with different text, non-queue mode, duplicates, missing entry, and partial scan do not |
+| R15, R16 | Provider ACP route | Route tests with a fixture ACP agent that advertises steering, reports busy, requires load, and fails load; Cursor steer rejected idle and running |
+| R26 | Scheduled-run routes; `RouteEffectEvidence` transitions | Storage tests per evidence variant (legal/illegal transitions, old native JSON decodes); run worker tests with a fake `ScheduledRunExecution`; provider scheduled-run tests with the fixture agent (busy then idle, settle, cancel-then-settle, never-settles, existing target only; completes without a summary; Fresh/Fork rejected at activation); crash-boundary tests keep uncertainty without replay |
+| R27–R30, C5 | Peer route + claude-code-peer-messaging | Crate tests with a temp registry directory and a fake Unix socket (live, dead pid, unknown protocol, busy/idle, refused, interrupted write); router test: stored provider record + live unsupported peer → zero loads; manual owner run with a real Claude Code session |
+| K1 | Interfaces + composition | The fake-based tests above, plus a dependency test that fails if a feature module imports a route or client module |
+| R21 | whoami resolver (existing) | Existing tests |

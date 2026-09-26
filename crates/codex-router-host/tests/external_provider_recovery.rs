@@ -215,7 +215,9 @@ async fn crash_child_records_durable_boundary() -> TestResult {
             .admit(ProviderOperationAdmission {
                 operation_id,
                 operation_kind: ProviderOperationKind::ConversationCreate,
-                binding: binding()?,
+                binding: collaboration_protocol::ConversationBindingIdentity::ExternalProvider {
+                    binding: binding()?,
+                },
                 admitted_at_ms: 1,
             })
             .await?;
@@ -237,7 +239,7 @@ async fn crash_child_records_durable_boundary() -> TestResult {
             .create(ConversationCreateRequest {
                 operation_id,
                 endpoint: endpoint()?,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: actor.clone(),
                 approver: actor.clone(),
@@ -250,7 +252,7 @@ async fn crash_child_records_durable_boundary() -> TestResult {
             .load(ConversationLoadRequest {
                 operation_id,
                 target: target()?,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 requested_by: actor.clone(),
                 approver: actor.clone(),
@@ -392,7 +394,7 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
             .create(ConversationCreateRequest {
                 operation_id: operation_id.clone(),
                 endpoint: endpoint()?,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: actor.clone(),
                 approver: actor.clone(),
@@ -404,7 +406,7 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
             .load(ConversationLoadRequest {
                 operation_id: operation_id.clone(),
                 target: target()?,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 requested_by: actor.clone(),
                 approver: actor.clone(),
@@ -445,7 +447,7 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
             .create(ConversationCreateRequest {
                 operation_id: fresh_operation_id,
                 endpoint: endpoint()?,
-                generation: restarted_generation,
+                generation: Some(restarted_generation),
                 working_directory: working_directory()?,
                 created_by: actor.clone(),
                 approver: actor,
@@ -457,7 +459,7 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
             .load(ConversationLoadRequest {
                 operation_id: fresh_operation_id,
                 target: target()?,
-                generation: restarted_generation,
+                generation: Some(restarted_generation),
                 working_directory: working_directory()?,
                 requested_by: actor.clone(),
                 approver: actor,

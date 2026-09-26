@@ -4,7 +4,7 @@ use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
 use collaboration_protocol::{
-    CodexGeneration, RouterAccess, SettingsObservation, SettingsObservationSource,
+    CodexGeneration, OperationId, RouterAccess, SettingsObservation, SettingsObservationSource,
     SettingsUnavailableReason,
 };
 use serde_json::{Value, json};
@@ -42,9 +42,13 @@ pub enum SessionSetupError {
     SchemaUnavailable,
 }
 /// Retains one connection and a receipt minted only by successful fresh thread/start.
+mod session_load_adoption;
+
 pub struct AcpSessionBinding {
     pub(crate) session_id: String,
     pub(crate) generation: CodexGeneration,
+    pub(crate) materialized: bool,
+    working_directory: PathBuf,
     configuration: Option<McpConfiguration>,
     pub(crate) connection: NativeProtocolConnection,
     pub(crate) schemas: Arc<NativePayloadSchemas>,
@@ -188,6 +192,8 @@ pub struct SessionSetupInputs {
     pub generation: CodexGeneration,
     pub params: Value,
     pub approval_broker: std::sync::Arc<dyn crate::ApprovalBroker>,
+    pub operation_id: Option<OperationId>,
+    pub recorder: std::sync::Arc<dyn crate::ConversationOperationRecorder>,
 }
 impl AcpSessionBinding {
     pub async fn create(
@@ -320,6 +326,13 @@ impl AcpSessionBinding {
             fields.insert("threadId".into(), json!(fork_thread_id));
             fields.insert("excludeTurns".into(), json!(true));
         }
+        if let Some(operation_id) = &inputs.operation_id {
+            inputs
+                .recorder
+                .before_native_dispatch(operation_id)
+                .await
+                .map_err(|_| SessionSetupError::Unavailable)?;
+        }
         let result = connection
             .request_validated(&inputs.schemas, operation, native)
             .await
@@ -409,6 +422,8 @@ impl AcpSessionBinding {
         Ok(Self {
             session_id,
             generation: inputs.generation,
+            materialized: false,
+            working_directory: expected_cwd,
             configuration: Some(configuration),
             connection,
             schemas: inputs.schemas,
@@ -422,6 +437,17 @@ impl AcpSessionBinding {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+    #[must_use]
+    pub fn is_unmaterialized(&self) -> bool {
+        !self.materialized
+    }
+    #[must_use]
+    pub fn generation(&self) -> &CodexGeneration {
+        &self.generation
+    }
+    pub fn connection_mut(&mut self) -> &mut NativeProtocolConnection {
+        &mut self.connection
     }
     #[must_use]
     pub fn new_session_result(&self) -> Value {
@@ -463,6 +489,13 @@ impl AcpSessionBinding {
             .filter(|id| !id.is_empty())
             .ok_or(SessionSetupError::InvalidParameters)?
             .to_owned();
+        let working_directory = normalized_directory(
+            inputs
+                .params
+                .get("cwd")
+                .and_then(Value::as_str)
+                .ok_or(SessionSetupError::InvalidParameters)?,
+        )?;
         let route = inputs
             .approval_broker
             .route(&session_id)
@@ -471,6 +504,8 @@ impl AcpSessionBinding {
         let mut session = Self {
             session_id,
             generation: inputs.generation.clone(),
+            materialized: true,
+            working_directory,
             configuration: None,
             connection: inputs.connection,
             schemas: inputs.schemas,
@@ -506,117 +541,9 @@ impl AcpSessionBinding {
             .map_err(|_| SessionSetupError::OutcomeUnknown)?;
         Ok((session, history))
     }
-    /// Reattaches only this known session. Successful resume never mints new configuration evidence.
-    /// Caller must project historical updates before returning ACP LoadSessionResponse.
-    pub async fn resume_with_receipt(
-        &mut self,
-        catalog: &mut AcpSchemaCatalog,
-        generation: &CodexGeneration,
-        params: &Value,
-    ) -> Result<Value, SessionSetupError> {
-        if !catalog
-            .validate("LoadSessionRequest", params)
-            .map_err(|_| SessionSetupError::SchemaUnavailable)?
-        {
-            return Err(SessionSetupError::InvalidParameters);
-        }
-        let session_id = params
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .ok_or(SessionSetupError::InvalidParameters)?;
-        let requested_cwd = normalized_directory(
-            params
-                .get("cwd")
-                .and_then(Value::as_str)
-                .ok_or(SessionSetupError::InvalidParameters)?,
-        )?;
-        let servers = params
-            .get("mcpServers")
-            .and_then(Value::as_array)
-            .ok_or(SessionSetupError::InvalidParameters)?;
-        let configuration = McpConfiguration::parse(catalog, servers)
-            .map_err(|_| SessionSetupError::InvalidParameters)?;
-        if !self.accepts_configuration(generation, session_id, &configuration) {
-            return Err(SessionSetupError::ConfigurationMismatch);
-        }
-        let result = self
-            .connection
-            .request_validated(
-                &self.schemas,
-                NativeOperation::ResumeThread,
-                resume_parameters(session_id, &requested_cwd, self.access_route.as_ref()),
-            )
-            .await
-            .map_err(map_native_failure)?;
-        let thread = result
-            .get("thread")
-            .ok_or(SessionSetupError::OutcomeUnknown)?;
-        if thread.get("id").and_then(Value::as_str) != Some(session_id) {
-            return Err(SessionSetupError::OutcomeUnknown);
-        }
-        for cwd in [result.get("cwd"), thread.get("cwd")] {
-            let effective = cwd
-                .and_then(Value::as_str)
-                .ok_or(SessionSetupError::OutcomeUnknown)?;
-            if normalized_directory(effective)? != requested_cwd {
-                return Err(SessionSetupError::ConfigurationMismatch);
-            }
-        }
-        if let Some(route) = self.access_route.as_ref() {
-            let profile = profile_name(route.access);
-            validate_observed_settings(
-                &result,
-                route.access,
-                &requested_cwd,
-                Path::new(&route.scratch_path),
-                profile,
-            )?;
-        }
-        Ok(result)
-    }
-    /// Empty load configuration adds nothing; a nonempty load must match fresh-new evidence.
-    #[must_use]
-    pub fn accepts_configuration(
-        &self,
-        generation: &CodexGeneration,
-        session_id: &str,
-        configuration: &McpConfiguration,
-    ) -> bool {
-        self.generation == *generation
-            && self.session_id == session_id
-            && (configuration.is_empty() || self.configuration.as_ref() == Some(configuration))
-    }
     pub fn into_connection(self) -> (NativeProtocolConnection, Arc<NativePayloadSchemas>) {
         (self.connection, self.schemas)
     }
-}
-
-fn resume_parameters(session_id: &str, cwd: &Path, route: Option<&crate::ApprovalRoute>) -> Value {
-    let Some(route) = route else {
-        return json!({"threadId":session_id});
-    };
-    let profile = profile_name(route.access);
-    let mut filesystem = serde_json::Map::new();
-    filesystem.insert(route.scratch_path.clone(), json!("write"));
-    if route.access == RouterAccess::WriteRestricted {
-        filesystem.insert(
-            cwd.join("tmp").to_string_lossy().into_owned(),
-            json!("write"),
-        );
-        filesystem.insert(
-            cwd.join("docs/wip").to_string_lossy().into_owned(),
-            json!("write"),
-        );
-    }
-    json!({
-        "threadId":session_id,
-        "permissions":profile,
-        "config":{
-            "default_permissions":profile,
-            format!("permissions.{profile}.extends"):if route.access == RouterAccess::WriteRestricted { ":read-only" } else { ":workspace" },
-            format!("permissions.{profile}.filesystem"):filesystem
-        }
-    })
 }
 
 fn observe_settings(
@@ -784,6 +711,7 @@ fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
 fn map_native_failure(error: NativeConnectionError) -> SessionSetupError {
     match error {
         NativeConnectionError::Unavailable => SessionSetupError::Unavailable,
+        NativeConnectionError::UnavailableWithCause(_) => SessionSetupError::Unavailable,
         NativeConnectionError::InvalidInput => SessionSetupError::InvalidParameters,
         NativeConnectionError::Rejected { .. } => SessionSetupError::NativeRejected,
         _ => SessionSetupError::OutcomeUnknown,

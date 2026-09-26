@@ -26,9 +26,17 @@ pub(crate) async fn project(
                 .try_into()
                 .map_err(|_| StorageError::InvalidRecord)?;
             let attempt = decode(required(&event.body, "attempt")?)?;
+            let receipt = event
+                .body
+                .get("receipt")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .map(decode)
+                .transpose()?;
             AutomationEventDetails::DeliveryAttempt {
                 attempt: Box::new(
-                    crate::attempt_history_projection::delivery(store, &id, attempt).await?,
+                    crate::attempt_history_projection::delivery(store, &id, attempt, receipt)
+                        .await?,
                 ),
             }
         }

@@ -110,6 +110,8 @@ pub(super) struct OperatorRuntimeContext<'a> {
     pub(super) active_host_replacement: &'a mut Option<ActiveHostReplacement>,
     pub(super) active_status: &'a mut Option<ActiveStatusObservation>,
     pub(super) update_drain_active: bool,
+    pub(super) router_executable_observer:
+        std::sync::Arc<tokio::sync::Mutex<crate::RouterExecutableObserver>>,
 }
 
 pub(super) fn spawn_operator_connection(
@@ -281,6 +283,7 @@ pub(super) fn handle_operator_work(work: OperatorWork, context: OperatorRuntimeC
                     running_identity,
                     context.update_inputs.update_deadlines.identity(),
                     !context.update_drain_active,
+                    std::sync::Arc::clone(&context.router_executable_observer),
                 ),
                 responses: vec![(work.request, work.response)],
             });
@@ -527,6 +530,7 @@ mod tests {
             remote_control: RemoteControlCondition::Connected,
             remote_control_identity: None,
             executable_relation: ExecutableRelation::Match,
+            router_executable_relation: crate::RouterExecutableRelation::Match,
             recovery_budget: RecoveryBudget::Available,
             last_lifecycle_outcome: None,
         })

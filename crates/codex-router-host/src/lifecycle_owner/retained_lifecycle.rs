@@ -25,6 +25,8 @@ pub(super) struct RuntimeState {
     pub(super) app_server: AppServerCondition,
     pub(super) remote_control: RemoteControlCondition,
     pub(super) executable_relation: ExecutableRelation,
+    pub(super) router_executable_relation: crate::RouterExecutableRelation,
+    pub(super) router_drift_logged: bool,
     pub(super) recovery_budget: RecoveryBudget,
     pub(super) last_lifecycle_outcome: Option<LifecycleOutcome>,
 }
@@ -42,6 +44,10 @@ impl RuntimeState {
             app_server: AppServerCondition::Starting,
             remote_control: RemoteControlCondition::Unavailable,
             executable_relation: ExecutableRelation::Match,
+            router_executable_relation: crate::RouterExecutableRelation::Unknown {
+                reason: "startup observation pending".to_owned(),
+            },
+            router_drift_logged: false,
             recovery_budget: RecoveryBudget::Available,
             last_lifecycle_outcome: None,
         };
@@ -73,9 +79,28 @@ impl RuntimeState {
             remote_control: self.remote_control,
             remote_control_identity: None,
             executable_relation: self.executable_relation,
+            router_executable_relation: self.router_executable_relation.clone(),
             recovery_budget: self.recovery_budget,
             last_lifecycle_outcome: self.last_lifecycle_outcome.clone(),
         })
+    }
+
+    pub(super) fn observe_router_executable(
+        &mut self,
+        relation: crate::RouterExecutableRelation,
+    ) -> bool {
+        let warning = collaboration_protocol::router_build_warning(&relation);
+        let should_log = if let Some(warning) = warning
+            && !self.router_drift_logged
+        {
+            tracing::warn!(router_build_warning = %warning, "Router executable drift detected");
+            self.router_drift_logged = true;
+            true
+        } else {
+            false
+        };
+        self.router_executable_relation = relation;
+        should_log
     }
 
     pub(super) fn record_lifecycle(
@@ -113,5 +138,21 @@ mod tests {
             ),
             LifecycleOutcomeClassification::TimedOut
         );
+    }
+
+    #[test]
+    fn router_drift_warns_once_for_the_host_lifetime() {
+        let mut state = RuntimeState::ready(
+            RouterCondition::ExternalReachable,
+            crate::AppServerReadiness::Ready {
+                running_version: "1.2.3".to_owned(),
+            },
+        );
+        let drift = crate::RouterExecutableRelation::Drift {
+            running_version: "0.1.36".to_owned(),
+            installed_version: Some("0.1.37".to_owned()),
+        };
+        assert!(state.observe_router_executable(drift.clone()));
+        assert!(!state.observe_router_executable(drift));
     }
 }

@@ -1,11 +1,47 @@
 //! Run execution evidence freezes time budgets only when dispatch becomes eligible.
-use serde::{Deserialize, Serialize};
-#[derive(Clone, Debug, Serialize, Deserialize)]
+use serde::{Deserialize, Deserializer, Serialize};
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunExecutionEvidence<TTarget, TGeneration, TReceipt> {
-    pub native: crate::NativeEffectEvidence<TTarget, TGeneration>,
+    #[serde(alias = "native")]
+    /// None means no route has been selected and no client I/O has occurred.
+    pub route: Option<crate::RouteEffectEvidence<TTarget, TGeneration>>,
     pub timing: Option<ExecutionTiming>,
     pub acceptance: Option<TReceipt>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunExecutionFields<TTarget, TGeneration, TReceipt> {
+    #[serde(alias = "native")]
+    route: Option<crate::RouteEffectEvidence<TTarget, TGeneration>>,
+    timing: Option<ExecutionTiming>,
+    acceptance: Option<TReceipt>,
+}
+
+impl<'de, TTarget, TGeneration, TReceipt> Deserialize<'de>
+    for RunExecutionEvidence<TTarget, TGeneration, TReceipt>
+where
+    TTarget: Deserialize<'de>,
+    TGeneration: Deserialize<'de>,
+    TReceipt: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = RunExecutionFields::deserialize(deserializer)?;
+        if fields.route.is_none() && (fields.timing.is_some() || fields.acceptance.is_some()) {
+            return Err(serde::de::Error::custom(
+                "unselected run cannot have timing or acceptance evidence",
+            ));
+        }
+        Ok(Self {
+            route: fields.route,
+            timing: fields.timing,
+            acceptance: fields.acceptance,
+        })
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -32,6 +68,7 @@ pub enum WorkerOutcome {
     Completed { explanation: Option<String> },
     Failed { explanation: Option<String> },
     Interrupted { explanation: Option<String> },
+    PeerMessageWritten { explanation: String },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

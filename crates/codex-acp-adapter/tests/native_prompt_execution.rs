@@ -1,5 +1,6 @@
 use codex_acp_adapter::{
-    AcpSchemaCatalog, AcpSessionBinding, PendingAcpPrompt, PromptEvent, SessionSetupInputs,
+    AcpSchemaCatalog, AcpSessionBinding, HeldBindingCheckout, PendingAcpPrompt, PromptEvent,
+    SessionSetupInputs, UnmaterializedBindingStore,
 };
 use codex_native_integration::{
     NativePayloadSchemas, NativeProtocolConnection, NativeSchemaBundle,
@@ -11,9 +12,24 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, protocol::Role},
 };
+#[path = "support/conversation_operation_recorder.rs"]
+mod conversation_operation_recorder;
+use conversation_operation_recorder::AcceptingConversationRecorder;
 
 /// Fixture recency: the thread's last update sits this far in the past.
 const IDLE_FIXTURE_SECONDS: i64 = 90;
+struct TestBindingHolder;
+impl UnmaterializedBindingStore for TestBindingHolder {
+    fn hold(&self, _binding: AcpSessionBinding) {}
+    fn checkout(&self, _session_id: &str) -> HeldBindingCheckout {
+        HeldBindingCheckout::Missing
+    }
+    fn restore(&self, _binding: AcpSessionBinding) {}
+    fn finish(&self, _session_id: &str) {}
+    fn create_tasks(&self) -> tokio_util::task::TaskTracker {
+        tokio_util::task::TaskTracker::new()
+    }
+}
 const TEST_SCRATCH: &str =
     "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
 /// Omits the effort key entirely when the caller requested none.
@@ -173,6 +189,8 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             socket.send(Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"thread-a","model":"gpt-5.6-sol","reasoningEffort":thread_effort,"createdAt":thread_created_at,"updatedAt":thread_updated_at,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("thread read response: {error}"));
         });
         let setup_inputs = SessionSetupInputs {
+            operation_id: None,
+            recorder: Arc::new(AcceptingConversationRecorder),
             connection,
             schemas,
             generation,
@@ -194,10 +212,14 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
         if use_task {
             let closed = tokio_util::sync::CancellationToken::new();
             let (output, mut frames) = codex_acp_adapter::bounded_acp_output(closed.clone());
-            let mut registry = codex_acp_adapter::AcpSessionRegistry::new(output, closed);
+            let mut registry = codex_acp_adapter::AcpSessionRegistry::new(
+                output,
+                closed,
+                Arc::new(TestBindingHolder),
+            );
             registry
                 .insert(session)
-                .unwrap_or_else(|error| panic!("insert: {error}"));
+                .unwrap_or_else(|(reason, _binding)| panic!("insert: {reason}"));
             let params = json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"hello"}],"_meta":{"codexRouter":prompt_metadata(requested_effort)}});
             registry
                 .begin_prompt(&mut catalog, json!("acp-prompt"), params.clone())

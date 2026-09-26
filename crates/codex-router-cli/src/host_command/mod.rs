@@ -19,6 +19,7 @@ use operator_client::OperatorClientError;
 
 mod foreground_launch;
 pub(crate) mod operator_client;
+mod provider_launch_configuration;
 pub(crate) mod replacement_outcome;
 
 const DEFAULT_HOST_PORT: u16 = 8787;
@@ -162,6 +163,16 @@ pub(crate) async fn run_host_command<W: Write + Send>(
     context: &CliContext,
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
 ) -> Result<(), HostCommandError> {
+    if context
+        .env_var("CODEX_ROUTER_DEBUG_RUNNING_VERSION")
+        .is_some()
+        && (!cfg!(debug_assertions) || !command.require_debug_isolation)
+    {
+        return Err(HostCommandError::RouterRoot(
+            "debug running-version override requires --require-debug-isolation in a debug build"
+                .to_owned(),
+        ));
+    }
     if command.require_debug_isolation
         && (!cfg!(all(debug_assertions, not(test)))
             || context.env_var(crate::USE_HOME_DEFAULT_ENV).is_some())

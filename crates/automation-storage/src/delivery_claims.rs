@@ -1,8 +1,8 @@
 //! Claim a native submission exactly once locally; unresolved effects are never silently replayed.
 use crate::{AutomationStore, StorageError};
 use agent_automation::{
-    AttemptId, AttemptOutcome, CessationEvidence, DeliveryAttempt, DeliveryId, DeliveryStatus,
-    EventId, NativeEffectEvidence, PreparationEffect, SubmissionEffect, WakeState, WakeupId,
+    AttemptId, AttemptOutcome, DeliveryAttempt, DeliveryId, DeliveryStatus, EventId, WakeState,
+    WakeupId,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{Connection, Row};
@@ -101,7 +101,14 @@ impl AutomationStore {
             .map_or(Some(1), |attempt| attempt.attempt_number.checked_add(1))
             .ok_or(StorageError::InvalidRecord)?;
         if let Some(prior) = prior {
-            let event = serde_json::json!({"kind":"deliveryAttempt","attempt":prior});
+            let receipt = row
+                .try_get::<Option<String>, _>("outcome_receipt_json")?
+                .as_deref()
+                .map(serde_json::from_str::<serde_json::Value>)
+                .transpose()
+                .map_err(|_| StorageError::InvalidRecord)?;
+            let event =
+                serde_json::json!({"kind":"deliveryAttempt","attempt":prior,"receipt":receipt});
             sqlx::query("INSERT INTO automation_events(event_id,subject_kind,subject_id,event_kind,event_body_json,recorded_at_ms) VALUES (?,'delivery',?,'attemptArchived',?,?)")
             .bind(EventId::generate().as_str()).bind(id.as_str()).bind(event.to_string()).bind(now_ms).execute(&mut *transaction).await?;
         }
@@ -112,21 +119,11 @@ impl AutomationStore {
             started_at_ms: now_ms,
             completed_at_ms: None,
             discard_on_non_submission: false,
-            effects: NativeEffectEvidence {
-                target: Some(target.clone()),
-                generation: None,
-                client_user_message_id: Some(id.as_str().to_owned()),
-                native_turn_id: None,
-                native_submission_id: None,
-                allocation: PreparationEffect::NotRequested,
-                resume: PreparationEffect::NotRequested,
-                submission: SubmissionEffect::Dispatching,
-                cessation: CessationEvidence::NotApplicable,
-            },
+            effects: None,
             outcome: AttemptOutcome::InProgress,
         };
         let encoded = serde_json::to_string(&attempt).map_err(|_| StorageError::InvalidRecord)?;
-        let affected=sqlx::query("UPDATE mailbox_deliveries SET delivery_status='dispatching',latest_attempt_json=? WHERE delivery_id=? AND delivery_status IN ('pending','retryable')")
+        let affected=sqlx::query("UPDATE mailbox_deliveries SET delivery_status='dispatching',latest_attempt_json=?,outcome_receipt_json=NULL WHERE delivery_id=? AND delivery_status IN ('pending','retryable')")
         .bind(encoded).bind(id.as_str()).execute(&mut *transaction).await?.rows_affected();
         if affected != 1 {
             return Err(StorageError::InvalidRecord);

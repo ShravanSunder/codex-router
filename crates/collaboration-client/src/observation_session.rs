@@ -302,7 +302,9 @@ impl NativeObservation {
                     ))
                 }
                 NativeConnectionError::Unavailable
+                | NativeConnectionError::UnavailableWithCause(_)
                 | NativeConnectionError::OutcomeUnknown
+                | NativeConnectionError::OutcomeUnknownWithCause(_)
                 | NativeConnectionError::Rejected { .. } => ObservationReadError::Disconnected,
             })
     }

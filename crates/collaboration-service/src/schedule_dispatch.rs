@@ -16,7 +16,7 @@ pub(crate) struct ScheduleRequest<'a> {
     pub method: &'a str,
     pub params: Value,
     pub service_id: &'a collaboration_protocol::UuidIdentity,
-    pub backend: Option<&'a crate::NativeControlBackend>,
+    pub execution: Option<&'a Arc<dyn crate::ScheduledRunExecution>>,
     pub store: Option<&'a Arc<Mutex<AutomationStore>>>,
 }
 pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
@@ -65,7 +65,7 @@ pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
                     schedule_id: None,
                     operation_id: &params.operation_id,
                     service_id: request.service_id,
-                    backend: request.backend,
+                    execution: request.execution,
                 },
             )
             .await
@@ -116,7 +116,7 @@ pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
                     schedule_id: Some(&params.schedule_id),
                     operation_id: &params.operation_id,
                     service_id: request.service_id,
-                    backend: request.backend,
+                    execution: request.execution,
                 },
             )
             .await
@@ -157,7 +157,7 @@ pub(crate) async fn dispatch(request: ScheduleRequest<'_>) -> Value {
                             schedule_id: Some(&params.schedule_id),
                             operation_id: &params.operation_id,
                             service_id: request.service_id,
-                            backend: request.backend,
+                            execution: request.execution,
                         },
                     )
                     .await

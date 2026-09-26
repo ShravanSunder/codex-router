@@ -67,10 +67,20 @@ async fn fresh_run_keeps_occupancy_while_separate_summary_budget_begins()
         submission: SubmissionEffect::Dispatching,
         cessation: CessationEvidence::Unconfirmed,
     };
+    let mut prepared = effects.clone();
+    prepared.submission = SubmissionEffect::NotDispatched;
+    store
+        .begin_run_preparation::<String, String, String, String>(
+            automation_storage::RunPreparationIntent {
+                run_id: run.clone(),
+                effects: prepared.into(),
+            },
+        )
+        .await?;
     store
         .begin_run_dispatch::<_, String, _, String>(RunDispatchIntent {
             run_id: run.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
             configured_timeout_seconds: 3600,
             now_ms: 500000,
         })
@@ -81,7 +91,7 @@ async fn fresh_run_keeps_occupancy_while_separate_summary_budget_begins()
     store
         .record_run_submission::<_, String, _, _>(automation_storage::RunSubmissionResult {
             run_id: run.clone(),
-            effects: accepted,
+            effects: accepted.into(),
             outcome: automation_storage::RunSubmissionOutcome::Accepted {
                 turn_id: "native-run-turn".into(),
                 receipt: "native-receipt".to_owned(),
@@ -89,23 +99,29 @@ async fn fresh_run_keeps_occupancy_while_separate_summary_budget_begins()
         })
         .await?;
     let stale = store
-        .complete_run_turn::<String, String, String, String>(automation_storage::RunCompletion {
-            run_id: run.clone(),
-            native_turn_id: "another-turn".into(),
-            outcome: agent_automation::WorkerOutcome::Completed { explanation: None },
-            now_ms: 501000,
-        })
+        .complete_run_settlement::<String, String, String, String>(
+            automation_storage::RunCompletion {
+                run_id: run.clone(),
+                settlement: automation_storage::RunStopIdentity::NativeTurn("another-turn".into()),
+                outcome: agent_automation::WorkerOutcome::Completed { explanation: None },
+                now_ms: 501000,
+            },
+        )
         .await?;
     if stale {
         return Err("unrelated turn completed this run".into());
     }
     if !store
-        .complete_run_turn::<String, String, String, String>(automation_storage::RunCompletion {
-            run_id: run.clone(),
-            native_turn_id: "native-run-turn".into(),
-            outcome: agent_automation::WorkerOutcome::Completed { explanation: None },
-            now_ms: 502000,
-        })
+        .complete_run_settlement::<String, String, String, String>(
+            automation_storage::RunCompletion {
+                run_id: run.clone(),
+                settlement: automation_storage::RunStopIdentity::NativeTurn(
+                    "native-run-turn".into(),
+                ),
+                outcome: agent_automation::WorkerOutcome::Completed { explanation: None },
+                now_ms: 502000,
+            },
+        )
         .await?
     {
         return Err("exact completed turn not recorded".into());

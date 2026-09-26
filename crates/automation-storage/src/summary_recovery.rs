@@ -67,6 +67,15 @@ impl AutomationStore {
         if inventory.occupying.as_ref() != Some(&request.run_id) {
             return Err(StorageError::InvalidRecord);
         }
+        if record
+            .evidence
+            .route
+            .as_ref()
+            .map(agent_automation::RouteEffectEvidence::settlement_state)
+            != Some(agent_automation::RouteSettlementState::NativeTurnConfirmed)
+        {
+            return Err(StorageError::InvalidRecord);
+        }
         if let Some(attempt) = &record.summary_attempt {
             let not_submitted = matches!(
                 attempt.effects.submission,
@@ -85,19 +94,31 @@ impl AutomationStore {
         }
         match request.action {
             SummaryRecoveryAction::Retry { timeout_seconds } => {
-                let attempt: agent_automation::SummaryAttempt<TTarget, TGeneration> =
-                    crate::summary_admission::make_attempt(
-                        crate::summary_admission::SummaryAttemptSeed {
-                            source_target: record
-                                .evidence
-                                .native
-                                .target
-                                .clone()
-                                .ok_or(StorageError::InvalidRecord)?,
-                            source_turn_id: record
+                let (source_target, source_reference) = match record
+                    .evidence
+                    .route
+                    .as_ref()
+                    .ok_or(StorageError::InvalidRecord)?
+                {
+                    agent_automation::RouteEffectEvidence::CodexAppServer(native) => (
+                        native.target.clone().ok_or(StorageError::InvalidRecord)?,
+                        agent_automation::SummarySourceReference::NativeTurn {
+                            turn_id: record
                                 .native_turn_id
                                 .clone()
                                 .ok_or(StorageError::InvalidRecord)?,
+                        },
+                    ),
+                    agent_automation::RouteEffectEvidence::ProviderAcp(_)
+                    | agent_automation::RouteEffectEvidence::ClaudeCodePeer(_) => {
+                        return Err(StorageError::InvalidRecord);
+                    }
+                };
+                let attempt: agent_automation::SummaryAttempt<TTarget, TGeneration> =
+                    crate::summary_admission::make_attempt(
+                        crate::summary_admission::SummaryAttemptSeed {
+                            source_target,
+                            source_reference,
                             timeout_seconds,
                             now_ms: request.now_ms,
                         },
