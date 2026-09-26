@@ -37,7 +37,15 @@ pub use provider_operation_store::{
 mod delivery_acceptance_effect;
 mod delivery_route_projection;
 pub use provider_session_record::ProviderSessionRecord;
+mod app_server_item_translation;
 mod app_server_model_catalog;
+pub use app_server_item_translation::{
+    HistoricalTurn, TranslatedSessionItem, group_historical_turns, render_historical_turn,
+    translate_session_item,
+};
+#[cfg(test)]
+#[path = "app_server_item_translation_tests.rs"]
+mod app_server_item_translation_tests;
 mod provider_conversation_backend;
 mod router_session_app_server;
 mod schedule_preparation_evidence_sink;
