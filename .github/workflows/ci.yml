@@ -103,5 +103,11 @@ jobs:
         background: true
         run: cargo nextest run --profile ci --workspace
 
+      # Debug code generation does not reproduce the FuturesUnordered waker bug.
+      - name: Test optimized idle provider transport
+        id: provider_transport_idle
+        background: true
+        run: cargo test --locked --release -p codex-router-host --test provider_transport_idle
+
       - name: Wait for validation
         wait-all:
