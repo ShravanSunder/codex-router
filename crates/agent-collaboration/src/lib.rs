@@ -26,7 +26,7 @@ pub fn command_help() -> String {
     );
     help.replace(
         "  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n",
-        "  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n  events observe --endpoint ID --session ID --attach [--timeout-seconds 60] [--max-events 256] [--max-bytes 262144]\n",
+        "  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n  events observe --endpoint ID --session ID --attach [--timeout-seconds 60] [--max-events 256] [--max-bytes 262144]\n  approval list|decide --help\n  question list|answer --help\n",
     )
     .replace(
         "  wake send --to ADDRESS --from ADDRESS",
@@ -52,8 +52,10 @@ mod whoami_command;
 pub use whoami_command::run_whoami_command;
 mod address_book_commands;
 mod approval_commands;
+mod question_commands;
 pub use address_book_commands::run_address_command;
 pub use approval_commands::run_approval_command;
+pub use question_commands::run_question_command;
 
 mod journal_read_commands;
 mod native_stdio_bridge;

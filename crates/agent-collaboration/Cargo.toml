@@ -20,6 +20,7 @@ tokio-util.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
+message-board = { path = "../message-board", version = "0.1.20" }
 codex-native-integration.workspace = true
 clap.workspace = true
 comfy-table.workspace = true

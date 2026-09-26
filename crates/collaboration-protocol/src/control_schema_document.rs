@@ -355,7 +355,7 @@ pub fn control_schema_document(
             "overloaded",
         ],
     )?;
-    assembly.add_method::<ApprovalListParams, ApprovalListResult>(
+    assembly.add_method::<ApprovalListParams, ApprovalListResponse>(
         "approval/list",
         &["unavailable", "overloaded"],
     )?;
@@ -366,8 +366,25 @@ pub fn control_schema_document(
             "wrongActor",
             "selfDecision",
             "decisionNotOffered",
+            "persistentChoiceNotAcknowledged",
+            "invalidSelection",
+            "invalidOptionId",
             "expired",
             "oldGeneration",
+            "unavailable",
+            "overloaded",
+        ],
+    )?;
+    assembly.add_method::<QuestionListParams, QuestionListResult>(
+        "question/list",
+        &["unavailable", "overloaded"],
+    )?;
+    assembly.add_method::<QuestionAnswerParams, QuestionAnswerResult>(
+        "question/answer",
+        &[
+            "questionNotPending",
+            "wrongActor",
+            "invalidAnswer",
             "unavailable",
             "overloaded",
         ],
@@ -505,11 +522,21 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
             !native_control_diagnostics || !matches!(*kind, "nativeRejected" | "nameMismatch")
         })
         .collect();
-    let properties = Map::from_iter([
+    let mut properties = Map::from_iter([
         ("kind".to_owned(), json!({"enum":general_failures})),
         ("stage".to_owned(), json!({"enum":stages})),
         ("message".to_owned(), text.clone()),
     ]);
+    if method == "approval/decide" {
+        properties.insert(
+            "offeredOptions".to_owned(),
+            json!({"type":"array","items":{"type":"string"}}),
+        );
+        properties.insert("persistentTarget".to_owned(), text.clone());
+    }
+    if method == "question/answer" {
+        properties.insert("fieldId".to_owned(), json!({"type":"string"}));
+    }
     let required = vec!["kind", "stage", "message"];
     let method_data = json!({"type":"object","required":required,
         "additionalProperties":false,"properties":properties});

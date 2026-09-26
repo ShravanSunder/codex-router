@@ -669,12 +669,25 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
     let listed = &list["result"]["structuredContent"]["approvals"][0];
     assert_eq!(listed["requestId"], pending.request_id);
     assert_eq!(listed["requester"], serde_json::json!(fixture.requester));
-    assert_eq!(listed["approver"], serde_json::json!(fixture.approver));
-    assert_eq!(listed["generation"], serde_json::json!(fixture.generation));
+    assert_eq!(
+        listed["approver"],
+        json!({"kind":"session","session":fixture.approver})
+    );
+    let options = listed["options"].as_array().expect("offered options");
     assert!(
-        listed["operation"]["params"]["toolCall"]["content"][0]["content"]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("Requested permissions:"))
+        options
+            .iter()
+            .any(|option| option["optionId"] == "native-accept")
+    );
+    assert!(
+        options
+            .iter()
+            .any(|option| option["optionId"] == "native-accept-session")
+    );
+    assert!(
+        options
+            .iter()
+            .any(|option| option["optionId"] == "native-decline")
     );
 
     let wrong_actor: SessionRef = serde_json::from_value(json!({
@@ -727,6 +740,102 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
         BrokeredApprovalOutcome::Selected {
             option_id: "native-accept-session".to_owned()
         }
+    );
+    listener.shutdown().await.expect("MCP shutdown");
+    fixture.shutdown().await;
+}
+
+// R18: MCP presents the typed form and forwards the Approver's answer to the
+// waiting broker request through the same public Control path as the CLI.
+#[tokio::test]
+async fn streamable_http_question_form_reaches_the_waiting_agent() {
+    let fixture = ApprovalFixture::start(0).await;
+    let requester =
+        serde_json::from_value(serde_json::to_value(&fixture.requester).expect("requester JSON"))
+            .expect("typed requester");
+    let approver = serde_json::from_value(json!({"kind":"session","session":fixture.approver}))
+        .expect("typed approver");
+    let question = serde_json::from_value(json!({
+        "requestId":"mcp-question", "prompt":"Choose settings", "fields":[
+            {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true},
+            {"kind":"boolean","fieldId":"dryRun","label":"Dry run","description":null,"required":true},
+            {"kind":"singleChoice","fieldId":"color","label":"Color","description":null,"required":true,"options":["red","blue"]}
+        ]
+    })).expect("question");
+    let agent_reply = fixture
+        .broker
+        .request_question(requester, approver, question)
+        .await
+        .expect("pending question");
+    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
+        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
+        service_directory: fixture.service_directory().to_owned(),
+        allowed_origins: vec!["http://localhost".to_owned()],
+    })
+    .await
+    .expect("MCP listener");
+    let client = reqwest::Client::new();
+    let initialize = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .json(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"question-integration","version":"1"}
+            }}),
+        )
+        .send()
+        .await
+        .expect("initialize");
+    let session_id = initialize
+        .headers()
+        .get("mcp-session-id")
+        .cloned()
+        .expect("MCP session id");
+    let _ = initialize.text().await.expect("initialize body");
+    let initialized = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id.clone())
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .expect("initialized notification");
+    assert!(initialized.status().is_success());
+    let listed = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        2,
+        "question_list",
+        json!({"pending":true}),
+    )
+    .await;
+    let question = &listed["result"]["structuredContent"]["questions"][0];
+    assert_eq!(question["prompt"], "Choose settings");
+    assert_eq!(question["fields"][0]["kind"], "number");
+    let answered = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        3,
+        "question_answer",
+        json!({
+            "requestId":"mcp-question", "actor":fixture.approver,
+            "response":{"action":"answered","content":{"count":3,"dryRun":true,"color":"blue"}}
+        }),
+    )
+    .await;
+    assert_eq!(answered["result"]["isError"], false);
+    assert_eq!(answered["result"]["structuredContent"]["state"], "answered");
+    let response = agent_reply.await.expect("agent response");
+    assert_eq!(
+        serde_json::to_value(response).expect("response JSON"),
+        json!({
+            "action":"answered","content":{"count":3,"dryRun":true,"color":"blue"}
+        })
     );
     listener.shutdown().await.expect("MCP shutdown");
     fixture.shutdown().await;

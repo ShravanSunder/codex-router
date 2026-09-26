@@ -5,12 +5,13 @@ use collaboration_client::{
     MessageSendRequest, NativeObservation, OperationEffect, operation_failure_from_client_error,
 };
 use collaboration_protocol::{
-    AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
-    ApprovalListResult, ConversationCreateOutcome, ConversationOperationSubmission,
-    DeliveryOutcome, DeliveryReceipt, EndpointInventory, JournalPage, JournalReadParams,
-    JournalStatus, NativeInspectParams, NativeInspectResult, NativeInterruptParams,
-    NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
-    NativeSessionListResult, OperationId, RouterExecutableRelation, router_build_warning,
+    AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult,
+    ApprovalDetailedListResult, ApprovalListParams, ConversationCreateOutcome,
+    ConversationOperationSubmission, DeliveryOutcome, DeliveryReceipt, EndpointInventory,
+    JournalPage, JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
+    NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
+    NativeSessionListParams, NativeSessionListResult, OperationId, RouterExecutableRelation,
+    router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -306,7 +307,7 @@ impl CollaborationMcpServer {
         message_tool_result(result)
     }
 
-    #[tool(name = "approval_list", description = "Lists approval requests using the existing Router approval policy. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ApprovalListResult>())]
+    #[tool(name = "approval_list", description = "Lists approval requests and every offered choice, including persistent effects. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ApprovalDetailedListResult>())]
     async fn approval_list(
         &self,
         Parameters(request): Parameters<ApprovalListParams>,
@@ -315,7 +316,7 @@ impl CollaborationMcpServer {
             Ok(value) => value,
             Err(error) => return failure(error, OperationEffect::None),
         };
-        let result = client.list_pending_approvals(request.pending).await;
+        let result = client.list_approvals_with_options(request.pending).await;
         let _closed = client.close().await;
         structured_result(result, OperationEffect::None)
     }
@@ -330,6 +331,40 @@ impl CollaborationMcpServer {
             Err(error) => return failure(error, OperationEffect::None),
         };
         let result = client.decide_approval(request).await;
+        let _closed = client.close().await;
+        match result {
+            Ok(value) => structured_result(Ok(value), OperationEffect::None),
+            Err(error) => {
+                let (failure, target, turn_id) = error.into_parts();
+                operation_error_result(failure, target, turn_id)
+            }
+        }
+    }
+
+    #[tool(name = "question_list", description = "Lists questions with their typed fields and current state. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<collaboration_protocol::QuestionListResult>())]
+    async fn question_list(
+        &self,
+        Parameters(request): Parameters<collaboration_protocol::QuestionListParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.list_questions(request.pending).await;
+        let _closed = client.close().await;
+        structured_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "question_answer", description = "Answers, declines, or cancels one question as its Approver.", output_schema = rmcp::handler::server::tool::schema_for_type::<collaboration_protocol::QuestionAnswerResult>())]
+    async fn question_answer(
+        &self,
+        Parameters(request): Parameters<collaboration_protocol::QuestionAnswerParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.answer_question(request).await;
         let _closed = client.close().await;
         match result {
             Ok(value) => structured_result(Ok(value), OperationEffect::None),

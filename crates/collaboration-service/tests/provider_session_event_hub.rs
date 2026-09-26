@@ -142,14 +142,14 @@ async fn late_attach_replays_pending_approval_and_question() -> TestResult {
     let target = session()?;
     let interactions: [PendingInteraction; 2] = [
         serde_json::from_value(serde_json::json!({
-            "kind":"approval", "request":{
+            "kind":"approval", "approver":{"kind":"human","humanId":"owner"}, "request":{
                 "requestId":"approval-1", "title":"Run command", "options":[
                     {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}}
                 ]
             }
         }))?,
         serde_json::from_value(serde_json::json!({
-            "kind":"question", "request":{
+            "kind":"question", "approver":{"kind":"human","humanId":"owner"}, "request":{
                 "requestId":"question-1", "prompt":"Choose a count", "fields":[
                     {"kind":"number","fieldId":"count","label":"Count","required":true}
                 ]
@@ -251,7 +251,7 @@ async fn replay_reset_replaces_lost_history_and_resyncs_old_subscribers() -> Tes
     )
     .await?;
     let approval: PendingInteraction = serde_json::from_value(serde_json::json!({
-        "kind":"approval", "request":{
+        "kind":"approval", "approver":{"kind":"human","humanId":"owner"}, "request":{
             "requestId":"old-approval", "title":"Old approval", "options":[
                 {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}}
             ]

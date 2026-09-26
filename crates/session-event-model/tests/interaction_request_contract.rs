@@ -1,3 +1,4 @@
+use message_board::{HumanId, Identity};
 use serde_json::json;
 use session_event_model::{
     ApprovalChoice, ApprovalEffect, ApprovalRequest, ApprovalScope, ApprovalSubject, OfferedOption,
@@ -45,19 +46,25 @@ fn approval_event_round_trip_carries_prompt_subject_and_ordered_choices() {
         Some(ApprovalSubject::ToolCall { .. })
     ));
     let event = SessionEvent::InteractionRequested {
-        interaction: PendingInteraction::Approval { request },
+        interaction: PendingInteraction::Approval {
+            approver: Identity::Human {
+                human_id: HumanId::try_from("owner".to_owned()).expect("human"),
+            },
+            request: Box::new(request),
+        },
     };
     let wire = serde_json::to_value(&event).expect("encode pending approval");
     assert_eq!(
         wire["interaction"]["request"]["options"][0]["optionId"],
         "allow-once"
     );
+    assert_eq!(wire["interaction"]["approver"]["humanId"], "owner");
     assert_eq!(
         serde_json::from_value::<SessionEvent>(wire).expect("decode event"),
         event
     );
     let SessionEvent::InteractionRequested {
-        interaction: PendingInteraction::Approval { request },
+        interaction: PendingInteraction::Approval { request, .. },
     } = &event
     else {
         panic!("approval event expected");
@@ -99,7 +106,12 @@ fn question_event_round_trip_preserves_field_labels_and_descriptions() {
         fields: QuestionFields::new(vec![field]).expect("one field"),
     };
     let event = SessionEvent::InteractionRequested {
-        interaction: PendingInteraction::Question { request },
+        interaction: PendingInteraction::Question {
+            approver: Identity::Human {
+                human_id: HumanId::try_from("owner".to_owned()).expect("human"),
+            },
+            request: Box::new(request),
+        },
     };
     let wire = serde_json::to_value(&event).expect("encode pending question");
     assert_eq!(
@@ -114,6 +126,7 @@ fn question_event_round_trip_preserves_field_labels_and_descriptions() {
         wire["interaction"]["request"]["fields"][0]["fieldId"],
         "count"
     );
+    assert_eq!(wire["interaction"]["approver"]["humanId"], "owner");
     assert_eq!(
         serde_json::from_value::<SessionEvent>(wire).expect("decode event"),
         event

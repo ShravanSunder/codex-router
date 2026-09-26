@@ -8,10 +8,11 @@ use codex_acp_adapter::{
     BrokeredApprovalRequest,
 };
 use collaboration_protocol::{
-    ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListResult,
-    ApprovalOfferedOption, ApprovalOptionScope, ApprovalPresentation, ApprovalRequestRecord,
-    ApprovalState, DeliveryOutcome, EndpointRef, MessageContent, MessageDelivery, SessionRef,
-    UuidIdentity,
+    ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalDetailedListResult,
+    ApprovalDetailedRecord, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionEffect,
+    ApprovalOptionScope, ApprovalOptionView, ApprovalOptionViewScope, ApprovalPresentation,
+    ApprovalRequestRecord, ApprovalState, DeliveryOutcome, EndpointRef, MessageContent,
+    MessageDelivery, SessionRef, UuidIdentity,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -32,9 +33,70 @@ use external_requests::map_external_options;
 use interaction_history::InteractionHistoryStore;
 pub use interaction_history::{
     InteractionHistoryError, InteractionHistoryRecord, InteractionHistoryState,
+    QuestionHistoryState, QuestionResponse,
 };
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ApprovalDecisionError {
+    #[error("{0}")]
+    Code(&'static str),
+    #[error("decision is not one of the offered options")]
+    OptionNotOffered { offered: Vec<String> },
+    #[error("persistent choice requires acknowledgement: {persistent_target}")]
+    PersistentChoiceNotAcknowledged { persistent_target: String },
+}
+
+impl ApprovalDecisionError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Code(code) => code,
+            Self::OptionNotOffered { .. } => "decisionNotOffered",
+            Self::PersistentChoiceNotAcknowledged { .. } => "persistentChoiceNotAcknowledged",
+        }
+    }
+
+    #[must_use]
+    pub fn detail(&self) -> serde_json::Value {
+        match self {
+            Self::Code(_) => serde_json::Value::Null,
+            Self::OptionNotOffered { offered } => serde_json::json!({"offeredOptions":offered}),
+            Self::PersistentChoiceNotAcknowledged { persistent_target } => {
+                serde_json::json!({"persistentTarget":persistent_target})
+            }
+        }
+    }
+}
+
+impl From<&'static str> for ApprovalDecisionError {
+    fn from(value: &'static str) -> Self {
+        Self::Code(value)
+    }
+}
+
+impl From<InteractionHistoryError> for ApprovalDecisionError {
+    fn from(value: InteractionHistoryError) -> Self {
+        match value {
+            InteractionHistoryError::OptionNotOffered { offered } => {
+                Self::OptionNotOffered { offered }
+            }
+            InteractionHistoryError::PersistentChoiceNotAcknowledged { persistent_target } => {
+                Self::PersistentChoiceNotAcknowledged { persistent_target }
+            }
+            InteractionHistoryError::WrongActor => Self::Code("wrongActor"),
+            InteractionHistoryError::SelfApprover => Self::Code("selfDecision"),
+            InteractionHistoryError::NotPending => Self::Code("approvalNotPending"),
+            InteractionHistoryError::InvalidOptionId => Self::Code("invalidOptionId"),
+            InteractionHistoryError::InvalidQuestion => Self::Code("invalidQuestion"),
+            InteractionHistoryError::InvalidAnswer { .. } => Self::Code("invalidAnswer"),
+            InteractionHistoryError::AlreadyExists | InteractionHistoryError::Unavailable => {
+                Self::Code("unavailable")
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExternalApprovalOptionScope {
@@ -176,6 +238,9 @@ pub struct ServiceApprovalBroker {
     history_path: PathBuf,
     history: Arc<Mutex<Vec<ApprovalRequestRecord>>>,
     interaction_history: InteractionHistoryStore,
+    typed_pending_approvals:
+        Mutex<BTreeMap<String, oneshot::Sender<session_event_model::OfferedOptionId>>>,
+    pending_questions: Mutex<BTreeMap<String, oneshot::Sender<QuestionResponse>>>,
 }
 
 impl ServiceApprovalBroker {
@@ -216,6 +281,8 @@ impl ServiceApprovalBroker {
             history_path,
             history: Arc::new(Mutex::new(history)),
             interaction_history,
+            typed_pending_approvals: Mutex::new(BTreeMap::new()),
+            pending_questions: Mutex::new(BTreeMap::new()),
         }))
     }
 
@@ -255,13 +322,178 @@ impl ServiceApprovalBroker {
         ApprovalListResult { approvals }
     }
 
-    /// New typed interaction records use their own history file. The legacy
-    /// approval record and reader remain byte-shape compatible with 0.1.38.
-    pub async fn record_typed_interaction(
+    pub async fn list_detailed(
         &self,
-        record: InteractionHistoryRecord,
+        pending_only: bool,
+    ) -> Result<ApprovalDetailedListResult, ApprovalDecisionError> {
+        let legacy = self.list(pending_only).await.approvals;
+        let typed = self.interaction_history.list_approvals(pending_only).await;
+        let mut approvals = Vec::with_capacity(legacy.len() + typed.len());
+        for record in legacy {
+            approvals.push(ApprovalDetailedRecord {
+                request_id: record.request_id,
+                requester: board_session_ref(&record.requester)?,
+                approver: board_identity(&record.approver)?,
+                state: record.state,
+                title: record
+                    .presentation
+                    .as_ref()
+                    .and_then(|value| value.title.clone()),
+                description: None,
+                options: record
+                    .offered_options
+                    .into_iter()
+                    .filter_map(legacy_option_view)
+                    .collect(),
+            });
+        }
+        for record in typed {
+            let InteractionHistoryRecord::Approval {
+                requester,
+                approver,
+                request,
+                state,
+            } = record
+            else {
+                continue;
+            };
+            let state = match state {
+                InteractionHistoryState::Pending => ApprovalState::PendingClientDecision,
+                InteractionHistoryState::Decided { .. } => ApprovalState::Decided,
+                InteractionHistoryState::Cancelled { .. } => ApprovalState::Cancelled,
+            };
+            approvals.push(ApprovalDetailedRecord {
+                request_id: request.request_id,
+                requester,
+                approver,
+                state,
+                title: Some(request.title),
+                description: request.description,
+                options: request.options.iter().map(typed_option_view).collect(),
+            });
+        }
+        Ok(ApprovalDetailedListResult { approvals })
+    }
+
+    /// Register an offered approval and return the exact agent option ID when
+    /// its typed Approver decides. Legacy approval history remains untouched.
+    pub async fn request_typed_approval(
+        &self,
+        requester: message_board::SessionRef,
+        approver: message_board::Identity,
+        request: session_event_model::ApprovalRequest,
+    ) -> Result<oneshot::Receiver<session_event_model::OfferedOptionId>, InteractionHistoryError>
+    {
+        let request_id = request.request_id.clone();
+        let mut pending = self.typed_pending_approvals.lock().await;
+        if pending.contains_key(&request_id) {
+            return Err(InteractionHistoryError::AlreadyExists);
+        }
+        self.interaction_history
+            .record(InteractionHistoryRecord::Approval {
+                requester,
+                approver,
+                request,
+                state: InteractionHistoryState::Pending,
+            })
+            .await?;
+        let (sender, receiver) = oneshot::channel();
+        pending.insert(request_id, sender);
+        Ok(receiver)
+    }
+
+    pub async fn list_typed_approvals(
+        &self,
+        pending_only: bool,
+    ) -> Vec<session_event_model::ApprovalRequest> {
+        self.interaction_history
+            .list_approvals(pending_only)
+            .await
+            .into_iter()
+            .filter_map(|record| record.approval_request().cloned())
+            .collect()
+    }
+
+    pub async fn request_question(
+        &self,
+        requester: message_board::SessionRef,
+        approver: message_board::Identity,
+        request: session_event_model::QuestionRequest,
+    ) -> Result<oneshot::Receiver<QuestionResponse>, InteractionHistoryError> {
+        let request_id = request.request_id.clone();
+        let mut pending = self.pending_questions.lock().await;
+        if pending.contains_key(&request_id) {
+            return Err(InteractionHistoryError::AlreadyExists);
+        }
+        self.interaction_history
+            .record_question(requester, approver, request)
+            .await?;
+        let (sender, receiver) = oneshot::channel();
+        pending.insert(request_id, sender);
+        Ok(receiver)
+    }
+
+    pub async fn list_questions(&self, pending_only: bool) -> Vec<InteractionHistoryRecord> {
+        self.interaction_history.list_questions(pending_only).await
+    }
+
+    pub async fn respond_question(
+        &self,
+        request_id: &str,
+        actor: &message_board::Identity,
+        response: QuestionResponse,
     ) -> Result<(), InteractionHistoryError> {
-        self.interaction_history.record(record).await
+        let mut pending = self.pending_questions.lock().await;
+        if !pending.contains_key(request_id) {
+            return Err(InteractionHistoryError::NotPending);
+        }
+        self.interaction_history
+            .respond_question(request_id, actor, &response)
+            .await?;
+        let sender = pending
+            .remove(request_id)
+            .ok_or(InteractionHistoryError::NotPending)?;
+        sender
+            .send(response)
+            .map_err(|_| InteractionHistoryError::Unavailable)
+    }
+
+    pub async fn cancel_questions(
+        &self,
+        requester: &message_board::SessionRef,
+        reason: &str,
+    ) -> Result<usize, InteractionHistoryError> {
+        let mut pending = self.pending_questions.lock().await;
+        let cancelled = self
+            .interaction_history
+            .cancel_questions(requester, reason)
+            .await?;
+        for request_id in &cancelled {
+            if let Some(sender) = pending.remove(request_id) {
+                let _ = sender.send(QuestionResponse::Cancelled);
+            }
+        }
+        Ok(cancelled.len())
+    }
+
+    pub async fn cancel_question(
+        &self,
+        request_id: &str,
+        reason: &str,
+    ) -> Result<(), InteractionHistoryError> {
+        let mut pending = self.pending_questions.lock().await;
+        if !pending.contains_key(request_id) {
+            return Err(InteractionHistoryError::NotPending);
+        }
+        self.interaction_history
+            .cancel_question(request_id, reason)
+            .await?;
+        let sender = pending
+            .remove(request_id)
+            .ok_or(InteractionHistoryError::NotPending)?;
+        sender
+            .send(QuestionResponse::Cancelled)
+            .map_err(|_| InteractionHistoryError::Unavailable)
     }
 
     pub async fn decide_typed_interaction(
@@ -269,10 +501,23 @@ impl ServiceApprovalBroker {
         request_id: &str,
         actor: &message_board::Identity,
         option_id: &str,
-    ) -> Result<(), InteractionHistoryError> {
-        self.interaction_history
-            .decide(request_id, actor, option_id)
-            .await
+        acknowledge_persistent: bool,
+    ) -> Result<session_event_model::OfferedOptionId, InteractionHistoryError> {
+        let mut pending = self.typed_pending_approvals.lock().await;
+        if !pending.contains_key(request_id) {
+            return Err(InteractionHistoryError::NotPending);
+        }
+        let selected = self
+            .interaction_history
+            .decide(request_id, actor, option_id, acknowledge_persistent)
+            .await?;
+        let sender = pending
+            .remove(request_id)
+            .ok_or(InteractionHistoryError::NotPending)?;
+        sender
+            .send(selected.clone())
+            .map_err(|_| InteractionHistoryError::Unavailable)?;
+        Ok(selected)
     }
 
     async fn record(&self, record: ApprovalRequestRecord) -> Result<(), ApprovalBrokerError> {
@@ -463,15 +708,152 @@ impl Drop for CancellationMarker {
     }
 }
 
+fn board_session_ref(
+    session: &SessionRef,
+) -> Result<message_board::SessionRef, ApprovalDecisionError> {
+    let encoded =
+        serde_json::to_value(session).map_err(|_| ApprovalDecisionError::Code("unavailable"))?;
+    serde_json::from_value(encoded).map_err(|_| ApprovalDecisionError::Code("unavailable"))
+}
+
+fn board_identity(session: &SessionRef) -> Result<message_board::Identity, ApprovalDecisionError> {
+    Ok(message_board::Identity::Session {
+        session: board_session_ref(session)?,
+    })
+}
+
+fn typed_option_view(option: &session_event_model::OfferedOption) -> ApprovalOptionView {
+    use session_event_model::{ApprovalEffect, ApprovalScope};
+    let effect = match option.choice.effect {
+        ApprovalEffect::Allow => ApprovalOptionEffect::Allow,
+        ApprovalEffect::Decline => ApprovalOptionEffect::Decline,
+        ApprovalEffect::Abort => ApprovalOptionEffect::Abort,
+    };
+    let (scope, persistent_target) = match &option.choice.scope {
+        ApprovalScope::Once => (ApprovalOptionViewScope::Once, None),
+        ApprovalScope::Session => (ApprovalOptionViewScope::Session, None),
+        ApprovalScope::Persistent { where_stored } => (
+            ApprovalOptionViewScope::Persistent,
+            Some(where_stored.as_str().to_owned()),
+        ),
+    };
+    ApprovalOptionView {
+        option_id: option.option_id.as_str().to_owned(),
+        label: option.label.clone(),
+        effect,
+        scope,
+        persistent_target,
+    }
+}
+
+fn legacy_option_view(option: ApprovalOfferedOption) -> Option<ApprovalOptionView> {
+    let (effect, scope) = match option.scope {
+        ApprovalOptionScope::AllowOnce => {
+            (ApprovalOptionEffect::Allow, ApprovalOptionViewScope::Once)
+        }
+        ApprovalOptionScope::AllowForSession => (
+            ApprovalOptionEffect::Allow,
+            ApprovalOptionViewScope::Session,
+        ),
+        ApprovalOptionScope::RejectOnce => {
+            (ApprovalOptionEffect::Decline, ApprovalOptionViewScope::Once)
+        }
+        ApprovalOptionScope::AllowAlways
+        | ApprovalOptionScope::RejectAlways
+        | ApprovalOptionScope::Unsupported { .. } => return None,
+    };
+    Some(ApprovalOptionView {
+        label: option.label.unwrap_or_else(|| option.option_id.clone()),
+        option_id: option.option_id,
+        effect,
+        scope,
+        persistent_target: None,
+    })
+}
+
+fn legacy_choice_from_typed(
+    request: &session_event_model::ApprovalRequest,
+    decision: ApprovalDecision,
+) -> Result<String, ApprovalDecisionError> {
+    use session_event_model::{ApprovalEffect, ApprovalScope};
+
+    request
+        .options
+        .iter()
+        .find(|option| match decision {
+            ApprovalDecision::Allow => {
+                option.choice.effect == ApprovalEffect::Allow
+                    && matches!(&option.choice.scope, ApprovalScope::Once)
+            }
+            ApprovalDecision::AllowForSession => {
+                option.choice.effect == ApprovalEffect::Allow
+                    && matches!(&option.choice.scope, ApprovalScope::Session)
+            }
+            ApprovalDecision::Deny => {
+                option.choice.effect == ApprovalEffect::Decline
+                    && matches!(&option.choice.scope, ApprovalScope::Once)
+            }
+        })
+        .map(|option| option.option_id.as_str().to_owned())
+        .ok_or_else(|| ApprovalDecisionError::OptionNotOffered {
+            offered: request
+                .options
+                .iter()
+                .map(|option| option.option_id.as_str().to_owned())
+                .collect(),
+        })
+}
+
 impl ServiceApprovalBroker {
     pub async fn decide(
         &self,
         params: ApprovalDecideParams,
-    ) -> Result<ApprovalDecideResult, &'static str> {
+    ) -> Result<ApprovalDecideResult, ApprovalDecisionError> {
+        if params.option_id.is_some() == params.decision.is_some() {
+            return Err(ApprovalDecisionError::Code("invalidSelection"));
+        }
+        if self
+            .typed_pending_approvals
+            .lock()
+            .await
+            .contains_key(&params.request_id)
+        {
+            let record = self
+                .interaction_history
+                .approval(&params.request_id)
+                .await
+                .ok_or(ApprovalDecisionError::Code("approvalNotPending"))?;
+            let option_id = match (&params.option_id, params.decision) {
+                (Some(option_id), None) => option_id.clone(),
+                (None, Some(decision)) => legacy_choice_from_typed(
+                    record
+                        .approval_request()
+                        .ok_or(ApprovalDecisionError::Code("approvalNotPending"))?,
+                    decision,
+                )?,
+                _ => return Err(ApprovalDecisionError::Code("invalidSelection")),
+            };
+            let selected = self
+                .decide_typed_interaction(
+                    &params.request_id,
+                    &params.actor,
+                    &option_id,
+                    params.acknowledge_persistent,
+                )
+                .await
+                .map_err(ApprovalDecisionError::from)?;
+            return Ok(ApprovalDecideResult {
+                request_id: params.request_id,
+                state: ApprovalState::Decided,
+                decision: params.decision,
+                option_id: params.option_id.map(|_| selected.as_str().to_owned()),
+                scope: None,
+            });
+        }
         let mut pending = self.pending.lock().await;
         let request = pending
             .get(&params.request_id)
-            .ok_or("approvalNotPending")?;
+            .ok_or(ApprovalDecisionError::Code("approvalNotPending"))?;
         if chrono::DateTime::parse_from_rfc3339(&request.record.expires_at)
             .map(|expiry| expiry <= chrono::Utc::now())
             .unwrap_or(true)
@@ -479,7 +861,7 @@ impl ServiceApprovalBroker {
             drop(pending);
             self.expire_or_cancel_stale(&params.request_id, ApprovalState::TimedOut)
                 .await?;
-            return Err("expired");
+            return Err(ApprovalDecisionError::Code("expired"));
         }
         let current_generation = match &request.generation_authority {
             ApprovalGenerationAuthority::Native => self
@@ -497,7 +879,7 @@ impl ServiceApprovalBroker {
                     drop(pending);
                     self.expire_or_cancel_stale(&params.request_id, ApprovalState::Cancelled)
                         .await?;
-                    return Err("oldGeneration");
+                    return Err(ApprovalDecisionError::Code("oldGeneration"));
                 }
                 generation.clone()
             }
@@ -506,27 +888,50 @@ impl ServiceApprovalBroker {
             drop(pending);
             self.expire_or_cancel_stale(&params.request_id, ApprovalState::Cancelled)
                 .await?;
-            return Err("oldGeneration");
+            return Err(ApprovalDecisionError::Code("oldGeneration"));
         }
+        let requester = board_identity(&request.record.requester)?;
+        let approver = board_identity(&request.record.approver)?;
         if matches!(
             &request.generation_authority,
             ApprovalGenerationAuthority::Native
-        ) && params.actor == request.record.requester
+        ) && params.actor == requester
         {
-            return Err("selfDecision");
+            return Err(ApprovalDecisionError::Code("selfDecision"));
         }
-        if params.actor != request.record.approver {
-            return Err("wrongActor");
+        if params.actor != approver {
+            return Err(ApprovalDecisionError::Code("wrongActor"));
         }
-        let option_id = request
+        let option_id = match (&params.option_id, params.decision) {
+            (Some(option_id), None) => option_id.clone(),
+            (None, Some(decision)) => request.offered.get(&decision).cloned().ok_or_else(|| {
+                ApprovalDecisionError::OptionNotOffered {
+                    offered: request
+                        .record
+                        .offered_options
+                        .iter()
+                        .map(|option| option.option_id.clone())
+                        .collect(),
+                }
+            })?,
+            _ => return Err(ApprovalDecisionError::Code("invalidSelection")),
+        };
+        let decision = request
             .offered
-            .get(&params.decision)
-            .cloned()
-            .ok_or("decisionNotOffered")?;
+            .iter()
+            .find_map(|(decision, offered_id)| (offered_id == &option_id).then_some(*decision))
+            .ok_or_else(|| ApprovalDecisionError::OptionNotOffered {
+                offered: request
+                    .record
+                    .offered_options
+                    .iter()
+                    .map(|option| option.option_id.clone())
+                    .collect(),
+            })?;
         let mut record = request.record.clone();
         record.state = ApprovalState::Decided;
         record.reason = None;
-        record.decision = Some(params.decision);
+        record.decision = Some(decision);
         self.record(record).await.map_err(|_| "unavailable")?;
         let request = pending
             .remove(&params.request_id)
@@ -534,13 +939,16 @@ impl ServiceApprovalBroker {
         drop(pending);
         request
             .completion
-            .send(BrokeredApprovalOutcome::Selected { option_id })
+            .send(BrokeredApprovalOutcome::Selected {
+                option_id: option_id.clone(),
+            })
             .map_err(|_| "approvalNotPending")?;
         Ok(ApprovalDecideResult {
             request_id: params.request_id,
             state: ApprovalState::Decided,
-            decision: params.decision,
-            scope: (params.decision == ApprovalDecision::AllowForSession)
+            decision: Some(decision),
+            option_id: params.option_id.map(|_| option_id),
+            scope: (decision == ApprovalDecision::AllowForSession)
                 .then(|| "nativeSession".to_owned()),
         })
     }
