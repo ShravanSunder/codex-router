@@ -1,9 +1,9 @@
 //! Durable provider session metadata needed for load-on-demand and approvals.
 use crate::{ProviderOperationStore, ProviderOperationStoreError};
 use collaboration_protocol::{
-    ConversationBindingIdentity, OperationId, ProviderOperationEffect, ProviderOperationKind,
-    ProviderOperationStage, ProviderReconciliationState, ProviderRequestedPolicy,
-    ProviderWorkingDirectory, SessionRef,
+    ConversationBindingIdentity, EndpointRef, OperationId, ProviderOperationEffect,
+    ProviderOperationKind, ProviderOperationStage, ProviderReconciliationState,
+    ProviderRequestedPolicy, ProviderWorkingDirectory, SessionId, SessionRef,
 };
 use sqlx::Connection;
 
@@ -196,5 +196,49 @@ impl ProviderOperationStore {
             Ok(record)
         })
         .transpose()
+    }
+
+    /// The durable provider inventory is the source for every front door's
+    /// session list. Hub live state is overlaid after this read.
+    pub async fn list_sessions(
+        &mut self,
+        endpoint: &EndpointRef,
+    ) -> Result<Vec<ProviderSessionRecord>, ProviderOperationStoreError> {
+        let target_service_id = String::from(endpoint.service_id.clone());
+        let target_endpoint_id = String::from(endpoint.endpoint_id.clone());
+        let rows = sqlx::query!(
+            "SELECT target_session_id,working_directory,requested_policy_json,
+                    created_by_json,approver_json,updated_at_ms
+             FROM provider_session_records
+             WHERE target_service_id=? AND target_endpoint_id=?
+             ORDER BY updated_at_ms DESC,target_session_id ASC",
+            target_service_id,
+            target_endpoint_id,
+        )
+        .fetch_all(&mut self.connection)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let target = SessionRef {
+                    endpoint: endpoint.clone(),
+                    session_id: SessionId::try_from(row.target_session_id)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                };
+                let record = ProviderSessionRecord {
+                    target,
+                    working_directory: ProviderWorkingDirectory::try_from(row.working_directory)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                    requested_policy: serde_json::from_str(&row.requested_policy_json)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                    created_by: serde_json::from_str(&row.created_by_json)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                    approver: serde_json::from_str(&row.approver_json)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                    updated_at_ms: row.updated_at_ms,
+                };
+                record.validate()?;
+                Ok(record)
+            })
+            .collect()
     }
 }

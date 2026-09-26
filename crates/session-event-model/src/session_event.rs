@@ -106,4 +106,8 @@ pub enum SessionEvent {
     CapabilitiesChanged {
         capabilities: CapabilityReport,
     },
+    /// Control event on an obsolete subscription when history replay resets.
+    ResyncRequired {
+        replay_epoch: u64,
+    },
 }

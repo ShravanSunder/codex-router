@@ -165,3 +165,37 @@ async fn create_settlement_and_session_record_commit_together() -> TestResult {
     store.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn provider_session_inventory_lists_only_the_requested_endpoint() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let mut store = ProviderOperationStore::open(&root.path().join("operations.sqlite")).await?;
+    for (endpoint_id, session_id, updated_at_ms) in [
+        ("claude-local", "older", 10),
+        ("cursor-local", "other-endpoint", 30),
+        ("claude-local", "newer", 20),
+    ] {
+        let target = session_ref(endpoint_id, session_id)?;
+        store
+            .record_session(&ProviderSessionRecord {
+                target,
+                working_directory: ProviderWorkingDirectory::try_from(
+                    root.path().display().to_string(),
+                )?,
+                requested_policy: ProviderRequestedPolicy {
+                    access: RouterAccess::WriteRestricted,
+                },
+                created_by: session_ref("codex-local", "creator")?,
+                approver: session_ref("codex-local", "approver")?,
+                updated_at_ms,
+            })
+            .await?;
+    }
+    let endpoint = session_ref("claude-local", "unused")?.endpoint;
+    let records = store.list_sessions(&endpoint).await?;
+    ensure_eq!(records.len(), 2);
+    ensure_eq!(String::from(records[0].target.session_id.clone()), "newer");
+    ensure_eq!(String::from(records[1].target.session_id.clone()), "older");
+    store.close().await?;
+    Ok(())
+}
