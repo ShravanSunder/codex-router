@@ -33,10 +33,9 @@ Use the exact `claude-local` SessionRef. The message arrives with its origin and
 
 The receiving session decides what happens to the message after the write, and Router never learns the result:
 
-- Its effective `crossSessionInbound` setting decides: `accept` delivers, `hold` shows an approval dialog, and `refuse` drops the message.
-  - This owner's machines set `crossSessionInbound: accept` in user settings, so every local session delivers messages, including sessions in `bypassPermissions`.
+- Its effective `crossSessionInbound` setting decides: `accept` delivers, `hold` shows a notice and keeps the message until `accept` applies, and `refuse` drops the message.
+  - This owner's machines set `crossSessionInbound: accept` in user settings, so every local session delivers messages, including sessions in `bypassPermissions`, unless managed settings or a `--settings` flag set it differently.
   - A project or local settings file can only make it stricter.
-  - A session started before a settings change may still use the value it loaded; if messages to it are held, that session needs a restart.
   - Without the setting, Claude Code's default applies: a session that prompts for permissions (`default`, `auto`, `acceptEdits`, `dontAsk`) delivers, and a session in `bypassPermissions` holds the message behind an approval dialog that drops it after about five minutes.
 - It throttles each sender: identical repeats in a short window are dropped, a rapid burst is refused, and at most 50 accepted messages wait to be read.
 - It reaches only sessions on the same machine and the same home directory; containers and WSL are separate.
