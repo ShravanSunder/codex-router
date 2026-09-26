@@ -10,8 +10,8 @@ use collaboration_protocol::{
     ConversationOperationSubmission, DeliveryOutcome, DeliveryReceipt, EndpointInventory,
     JournalPage, JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
     NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
-    NativeSessionListParams, NativeSessionListResult, OperationId, RouterExecutableRelation,
-    router_build_warning,
+    NativeSessionListParams, NativeSessionListResult, OperationId, ProviderSessionListParams,
+    ProviderSessionListResult, RouterExecutableRelation, router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -241,6 +241,20 @@ impl CollaborationMcpServer {
             Err(error) => return failure(error, OperationEffect::None),
         };
         let result = client.list_sessions(request).await;
+        let _closed = client.close().await;
+        structured_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "provider_sessions_list", description = "Lists Router-owned provider Sessions from durable inventory with live state when available. Provider records have no source, title or model.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSessionListResult>())]
+    async fn provider_sessions_list(
+        &self,
+        Parameters(request): Parameters<ProviderSessionListParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.list_provider_sessions(request).await;
         let _closed = client.close().await;
         structured_result(result, OperationEffect::None)
     }

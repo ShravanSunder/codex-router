@@ -568,7 +568,8 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
     assert!(tool_names.contains(&"endpoints_list"));
     assert!(tool_names.contains(&"question_list"));
     assert!(tool_names.contains(&"question_answer"));
-    assert_eq!(tool_names.len(), 97);
+    assert!(tool_names.contains(&"provider_sessions_list"));
+    assert_eq!(tool_names.len(), 98);
     let tools = tools_body
         .pointer("/result/tools")
         .and_then(Value::as_array)

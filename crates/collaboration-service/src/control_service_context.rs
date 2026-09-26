@@ -23,6 +23,7 @@ pub struct ServiceIdentity {
         Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
     pub(crate) provider_operations:
         Option<std::sync::Arc<tokio::sync::Mutex<crate::ProviderOperationStore>>>,
+    pub(crate) provider_session_hub: Option<std::sync::Arc<dyn crate::SessionEventHub>>,
     pub(crate) codex_conversation_recorder:
         Option<std::sync::Arc<crate::CodexConversationOperationRecorder>>,
     pub(crate) provider_conversations:
@@ -93,6 +94,15 @@ impl ServiceIdentity {
         store: std::sync::Arc<tokio::sync::Mutex<crate::ProviderOperationStore>>,
     ) -> Self {
         self.provider_operations = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_provider_session_hub(
+        mut self,
+        hub: std::sync::Arc<dyn crate::SessionEventHub>,
+    ) -> Self {
+        self.provider_session_hub = Some(hub);
         self
     }
 
@@ -210,6 +220,7 @@ impl ServiceIdentity {
             wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,
             provider_operations: None,
+            provider_session_hub: None,
             codex_conversation_recorder: None,
             provider_conversations: None,
             board: None,

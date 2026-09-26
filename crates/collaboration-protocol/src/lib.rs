@@ -32,6 +32,7 @@ mod access_contract;
 mod approval_contract;
 mod interaction_actor;
 mod permission_diagnostic;
+mod provider_session_list;
 mod question_contract;
 pub use access_contract::{
     RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,
@@ -46,6 +47,10 @@ pub use approval_contract::{
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,
     PermissionDiagnosticStage,
+};
+pub use provider_session_list::{
+    ProviderSessionListParams, ProviderSessionListResult, ProviderSessionState,
+    ProviderSessionSummary,
 };
 pub use question_contract::{
     QuestionAnswerParams, QuestionAnswerResult, QuestionAnswerValue, QuestionFieldView,

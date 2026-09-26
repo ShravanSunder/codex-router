@@ -245,6 +245,16 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
         live[0].approver,
         message_board::Identity::Session { session: target }
     );
+    drop(hub);
+    let restarted_store =
+        ProviderOperationStore::open(&root.path().join("operations.sqlite")).await?;
+    let restarted_hub = ProviderSessionEventHub::new(Arc::new(Mutex::new(restarted_store)));
+    let restarted = restarted_hub
+        .sessions(live[0].session.endpoint.clone())
+        .await?;
+    ensure_eq!(restarted.len(), 1);
+    ensure_eq!(restarted[0].state, SessionState::Unloaded);
+    ensure_eq!(restarted[0].approver, live[0].approver);
     Ok(())
 }
 

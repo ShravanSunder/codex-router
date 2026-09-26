@@ -306,6 +306,16 @@ pub fn control_schema_document(
             "overloaded",
         ],
     )?;
+    assembly.add_method::<ProviderSessionListParams, ProviderSessionListResult>(
+        "provider/sessionList",
+        &[
+            "wrongService",
+            "endpointNotFound",
+            "unsupportedCapability",
+            "unavailable",
+            "overloaded",
+        ],
+    )?;
     assembly.add_method::<NativeInspectParams, NativeInspectResult>(
         "codex/sessionInspect",
         &[

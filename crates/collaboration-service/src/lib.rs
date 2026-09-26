@@ -106,6 +106,7 @@ pub use codex_acp_adapter::{ACP_SCHEMA_DIGEST, NativeStoredSessions};
 pub use unmaterialized_thread_holder::UnmaterializedThreadHolder;
 
 mod instruction_dispatch;
+mod provider_session_inventory_dispatch;
 mod session_inventory_dispatch;
 mod stored_inventory_observation;
 

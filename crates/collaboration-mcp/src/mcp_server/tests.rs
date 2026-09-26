@@ -110,14 +110,15 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let tools = server.resolved_tools();
-    assert_eq!(tools.len(), 97);
+    assert_eq!(tools.len(), 98);
     let mut names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 97);
+    assert_eq!(names.len(), 98);
+    assert!(names.contains(&"provider_sessions_list"));
     assert!(names.contains(&"question_list"));
     assert!(names.contains(&"question_answer"));
     for tool in tools {
