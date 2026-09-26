@@ -8,24 +8,29 @@ mod approval_presentation;
 mod approval_turn_cancellation;
 mod external_approval_dispatch;
 mod external_permission_options;
+mod provider_acp_error_mapping;
 mod provider_approval_dispatch;
+mod provider_initialize_request;
 mod provider_request_fallback;
 
 use crate::provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
     ProviderSteeringOutcome, run_provider_session,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 #[cfg(test)]
 use agent_client_protocol::schema::v1::ToolKind;
 use agent_client_protocol::schema::v1::{
     LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, RequestPermissionRequest,
 };
-use agent_client_protocol::schema::{ProtocolVersion, v1::InitializeRequest};
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines,
 };
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
 use external_approval_dispatch::spawn_external_approval_dispatch;
+use provider_acp_error_mapping::acp_load_session_error;
+pub(crate) use provider_acp_error_mapping::acp_operation_error;
+use provider_initialize_request::initialize_provider_connection;
 use provider_request_fallback::{
     ProviderKnownSessions, ProviderRequestFallback, ProviderRequestSessionGuard,
 };
@@ -301,6 +306,14 @@ pub enum ExternalProviderRuntimeError {
     AuthenticationRequired { code: i64 },
     #[error("provider session was not found (ACP code {code})")]
     ProviderSessionNotFound { code: i64 },
+    #[error("provider resource was not found (ACP code {code})")]
+    ResourceNotFound { code: i64 },
+    #[error("provider ACP method is unsupported (ACP code {code})")]
+    UnsupportedMethod { code: i64 },
+    #[error("provider ACP parameters are invalid (ACP code {code})")]
+    InvalidParams { code: i64 },
+    #[error("provider ACP request was cancelled (ACP code {code})")]
+    RequestCancelled { code: i64 },
     #[error("provider rejected the ACP operation (ACP code {code})")]
     ProviderRejected { code: i64 },
     #[error("provider operation response was unavailable")]
@@ -317,23 +330,6 @@ pub enum ExternalProviderRuntimeError {
     UnknownStopReason { suffix: String },
     #[error("provider ACP operation failed: {0}")]
     Operation(String),
-}
-
-pub(crate) fn acp_operation_error(
-    error: agent_client_protocol::Error,
-) -> ExternalProviderRuntimeError {
-    if agent_client_protocol::is_incoming_transport_closed(&error) {
-        return ExternalProviderRuntimeError::TransportFailure;
-    }
-    use agent_client_protocol::schema::v1::ErrorCode;
-    let code = i64::from(i32::from(error.code));
-    match error.code {
-        ErrorCode::AuthRequired => ExternalProviderRuntimeError::AuthenticationRequired { code },
-        ErrorCode::ResourceNotFound => {
-            ExternalProviderRuntimeError::ProviderSessionNotFound { code }
-        }
-        _ => ExternalProviderRuntimeError::ProviderRejected { code },
-    }
 }
 
 pub(crate) fn sanitized_initialization_error(error: &agent_client_protocol::Error) -> String {
@@ -664,9 +660,7 @@ impl ExternalProviderRuntime {
                         () = task_shutdown.cancelled() => {
                             return Ok(());
                         }
-                        response = connection
-                            .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                            .block_task() => response,
+                        response = initialize_provider_connection(&connection) => response,
                     };
                     let admission = match initialized {
                         Ok(response) if response.protocol_version == ProtocolVersion::V1 => {
@@ -804,7 +798,7 @@ impl ExternalProviderRuntime {
                                                         result = pending_connection
                                                         .load_session_from(request)
                                                         .block_task()
-                                                        .start_session() => result.map(|restored| restored.into_session()).map_err(acp_operation_error),
+                                                        .start_session() => result.map(|restored| restored.into_session()).map_err(acp_load_session_error),
                                                     };
                                                     publish_pending_session_admission(
                                                         &pending_admission_tx,

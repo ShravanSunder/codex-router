@@ -68,7 +68,8 @@ for step_number, step in enumerate(steps, start=1):
     if action == "expect_request":
         actual = read_message(step_number)
         expected = {"jsonrpc": "2.0", "method": step["method"], "params": step["params"]}
-        if not contains_expected(actual, expected) or "id" not in actual:
+        exact_params = not step.get("exactParams") or actual.get("params") == step["params"]
+        if not contains_expected(actual, expected) or not exact_params or "id" not in actual:
             fail(step_number, expected, actual)
         request_ids[step["requestName"]] = actual["id"]
     elif action == "expect_message":
@@ -82,6 +83,15 @@ for step_number, step in enumerate(steps, start=1):
         send_message(
             {"jsonrpc": "2.0", "id": request_ids.pop(request_name), "result": step["result"]}
         )
+    elif action == "respond_error":
+        request_name = step["requestName"]
+        if request_name not in request_ids:
+            fail(step_number, {"capturedRequest": request_name}, request_ids)
+        send_message({
+            "jsonrpc": "2.0",
+            "id": request_ids.pop(request_name),
+            "error": {"code": step["code"], "message": "private provider text", "data": {"privateText": "secret sentinel"}},
+        })
     elif action == "send":
         send_message(step["message"])
     elif action == "exit":

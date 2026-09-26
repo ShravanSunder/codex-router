@@ -37,6 +37,22 @@ impl AcpFixtureScript {
         self
     }
 
+    pub(crate) fn expect_exact_request(
+        mut self,
+        request_name: &str,
+        method: &str,
+        expected_params: Value,
+    ) -> Self {
+        self.steps.push(json!({
+            "action": "expect_request",
+            "requestName": request_name,
+            "method": method,
+            "params": expected_params,
+            "exactParams": true,
+        }));
+        self
+    }
+
     /// Read and check an entire client message. Use this for notifications or
     /// responses to requests sent by the fixture agent.
     pub(crate) fn expect_message(mut self, expected_message: Value) -> Self {
@@ -52,6 +68,15 @@ impl AcpFixtureScript {
             "action": "respond",
             "requestName": request_name,
             "result": result,
+        }));
+        self
+    }
+
+    pub(crate) fn respond_error(mut self, request_name: &str, code: i32) -> Self {
+        self.steps.push(json!({
+            "action": "respond_error",
+            "requestName": request_name,
+            "code": code,
         }));
         self
     }

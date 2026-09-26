@@ -575,6 +575,100 @@ fn typed_runtime_failure_mapping_never_classifies_provider_text() {
 }
 
 #[test]
+fn acp_error_codes_project_to_existing_public_failure_kinds() {
+    // ACP v1 error-codes.mdx and Specification R7 classify by code. PR 1
+    // preserves the existing public failure-kind enum and providerCode.
+    for (error, expected_kind, code) in [
+        (
+            ExternalProviderRuntimeError::AuthenticationRequired { code: -32000 },
+            ConversationOperationFailureKind::AuthenticationRequired,
+            -32000,
+        ),
+        (
+            ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002 },
+            ConversationOperationFailureKind::ProviderSessionNotFound,
+            -32002,
+        ),
+        (
+            ExternalProviderRuntimeError::ResourceNotFound { code: -32002 },
+            ConversationOperationFailureKind::NotFound,
+            -32002,
+        ),
+        (
+            ExternalProviderRuntimeError::UnsupportedMethod { code: -32601 },
+            ConversationOperationFailureKind::UnsupportedCapability,
+            -32601,
+        ),
+        (
+            ExternalProviderRuntimeError::InvalidParams { code: -32602 },
+            ConversationOperationFailureKind::InvalidRequest,
+            -32602,
+        ),
+        (
+            ExternalProviderRuntimeError::RequestCancelled { code: -32800 },
+            ConversationOperationFailureKind::ProviderRejected,
+            -32800,
+        ),
+        (
+            ExternalProviderRuntimeError::ProviderRejected { code: -32603 },
+            ConversationOperationFailureKind::ProviderRejected,
+            -32603,
+        ),
+    ] {
+        let failure = runtime_failure(OperationId::generate(), None, error);
+        assert_eq!(failure.kind, expected_kind, "code {code}");
+        assert_eq!(failure.provider_code, Some(code), "code {code}");
+    }
+}
+
+#[tokio::test]
+async fn provider_error_code_fixtures_project_without_agent_text() {
+    // ACP v1 error-codes.mdx and Specification R7: each code is classified
+    // from a real ACP response, with the agent's message/data kept private.
+    for (code, expected_kind) in [
+        (
+            -32000,
+            ConversationOperationFailureKind::AuthenticationRequired,
+        ),
+        (-32002, ConversationOperationFailureKind::NotFound),
+        (
+            -32601,
+            ConversationOperationFailureKind::UnsupportedCapability,
+        ),
+        (-32602, ConversationOperationFailureKind::InvalidRequest),
+        (-32800, ConversationOperationFailureKind::ProviderRejected),
+        (-32603, ConversationOperationFailureKind::ProviderRejected),
+    ] {
+        let fixture = crate::external_provider_runtime::acp_scripted_fixture::AcpFixtureScript::new()
+            .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+            .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "error-fixture", "version": "1"}}))
+            .expect_request("create", "session/new", serde_json::json!({}))
+            .respond("create", serde_json::json!({"sessionId": "fixture-session"}))
+            .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId": "fixture-session"}))
+            .respond_error("prompt", code)
+            .launch();
+        let runtime = ExternalProviderRuntime::initialize(fixture)
+            .await
+            .expect("fixture initializes");
+        runtime
+            .create_session(PathBuf::from("/tmp"))
+            .await
+            .expect("session created");
+        let error = runtime
+            .prompt("fixture-session".to_owned(), "continue".to_owned())
+            .await
+            .expect_err("agent rejected prompt");
+        let failure = runtime_failure(OperationId::generate(), None, error);
+        assert_eq!(failure.kind, expected_kind, "code {code}");
+        assert_eq!(failure.provider_code, Some(i64::from(code)), "code {code}");
+        let diagnostic = String::from(failure.message);
+        assert!(!diagnostic.contains("private provider text"), "code {code}");
+        assert!(!diagnostic.contains("secret sentinel"), "code {code}");
+        runtime.shutdown().await;
+    }
+}
+
+#[test]
 fn lost_provider_prompt_has_terminal_unknown_effect_and_sanitized_reason() {
     // A prompt dispatched before connection loss cannot be retried safely.
     // Specification E4 and R5 require a terminal lost projection in PR 1.

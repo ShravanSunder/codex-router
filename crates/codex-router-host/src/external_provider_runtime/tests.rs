@@ -425,9 +425,70 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     let reason = acp_operation_error(missing);
     assert!(matches!(
         &reason,
-        ExternalProviderRuntimeError::ProviderSessionNotFound { code } if *code == -32002
+        ExternalProviderRuntimeError::ResourceNotFound { code } if *code == -32002
     ));
     assert!(!reason.to_string().contains("private"));
+}
+
+#[test]
+fn acp_error_code_table_uses_typed_safe_outcomes() {
+    // ACP v1 error-codes.mdx maps JSON-RPC codes independently of agent text.
+    // Specification R7 specializes -32002 only for session/load.
+    for (code, expected_diagnostic) in [
+        (
+            -32000,
+            "provider authentication is required (ACP code -32000)",
+        ),
+        (-32002, "provider resource was not found (ACP code -32002)"),
+        (
+            -32601,
+            "provider ACP method is unsupported (ACP code -32601)",
+        ),
+        (
+            -32602,
+            "provider ACP parameters are invalid (ACP code -32602)",
+        ),
+        (
+            -32800,
+            "provider ACP request was cancelled (ACP code -32800)",
+        ),
+        (
+            -32603,
+            "provider rejected the ACP operation (ACP code -32603)",
+        ),
+    ] {
+        let mut provider = agent_client_protocol::Error::new(code, "private provider text");
+        provider.data = Some(serde_json::json!({"privateText": "secret sentinel"}));
+        let diagnostic = acp_operation_error(provider).to_string();
+        assert_eq!(diagnostic, expected_diagnostic, "code {code}");
+        assert!(!diagnostic.contains("private"));
+        assert!(!diagnostic.contains("secret sentinel"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resource_not_found_from_session_load_is_session_not_found() {
+    // ACP v1 error-codes.mdx: -32002 is a missing resource. R7 specializes
+    // it only where the method contract names the resource as the Session.
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": true}, "agentInfo": {"name": "missing-load-fixture", "version": "1"}}))
+        .expect_request("load", "session/load", serde_json::json!({"sessionId": "missing-session"}))
+        .respond_error("load", -32002)
+        .launch();
+    let runtime = ExternalProviderRuntime::initialize(fixture)
+        .await
+        .expect("fixture initializes");
+    let error = runtime
+        .load_session("missing-session".to_owned(), PathBuf::from("/tmp"))
+        .await
+        .expect_err("missing session");
+    assert!(matches!(
+        error,
+        ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002 }
+    ));
+    runtime.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -530,6 +591,38 @@ async fn stable_v1_initialize_admits_runtime_and_capabilities() {
         }
     );
 
+    runtime.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialize_advertises_exact_supported_client_capabilities() {
+    // ACP v1 initialization.mdx:28-54 requires protocolVersion and the
+    // supported capabilities; omitted capabilities are unsupported (lines
+    // 100-115). R6 requires name/version and no fs, terminal or elicitation.
+    let root = tempfile::tempdir().expect("fixture root");
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_exact_request(
+            "initialize",
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {"auth": {"terminal": false}},
+                "clientInfo": {"name": "codex-router", "version": env!("CARGO_PKG_VERSION")}
+            }),
+        )
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "initialize-fixture", "version": "1"}}))
+        .record_diagnostics(root.path().join("fixture-diagnostics.txt"))
+        .launch();
+    let runtime = ExternalProviderRuntime::initialize_with_timeout(fixture, Duration::from_secs(2))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "initialize failed: {error}; wire diff: {}",
+                std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
+                    .unwrap_or_default()
+            )
+        });
     runtime.shutdown().await;
 }
 
