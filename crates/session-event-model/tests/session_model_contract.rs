@@ -28,11 +28,14 @@ fn confirmed_and_lost_turns_keep_distinct_evidence() {
 #[test]
 fn requires_action_cannot_start_with_an_empty_pending_set() {
     assert!(PendingInteractions::new(vec![]).is_none());
-    let pending = PendingInteractions::new(vec![PendingInteraction {
-        request_id: "request-1".into(),
-        kind: InteractionKind::Approval,
-    }])
-    .expect("one pending interaction");
+    let request: PendingInteraction = serde_json::from_value(serde_json::json!({
+        "kind":"approval",
+        "request":{"requestId":"request-1","title":"Run command","options":[
+            {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}}
+        ]}
+    }))
+    .expect("full pending approval");
+    let pending = PendingInteractions::new(vec![request]).expect("one pending interaction");
     assert_eq!(
         SessionState::RequiresAction { pending }.requires_action_kind(),
         Some(InteractionKind::Approval)

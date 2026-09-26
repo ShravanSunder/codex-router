@@ -7,18 +7,13 @@ pub enum InteractionKind {
     Question,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PendingInteraction {
-    pub request_id: String,
-    pub kind: InteractionKind,
-}
+use crate::PendingInteraction;
 
 /// A nonempty set is required before a Session can report requiresAction.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<PendingInteraction>", into = "Vec<PendingInteraction>")]
 pub struct PendingInteractions {
-    first: PendingInteraction,
+    first: Box<PendingInteraction>,
     remaining: Vec<PendingInteraction>,
 }
 
@@ -28,7 +23,7 @@ impl PendingInteractions {
         let mut interactions = interactions.into_iter();
         let first = interactions.next()?;
         Some(Self {
-            first,
+            first: Box::new(first),
             remaining: interactions.collect(),
         })
     }
@@ -39,7 +34,7 @@ impl PendingInteractions {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &PendingInteraction> {
-        std::iter::once(&self.first).chain(self.remaining.iter())
+        std::iter::once(self.first.as_ref()).chain(self.remaining.iter())
     }
 }
 
@@ -53,7 +48,7 @@ impl TryFrom<Vec<PendingInteraction>> for PendingInteractions {
 
 impl From<PendingInteractions> for Vec<PendingInteraction> {
     fn from(value: PendingInteractions) -> Self {
-        std::iter::once(value.first)
+        std::iter::once(*value.first)
             .chain(value.remaining)
             .collect()
     }
@@ -85,7 +80,7 @@ impl SessionState {
     #[must_use]
     pub fn requires_action_kind(&self) -> Option<InteractionKind> {
         match self {
-            Self::RequiresAction { pending } => Some(pending.first().kind),
+            Self::RequiresAction { pending } => Some(pending.first().kind()),
             _ => None,
         }
     }

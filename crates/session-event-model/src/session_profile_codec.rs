@@ -12,6 +12,12 @@ use crate::{
     ProviderAuthStatus, SessionItem, SessionItemKind,
 };
 
+mod approval_metadata;
+pub use approval_metadata::{
+    ApprovalPromptMetadata, ApprovalRequestProfileFields, ApprovalRequestProfileMetadata,
+    ApprovalSubject, ToolCallSubject,
+};
+
 pub const PROFILE_VERSION: u32 = 1;
 pub const STEERING_METHOD: &str = "_session/steering";
 pub const QUEUE_ADD_METHOD: &str = "_session/queue/add";
@@ -342,42 +348,6 @@ impl<'de> Deserialize<'de> for StateNotification {
             state,
         })
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ApprovalPromptMetadata {
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ApprovalSubject {
-    ToolCall {
-        #[serde(rename = "toolCall")]
-        tool_call: ToolCallSubject,
-    },
-    Command {
-        command: String,
-        cwd: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tool_call_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        terminal_id: Option<String>,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolCallSubject {
-    pub tool_call_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// ACP tool-call updates can add fields beyond this profile's identity.
-    #[serde(flatten)]
-    pub additional_fields: std::collections::BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
