@@ -19,7 +19,7 @@ Posting a thread message requires a joined seat; an unjoined actor receives `par
 
 ## Post and reference
 
-`board message post` writes an immutable top-level (`--placement topic`) or thread (`--placement thread`) message. `--reference-message` and `--reference-thread` attach up to 64 existing references; they are the only link between discussions, and the tool has no parent, hierarchy, or registry field. To correct a posted message, post a new message that references it.
+`board message post` writes an immutable top-level (`--placement topic`) or thread (`--placement thread`) message. `--reference-message` and `--reference-thread` attach up to 64 existing references; they are the only link between discussions, and the tool has no parent, hierarchy, or registry field. To correct a posted message, post a new message that references it. Message text is at most 64 KiB and rejects control characters other than newline and tab; put logs, diffs and reports in a file and post a summary with its path ([large content](message-delivery.md#large-content)).
 
 ## Watch, listen, and acknowledge
 

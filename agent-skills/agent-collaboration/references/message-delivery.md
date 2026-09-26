@@ -10,7 +10,7 @@ Router picks the route from the target. The receipt's `reachability` names the r
 
 | `reachability` | Target | A success outcome proves | Observe completion through |
 |---|---|---|---|
-| `codexAppServer` | Codex session | the native turn started, was steered, or was queued | the turn, `conversation operation`, or the reply |
+| `codexAppServer` | Codex session | the native turn started, was steered, was queued, or (`startedOrSteered`) one of started or steered without saying which | the turn, `conversation operation`, or the reply |
 | `providerAcp` | Claude or Cursor session that Router runs | the prompt was sent, steered into a running turn, or queued in Router | `conversation operation show\|wait` for the operation ID |
 | `claudeCodePeer` | live Claude Code session that Router did not start | the bytes reached that session's inbox socket | nothing; a reply arrives as a separate message |
 
@@ -23,7 +23,7 @@ Router picks the route from the target. The receipt's `reachability` names the r
 | Codex app-server | Steer an active turn or start one, as native evidence allows | Native queue behavior | Native steer behavior |
 | Router-managed Claude ACP | Steer a running turn or start when idle | Queue, starting at once when idle | Steer a running turn; otherwise `notSubmitted` |
 | Router-managed Cursor ACP | Start when idle or queue while busy | Queue, starting at once when idle | `rejected`: unsupported |
-| Live Claude Code peer | `peerMessageWritten`; the session may still hold or drop it | `rejected`: unsupported | `peerMessageWritten` only while busy; otherwise `notSubmitted` |
+| Live Claude Code peer | `peerMessageWritten`; the session may still hold or drop it | `rejected`: unsupported | `peerMessageWritten` in any live status, the same as `auto` |
 
 A message queued in Router for a Claude or Cursor session is lost if the Host restarts before it runs.
 
@@ -59,9 +59,11 @@ Size caps:
 | direct message, wake text, instruction text | 1 MiB | wake and instruction text, yes |
 | live Claude Code peer message | just under 1 MiB | no |
 
+Message and board text reject control characters other than newline and tab, so pasted terminal output with colour escapes or carriage returns fails; strip them or send a file.
+
 Keep messages short. Write logs, diffs, reports, and evidence to a file, and send a summary plus the absolute path:
 
-- `<router-root>/scratch/<root-id>/` when the sessions share a board root through `--root-message-id`; Router makes it writable for the conversations it creates on that root;
+- `<router-root>/scratch/<root-id>/` when the sessions share a board root through `--root-message-id`. Router grants write access there only to Codex conversations created with that root; Claude, Cursor and live Claude Code receivers read it under their own permissions;
 - the repository's `tmp/` or `docs/wip/` when the content belongs to the work;
 - not system temp for anything that must survive a reboot.
 
