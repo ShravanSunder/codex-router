@@ -15,23 +15,10 @@ Return: the resolved service and exact target, observed result and effect, retai
    The one conversation surface advertises `conversation_create`, `conversation_prompt`, `conversation_create_and_prompt`, `conversation_load`, `conversation_cancel`, and `conversation_operation_show|wait|reconcile`. Use the same tool for Codex, Claude, or Cursor; the endpoint selects the client. MCP provider mutations require a caller UUIDv7 operation ID. Codex create also has an inspectable operation ID; Codex prompt and load reject a caller-supplied operation ID because those operations are not inspectable.
 3. Resolve exact identities before mutation. A conversation target is the complete `SessionRef` with service ID, endpoint ID, and session ID. Obtain the current sender from `agent-collaboration whoami --json` (MCP cannot read the caller's environment), preserve it, and use explicit agent attribution; never substitute a title, working directory, native-thread inventory entry, board root, or human identity.
 4. Invoke only the caller-authorized operation. Keep the returned target, turn, operation, stage, effect, settlement, and uncertainty evidence that the advertised result supplies. A saved board message, accepted input, completed turn, or observed event proves only its stated stage; none automatically proves assignment success or a peer reply.
-   `message_send` returns a delivery receipt. Read its `outcome` and `reachability`: `started`, `steered`, `startedOrSteered`, `queued`, and `peerMessageWritten` report different effects; `notSubmitted`, `rejected`, and `unknown` do not establish delivery. A peer write means the bytes reached a live Claude Code socket, not that Claude accepted or acted on them. A rejection may carry a reason, next action, client code, and detail. Use those fields before choosing another action.
+   `message_send` returns a delivery receipt. [Message delivery](message-delivery.md) owns what each `outcome` and `reachability` proves, the delivery mode per route, and the size caps.
 5. If a capability is absent, access is denied, or the service cannot be verified, report the exact gap. Do not switch transports, identities, services, or delivery modes to bypass a denial.
 
 Complete when the requested operation has its strongest observed result, the exact target and effect evidence are retained, and every unresolved capability, access, or outcome gap is explicit.
-
-## Delivery mode by reachability
-
-`auto`, `queue`, and `steer` depend on the selected route. Check the receipt after each send rather than treating the requested mode as its effect.
-
-| Reachability | `auto` | `queue` | `steer` |
-| --- | --- | --- | --- |
-| Codex app-server | Steer an active turn or start one, as native evidence allows | Native queue behavior | Native steer behavior |
-| Router-managed Claude ACP | Steer a running turn or start when idle | Queue, starting at once when idle | Steer a running turn; otherwise `notSubmitted` |
-| Router-managed Cursor ACP | Start when idle or queue while busy | Queue, starting at once when idle | `rejected`: unsupported |
-| Live Claude Code peer | `peerMessageWritten`; the session may still hold or drop it | `rejected`: unsupported | `peerMessageWritten` only while busy; otherwise `notSubmitted` |
-
-For a live Claude Code peer, use `message_send` with the exact `claude-local` SessionRef. The incoming message identifies its origin and asks Claude to reply through Router's `message_send` as that Claude session. A socket write is not a reply; observe the subsequent message separately.
 
 ## Coordination and observation boundaries
 
