@@ -111,6 +111,10 @@ fn question_event_round_trip_preserves_field_labels_and_descriptions() {
         "How many?"
     );
     assert_eq!(
+        wire["interaction"]["request"]["fields"][0]["fieldId"],
+        "count"
+    );
+    assert_eq!(
         serde_json::from_value::<SessionEvent>(wire).expect("decode event"),
         event
     );

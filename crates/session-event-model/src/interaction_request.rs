@@ -153,24 +153,28 @@ pub struct ApprovalRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum QuestionField {
+    #[serde(rename_all = "camelCase")]
     Text {
         field_id: String,
         label: String,
         description: Option<String>,
         required: bool,
     },
+    #[serde(rename_all = "camelCase")]
     Number {
         field_id: String,
         label: String,
         description: Option<String>,
         required: bool,
     },
+    #[serde(rename_all = "camelCase")]
     Boolean {
         field_id: String,
         label: String,
         description: Option<String>,
         required: bool,
     },
+    #[serde(rename_all = "camelCase")]
     SingleChoice {
         field_id: String,
         label: String,
