@@ -58,6 +58,14 @@ pub(crate) trait AsyncProviderCredentialResolver {
         &self,
         account_id: &AccountId,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError>;
+
+    async fn recover_unauthorized_credentials_async(
+        &self,
+        _account_id: &AccountId,
+        _rejected_generation: u64,
+    ) -> Result<(ResolvedProviderCredential, bool), CredentialResolverError> {
+        Err(CredentialResolverError::RefreshUnavailable)
+    }
 }
 
 impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
@@ -112,7 +120,7 @@ where
 
 impl<C> ProviderCredentialResolver for CliCredentialResolver<C>
 where
-    C: CredentialRefreshClient + Clone + Send + 'static,
+    C: CredentialRefreshClient + Clone + Send + Sync + 'static,
 {
     fn resolve_provider_credentials(
         &self,
@@ -166,7 +174,7 @@ impl AsyncCliCredentialResolver<OpenAiOAuthRefreshClient> {
 
 impl<C> AsyncProviderCredentialResolver for AsyncCliCredentialResolver<C>
 where
-    C: CredentialRefreshClient + Clone + Send + 'static,
+    C: CredentialRefreshClient + Clone + Send + Sync + 'static,
 {
     async fn resolve_provider_credentials_async(
         &self,
@@ -181,11 +189,28 @@ where
         );
         resolver.resolve_provider_credentials(account_id).await
     }
+
+    async fn recover_unauthorized_credentials_async(
+        &self,
+        account_id: &AccountId,
+        rejected_generation: u64,
+    ) -> Result<(ResolvedProviderCredential, bool), CredentialResolverError> {
+        let resolver = AsyncRouterCredentialResolver::new_with_refresh_leases(
+            self.state_store.clone(),
+            self.secret_store.clone(),
+            self.refresh_client.clone(),
+            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
+            self.refresh_leases.clone(),
+        );
+        resolver
+            .recover_unauthorized_credentials(account_id, rejected_generation)
+            .await
+    }
 }
 
 impl<C> AsyncProviderCredentialResolver for CliCredentialResolver<C>
 where
-    C: CredentialRefreshClient + Clone + Send + 'static,
+    C: CredentialRefreshClient + Clone + Send + Sync + 'static,
 {
     async fn resolve_provider_credentials_async(
         &self,
@@ -202,5 +227,25 @@ where
             self.refresh_leases.clone(),
         );
         resolver.resolve_provider_credentials(account_id).await
+    }
+
+    async fn recover_unauthorized_credentials_async(
+        &self,
+        account_id: &AccountId,
+        rejected_generation: u64,
+    ) -> Result<(ResolvedProviderCredential, bool), CredentialResolverError> {
+        let state_store = AsyncSqliteStateStore::open(&self.state_db_path)
+            .await
+            .map_err(|_| CredentialResolverError::AccountUnavailable)?;
+        let resolver = AsyncRouterCredentialResolver::new_with_refresh_leases(
+            state_store,
+            self.secret_store.clone(),
+            self.refresh_client.clone(),
+            Some(current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds)),
+            self.refresh_leases.clone(),
+        );
+        resolver
+            .recover_unauthorized_credentials(account_id, rejected_generation)
+            .await
     }
 }

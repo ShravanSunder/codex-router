@@ -160,8 +160,18 @@ pub(super) fn quota_selected_account_view_model(
 
 fn weekly_floor_guard_summary(row: &QuotaStatusRow) -> String {
     let base = format!("5h {}% / weekly {}%", row.short_pressure, row.long_pressure);
-    row.weekly_quota_floor_basis_points
+    let base = row
+        .weekly_quota_floor_basis_points
         .map_or(base.clone(), |floor| {
-            format!("{base} / floor {}%", floor / 100)
-        })
+            format!(
+                "{base} / floor {}% / stops at {}%",
+                floor / 100,
+                weekly_quota_effective_stop_basis_points(Some(floor)).unwrap_or(floor) / 100,
+            )
+        });
+    match oauth_maintenance_state(row.oauth_maintenance.as_ref()) {
+        "reauth_required" | "unrefreshable" => format!("{base} / OAuth re-login required"),
+        "retrying" => format!("{base} / OAuth retrying"),
+        _ => base,
+    }
 }

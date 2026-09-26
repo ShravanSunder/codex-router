@@ -50,7 +50,7 @@ pub(super) fn write_quota_plain(
     writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
     writeln!(
         stdout,
-        "account\tstatus\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
+        "account\tstatus\tOAuth\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
     )
     .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
@@ -60,14 +60,19 @@ pub(super) fn write_quota_plain(
             sample_metadata_from_display_windows(&row.windows, report.now_unix_seconds);
         writeln!(
             stdout,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.account_label,
             row.account_status,
+            oauth_maintenance_human(row.oauth_maintenance.as_ref()),
             row.short_window.replace('\n', " "),
             row.weekly_window.replace('\n', " "),
             row.weekly_quota_floor_basis_points.map_or_else(
                 || "disabled".to_owned(),
-                |floor| format!("{}%", floor / 100)
+                |floor| format!(
+                    "floor {}% / stops at {}%",
+                    floor / 100,
+                    weekly_quota_effective_stop_basis_points(Some(floor)).unwrap_or(floor) / 100,
+                )
             ),
             plain_reset_pace_summary(&reset_pace),
             plain_sample_metadata_summary(&sample_metadata),
@@ -81,6 +86,18 @@ pub(super) fn write_quota_plain(
     }
 
     write_selector_summary_plain(stdout, rows)
+}
+
+pub(super) fn oauth_maintenance_human(
+    record: Option<&CredentialMaintenanceRecord>,
+) -> &'static str {
+    match oauth_maintenance_state(record) {
+        "healthy" => "healthy",
+        "retrying" => "retrying",
+        "reauth_required" => "re-login required",
+        "unrefreshable" => "cannot refresh; re-login required",
+        _ => "unknown",
+    }
 }
 
 pub(super) fn write_selector_summary_plain(

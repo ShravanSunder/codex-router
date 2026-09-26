@@ -70,6 +70,11 @@ const WEEKLY_FLOOR_MUTATION_DEADLINE: Duration = Duration::from_millis(250);
 const DEFAULT_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 18_000;
 const WEEKLY_SELECTOR_LIMIT_WINDOW_SECONDS: u64 = 604_800;
 const SUSPECT_EXHAUSTED_TTL_SECONDS: u64 = 300;
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SnapshotSelectorProjection {
+    DeriveFromSnapshot,
+    PreserveProviderWindows,
+}
 const CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS: &[&str] = &[
     "responses",
     "models",
@@ -610,8 +615,8 @@ impl fmt::Debug for SqliteStateStore {
 #[derive(Clone, Debug)]
 pub struct AsyncSqliteStateStore {
     database_path: PathBuf,
-    pool: sqlx::SqlitePool,
-    read_only: bool,
+    pub(crate) pool: sqlx::SqlitePool,
+    pub(crate) read_only: bool,
 }
 
 /// Committed result of a weekly-floor mutation.
@@ -965,6 +970,27 @@ impl AsyncSqliteStateStore {
         &self,
         snapshot: &PersistedQuotaSnapshot,
     ) -> Result<(), StateStoreError> {
+        self.write_quota_snapshot(snapshot, SnapshotSelectorProjection::DeriveFromSnapshot)
+            .await
+    }
+
+    /// Saves a provider snapshot after its exact selector windows were already committed.
+    pub async fn upsert_quota_snapshot_preserving_selector_windows(
+        &self,
+        snapshot: &PersistedQuotaSnapshot,
+    ) -> Result<(), StateStoreError> {
+        self.write_quota_snapshot(
+            snapshot,
+            SnapshotSelectorProjection::PreserveProviderWindows,
+        )
+        .await
+    }
+
+    async fn write_quota_snapshot(
+        &self,
+        snapshot: &PersistedQuotaSnapshot,
+        selector_projection: SnapshotSelectorProjection,
+    ) -> Result<(), StateStoreError> {
         let observed_unix_seconds = u64_to_i64(snapshot.observed_unix_seconds())?;
         let remaining_headroom = u32_to_i64(snapshot.remaining_headroom());
         let reset_unix_seconds = snapshot.reset_unix_seconds().map(u64_to_i64).transpose()?;
@@ -1002,7 +1028,9 @@ impl AsyncSqliteStateStore {
         .execute(&mut *transaction)
         .await
         .map_err(sqlx_error)?;
-        if selector_route_band(snapshot.route_band()) {
+        if selector_projection == SnapshotSelectorProjection::DeriveFromSnapshot
+            && selector_route_band(snapshot.route_band())
+        {
             let selector_window = selector_window_from_snapshot(snapshot);
             insert_selector_window_in_async_transaction(&mut transaction, &selector_window).await?;
         }
@@ -1115,6 +1143,11 @@ impl AsyncSqliteStateStore {
         .execute(&mut *transaction)
         .await
         .map_err(sqlx_error)?;
+        sqlx::query("DELETE FROM credential_maintenance WHERE account_id = ?1")
+            .bind(account_id.as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
         for route_band in CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS {
             sqlx::query(
                 "INSERT INTO quota_snapshots (
@@ -5402,7 +5435,7 @@ fn selector_window_from_snapshot(
     window
 }
 
-async fn invalidate_credential_mutation_quota_async(
+pub(crate) async fn invalidate_credential_mutation_quota_async(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     account_id: &AccountId,
 ) -> Result<(), StateStoreError> {
@@ -5517,7 +5550,7 @@ fn selector_route_band(route_band: &str) -> bool {
     SELECTOR_INVALIDATED_ROUTE_BANDS.contains(&route_band)
 }
 
-fn u64_to_i64(value: u64) -> Result<i64, StateStoreError> {
+pub(crate) fn u64_to_i64(value: u64) -> Result<i64, StateStoreError> {
     i64::try_from(value).map_err(|_| StateStoreError::Sqlite {
         message: "u64 value does not fit sqlite integer".to_owned(),
     })

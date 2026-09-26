@@ -36,7 +36,6 @@ router home.
 
 ```shell
 cargo run -p codex-router-cli -- account login --label primary --device-auth --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account login --label backup --auth-json /path/to/auth.json --allow-plaintext-file-secrets
 cargo run -p codex-router-cli -- account list
 cargo run -p codex-router-cli -- quota refresh
 cargo run -p codex-router-cli -- quota status --all-limits
@@ -47,21 +46,22 @@ the installed `codex` binary in a temporary owner-only `CODEX_HOME`, then import
 the resulting OAuth `auth.json` into router-owned account state. Use
 `--codex-bin <path>` to point at a specific Codex binary.
 
-`account login --auth-json` is the explicit import path for an existing
-Codex/Prodex-style OAuth `auth.json`. It is useful for migration, recovery, and
-test setup. API-key auth is not quota-compatible.
+The Router keeps enabled accounts' renewable credentials current while it runs,
+including when an account is idle or its quota is exhausted. A disabled account
+is not maintained until it is re-enabled. Re-login through device auth when
+account or quota status reports that renewal needs user action.
 
 Start the local router from the same persisted state:
 
 ```shell
-cargo run -p codex-router-cli -- serve \
-  --quota-refresh-interval-seconds 300
+cargo run -p codex-router-cli -- serve
 ```
 
 Startup does not require `CODEX_ROUTER_TOKEN` and does not block on quota
 refresh. `serve` reads last-known SQLite quota state immediately, starts an
-immediate background refresh after binding, and continues refreshing on the
-configured schedule. Run `quota refresh` for an explicit manual provider fetch,
+immediate background refresh after binding, then targets a new quota observation
+every 180 seconds by default. OAuth upkeep runs separately even when background
+quota refresh is disabled. Run `quota refresh` for an explicit manual provider fetch,
 and `quota status` for SQLite-only status output.
 
 ## Shared Codex Host

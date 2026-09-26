@@ -99,13 +99,12 @@ where
         .collect::<HashMap<_, _>>();
     let mut refreshed_count = 0_u64;
     let mut failed_count = 0_u64;
-    let mut weekly_floor_accounts = Vec::<AccountId>::new();
     for account in accounts
         .iter()
         .filter(|account| account.status() == AccountStatus::Enabled)
         .filter(|account| account.active_credential_generation().is_some())
     {
-        let resolved = match credential_resolver
+        let mut resolved = match credential_resolver
             .resolve_provider_credentials_async(account.account_id())
             .await
         {
@@ -151,7 +150,7 @@ where
             }
         };
         for route_band in DEFAULT_ROUTE_BANDS {
-            let response = match quota_provider
+            let first_response = quota_provider
                 .fetch_quota(QuotaRefreshProviderRequest::new(
                     account.account_id().clone(),
                     account.label(),
@@ -160,8 +159,44 @@ where
                     resolved.access_token().clone(),
                     resolved.chatgpt_account_id(),
                 ))
-                .await
-            {
+                .await;
+            let initial_unauthorized = matches!(
+                &first_response,
+                Err(QuotaCommandError::ProviderStatus { status: 401 })
+            );
+            let (response, retry_generation, renewed_for_retry) = if initial_unauthorized {
+                match credential_resolver
+                    .recover_unauthorized_credentials_async(
+                        account.account_id(),
+                        resolved.credential_generation(),
+                    )
+                    .await
+                {
+                    Ok((recovered, renewed_here)) => {
+                        let retry_generation = Some(recovered.credential_generation());
+                        let retry_response = quota_provider
+                            .fetch_quota(QuotaRefreshProviderRequest::new(
+                                account.account_id().clone(),
+                                account.label(),
+                                *route_band,
+                                base_url.clone(),
+                                recovered.access_token().clone(),
+                                recovered.chatgpt_account_id(),
+                            ))
+                            .await;
+                        resolved = recovered;
+                        (retry_response, retry_generation, renewed_here)
+                    }
+                    Err(error) => (
+                        Err(QuotaCommandError::CredentialResolver(error)),
+                        None,
+                        false,
+                    ),
+                }
+            } else {
+                (first_response, None, false)
+            };
+            let response = match response {
                 Ok(response) => response,
                 Err(error) => {
                     failed_count = failed_count.saturating_add(1);
@@ -184,11 +219,11 @@ where
                     .await?;
                     let provider_rejected_credentials =
                         matches!(error, QuotaCommandError::ProviderStatus { status: 401 });
-                    if provider_rejected_credentials {
+                    if provider_rejected_credentials && renewed_for_retry {
                         quota_history_state
                             .disable_account_if_credential_generation_current(
                                 account.account_id(),
-                                resolved.credential_generation(),
+                                retry_generation.unwrap_or(resolved.credential_generation()),
                             )
                             .await?;
                     }
@@ -210,7 +245,7 @@ where
                         "refresh failed: account={diagnostic_account} route_band={route_band} error={error}",
                     )
                     .map_err(QuotaCommandError::Stdout)?;
-                    if provider_rejected_credentials {
+                    if provider_rejected_credentials || initial_unauthorized {
                         break;
                     }
                     continue;
@@ -256,24 +291,6 @@ where
                     continue;
                 }
             };
-            let snapshot = PersistedQuotaSnapshot::new(
-                account.account_id().clone(),
-                QuotaSnapshotSource::OpenAiEndpoint,
-            )
-            .with_observed_unix_seconds(observed_unix_seconds)
-            .with_route_band(*route_band, effective_window.remaining_headroom)
-            .with_stale_penalty(false);
-            let snapshot = if let Some(reset_unix_seconds) = effective_window.reset_unix_seconds {
-                snapshot.with_reset_unix_seconds(reset_unix_seconds)
-            } else {
-                snapshot
-            };
-            let snapshot = if let Some(reset_credits_available) = response.reset_credits_available {
-                snapshot.with_reset_credits_available(reset_credits_available)
-            } else {
-                snapshot
-            };
-            quota_history_state.upsert_quota_snapshot(&snapshot).await?;
             let mut selector_windows = Vec::new();
             for window in &response.windows {
                 let status = if window.remaining_headroom == 0 {
@@ -318,16 +335,36 @@ where
             if *route_band == USER_QUOTA_ROUTE_BAND
                 && let Some(floor_basis_points) =
                     weekly_quota_floors.get(account.account_id()).copied()
+                && let Some(effective_stop) =
+                    weekly_quota_effective_stop_basis_points(Some(floor_basis_points))
                 && response.windows.iter().any(|window| {
                     window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS
-                        && window.remaining_headroom.saturating_mul(100) <= floor_basis_points
+                        && window.remaining_headroom.saturating_mul(100) <= effective_stop
                 })
-                && !weekly_floor_accounts
-                    .iter()
-                    .any(|account_id| account_id == account.account_id())
+                && let Some(observer) = weekly_floor_observer
             {
-                weekly_floor_accounts.push(account.account_id().clone());
+                observer.weekly_quota_floor_reached(account.account_id());
             }
+            let snapshot = PersistedQuotaSnapshot::new(
+                account.account_id().clone(),
+                QuotaSnapshotSource::OpenAiEndpoint,
+            )
+            .with_observed_unix_seconds(observed_unix_seconds)
+            .with_route_band(*route_band, effective_window.remaining_headroom)
+            .with_stale_penalty(false);
+            let snapshot = if let Some(reset_unix_seconds) = effective_window.reset_unix_seconds {
+                snapshot.with_reset_unix_seconds(reset_unix_seconds)
+            } else {
+                snapshot
+            };
+            let snapshot = if let Some(reset_credits_available) = response.reset_credits_available {
+                snapshot.with_reset_credits_available(reset_credits_available)
+            } else {
+                snapshot
+            };
+            quota_history_state
+                .upsert_quota_snapshot_preserving_selector_windows(&snapshot)
+                .await?;
             tracing::info!(
                 account.hash = telemetry_hash(account.account_id().as_str()),
                 route_band,
@@ -340,11 +377,6 @@ where
         }
     }
     purge_old_quota_history(&quota_history_state, observed_unix_seconds).await?;
-    if let Some(weekly_floor_observer) = weekly_floor_observer {
-        for account_id in &weekly_floor_accounts {
-            weekly_floor_observer.weekly_quota_floor_reached(account_id);
-        }
-    }
 
     writeln!(stdout, "refreshed: {refreshed_count}").map_err(QuotaCommandError::Stdout)?;
     if failed_count > 0 {

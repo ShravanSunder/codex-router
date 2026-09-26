@@ -24,8 +24,7 @@ pub(in crate::quota) fn quota_human_group(row: &QuotaStatusRow) -> QuotaHumanGro
         _ => match row.availability {
             AccountAvailability::Usable => QuotaHumanGroup::Available,
             AccountAvailability::Reserve => QuotaHumanGroup::Held,
-            AccountAvailability::Retiring
-            | AccountAvailability::Blocked
+            AccountAvailability::Blocked
             | AccountAvailability::Unknown
             | AccountAvailability::Excluded => QuotaHumanGroup::BlockedOrStale,
         },
@@ -403,6 +402,7 @@ pub(in crate::quota) const fn routing_reason_is_preferred(reason: RoutingReason)
         RoutingReason::PreferredNearResetInitialAdmission
             | RoutingReason::PreferredNearResetDrainable
             | RoutingReason::PreferredNearResetControlledDrain
+            | RoutingReason::PreferredIdleFarResetAdmission
             | RoutingReason::PreferredWeeklyHealthier
             | RoutingReason::PreferredWeeklyResetSoon
             | RoutingReason::PreferredShortResetSoon
@@ -421,6 +421,9 @@ pub(in crate::quota) fn format_routing_reason(reason: RoutingReason) -> &'static
         RoutingReason::PreferredNearResetControlledDrain => {
             "preferred by quota: near-reset controlled drain"
         }
+        RoutingReason::PreferredIdleFarResetAdmission => {
+            "preferred by quota: idle far-reset allowance"
+        }
         RoutingReason::PreferredWeeklyHealthier => "preferred by quota: weekly healthier",
         RoutingReason::PreferredWeeklyResetSoon => "preferred by quota: weekly reset soon",
         RoutingReason::PreferredShortResetSoon => "preferred by quota: 5h reset soon",
@@ -435,7 +438,6 @@ pub(in crate::quota) fn format_routing_reason(reason: RoutingReason) -> &'static
         RoutingReason::HeldShortWindowGuard => "held by quota: 5h guard",
         RoutingReason::UnknownFallbackPreferred => "fallback by quota: needs refresh",
         RoutingReason::UnknownFallbackAvailable => "fallback by quota: same unknown pool",
-        RoutingReason::RetiringNearZero => "retiring: near zero quota",
         RoutingReason::ExcludedDisabled => "excluded: account disabled",
         RoutingReason::ExcludedMissingCredential => "excluded: missing credential",
         RoutingReason::ExcludedWeeklyQuotaFloor => "blocked: weekly quota floor",
@@ -454,6 +456,7 @@ pub(in crate::quota) fn format_next_use_from_routing_reason(reason: RoutingReaso
         | RoutingReason::PreferredWeeklyHealthier
         | RoutingReason::PreferredNearResetDrainable
         | RoutingReason::PreferredNearResetControlledDrain
+        | RoutingReason::PreferredIdleFarResetAdmission
         | RoutingReason::PreferredWeeklyResetSoon
         | RoutingReason::PreferredShortResetSoon
         | RoutingReason::PreferredProjectedBurn
@@ -466,7 +469,6 @@ pub(in crate::quota) fn format_next_use_from_routing_reason(reason: RoutingReaso
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
             "fallback by quota"
         }
-        RoutingReason::RetiringNearZero => "retiring",
         RoutingReason::ExcludedDisabled
         | RoutingReason::ExcludedMissingCredential
         | RoutingReason::ExcludedWeeklyQuotaFloor

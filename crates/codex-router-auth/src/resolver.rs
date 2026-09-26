@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -12,6 +13,7 @@ use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+use codex_router_secret_store::account_tokens::first_unused_account_credential_generation;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -21,9 +23,12 @@ use codex_router_state::sqlite::StateStoreError;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
+use tokio_util::task::TaskTracker;
 
-use crate::oauth::OAuthRefreshClassification;
-use crate::oauth::classify_refresh_response;
+use codex_router_secret_store::account_credential_lock::AccountCredentialLock;
+use codex_router_state::credential_maintenance::CredentialFailureClass;
+use codex_router_state::credential_maintenance::CredentialMaintenanceRecord;
+use codex_router_state::credential_maintenance::CredentialMaintenanceState;
 
 const DEFAULT_OPENAI_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const DEFAULT_OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -154,7 +159,41 @@ pub trait CredentialRefreshClient {
         &self,
         account_id: &AccountId,
         refresh_token: &SecretString,
-    ) -> Result<AccountCredentialBundle, CredentialResolverError>;
+    ) -> Result<AccountCredentialBundle, CredentialRefreshFailure>;
+}
+
+/// Secret-safe outcome of one OAuth refresh attempt.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("provider credential refresh failed ({failure_class:?})")]
+pub struct CredentialRefreshFailure {
+    pub failure_class: CredentialFailureClass,
+    pub confirmed_unspent: bool,
+    pub retry_after_seconds: Option<u64>,
+}
+
+impl CredentialRefreshFailure {
+    /// The provider did not spend the refresh token and a retry is safe.
+    #[must_use]
+    pub const fn confirmed_unspent(
+        failure_class: CredentialFailureClass,
+        retry_after_seconds: Option<u64>,
+    ) -> Self {
+        Self {
+            failure_class,
+            confirmed_unspent: true,
+            retry_after_seconds,
+        }
+    }
+
+    /// The provider may have spent the refresh token; require device re-login.
+    #[must_use]
+    pub const fn ambiguous(failure_class: CredentialFailureClass) -> Self {
+        Self {
+            failure_class,
+            confirmed_unspent: false,
+            retry_after_seconds: None,
+        }
+    }
 }
 
 /// Test-only refresh commit failpoints for cancellation-safety coverage.
@@ -176,8 +215,10 @@ impl CredentialRefreshClient for NoopCredentialRefreshClient {
         &self,
         _account_id: &AccountId,
         _refresh_token: &SecretString,
-    ) -> Result<AccountCredentialBundle, CredentialResolverError> {
-        Err(CredentialResolverError::RefreshUnavailable)
+    ) -> Result<AccountCredentialBundle, CredentialRefreshFailure> {
+        Err(CredentialRefreshFailure::ambiguous(
+            CredentialFailureClass::ProviderOutcomeAmbiguous,
+        ))
     }
 }
 
@@ -223,45 +264,99 @@ impl CredentialRefreshClient for OpenAiOAuthRefreshClient {
         &self,
         _account_id: &AccountId,
         refresh_token: &SecretString,
-    ) -> Result<AccountCredentialBundle, CredentialResolverError> {
+    ) -> Result<AccountCredentialBundle, CredentialRefreshFailure> {
+        self.refresh_with_token(refresh_token)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RenewalTrigger {
+    ExpiredAccess,
+    Proactive,
+    UnauthorizedGeneration(u64),
+}
+
+impl OpenAiOAuthRefreshClient {
+    fn refresh_with_token(
+        &self,
+        refresh_token: &SecretString,
+    ) -> Result<AccountCredentialBundle, CredentialRefreshFailure> {
         let request = RefreshTokenRequest {
             client_id: &self.client_id,
             grant_type: "refresh_token",
             refresh_token: refresh_token.expose_secret(),
         };
-        let body = serde_json::to_string(&request)
-            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+        let body = serde_json::to_string(&request).map_err(|_| {
+            CredentialRefreshFailure::confirmed_unspent(
+                CredentialFailureClass::TransportUnspent,
+                None,
+            )
+        })?;
         let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+            .map_err(|_| {
+                CredentialRefreshFailure::confirmed_unspent(
+                    CredentialFailureClass::TransportUnspent,
+                    None,
+                )
+            })?;
         let response = client
             .post(&self.token_endpoint)
             .header("content-type", "application/json")
             .body(body)
             .send()
-            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+            .map_err(|error| {
+                if error.is_connect() {
+                    CredentialRefreshFailure::confirmed_unspent(
+                        CredentialFailureClass::TransportUnspent,
+                        None,
+                    )
+                } else {
+                    CredentialRefreshFailure::ambiguous(
+                        CredentialFailureClass::ProviderOutcomeAmbiguous,
+                    )
+                }
+            })?;
         let status = response.status();
-        let body = response
-            .text()
-            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+        let retry_after_seconds = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|header| header.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        let body = response.text().map_err(|_| {
+            CredentialRefreshFailure::ambiguous(CredentialFailureClass::ProviderOutcomeAmbiguous)
+        })?;
 
         if !status.is_success() {
             let oauth_error = serde_json::from_str::<RefreshTokenErrorResponse>(&body)
                 .ok()
                 .and_then(|error| error.error);
-            return match classify_refresh_response(status.as_u16(), oauth_error.as_deref()) {
-                OAuthRefreshClassification::Succeeded
-                | OAuthRefreshClassification::RefreshTokenRejected
-                | OAuthRefreshClassification::RateLimited
-                | OAuthRefreshClassification::TransientProviderFailure
-                | OAuthRefreshClassification::UnexpectedProviderResponse { .. } => {
-                    Err(CredentialResolverError::RefreshUnavailable)
+            let failure = match (status.as_u16(), oauth_error.as_deref()) {
+                (400, Some("invalid_grant")) => {
+                    CredentialRefreshFailure::ambiguous(CredentialFailureClass::ProviderRejected)
                 }
+                (429, _) => CredentialRefreshFailure::confirmed_unspent(
+                    CredentialFailureClass::RateLimited,
+                    retry_after_seconds,
+                ),
+                (500..=599, Some("temporarily_unavailable")) => {
+                    CredentialRefreshFailure::confirmed_unspent(
+                        CredentialFailureClass::ProviderTemporary,
+                        retry_after_seconds,
+                    )
+                }
+                _ => CredentialRefreshFailure::ambiguous(
+                    CredentialFailureClass::ProviderOutcomeAmbiguous,
+                ),
             };
+            return Err(failure);
         }
 
-        let refresh_response = serde_json::from_str::<RefreshTokenResponse>(&body)
-            .map_err(|_error| CredentialResolverError::RefreshUnavailable)?;
+        let refresh_response =
+            serde_json::from_str::<RefreshTokenResponse>(&body).map_err(|_| {
+                CredentialRefreshFailure::ambiguous(CredentialFailureClass::MalformedResponse)
+            })?;
         let mut refreshed = AccountCredentialBundle::imported_codex_auth(
             refresh_response.access_token,
             Some(
@@ -469,7 +564,8 @@ where
             .ok_or(CredentialResolverError::RefreshUnavailable)?;
         let mut refreshed = self
             .refresh_client
-            .refresh_credentials(account_id, refresh_token)?;
+            .refresh_credentials(account_id, refresh_token)
+            .map_err(|_| CredentialResolverError::RefreshUnavailable)?;
         if refreshed.chatgpt_account_id().is_none()
             && let Some(chatgpt_account_id) = bundle.chatgpt_account_id()
         {
@@ -546,211 +642,6 @@ where
     }
 }
 
-/// Async resolver for provider credentials through router-owned state and secret stores.
-#[derive(Clone, Debug)]
-pub struct AsyncRouterCredentialResolver<S, C>
-where
-    S: SecretStore + Clone,
-    C: CredentialRefreshClient + Clone,
-{
-    state_store: AsyncSqliteStateStore,
-    secret_store: S,
-    refresh_client: C,
-    fixed_now_unix_seconds: Option<u64>,
-    refresh_leases: AsyncRefreshLeaseRegistry,
-}
-
-/// Default async router credential resolver for OpenAI OAuth account tokens.
-pub type DefaultAsyncRouterCredentialResolver<S> =
-    AsyncRouterCredentialResolver<S, OpenAiOAuthRefreshClient>;
-
-impl<S> AsyncRouterCredentialResolver<S, OpenAiOAuthRefreshClient>
-where
-    S: SecretStore + Clone + Send + 'static,
-{
-    /// Creates a default OpenAI OAuth async resolver with shared refresh leases.
-    #[must_use]
-    pub fn new_default_oauth_with_refresh_leases(
-        state_store: AsyncSqliteStateStore,
-        secret_store: S,
-        fixed_now_unix_seconds: Option<u64>,
-        refresh_leases: AsyncRefreshLeaseRegistry,
-    ) -> Self {
-        Self::new_with_refresh_leases(
-            state_store,
-            secret_store,
-            OpenAiOAuthRefreshClient::new(),
-            fixed_now_unix_seconds,
-            refresh_leases,
-        )
-    }
-}
-
-impl<S, C> AsyncRouterCredentialResolver<S, C>
-where
-    S: SecretStore + Clone + Send + 'static,
-    C: CredentialRefreshClient + Clone + Send + 'static,
-{
-    /// Creates an async credential resolver.
-    #[must_use]
-    pub fn new(
-        state_store: AsyncSqliteStateStore,
-        secret_store: S,
-        refresh_client: C,
-        fixed_now_unix_seconds: Option<u64>,
-    ) -> Self {
-        Self {
-            state_store,
-            secret_store,
-            refresh_client,
-            fixed_now_unix_seconds,
-            refresh_leases: AsyncRefreshLeaseRegistry::new(),
-        }
-    }
-
-    /// Creates an async credential resolver with shared refresh leases.
-    #[must_use]
-    pub fn new_with_refresh_leases(
-        state_store: AsyncSqliteStateStore,
-        secret_store: S,
-        refresh_client: C,
-        fixed_now_unix_seconds: Option<u64>,
-        refresh_leases: AsyncRefreshLeaseRegistry,
-    ) -> Self {
-        Self {
-            state_store,
-            secret_store,
-            refresh_client,
-            fixed_now_unix_seconds,
-            refresh_leases,
-        }
-    }
-
-    /// Resolves credentials immediately before provider egress.
-    pub async fn resolve_provider_credentials(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        let now_unix_seconds = match self.fixed_now_unix_seconds {
-            Some(now_unix_seconds) => now_unix_seconds,
-            None => current_unix_seconds()
-                .map_err(|_error| CredentialResolverError::RefreshUnavailable)?,
-        };
-        let (active_generation, bundle) = self.read_active_bundle(account_id).await?;
-        if self.bundle_is_expired(&bundle, now_unix_seconds) {
-            let lease = self.refresh_leases.lease_for(account_id);
-            let _guard = lease.lock().await;
-            let (current_generation, current_bundle) = self.read_active_bundle(account_id).await?;
-            let (resolved_generation, refreshed) =
-                if self.bundle_is_expired(&current_bundle, now_unix_seconds) {
-                    self.refresh_expired_bundle(account_id, current_generation, &current_bundle)
-                        .await?
-                } else {
-                    (current_generation, current_bundle)
-                };
-            return Ok(ResolvedProviderCredential::new(
-                account_id.clone(),
-                refreshed.access_token().clone(),
-                resolved_generation,
-            )
-            .with_chatgpt_account_id(refreshed.chatgpt_account_id()));
-        }
-
-        Ok(ResolvedProviderCredential::new(
-            account_id.clone(),
-            bundle.access_token().clone(),
-            active_generation,
-        )
-        .with_chatgpt_account_id(bundle.chatgpt_account_id()))
-    }
-
-    async fn read_active_bundle(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
-        let account = self
-            .state_store
-            .load_account(account_id)
-            .await
-            .map_err(map_state_error)?
-            .ok_or(CredentialResolverError::AccountUnavailable)?;
-        if account.status() != AccountStatus::Enabled {
-            return Err(CredentialResolverError::AccountIneligible);
-        }
-        let active_generation = account
-            .active_credential_generation()
-            .ok_or(CredentialResolverError::AccountIneligible)?;
-        let bundle_key = account_credential_bundle_key(account_id, active_generation)
-            .map_err(map_secret_error)?;
-        let secret_store = self.secret_store.clone();
-        let bundle = tokio::task::spawn_blocking(move || {
-            let secret = secret_store
-                .read_secret(&bundle_key)
-                .map_err(map_secret_error)?;
-            AccountCredentialBundle::from_secret_string(secret).map_err(map_secret_error)
-        })
-        .await
-        .map_err(|_error| CredentialResolverError::SecretUnavailable)??;
-
-        Ok((active_generation, bundle))
-    }
-
-    fn bundle_is_expired(&self, bundle: &AccountCredentialBundle, now_unix_seconds: u64) -> bool {
-        bundle
-            .expires_unix_seconds()
-            .is_some_and(|expires| expires <= now_unix_seconds)
-    }
-
-    async fn refresh_expired_bundle(
-        &self,
-        account_id: &AccountId,
-        current_generation: u64,
-        bundle: &AccountCredentialBundle,
-    ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
-        let refresh_token = bundle
-            .refresh_token()
-            .ok_or(CredentialResolverError::RefreshUnavailable)?
-            .clone();
-        let refresh_client = self.refresh_client.clone();
-        let account_id_for_refresh = account_id.clone();
-        let mut refreshed = tokio::task::spawn_blocking(move || {
-            refresh_client.refresh_credentials(&account_id_for_refresh, &refresh_token)
-        })
-        .await
-        .map_err(|_error| CredentialResolverError::RefreshUnavailable)??;
-        if refreshed.chatgpt_account_id().is_none()
-            && let Some(chatgpt_account_id) = bundle.chatgpt_account_id()
-        {
-            refreshed = refreshed.with_chatgpt_account_id(chatgpt_account_id);
-        }
-        let refreshed_generation = current_generation
-            .checked_add(1)
-            .ok_or(CredentialResolverError::RefreshUnavailable)?;
-        let refreshed_key = account_credential_bundle_key(account_id, refreshed_generation)
-            .map_err(map_secret_error)?;
-        let refreshed_secret = refreshed.to_secret_string().map_err(map_secret_error)?;
-        let secret_store = self.secret_store.clone();
-        tokio::task::spawn_blocking(move || {
-            secret_store
-                .write_secret(&refreshed_key, &refreshed_secret)
-                .map_err(map_secret_error)
-        })
-        .await
-        .map_err(|_error| CredentialResolverError::SecretUnavailable)??;
-        self.state_store
-            .activate_account_credential_generation_if_current_and_invalidate_quota(
-                account_id,
-                current_generation,
-                refreshed_generation,
-                AccountStatus::Enabled,
-            )
-            .await
-            .map_err(map_state_error)?;
-
-        Ok((refreshed_generation, refreshed))
-    }
-}
-
 fn map_state_error(_error: StateStoreError) -> CredentialResolverError {
     CredentialResolverError::AccountUnavailable
 }
@@ -758,6 +649,14 @@ fn map_state_error(_error: StateStoreError) -> CredentialResolverError {
 fn map_secret_error(_error: SecretStoreError) -> CredentialResolverError {
     CredentialResolverError::SecretUnavailable
 }
+
+mod credential_renewal;
+
+pub use credential_renewal::AsyncRouterCredentialResolver;
+pub use credential_renewal::CredentialRefreshTaskSupervisor;
+pub use credential_renewal::DefaultAsyncRouterCredentialResolver;
+#[cfg(test)]
+pub(crate) use credential_renewal::credential_renewal_is_due;
 
 /// Returns the current Unix second for runtime credential freshness checks.
 pub fn current_unix_seconds() -> Result<u64, std::time::SystemTimeError> {

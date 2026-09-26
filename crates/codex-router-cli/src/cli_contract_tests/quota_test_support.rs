@@ -128,7 +128,8 @@ impl CredentialRefreshClient for RecordingRefreshClient {
         &self,
         account_id: &AccountId,
         refresh_token: &SecretString,
-    ) -> Result<AccountCredentialBundle, CredentialResolverError> {
+    ) -> Result<AccountCredentialBundle, codex_router_auth::resolver::CredentialRefreshFailure>
+    {
         assert_eq!(account_id.as_str(), self.expected_account_id);
         assert_eq!(refresh_token.expose_secret(), self.expected_refresh_token);
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -183,6 +184,7 @@ pub(super) struct FloorNotificationOrderingQuotaProvider {
     pub(super) floor_account_id: AccountId,
     pub(super) healthy_account_id: AccountId,
     pub(super) floor_observer: Arc<RecordingWeeklyFloorObserver>,
+    pub(super) state_db_path: PathBuf,
 }
 
 impl FloorNotificationOrderingQuotaProvider {
@@ -190,11 +192,13 @@ impl FloorNotificationOrderingQuotaProvider {
         floor_account_id: AccountId,
         healthy_account_id: AccountId,
         floor_observer: Arc<RecordingWeeklyFloorObserver>,
+        state_db_path: PathBuf,
     ) -> Self {
         Self {
             floor_account_id,
             healthy_account_id,
             floor_observer,
+            state_db_path,
         }
     }
 }
@@ -205,11 +209,40 @@ impl QuotaRefreshProvider for FloorNotificationOrderingQuotaProvider {
         request: QuotaRefreshProviderRequest,
     ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
         if request.account_id() == &self.healthy_account_id && request.route_band() == "responses" {
-            assert!(
-                lock_test_mutex(&self.floor_observer.account_ids, "weekly floor observer",)
-                    .is_empty(),
-                "floor reconnect notification fired before the healthy account was published"
+            assert_eq!(
+                *lock_test_mutex(&self.floor_observer.account_ids, "weekly floor observer"),
+                vec![self.floor_account_id.clone()],
+                "floor reconnect must follow its saved selector evidence and precede later accounts"
             );
+            let state = AsyncSqliteStateStore::open_read_only(&self.state_db_path).await?;
+            let windows = state
+                .selector_inputs_for_route_band("responses", 1_100)
+                .await?;
+            let floor = windows
+                .iter()
+                .find(|window| window.account_id() == &self.floor_account_id)
+                .expect("floor account selector window should be saved before signal");
+            assert!(
+                floor
+                    .windows()
+                    .iter()
+                    .any(|window| window.limit_window_seconds() == 604_800
+                        && window.remaining_headroom() == 0)
+            );
+            let history = state
+                .quota_history_observations_for_window(
+                    &self.floor_account_id,
+                    "responses",
+                    604_800,
+                    0,
+                    2_000,
+                )
+                .await?;
+            assert!(
+                !history.is_empty(),
+                "burn history must be saved before reconnect"
+            );
+            state.close().await?;
         }
         let remaining_headroom = if request.account_id() == &self.floor_account_id {
             0

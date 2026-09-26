@@ -22,6 +22,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -468,7 +469,7 @@ impl LoopbackRouterRuntimeConfig {
 
 /// Assembled loopback router runtime for HTTP/SSE forwarding.
 pub struct LoopbackRouterRuntime {
-    runtime: tokio::runtime::Runtime,
+    runtime: Option<tokio::runtime::Runtime>,
     server: AsyncLoopbackServerRuntime,
     credential_state_store: AsyncSqliteStateStore,
     provider_error_state_store: AsyncSqliteStateStore,
@@ -494,6 +495,15 @@ pub struct LoopbackRouterRuntime {
     last_session_affinity_cleanup_utc_day: AtomicU64,
     fixed_now_unix_seconds: Option<u64>,
     connection_error_reporter: Arc<dyn LoopbackConnectionErrorReporter>,
+    credential_refresh_shutdown_drain: Duration,
+}
+
+impl Drop for LoopbackRouterRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_timeout(Duration::ZERO);
+        }
+    }
 }
 
 impl LoopbackRouterRuntime {
@@ -571,7 +581,7 @@ impl LoopbackRouterRuntime {
         }
 
         let loopback_runtime = Self {
-            runtime,
+            runtime: Some(runtime),
             server,
             credential_state_store: writable_state_stores.credential_state_store,
             provider_error_state_store: writable_state_stores.db_write_state_store,
@@ -597,6 +607,7 @@ impl LoopbackRouterRuntime {
             credential_factory,
             fixed_now_unix_seconds,
             connection_error_reporter: Arc::new(StderrLoopbackConnectionErrorReporter),
+            credential_refresh_shutdown_drain: Duration::from_secs(30),
         };
         loopback_runtime.enqueue_runtime_maintenance_hints(
             fixed_now_unix_seconds.unwrap_or_else(|| current_unix_seconds().unwrap_or(0)),
@@ -656,6 +667,12 @@ impl LoopbackRouterRuntime {
         max_connections: usize,
     ) -> Result<usize, LoopbackRouterRuntimeError> {
         self.runtime
+            .as_ref()
+            .ok_or_else(|| {
+                LoopbackRouterRuntimeError::TokioRuntime(std::io::Error::other(
+                    "router runtime unavailable",
+                ))
+            })?
             .block_on(self.serve_protocol_connections_async(max_connections, None))
     }
 
@@ -666,6 +683,12 @@ impl LoopbackRouterRuntime {
         shutdown: CancellationToken,
     ) -> Result<usize, LoopbackRouterRuntimeError> {
         self.runtime
+            .as_ref()
+            .ok_or_else(|| {
+                LoopbackRouterRuntimeError::TokioRuntime(std::io::Error::other(
+                    "router runtime unavailable",
+                ))
+            })?
             .block_on(self.serve_protocol_connections_async(max_connections, Some(shutdown)))
     }
 
@@ -676,6 +699,13 @@ impl LoopbackRouterRuntime {
         reporter: Arc<dyn LoopbackConnectionErrorReporter>,
     ) -> Self {
         self.connection_error_reporter = reporter;
+        self
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_credential_refresh_shutdown_drain(mut self, limit: Duration) -> Self {
+        self.credential_refresh_shutdown_drain = limit;
         self
     }
 
@@ -779,6 +809,15 @@ impl LoopbackRouterRuntime {
         }
         affinity_record_tasks.close();
         affinity_record_tasks.wait().await;
+        if !self
+            .credential_factory
+            .drain_refresh_tasks(self.credential_refresh_shutdown_drain)
+            .await
+        {
+            tracing::warn!(
+                "credential refresh drain timed out; unresolved claims remain authoritative"
+            );
+        }
         self.db_write_actor.shutdown().await;
         self.maintenance_actor.shutdown().await;
 
@@ -2459,14 +2498,331 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
     use std::time::Duration;
 
+    use codex_router_auth::resolver::CredentialRefreshClient;
+    use codex_router_auth::resolver::CredentialRefreshFailure;
+    use codex_router_core::ids::AccountId;
+    use codex_router_core::redaction::SecretString;
+    use codex_router_secret_store::SecretStore;
+    use codex_router_secret_store::account_tokens::AccountCredentialBundle;
+    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+    use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_secret_store::model::SecretKey;
+    use codex_router_secret_store::model::SecretStoreError;
+    use codex_router_state::credential_maintenance::CredentialMaintenanceState;
+    use codex_router_state::repositories::AccountStateRepository;
+    use codex_router_state::sqlite::SqliteStateStore;
     use http_body_util::BodyExt;
     use http_body_util::StreamBody;
     use hyper::body::Frame;
     use tokio::io::AsyncWriteExt;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Clone)]
+    struct HeldProxyRefreshClient {
+        entered_sender: mpsc::Sender<()>,
+        release_receiver: Arc<Mutex<mpsc::Receiver<()>>>,
+        completed_sender: mpsc::Sender<()>,
+    }
+
+    impl CredentialRefreshClient for HeldProxyRefreshClient {
+        fn refresh_credentials(
+            &self,
+            _account_id: &AccountId,
+            _refresh_token: &SecretString,
+        ) -> Result<AccountCredentialBundle, CredentialRefreshFailure> {
+            self.entered_sender
+                .send(())
+                .expect("provider entry should report");
+            self.release_receiver
+                .lock()
+                .expect("release lock")
+                .recv_timeout(Duration::from_secs(5))
+                .expect("provider should be released");
+            self.completed_sender
+                .send(())
+                .expect("provider completion should report");
+            Ok(AccountCredentialBundle::imported_codex_auth(
+                "replacement-access-canary",
+                Some("replacement-refresh-canary".to_owned()),
+            )
+            .with_expires_unix_seconds(2_000))
+        }
+    }
+
+    fn proxy_refresh_fixture(
+        case: &str,
+        drain_limit: Duration,
+    ) -> (LoopbackRouterRuntime, AccountId, PathBuf, FileSecretStore) {
+        let database_path = test_database_path(case);
+        let secret_root = database_path.with_extension("secrets");
+        let account_id = AccountId::new("proxy-shutdown-account").expect("account id");
+        let state = SqliteStateStore::open(&database_path).expect("fixture state");
+        AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(account_id.clone(), "shutdown", AccountStatus::Enabled)
+                .with_active_credential_generation(1),
+        )
+        .expect("fixture account");
+        let secrets = FileSecretStore::open(&secret_root).expect("fixture secrets");
+        let active_key = account_credential_bundle_key(&account_id, 1).expect("active key");
+        let active_bundle = AccountCredentialBundle::imported_codex_auth(
+            "expired-access-canary",
+            Some("old-refresh-canary".to_owned()),
+        )
+        .with_expires_unix_seconds(900)
+        .to_secret_string()
+        .expect("active bundle");
+        secrets
+            .write_secret(&active_key, &active_bundle)
+            .expect("active secret");
+        drop(state);
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new("127.0.0.1", 0).expect("loopback bind"),
+            UpstreamEndpoint::new("http://127.0.0.1:1/v1").expect("fixture upstream"),
+            database_path.clone(),
+            secret_root,
+        )
+        .with_quota_clock(1_000, 300);
+        let router = LoopbackRouterRuntime::start(config)
+            .expect("fixture router should start")
+            .with_credential_refresh_shutdown_drain(drain_limit);
+        (router, account_id, database_path, secrets)
+    }
+
+    fn open_read_only_after_shutdown(
+        runtime: &tokio::runtime::Runtime,
+        database_path: &Path,
+        case: &str,
+    ) -> AsyncSqliteStateStore {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match runtime.block_on(AsyncSqliteStateStore::open_read_only(database_path)) {
+                Ok(state) => return state,
+                Err(error)
+                    if format!("{error}").contains("locked")
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::yield_now()
+                }
+                Err(error) => panic!("{case} read-only state unavailable: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_shutdown_drains_claimed_refresh_or_preserves_unresolved_claim_at_bound() {
+        for (case, drain_limit, complete_before_shutdown) in [
+            ("completed", Duration::from_secs(2), true),
+            ("bounded", Duration::from_millis(100), false),
+        ] {
+            let (router, account_id, database_path, _secrets) =
+                proxy_refresh_fixture(case, drain_limit);
+            let (entered_sender, entered_receiver) = mpsc::channel();
+            let (release_sender, release_receiver) = mpsc::channel();
+            let (completed_sender, completed_receiver) = mpsc::channel();
+            let client = HeldProxyRefreshClient {
+                entered_sender,
+                release_receiver: Arc::new(Mutex::new(release_receiver)),
+                completed_sender,
+            };
+            let resolver = router
+                .credential_factory
+                .resolver_for_state_with_refresh_client(
+                    router.credential_state_store.clone(),
+                    client,
+                );
+            let account_for_task = account_id.clone();
+            let request_task =
+                router
+                    .runtime
+                    .as_ref()
+                    .expect("runtime")
+                    .handle()
+                    .spawn(async move {
+                        resolver
+                            .resolve_provider_credentials(&account_for_task)
+                            .await
+                    });
+            entered_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("provider should start");
+            request_task.abort();
+            let shutdown = CancellationToken::new();
+            shutdown.cancel();
+            let (stopped_sender, stopped_receiver) = mpsc::channel();
+            let shutdown_thread = std::thread::spawn(move || {
+                let result =
+                    router.serve_protocol_connections_until_cancelled(usize::MAX, shutdown);
+                stopped_sender.send(result).expect("shutdown should report");
+            });
+            if complete_before_shutdown {
+                assert!(matches!(
+                    stopped_receiver.recv_timeout(Duration::from_millis(100)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+                release_sender.send(()).expect("release provider");
+            }
+            let result = stopped_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("proxy shutdown should finish")
+                .expect("proxy shutdown should succeed");
+            assert_eq!(result, 0);
+            shutdown_thread.join().expect("shutdown thread");
+            if !complete_before_shutdown {
+                release_sender
+                    .send(())
+                    .expect("release provider after bound");
+            }
+            completed_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("provider should finish");
+            let read_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("read runtime");
+            let read_state = open_read_only_after_shutdown(&read_runtime, &database_path, case);
+            let account = read_runtime
+                .block_on(read_state.load_account(&account_id))
+                .expect("account read")
+                .expect("account exists");
+            let maintenance = read_runtime
+                .block_on(read_state.load_credential_maintenance(&account_id))
+                .expect("maintenance read")
+                .expect("claim exists");
+            if complete_before_shutdown {
+                assert_eq!(account.active_credential_generation(), Some(2));
+                assert_eq!(maintenance.state, CredentialMaintenanceState::Healthy);
+            } else {
+                assert_eq!(account.active_credential_generation(), Some(1));
+                assert_eq!(maintenance.state, CredentialMaintenanceState::InProgress);
+                assert_eq!(maintenance.claimed_successor_generation, Some(2));
+            }
+            read_runtime
+                .block_on(read_state.close())
+                .expect("read state close");
+        }
+    }
+
+    #[derive(Clone)]
+    struct ImmediateProxyRefreshClient;
+
+    impl CredentialRefreshClient for ImmediateProxyRefreshClient {
+        fn refresh_credentials(
+            &self,
+            _account_id: &AccountId,
+            _refresh_token: &SecretString,
+        ) -> Result<AccountCredentialBundle, CredentialRefreshFailure> {
+            Ok(AccountCredentialBundle::imported_codex_auth(
+                "replacement-access-canary",
+                Some("replacement-refresh-canary".to_owned()),
+            )
+            .with_expires_unix_seconds(2_000))
+        }
+    }
+
+    #[derive(Clone)]
+    struct HeldProxySecretWriteStore {
+        inner: FileSecretStore,
+        entered_sender: mpsc::Sender<()>,
+        release_receiver: Arc<Mutex<mpsc::Receiver<()>>>,
+    }
+
+    impl SecretStore for HeldProxySecretWriteStore {
+        fn write_secret(
+            &self,
+            key: &SecretKey,
+            secret: &SecretString,
+        ) -> Result<(), SecretStoreError> {
+            if key.as_str().ends_with(".2") {
+                self.entered_sender
+                    .send(())
+                    .expect("secret write should report");
+                self.release_receiver
+                    .lock()
+                    .expect("write release lock")
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("secret write should be released");
+            }
+            self.inner.write_secret(key, secret)
+        }
+
+        fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError> {
+            self.inner.read_secret(key)
+        }
+    }
+
+    #[test]
+    fn proxy_shutdown_waits_for_blocking_successor_write_before_returning() {
+        let (router, account_id, database_path, file_secrets) =
+            proxy_refresh_fixture("held-successor-write", Duration::from_secs(2));
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let secrets = HeldProxySecretWriteStore {
+            inner: file_secrets,
+            entered_sender,
+            release_receiver: Arc::new(Mutex::new(release_receiver)),
+        };
+        let resolver = router
+            .credential_factory
+            .resolver_for_state_with_dependencies(
+                router.credential_state_store.clone(),
+                secrets,
+                ImmediateProxyRefreshClient,
+            );
+        let account_for_task = account_id.clone();
+        let request_task = router
+            .runtime
+            .as_ref()
+            .expect("runtime")
+            .handle()
+            .spawn(async move {
+                resolver
+                    .resolve_provider_credentials(&account_for_task)
+                    .await
+            });
+        entered_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("successor write should start");
+        request_task.abort();
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let (stopped_sender, stopped_receiver) = mpsc::channel();
+        let shutdown_thread = std::thread::spawn(move || {
+            let result = router.serve_protocol_connections_until_cancelled(usize::MAX, shutdown);
+            stopped_sender.send(result).expect("shutdown should report");
+        });
+        assert!(matches!(
+            stopped_receiver.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        release_sender.send(()).expect("release successor write");
+        assert_eq!(
+            stopped_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("shutdown should finish")
+                .expect("shutdown should succeed"),
+            0,
+        );
+        shutdown_thread.join().expect("shutdown thread");
+        let read_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("read runtime");
+        let read_state =
+            open_read_only_after_shutdown(&read_runtime, &database_path, "held successor write");
+        let account = read_runtime
+            .block_on(read_state.load_account(&account_id))
+            .expect("account read")
+            .expect("account exists");
+        assert_eq!(account.active_credential_generation(), Some(2));
+        read_runtime
+            .block_on(read_state.close())
+            .expect("read state close");
+    }
 
     #[test]
     fn active_session_event_compaction_keeps_completed_events_for_seven_days() {

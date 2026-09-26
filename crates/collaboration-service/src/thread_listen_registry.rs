@@ -28,6 +28,8 @@ struct ThreadListenState {
     consecutive_rejections: AtomicU8,
     /// Never held across an await: set and read in one statement.
     last_rejection: std::sync::Mutex<Value>,
+    #[cfg(test)]
+    debounce_armed: tokio::sync::Notify,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -151,6 +153,8 @@ impl ThreadListenRegistry {
             acknowledged: AtomicBool::new(false),
             consecutive_rejections: AtomicU8::new(0),
             last_rejection: std::sync::Mutex::new(Value::Null),
+            #[cfg(test)]
+            debounce_armed: tokio::sync::Notify::new(),
             _permit: permit,
         });
         let snapshot = state.snapshot(listen_id.clone());
@@ -284,6 +288,7 @@ impl ThreadListenRegistry {
                 _ = tokio::time::sleep_until(next_mark) => {
                     if mark == mark_total {
                         wait.abort();
+                        let _ = (&mut wait).await;
                         state.cancellation.cancel();
                         let reason = match state.mode {
                             ThreadListenMode::Once { .. } => ThreadListenEndReason::Timeout,
@@ -310,11 +315,15 @@ impl ThreadListenRegistry {
                                 let terminal = record_rejection(&mut consecutive_rejections, &mut last_rejection, evidence);
                                 publish_rejection_state(&state, consecutive_rejections, &last_rejection);
                                 if terminal {
+                                    wait.abort();
+                                    let _ = (&mut wait).await;
                                     self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, last_rejection).await;
                                     return;
                                 }
                             }
                             Err(BatchSinkFailure::Unavailable) => {
+                                wait.abort();
+                                let _ = (&mut wait).await;
                                 self.finish_session_delivery(&listen_id, &state, ThreadListenEndReason::Error, &sink, json!({"kind":"unavailable"})).await;
                                 return;
                             }
@@ -422,6 +431,8 @@ impl ThreadListenRegistry {
             if let Some(mut observed_activity) = latest {
                 let cap_deadline = Instant::now() + THREAD_LISTEN_DEBOUNCE_CAP;
                 let mut quiet_deadline = Instant::now() + THREAD_LISTEN_DEBOUNCE;
+                #[cfg(test)]
+                state.debounce_armed.notify_one();
                 loop {
                     tokio::select! {
                         _ = state.cancellation.cancelled() => {

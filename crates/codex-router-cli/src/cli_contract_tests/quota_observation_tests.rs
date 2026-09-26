@@ -60,6 +60,61 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
     ));
     ensure_async_state_schema(&router_root);
     drop(state);
+    let runtime = test_async_runtime();
+    let maintenance_store = must_ok(runtime.block_on(AsyncSqliteStateStore::open(
+        &router_root.join("state.sqlite"),
+    )));
+    assert!(must_ok(runtime.block_on(
+        maintenance_store.claim_credential_refresh(primary_account.account_id(), 1, 2,)
+    )));
+    must_ok(runtime.block_on(maintenance_store.close()));
+    let in_progress = run_cli(
+        [
+            "codex-router",
+            "quota",
+            "status",
+            "--router-root",
+            path_to_str(&router_root),
+            "--format",
+            "json",
+            "--no-refresh",
+            "--now-unix-seconds",
+            "11000",
+        ],
+        CliContext::new(Vec::new()),
+    );
+    let in_progress_json: serde_json::Value = must_ok(serde_json::from_str(&in_progress.stdout));
+    assert_eq!(
+        in_progress_json["accounts"][0]["oauth_maintenance_state"],
+        "unknown"
+    );
+    assert!(!in_progress.stdout.contains("reauth_required"));
+    let account_list = run_cli(
+        [
+            "codex-router",
+            "account",
+            "list",
+            "--router-root",
+            path_to_str(&router_root),
+        ],
+        CliContext::new(Vec::new()),
+    );
+    assert!(account_list.stdout.contains("unknown"));
+    assert!(!account_list.stdout.contains("re-login required"));
+    let maintenance_store = must_ok(runtime.block_on(AsyncSqliteStateStore::open(
+        &router_root.join("state.sqlite"),
+    )));
+    assert!(must_ok(runtime.block_on(
+        maintenance_store.finish_credential_refresh_claim(
+            primary_account.account_id(),
+            1,
+            2,
+            codex_router_state::credential_maintenance::CredentialMaintenanceState::Retrying,
+            codex_router_state::credential_maintenance::CredentialFailureClass::RateLimited,
+            Some(11_500),
+        )
+    )));
+    must_ok(runtime.block_on(maintenance_store.close()));
 
     let output = run_cli(
         [
@@ -97,7 +152,7 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
     assert_eq!(parsed["accounts"][0]["freshness"], "fresh");
     assert_eq!(
         parsed["accounts"][0]["routing_reason"],
-        "preferred_safest_quota"
+        "preferred_idle_far_reset"
     );
     assert!(parsed["accounts"][0].get("routing_weight").is_none());
     assert_eq!(parsed["accounts"][0]["preferred_next"], true);
@@ -109,6 +164,14 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
         "sqlx_mirror"
     );
     assert_eq!(parsed["accounts"][0]["next_use"], "preferred by quota");
+    assert!(parsed["accounts"][0]["weekly_quota_effective_stop_basis_points"].is_null());
+    assert!(parsed["accounts"][0]["weekly_quota_effective_stop_percent"].is_null());
+    assert_eq!(parsed["accounts"][0]["oauth_maintenance_state"], "retrying");
+    assert_eq!(
+        parsed["accounts"][0]["oauth_next_attempt_unix_seconds"],
+        11_500
+    );
+    assert_eq!(parsed["accounts"][0]["oauth_failure_class"], "rate_limited");
     assert!(parsed["accounts"][0].get("short_quota_risk").is_none());
     assert!(parsed["accounts"][0].get("weekly_quota_risk").is_none());
     assert_eq!(parsed["accounts"][0]["short_quota_guard"], 25);

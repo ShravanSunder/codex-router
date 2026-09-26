@@ -65,6 +65,7 @@ pub(super) fn quota_capture_row(fixture: QuotaCaptureRowFixture) -> QuotaStatusR
         active_credential_generation: Some(1),
         account_label: fixture.account_label.to_owned(),
         account_status: "enabled".to_owned(),
+        oauth_maintenance: None,
         short_window: format_window_cell(&windows, V1_SHORT_WINDOW_SECONDS, NOW, false),
         weekly_window: format_window_cell(&windows, V1_WEEKLY_WINDOW_SECONDS, NOW, false),
         pace: "history unknown".to_owned(),
@@ -312,6 +313,7 @@ pub(super) fn format_next_use_for_capture(reason: RoutingReason) -> &'static str
         RoutingReason::PreferredNearResetInitialAdmission
         | RoutingReason::PreferredNearResetDrainable
         | RoutingReason::PreferredNearResetControlledDrain
+        | RoutingReason::PreferredIdleFarResetAdmission
         | RoutingReason::PreferredWeeklyHealthier
         | RoutingReason::PreferredWeeklyResetSoon
         | RoutingReason::PreferredShortResetSoon
@@ -325,7 +327,6 @@ pub(super) fn format_next_use_for_capture(reason: RoutingReason) -> &'static str
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
             "fallback by quota"
         }
-        RoutingReason::RetiringNearZero => "retiring",
         RoutingReason::ExcludedDisabled
         | RoutingReason::ExcludedMissingCredential
         | RoutingReason::BlockedWindowExhausted

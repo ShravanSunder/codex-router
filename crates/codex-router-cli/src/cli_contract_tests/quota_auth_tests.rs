@@ -1,5 +1,115 @@
 use super::*;
 
+struct FirstUnauthorizedQuotaProvider {
+    seen_tokens: Mutex<Vec<String>>,
+    reject_retry: bool,
+}
+
+impl QuotaRefreshProvider for FirstUnauthorizedQuotaProvider {
+    async fn fetch_quota(
+        &self,
+        request: QuotaRefreshProviderRequest,
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+        let mut tokens = lock_test_mutex(&self.seen_tokens, "quota 401 token record");
+        tokens.push(request.access_token().expose_secret().to_owned());
+        let call = tokens.len();
+        drop(tokens);
+        if call == 1 || (self.reject_retry && call == 2) {
+            return Err(crate::quota::QuotaCommandError::ProviderStatus { status: 401 });
+        }
+        Ok(QuotaRefreshProviderResponse {
+            windows: vec![QuotaRefreshProviderWindow {
+                limit_window_seconds: 18_000,
+                remaining_headroom: 42,
+                reset_unix_seconds: Some(2_000),
+                effective: true,
+            }],
+            reset_credits_available: None,
+        })
+    }
+}
+
+#[test]
+fn quota_401_renews_once_and_retries_with_the_committed_generation() {
+    for (reject_retry, known_expiry) in [(false, true), (true, true), (false, false), (true, false)]
+    {
+        let test_root = TestRoot::new(if reject_retry {
+            "quota-401-second-reject"
+        } else {
+            "quota-401-recovered"
+        });
+        must_ok(fs::create_dir(test_root.path()));
+        let state_path = test_root.path().join("state.sqlite");
+        let secret_root = test_root.path().join("secrets");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account_id = account_id("quota-401-account");
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(account_id.clone(), "quota-401", AccountStatus::Enabled)
+                .with_active_credential_generation(1),
+        ));
+        let secrets = must_ok(FileSecretStore::open(&secret_root));
+        let key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let bundle = AccountCredentialBundle::imported_codex_auth(
+            "rejected-access-canary",
+            Some("renewable-refresh-canary".to_owned()),
+        );
+        let bundle = if known_expiry {
+            bundle.with_expires_unix_seconds(4_000_000_000)
+        } else {
+            bundle
+        };
+        must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+        let refresh_client = RecordingRefreshClient::new(
+            "quota-401-account",
+            "renewable-refresh-canary",
+            AccountCredentialBundle::imported_codex_auth(
+                "recovered-access-canary",
+                Some("rotated-refresh-canary".to_owned()),
+            )
+            .with_expires_unix_seconds(5_000_000_000),
+        );
+        let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            &secret_root,
+            1_000,
+            refresh_client.clone(),
+        ));
+        let provider = FirstUnauthorizedQuotaProvider {
+            seen_tokens: Mutex::new(Vec::new()),
+            reject_retry,
+        };
+        let mut output = Vec::new();
+        let _result = refresh_quota_store_paths_with_dependencies(
+            &mut output,
+            &state_path,
+            &secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            1_100,
+        );
+        assert_eq!(refresh_client.calls(), 1);
+        let recorded = lock_test_mutex(&provider.seen_tokens, "quota 401 token record");
+        assert_eq!(recorded[0], "rejected-access-canary");
+        assert_eq!(recorded[1], "recovered-access-canary");
+        if !reject_retry {
+            assert_eq!(recorded[2], "recovered-access-canary");
+        }
+        let account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+            .expect("account should remain");
+        assert_eq!(account.active_credential_generation(), Some(2));
+        assert_eq!(
+            account.status(),
+            if reject_retry {
+                AccountStatus::Disabled
+            } else {
+                AccountStatus::Enabled
+            }
+        );
+    }
+}
+
 #[test]
 fn quota_refresh_rejects_non_provider_base_url_before_token_egress() {
     let test_root = TestRoot::new("quota-refresh-disallowed");
@@ -351,11 +461,10 @@ fn quota_refresh_continues_after_one_account_provider_failure() {
 }
 
 #[test]
-fn quota_refresh_excludes_only_account_rejected_with_http_401() {
-    for (provider_status, expected_account_status) in [
-        (401, AccountStatus::Disabled),
-        (403, AccountStatus::Enabled),
-    ] {
+fn quota_refresh_preserves_enabled_account_when_401_recovery_is_unavailable() {
+    for (provider_status, expected_account_status) in
+        [(401, AccountStatus::Enabled), (403, AccountStatus::Enabled)]
+    {
         let test_root = TestRoot::new(&format!(
             "quota-refresh-provider-auth-rejection-{provider_status}"
         ));

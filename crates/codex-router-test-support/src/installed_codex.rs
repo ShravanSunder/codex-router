@@ -40,7 +40,7 @@ use std::time::Instant;
 use codex_native_integration::CodexRouterProfile;
 use codex_router_cli::CliContext;
 use codex_router_cli::profile::CodexRouterProfileWriter;
-use codex_router_cli::run_with_io;
+use codex_router_cli::run_with_io_async;
 use codex_router_cli::token::LocalRouterTokenService;
 use codex_router_cli::token::Shell;
 use codex_router_cli::token::export_token_assignment;
@@ -1524,12 +1524,10 @@ fn seed_smoke_account(
     })?;
     let credential_key = account_credential_bundle_key(&account_id, 1)
         .map_err(|error| format!("failed to build account credential key: {error}"))?;
-    let credential_bundle = AccountCredentialBundle::imported_codex_auth(
-        fixture.upstream_token,
-        Some(format!("{}-refresh", fixture.upstream_token)),
-    )
-    .to_secret_string()
-    .map_err(|error| format!("failed to serialize smoke credential bundle: {error}"))?;
+    let credential_bundle =
+        AccountCredentialBundle::imported_codex_auth(fixture.upstream_token, None)
+            .to_secret_string()
+            .map_err(|error| format!("failed to serialize smoke credential bundle: {error}"))?;
     secrets
         .write_secret(&credential_key, &credential_bundle)
         .map_err(|error| format!("failed to write smoke credential bundle: {error}"))?;
@@ -1549,39 +1547,48 @@ fn capture_quota_status(state_path: &Path) -> Result<SmokeQuotaStatus, String> {
     let router_root = state_path
         .parent()
         .ok_or_else(|| "state path had no router root parent".to_owned())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("quota status runtime unavailable: {error}"))?;
     Ok(SmokeQuotaStatus {
-        table: run_quota_status(router_root, "table")?,
-        plain: run_quota_status(router_root, "plain")?,
-        json: run_quota_status(router_root, "json")?,
+        table: run_quota_status(&runtime, router_root, "table")?,
+        plain: run_quota_status(&runtime, router_root, "plain")?,
+        json: run_quota_status(&runtime, router_root, "json")?,
     })
 }
 
-fn run_quota_status(router_root: &Path, format: &str) -> Result<String, String> {
+fn run_quota_status(
+    runtime: &tokio::runtime::Runtime,
+    router_root: &Path,
+    format: &str,
+) -> Result<String, String> {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    run_with_io(
-        vec![
-            OsString::from("codex-router"),
-            OsString::from("quota"),
-            OsString::from("status"),
-            OsString::from("--router-root"),
-            router_root.as_os_str().to_owned(),
-            OsString::from("--no-refresh"),
-            OsString::from("--format"),
-            OsString::from(format),
-            OsString::from("--now-unix-seconds"),
-            OsString::from("1030"),
-        ],
-        &CliContext::new(Vec::new()),
-        &mut stdout,
-        &mut stderr,
-    )
-    .map_err(|error| {
-        format!(
-            "quota status {format} failed: {error}; stderr={}",
-            String::from_utf8_lossy(&stderr)
-        )
-    })?;
+    runtime
+        .block_on(run_with_io_async(
+            vec![
+                OsString::from("codex-router"),
+                OsString::from("quota"),
+                OsString::from("status"),
+                OsString::from("--router-root"),
+                router_root.as_os_str().to_owned(),
+                OsString::from("--no-refresh"),
+                OsString::from("--format"),
+                OsString::from(format),
+                OsString::from("--now-unix-seconds"),
+                OsString::from("1030"),
+            ],
+            &CliContext::new(Vec::new()),
+            &mut stdout,
+            &mut stderr,
+        ))
+        .map_err(|error| {
+            format!(
+                "quota status {format} failed: {error}; stderr={}",
+                String::from_utf8_lossy(&stderr)
+            )
+        })?;
     if !stderr.is_empty() {
         return Err(format!(
             "quota status {format} wrote stderr: {}",
@@ -6432,6 +6439,11 @@ impl Drop for SmokeTempRoot {
 
 #[cfg(test)]
 mod tests {
+    use codex_router_secret_store::SecretStore;
+    use codex_router_secret_store::account_tokens::AccountCredentialBundle;
+    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+    use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_state::sqlite::SqliteStateStore;
     use std::borrow::Cow;
     use std::fs;
     use std::os::unix::fs as unix_fs;
@@ -6442,6 +6454,7 @@ mod tests {
     use super::InstalledCodexSmokeMode;
     use super::MockHttpSseTranscript;
     use super::MockWebSocketTranscript;
+    use super::QUOTA_RECONNECT_PRIMARY;
     use super::RETAIN_SMOKE_ROOT_ENV;
     use super::RedactedTranscriptInput;
     use super::RouterAuditObservation;
@@ -6451,6 +6464,7 @@ mod tests {
     use super::SmokeQuotaStatus;
     use super::SmokeSeed;
     use super::SmokeTempRoot;
+    use super::seed_smoke_account;
 
     use super::assert_codex_visible_output;
     use super::assert_redacted_three_websocket_payload;
@@ -6468,6 +6482,27 @@ mod tests {
     use super::upstream_account_token;
     use super::validate_copied_dev_state_roots;
     use super::write_redacted_transcript;
+
+    #[test]
+    fn access_forwarding_smoke_seed_cannot_refresh_with_production_oauth() {
+        let root = SmokeTempRoot::new("access-forwarding-no-refresh").expect("fixture root");
+        let state =
+            SqliteStateStore::open(&root.path().join("state.sqlite")).expect("fixture state");
+        let secrets = FileSecretStore::open(root.path().join("secrets")).expect("fixture secrets");
+        seed_smoke_account(&state, &secrets, QUOTA_RECONNECT_PRIMARY)
+            .expect("smoke account should seed");
+        let account_id = codex_router_core::ids::AccountId::new(QUOTA_RECONNECT_PRIMARY.account_id)
+            .expect("fixture account id");
+        let key = account_credential_bundle_key(&account_id, 1).expect("bundle key");
+        let bundle = AccountCredentialBundle::from_secret_string(
+            secrets.read_secret(&key).expect("seeded bundle"),
+        )
+        .expect("bundle should decode");
+        assert!(
+            bundle.refresh_token().is_none(),
+            "serve smoke must have no OAuth refresh capability"
+        );
+    }
 
     fn expect_string_error(result: Result<(), String>, context: &'static str) -> String {
         match result {

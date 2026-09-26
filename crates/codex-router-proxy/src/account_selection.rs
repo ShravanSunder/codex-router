@@ -1385,9 +1385,7 @@ fn assessment_account_is_available(
         account.account_id() == account_id
             && matches!(
                 account.availability(),
-                AccountAvailability::Usable
-                    | AccountAvailability::Reserve
-                    | AccountAvailability::Retiring
+                AccountAvailability::Usable | AccountAvailability::Reserve
             )
     })
 }
@@ -3445,7 +3443,8 @@ mod tests {
                     .with_remaining_headroom(23)
                     .with_reset_unix_seconds(604_800),
                 ],
-            ),
+            )
+            .with_current_active_sessions(1),
             codex_router_selection::burn_down::BurnDownAccountInput::new(
                 strong_account_id.clone(),
                 "strong",
@@ -3463,7 +3462,8 @@ mod tests {
                     .with_remaining_headroom(76)
                     .with_reset_unix_seconds(604_800),
                 ],
-            ),
+            )
+            .with_current_active_sessions(1),
         ];
         let assessment = codex_router_selection::burn_down::assess_route_band(
             codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput::new(
