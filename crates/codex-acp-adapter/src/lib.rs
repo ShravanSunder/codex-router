@@ -1,5 +1,6 @@
-//! ACP conversations translated into the existing shared Codex runtime.
+//! ACP-agent connection routing and Codex Session translation.
 mod acp_connection_dispatch;
+mod acp_connection_router;
 mod acp_connection_transport;
 mod acp_frame_transport;
 mod approval_broker;
@@ -19,6 +20,7 @@ mod session_connection_registry;
 mod session_creation;
 mod stored_session_listing;
 pub use acp_connection_dispatch::{AcpConnectionInputs, AcpStoredSessions, serve_acp_connection};
+pub use acp_connection_router::{AcpRouteFuture, AcpSessionRoute, serve_acp_router_connection};
 pub use acp_connection_transport::{
     AcpRouterChannels, AcpWireChannels, acp_connection_channels, run_acp_transport,
 };
