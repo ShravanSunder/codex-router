@@ -578,7 +578,13 @@ impl ExternalProviderRuntime {
                     }
                     std::io::Error::other(error)
                 })
-            });
+            })
+            .chain(futures_util::stream::once(async {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "provider stdout closed",
+                ))
+            }));
             let connection = Client.builder().name("codex-router-host")
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, connection| {

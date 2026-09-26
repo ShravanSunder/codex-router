@@ -29,7 +29,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.38"
+version = "0.1.39"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -49,7 +49,7 @@ chrono = "0.4.45"
 clap = { version = "4.5.53", features = ["derive", "env", "wrap_help"] }
 comfy-table = "7.2.2"
 crossterm = "0.29.0"
-futures-util = { version = "0.3.31", default-features = false, features = ["sink", "std"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 hmac = "0.12.1"
 http = "1.4.0"
 http-body-util = "0.1.3"
