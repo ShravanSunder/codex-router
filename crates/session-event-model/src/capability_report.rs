@@ -15,6 +15,7 @@ pub struct CapabilityReport {
     pub elicitation: bool,
     pub usage: bool,
     pub prompt_content: PromptContentCapabilities,
+    pub auth_status: ProviderAuthStatus,
 }
 
 impl CapabilityReport {
@@ -50,4 +51,26 @@ pub struct PromptContentCapabilities {
     pub image: bool,
     pub audio: bool,
     pub embedded_context: bool,
+}
+
+/// Connection-scoped auth status shared by Sessions on that provider connection.
+/// It contains no account, organization, plan, or vendor details.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ProviderAuthStatus {
+    #[default]
+    NotReported,
+    LoggedOut,
+    Account {
+        label: String,
+    },
+    ApiKey {
+        label: String,
+    },
+    Gateway {
+        label: String,
+    },
+    External {
+        label: String,
+    },
 }
