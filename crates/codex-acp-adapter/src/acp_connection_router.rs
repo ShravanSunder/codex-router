@@ -46,6 +46,7 @@ pub trait AcpSessionRoute: Send {
 pub struct AcpConnectionContext {
     pub actor: Option<Identity>,
     pub client_profile: Option<ProfileAdvertisement>,
+    pub client_supports_elicitation_form: bool,
 }
 
 fn rpc_error(id: Value, code: i32, message: &'static str) -> Value {
@@ -91,6 +92,7 @@ pub async fn serve_acp_router_connection<
     let mut route_tasks = JoinSet::<()>::new();
     let mut session_routes = BTreeMap::<String, String>::new();
     let mut pending_routes = BTreeMap::<String, String>::new();
+    let mut client_request_routes = BTreeMap::<String, String>::new();
     let mut used_ids = BTreeSet::new();
 
     let result = async {
@@ -108,6 +110,11 @@ pub async fn serve_acp_router_connection<
                     };
                     match routed {
                         RouteOutput::Frame { endpoint, response } => {
+                            if response.get("method").and_then(Value::as_str).is_some()
+                                && let Some(id) = response.get("id")
+                                && client_request_routes.insert(id.to_string(), endpoint.clone()).is_some() {
+                                break Err(io::Error::other("ACP server request ID reused"));
+                            }
                             if let Some(id) = response.get("id") {
                                 let key = id.to_string();
                                 if pending_routes.get(&key).is_some_and(|pending| pending == &endpoint) {
@@ -123,6 +130,7 @@ pub async fn serve_acp_router_connection<
                         }
                         RouteOutput::Closed { endpoint, result } => {
                             route_inputs.remove(&endpoint);
+                            client_request_routes.retain(|_, owner| owner != &endpoint);
                             session_routes.retain(|_, owner| owner != &endpoint);
                             let pending = pending_routes.iter()
                                 .filter(|(_, owner)| *owner == &endpoint)
@@ -149,6 +157,11 @@ pub async fn serve_acp_router_connection<
                         continue;
                     }
                     let Some(method) = frame.get("method").and_then(Value::as_str) else {
+                        if let Some(id) = frame.get("id")
+                            && let Some(endpoint) = client_request_routes.remove(&id.to_string())
+                            && let Some(route) = route_inputs.get(&endpoint) {
+                            route.send((*frame).clone()).await?;
+                        }
                         continue;
                     };
                     let params = frame.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -189,6 +202,9 @@ pub async fn serve_acp_router_connection<
                                 actor,
                                 client_profile: params.pointer("/_meta/sessionProfile")
                                     .and_then(|profile| serde_json::from_value(profile.clone()).ok()),
+                                client_supports_elicitation_form: params
+                                    .pointer("/clientCapabilities/elicitation/form")
+                                    .is_some_and(Value::is_object),
                             };
                             for route in routes {
                                 let endpoint = route.endpoint_id().to_owned();

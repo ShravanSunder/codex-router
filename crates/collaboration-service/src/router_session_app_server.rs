@@ -3,13 +3,13 @@ use crate::{
     CommandContent, CreateSessionCommand, HubEvent, HubSessionSummary, PromptSessionCommand,
     SessionCommandPort, SessionEventHub, SessionEventHubError, SessionSettingsCommand,
     SessionSteerOutcome, SessionTargetCommand, SteerSessionCommand,
+    app_server_event_forwarding::AppServerEventForwarding,
     app_server_model_catalog::{ProviderModelEntry, render_model_list},
     private_socket_listener::PrivateSocketListener,
 };
 use futures_util::{SinkExt, StreamExt};
 use message_board::{Identity, SessionEndpointRef, SessionRef};
 use serde_json::{Value, json};
-use session_event_model::{SessionEvent, StopReason, TurnOutcome};
 use std::{
     collections::HashSet,
     io,
@@ -31,6 +31,7 @@ pub struct RouterSessionAppServerContext {
     commands: Arc<dyn SessionCommandPort>,
     events: Arc<dyn SessionEventHub>,
     model_catalog: watch::Receiver<Vec<ProviderModelEntry>>,
+    interaction_broker: Option<Arc<crate::ServiceApprovalBroker>>,
 }
 
 impl RouterSessionAppServerContext {
@@ -47,6 +48,7 @@ impl RouterSessionAppServerContext {
             commands,
             events,
             model_catalog,
+            interaction_broker: None,
         }
     }
 
@@ -56,6 +58,12 @@ impl RouterSessionAppServerContext {
         model_catalog: watch::Receiver<Vec<ProviderModelEntry>>,
     ) -> Self {
         self.model_catalog = model_catalog;
+        self
+    }
+
+    #[must_use]
+    pub fn with_interaction_broker(mut self, broker: Arc<crate::ServiceApprovalBroker>) -> Self {
+        self.interaction_broker = Some(broker);
         self
     }
 }
@@ -139,13 +147,15 @@ pub async fn serve_router_session_app_server_connection(
         mpsc::channel::<(SessionRef, Result<HubEvent, ()>)>(64);
     let mut event_tasks = JoinSet::new();
     let mut attached_sessions = HashSet::new();
+    let mut forwarding =
+        AppServerEventForwarding::new(context.actor.clone(), context.interaction_broker.clone());
     loop {
         let frame = tokio::select! {
             incoming = websocket.next() => incoming,
             forwarded = event_receiver.recv(), if !event_tasks.is_empty() => {
                 let Some((session, event)) = forwarded else { break; };
                 let Ok(event) = event else { break; };
-                if let Some(notification) = render_turn_event(&session, &event) {
+                for notification in forwarding.project(&session, &event) {
                     websocket.send(Message::Text(notification.to_string().into())).await?;
                 }
                 continue;
@@ -162,6 +172,10 @@ pub async fn serve_router_session_app_server_connection(
             continue;
         };
         let request: Value = serde_json::from_str(&text)?;
+        if request.get("method").is_none() {
+            forwarding.resolve_reply(&request).await;
+            continue;
+        }
         let Some(id) = request.get("id").cloned() else {
             continue;
         };
@@ -238,7 +252,7 @@ pub async fn serve_router_session_app_server_connection(
                     .await
                     .map_err(|_| AppServerConnectionError::HubUnavailable)?;
                 for event in attachment.snapshot {
-                    if let Some(notification) = render_turn_event(&session, &event) {
+                    for notification in forwarding.project(&session, &event) {
                         websocket
                             .send(Message::Text(notification.to_string().into()))
                             .await?;
@@ -391,7 +405,7 @@ async fn handle_app_server_thread_request(
     }
 }
 
-fn thread_alias(session: &message_board::SessionRef) -> String {
+pub(crate) fn thread_alias(session: &message_board::SessionRef) -> String {
     let native_id = session.session_id.as_str();
     if let Ok(uuid) = Uuid::parse_str(native_id) {
         return uuid.hyphenated().to_string();
@@ -564,35 +578,6 @@ fn parse_turn_input(params: &Value) -> Result<Vec<CommandContent>, ThreadMethodE
             _ => Err(ThreadMethodError::InvalidParams),
         })
         .collect()
-}
-
-fn render_turn_event(session: &SessionRef, event: &HubEvent) -> Option<Value> {
-    let thread_id = thread_alias(session);
-    let (method, turn_id, status) = match &event.event {
-        SessionEvent::TurnStarted { turn_id, .. } => ("turn/started", turn_id, "inProgress"),
-        SessionEvent::TurnEnded { turn_id, outcome } => {
-            let status = match outcome {
-                TurnOutcome::Ended {
-                    stop_reason: StopReason::Cancelled,
-                    ..
-                } => "interrupted",
-                TurnOutcome::Ended { .. } => "completed",
-                TurnOutcome::Lost { .. } => "failed",
-            };
-            ("turn/completed", turn_id, status)
-        }
-        _ => return None,
-    };
-    Some(json!({
-        "method":method,
-        "params":{
-            "threadId":thread_id,
-            "turn":{
-                "id":turn_id,"items":[],"status":status,"error":null,
-                "startedAt":null,"completedAt":null,"durationMs":null
-            }
-        }
-    }))
 }
 
 #[cfg(test)]

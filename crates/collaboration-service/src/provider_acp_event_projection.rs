@@ -7,14 +7,17 @@ use message_board::SessionRef;
 use serde_json::{Value, json};
 use session_event_model::session_profile_codec::{ProfileState, StateNotification};
 use session_event_model::{
-    CapabilityReport, SessionEvent, SessionItemKind, SessionState, StopReason, ToolCallStatus,
-    TurnOutcome,
+    CapabilityReport, PendingInteraction, SessionEvent, SessionItemKind, SessionState, StopReason,
+    ToolCallStatus, TurnOutcome,
 };
 use std::{
     collections::{BTreeSet, HashMap},
     sync::Arc,
 };
-use tokio::{sync::watch, task::JoinSet};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 fn capabilities_from_snapshot(snapshot: &[crate::HubEvent]) -> Option<CapabilityReport> {
@@ -120,6 +123,7 @@ pub(crate) struct ProviderSessionObservers {
     events: Arc<dyn SessionEventHub>,
     output: codex_acp_adapter::AcpOutputSender,
     supports_state: bool,
+    interaction_sender: mpsc::Sender<(SessionRef, PendingInteraction)>,
     pub(crate) tasks: JoinSet<()>,
     attached: BTreeSet<SessionRef>,
     pub(crate) observed_turns: HashMap<SessionRef, watch::Receiver<Option<String>>>,
@@ -131,11 +135,13 @@ impl ProviderSessionObservers {
         events: Arc<dyn SessionEventHub>,
         output: codex_acp_adapter::AcpOutputSender,
         supports_state: bool,
+        interaction_sender: mpsc::Sender<(SessionRef, PendingInteraction)>,
     ) -> Self {
         Self {
             events,
             output,
             supports_state,
+            interaction_sender,
             tasks: JoinSet::new(),
             attached: BTreeSet::new(),
             observed_turns: HashMap::new(),
@@ -165,6 +171,14 @@ impl ProviderSessionObservers {
             self.cancellations
                 .insert(session.clone(), cancellation.clone());
             let mut item_text = HashMap::new();
+            for event in &attachment.snapshot {
+                if let SessionEvent::InteractionRequested { interaction } = &event.event {
+                    self.interaction_sender
+                        .send((session.clone(), interaction.clone()))
+                        .await
+                        .map_err(|_| ())?;
+                }
+            }
             if replay_history {
                 for event in &attachment.snapshot {
                     if let Some(notification) = event_notification(
@@ -181,6 +195,7 @@ impl ProviderSessionObservers {
             let output = self.output.clone();
             let events = Arc::clone(&self.events);
             let supports_state = self.supports_state;
+            let interaction_sender = self.interaction_sender.clone();
             self.tasks.spawn(async move {
             loop {
                 let received = tokio::select! {
@@ -207,12 +222,16 @@ impl ProviderSessionObservers {
                     let Ok(replacement) = events.attach(session.clone()).await else { break; };
                     item_text.clear();
                     for historical in &replacement.snapshot {
+                        if let SessionEvent::InteractionRequested { interaction } = &historical.event
+                            && interaction_sender.send((session.clone(), interaction.clone())).await.is_err() { return; }
                         if let Some(notification) = event_notification(&historical.event, &session, supports_state, &mut item_text)
                             && output.send(notification).await.is_err() { return; }
                     }
                     receiver = replacement.receiver;
                     continue;
                 }
+                if let SessionEvent::InteractionRequested { interaction } = &event.event
+                    && interaction_sender.send((session.clone(), interaction.clone())).await.is_err() { break; }
                 if let Some(notification) = event_notification(&event.event, &session, supports_state, &mut item_text)
                     && output.send(notification).await.is_err() { break; }
                 if let SessionEvent::TurnEnded { turn_id, .. } = event.event {

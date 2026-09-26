@@ -40,6 +40,7 @@ mod delivery_acceptance_effect;
 mod delivery_route_projection;
 pub use provider_session_event_hub::{HubReceiveError, ProviderSessionEventHub, receive_hub_event};
 pub use provider_session_record::ProviderSessionRecord;
+mod app_server_event_forwarding;
 mod app_server_item_translation;
 mod app_server_model_catalog;
 pub use app_server_item_translation::{
@@ -56,6 +57,7 @@ mod app_server_interaction_translation_tests;
 #[path = "app_server_item_translation_tests.rs"]
 mod app_server_item_translation_tests;
 mod provider_acp_event_projection;
+mod provider_acp_interaction;
 mod provider_acp_session_route;
 mod provider_conversation_backend;
 mod router_session_app_server;

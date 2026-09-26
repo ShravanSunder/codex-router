@@ -20,6 +20,7 @@ pub struct AcpChannelListener {
     holder: Arc<crate::UnmaterializedThreadHolder>,
     recorder: Arc<dyn codex_acp_adapter::ConversationOperationRecorder>,
     providers: Vec<ProviderRouteBackend>,
+    interaction_broker: Option<Arc<crate::ServiceApprovalBroker>>,
     permits: Arc<Semaphore>,
 }
 impl AcpChannelListener {
@@ -40,6 +41,7 @@ impl AcpChannelListener {
             holder,
             recorder,
             providers: Vec::new(),
+            interaction_broker: None,
             permits: Arc::new(Semaphore::new(32)),
         })
     }
@@ -62,6 +64,11 @@ impl AcpChannelListener {
         });
         self
     }
+    #[must_use]
+    pub fn with_interaction_broker(mut self, broker: Arc<crate::ServiceApprovalBroker>) -> Self {
+        self.interaction_broker = Some(broker);
+        self
+    }
     pub async fn run(self, shutdown: CancellationToken) -> io::Result<()> {
         let mut tasks = JoinSet::new();
         let result = loop {
@@ -82,11 +89,15 @@ impl AcpChannelListener {
                         lazy_codex_session_route(Arc::new(admission)),
                     ];
                     routes.extend(self.providers.iter().map(|provider| {
-                        Box::new(ProviderAcpSessionRoute::new(
+                        let route = ProviderAcpSessionRoute::new(
                             provider.endpoint.clone(),
                             Arc::clone(&provider.commands),
                             Arc::clone(&provider.events),
-                        )) as Box<dyn AcpSessionRoute>
+                        );
+                        let route = if let Some(broker) = &self.interaction_broker {
+                            route.with_interaction_broker(Arc::clone(broker))
+                        } else { route };
+                        Box::new(route) as Box<dyn AcpSessionRoute>
                     }));
                     tasks.spawn(async move { let _permit = permit; serve_acp_router_connection(stream,routes).await });
                 }
