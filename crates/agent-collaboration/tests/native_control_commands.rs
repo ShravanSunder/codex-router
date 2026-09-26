@@ -127,7 +127,7 @@ async fn session_inspect_cli_preserves_native_rejection_message() {
         .expect("init JSON");
         let initialized = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
             "version":{"major":1,"minor":0},"serviceId":service_id,
-            "serviceEpoch":epoch,"serviceVersion":"0.1.37","controlSchemaDigest":digest
+            "serviceEpoch":epoch,"serviceVersion":env!("CARGO_PKG_VERSION"),"controlSchemaDigest":digest
         }});
         write
             .write_all(format!("{initialized}\n").as_bytes())
@@ -256,7 +256,7 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
                     break;
                 }
                 let result = if method == "control/initialize" {
-                    json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"serviceVersion":"0.1.37","controlSchemaDigest":digest})
+                    json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"serviceVersion":env!("CARGO_PKG_VERSION"),"controlSchemaDigest":digest})
                 } else {
                     json!({"serviceEpoch":epoch,"sequence":0,"endpoints":[{
                         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"Fixture Codex",
