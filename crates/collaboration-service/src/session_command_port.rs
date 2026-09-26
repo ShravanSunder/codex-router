@@ -2,8 +2,7 @@
 //!
 //! The Host supplies the implementation. This crate owns the interface so no
 //! front door needs to know the provider runtime or ACP SDK.
-use collaboration_protocol::EndpointRef;
-use message_board::{Identity, SessionRef};
+use message_board::{Identity, SessionEndpointRef, SessionRef};
 use std::{future::Future, path::PathBuf, pin::Pin};
 
 pub type CommandFuture<'a, T> =
@@ -27,7 +26,7 @@ pub struct SessionSettingsCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateSessionCommand {
-    pub endpoint: EndpointRef,
+    pub endpoint: SessionEndpointRef,
     pub working_directory: PathBuf,
     pub settings: SessionSettingsCommand,
     pub actor: Identity,
@@ -43,6 +42,7 @@ pub struct PromptSessionCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteerSessionCommand {
     pub target: SessionRef,
+    pub expected_turn_id: String,
     pub content: Vec<CommandContent>,
     pub actor: Identity,
 }
@@ -231,7 +231,7 @@ mod tests {
             "sessionId":"19e49a31-daa3-428c-b985-e0c7373a89ed"
         }))
         .expect("session reference");
-        let endpoint: EndpointRef = serde_json::from_value(serde_json::json!({
+        let endpoint: SessionEndpointRef = serde_json::from_value(serde_json::json!({
             "serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"claude-local"
         }))
         .expect("endpoint");
@@ -266,6 +266,7 @@ mod tests {
         .expect("prompt");
         port.steer(SteerSessionCommand {
             target: session.clone(),
+            expected_turn_id: "turn-1".into(),
             content: content.clone(),
             actor: actor.clone(),
         })

@@ -37,12 +37,19 @@ pub use provider_operation_store::{
 mod delivery_acceptance_effect;
 mod delivery_route_projection;
 pub use provider_session_record::ProviderSessionRecord;
+mod app_server_model_catalog;
 mod provider_conversation_backend;
+mod router_session_app_server;
 mod schedule_preparation_evidence_sink;
 mod scheduled_run_contract;
 mod scheduled_run_evidence_sink;
 mod scheduled_run_router;
 mod session_command_port;
+pub use app_server_model_catalog::{InvalidProviderModelEntry, ProviderModelEntry};
+pub use router_session_app_server::{
+    AppServerConnectionError, RouterSessionAppServerContext, RouterSessionAppServerListener,
+    serve_router_session_app_server_connection,
+};
 mod session_delivery_contract;
 mod session_delivery_router;
 mod session_event_hub;

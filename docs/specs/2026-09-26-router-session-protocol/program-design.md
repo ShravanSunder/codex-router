@@ -114,6 +114,7 @@ Accepted debt:
 **`SessionEventHub`**, owned by `collaboration-service`:
 - `attach(sessionId)` → (snapshot of events since load, receiver of later events). The snapshot and the subscription are taken atomically, so there is no gap and no duplicate (R25).
 - `state(sessionId)` → Session state (R19).
+- `sessions(endpoint)` → Router's own Session inventory for that provider endpoint: the same durable records that `agent-sessions` and `sessions list` show, with the hub's live state overlaid for loaded Sessions (unloaded otherwise). It never uses the agent's `session/list` and never relies on hub memory alone, which would come back empty after a Host restart. The app-server face answers `thread/list` from this, and nothing else. There is no face-local thread catalog. (Added 2026-09-26 during implementation. Source decided by the owner: "my list", one source of truth.)
 - Late subscribers receive pending approvals and questions again, as part of the snapshot (R25).
 
 **The session profile on the wire** (R20–R22). The codec is the only home of these names:

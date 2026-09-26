@@ -39,7 +39,7 @@ publish = false
 agent-client-protocol = "=2.2.0"
 croner = "=4.0.0"
 chrono-tz = "0.10.4"
-uuid = { version = "1.26.0", features = ["v7"] }
+uuid = { version = "1.26.0", features = ["v5", "v7"] }
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.6" }
 codex-native-integration = { path = "crates/codex-native-integration", version = "0.1.6" }
 codex-router-host = { path = "crates/codex-router-host", version = "0.1.6" }
