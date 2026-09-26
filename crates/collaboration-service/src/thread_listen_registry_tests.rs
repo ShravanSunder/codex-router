@@ -729,19 +729,18 @@ fn describe_record(record: &ListenDeliveryRecord) -> String {
 /// Two things paused time cannot do on its own. Auto-advance races task startup,
 /// so a single long sleep can jump the clock past the delivery task's first poll
 /// and leave its debounce window opening after the observation window closed.
-/// Storage calls behind a Batch set complete on a real background thread. An
-/// accepted Batch must reach durable progress before virtual time advances;
-/// cancellation exposes a failed delivery instead of leaving this driver parked.
+/// Storage calls behind a Batch set complete on a real background thread.
+/// Settle those calls and await accepted Batch progress before virtual time
+/// advances; cancellation exposes a failed delivery instead of parking here.
 async fn drive_session_delivery(
+    store: &Arc<Mutex<BoardStore>>,
     records: &Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
     minutes: u64,
     batch_progress: Option<(&tokio::sync::Notify, &tokio_util::sync::CancellationToken)>,
     settled: impl Fn(&[ListenDeliveryRecord]) -> bool,
 ) {
     let mut observed_batch_progress = false;
-    for _ in 0..32 {
-        tokio::task::yield_now().await;
-    }
+    settle_storage_work(store).await;
     for _ in 0..minutes {
         let seen = records.lock().await;
         let settled_now = settled(&seen);
@@ -763,15 +762,35 @@ async fn drive_session_delivery(
             // Finalization is published before the detached delivery task drops
             // its last store reference. Let that task finish so fixture cleanup
             // observes ownership rather than racing publication.
-            for _ in 0..32 {
-                tokio::task::yield_now().await;
-            }
+            settle_storage_work(store).await;
             return;
         }
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        settle_storage_work(store).await;
+    }
+}
+
+/// Waits in real time until no task is inside a storage call.
+///
+/// Every storage call holds the store lock until its SQLx worker replies, which
+/// can take milliseconds when SQLite syncs to disk. A fixed number of yields is
+/// not enough to cover that on every host. This task stays runnable while it
+/// waits, so the paused clock cannot auto-advance, and a free lock after a round
+/// of yields means the delivery tasks are parked on timers or channels rather
+/// than on storage.
+async fn settle_storage_work(store: &Arc<Mutex<BoardStore>>) {
+    let real_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }
+        if store.try_lock().is_ok() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < real_deadline,
+            "storage work did not settle within 10 real seconds"
+        );
     }
 }
 
@@ -808,6 +827,7 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
         }),
     );
     drive_session_delivery(
+        &fixture.store,
         &records,
         90,
         Some((&state.batch_progress_recorded, &state.cancellation)),
@@ -886,10 +906,12 @@ async fn delivery_driver_waits_for_durable_progress_after_sink_accepts_batch() {
         }),
     );
     let driver_records = Arc::clone(&records);
+    let driver_store = Arc::clone(&fixture.store);
     let driver_observed = Arc::clone(&observed);
     let driver_state = Arc::clone(&state);
     let mut driver = tokio::spawn(async move {
         drive_session_delivery(
+            &driver_store,
             &driver_records,
             30,
             Some((
@@ -941,11 +963,13 @@ async fn delivery_driver_waits_for_durable_progress_after_sink_accepts_batch() {
     let missing_progress = Arc::new(tokio::sync::Notify::new());
     let failure_observed = Arc::new(tokio::sync::Notify::new());
     let failure_records = Arc::clone(&records);
+    let failure_store = Arc::clone(&fixture.store);
     let failure_state = Arc::clone(&state);
     let failure_progress = Arc::clone(&missing_progress);
     let failure_started = Arc::clone(&failure_observed);
     let failure_driver = tokio::spawn(async move {
         drive_session_delivery(
+            &failure_store,
             &failure_records,
             5,
             Some((&failure_progress, &failure_state.cancellation)),
@@ -966,7 +990,7 @@ async fn delivery_driver_waits_for_durable_progress_after_sink_accepts_batch() {
     failure_driver
         .await
         .expect("cancellation should release a missing-progress wait");
-    drive_session_delivery(&records, 5, None, |seen| {
+    drive_session_delivery(&fixture.store, &records, 5, None, |seen| {
         matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
     })
     .await;
@@ -1019,6 +1043,7 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
         }),
     );
     drive_session_delivery(
+        &fixture.store,
         &records,
         30,
         Some((&state.batch_progress_recorded, &state.cancellation)),
@@ -1044,7 +1069,7 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
         .cancel(&listen.listen_id)
         .await
         .expect("cancel listen");
-    drive_session_delivery(&records, 5, None, |seen| {
+    drive_session_delivery(&fixture.store, &records, 5, None, |seen| {
         matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
     })
     .await;

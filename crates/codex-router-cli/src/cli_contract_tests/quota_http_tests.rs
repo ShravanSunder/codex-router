@@ -81,8 +81,11 @@ fn quota_refresh_http_provider_fetches_usage_and_persists_sqlite_state() {
             } else {
                 r#"{"reset_credits":{"available":1}}"#
             };
+            // The mock serves one request per connection, so it must tell the
+            // client not to pool it; otherwise the follow-up request can race
+            // the close and fail with "error sending request".
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             if let Err(error) = stream.write_all(response.as_bytes()) {
