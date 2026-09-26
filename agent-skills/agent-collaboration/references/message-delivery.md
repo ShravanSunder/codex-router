@@ -23,7 +23,7 @@ Router picks the route from the target. The receipt's `reachability` names the r
 | Codex app-server | Steer an active turn or start one, as native evidence allows | Native queue behavior | Native steer behavior |
 | Router-managed Claude ACP | Steer a running turn or start when idle | Queue, starting at once when idle | Steer a running turn; otherwise `notSubmitted` |
 | Router-managed Cursor ACP | Start when idle or queue while busy | Queue, starting at once when idle | `rejected`: unsupported |
-| Live Claude Code peer | `peerMessageWritten`; the session may still hold or drop it | `rejected`: unsupported | `peerMessageWritten` in any live status, the same as `auto` |
+| Live Claude Code peer | `peerMessageWritten`; the receiver's inbound setting decides delivery (see below) | `rejected`: unsupported | `peerMessageWritten` in any live status, the same as `auto` |
 
 A message queued in Router for a Claude or Cursor session is lost if the Host restarts before it runs.
 
@@ -33,7 +33,11 @@ Use the exact `claude-local` SessionRef. The message arrives with its origin and
 
 The receiving session decides what happens to the message after the write, and Router never learns the result:
 
-- Its `crossSessionInbound` setting (`accept`, `hold`, or `refuse`) applies. When unset, a session that prompts for permissions (`default`, `auto`, `acceptEdits`, `dontAsk`) delivers the message, and a session in `bypassPermissions` holds it behind an approval dialog that drops it after about five minutes.
+- Its effective `crossSessionInbound` setting decides: `accept` delivers, `hold` shows an approval dialog, and `refuse` drops the message.
+  - This owner's machines set `crossSessionInbound: accept` in user settings, so every local session delivers messages, including sessions in `bypassPermissions`.
+  - A project or local settings file can only make it stricter.
+  - A session started before a settings change may still use the value it loaded; if messages to it are held, that session needs a restart.
+  - Without the setting, Claude Code's default applies: a session that prompts for permissions (`default`, `auto`, `acceptEdits`, `dontAsk`) delivers, and a session in `bypassPermissions` holds the message behind an approval dialog that drops it after about five minutes.
 - It throttles each sender: identical repeats in a short window are dropped, a rapid burst is refused, and at most 50 accepted messages wait to be read.
 - It reaches only sessions on the same machine and the same home directory; containers and WSL are separate.
 
