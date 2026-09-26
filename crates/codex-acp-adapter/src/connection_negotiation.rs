@@ -1,6 +1,9 @@
 //! ACP version negotiation for the complete Codex conversation dispatcher.
 use crate::{AcpSchemaCatalog, AcpSchemaError};
 use serde_json::{Value, json};
+use session_event_model::session_profile_codec::{
+    InitializeProfileMetadata, ProfileAdvertisement, ProfileElement,
+};
 
 #[derive(Default)]
 pub struct AcpNegotiation {
@@ -55,7 +58,10 @@ impl AcpNegotiation {
                 "sessionCapabilities":{"list":{}}
             },
             "authMethods":[],
-            "agentInfo":{"name":"codex-router","title":"Codex Router ACP","version":env!("CARGO_PKG_VERSION")}
+            "agentInfo":{"name":"codex-router","title":"Codex Router ACP","version":env!("CARGO_PKG_VERSION")},
+            "_meta":InitializeProfileMetadata::new(ProfileAdvertisement::new([
+                ProfileElement::Identity, ProfileElement::Capabilities, ProfileElement::State,
+            ]))
         });
         if !catalog.validate("InitializeResponse", &result)? {
             return Err(AcpNegotiationError::InvalidParameters);

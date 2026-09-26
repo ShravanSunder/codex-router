@@ -19,6 +19,7 @@ pub(super) struct ScriptedSessionBackend {
     pub(super) durable_inventory: Mutex<Vec<HubSessionSummary>>,
     pub(super) live_states: Mutex<HashMap<SessionRef, SessionState>>,
     pub(super) create_commands: Mutex<Vec<CreateSessionCommand>>,
+    pub(super) load_commands: Mutex<Vec<SessionTargetCommand>>,
     pub(super) prompt_commands: Mutex<Vec<PromptSessionCommand>>,
     pub(super) steer_commands: Mutex<Vec<SteerSessionCommand>>,
     pub(super) cancel_commands: Mutex<Vec<SessionTargetCommand>>,
@@ -43,6 +44,7 @@ impl ScriptedSessionBackend {
             durable_inventory: Mutex::new(Vec::new()),
             live_states: Mutex::new(HashMap::new()),
             create_commands: Mutex::new(Vec::new()),
+            load_commands: Mutex::new(Vec::new()),
             prompt_commands: Mutex::new(Vec::new()),
             steer_commands: Mutex::new(Vec::new()),
             cancel_commands: Mutex::new(Vec::new()),
@@ -81,6 +83,17 @@ impl SessionCommandPort for ScriptedSessionBackend {
         self.created.notify_one();
         let session = self.session.clone();
         Box::pin(async move { Ok(session) })
+    }
+    fn load_session(&self, command: SessionTargetCommand) -> CommandFuture<'_, ()> {
+        self.load_commands.lock().expect("test lock").push(command);
+        self.live_states
+            .lock()
+            .expect("test lock")
+            .insert(self.session.clone(), SessionState::Idle);
+        Box::pin(async { Ok(()) })
+    }
+    fn resume_session(&self, _: SessionTargetCommand) -> CommandFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
     }
     fn prompt(&self, command: PromptSessionCommand) -> CommandFuture<'_, SessionTurnHandle> {
         self.prompt_commands

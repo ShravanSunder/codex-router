@@ -8,6 +8,7 @@ mod assistant_text_projection;
 mod connection_negotiation;
 mod conversation_operation_recorder;
 mod history_projection;
+mod lazy_codex_session_route;
 mod mcp_configuration;
 mod native_prompt_execution;
 mod permission_address;
@@ -20,7 +21,9 @@ mod session_connection_registry;
 mod session_creation;
 mod stored_session_listing;
 pub use acp_connection_dispatch::{AcpConnectionInputs, AcpStoredSessions, serve_acp_connection};
-pub use acp_connection_router::{AcpRouteFuture, AcpSessionRoute, serve_acp_router_connection};
+pub use acp_connection_router::{
+    AcpConnectionContext, AcpRouteFuture, AcpSessionRoute, serve_acp_router_connection,
+};
 pub use acp_connection_transport::{
     AcpRouterChannels, AcpWireChannels, acp_connection_channels, run_acp_transport,
 };
@@ -29,6 +32,7 @@ pub use approval_broker::{
     ApprovalBroker, ApprovalBrokerError, ApprovalRoute, BrokeredApprovalOutcome,
     BrokeredApprovalRequest, RejectingApprovalBroker,
 };
+pub use lazy_codex_session_route::{CodexAdmissionSource, lazy_codex_session_route};
 pub use prompt_connection_task::{
     PromptCommand, PromptTaskCompletion, PromptTaskInputs, run_prompt_task,
 };

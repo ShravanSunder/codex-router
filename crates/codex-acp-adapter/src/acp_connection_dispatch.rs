@@ -1,13 +1,12 @@
 //! ACP connection routing over bounded carriers and one shared native backend.
 use crate::session_setup_task::{SetupTaskInputs, SetupTaskOutput, run_session_setup};
 use crate::{
-    AcpRouteFuture, AcpRouterChannels, AcpSchemaCatalog, AcpSessionRegistry, AcpSessionRoute,
-    ConversationOperationRecorder, HeldBindingCheckout, UnmaterializedBindingStore,
-    serve_acp_router_connection,
+    AcpConnectionContext, AcpRouteFuture, AcpRouterChannels, AcpSchemaCatalog, AcpSessionRegistry,
+    AcpSessionRoute, ConversationOperationRecorder, HeldBindingCheckout,
+    UnmaterializedBindingStore, serve_acp_router_connection,
 };
 use codex_native_integration::NativePayloadSchemas;
 use collaboration_protocol::{CodexGeneration, OperationId};
-use message_board::Identity;
 use serde_json::{Value, json};
 use std::{future::Future, io, path::PathBuf, pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -43,12 +42,16 @@ impl AcpSessionRoute for CodexAcpSessionRoute {
         "codex-local"
     }
 
-    fn run(self: Box<Self>, router: AcpRouterChannels, _actor: Option<Identity>) -> AcpRouteFuture {
+    fn run(
+        self: Box<Self>,
+        router: AcpRouterChannels,
+        _context: AcpConnectionContext,
+    ) -> AcpRouteFuture {
         Box::pin(route_codex_sessions(router, self.inputs))
     }
 }
 
-async fn route_codex_sessions(
+pub(crate) async fn route_codex_sessions(
     mut router: AcpRouterChannels,
     inputs: AcpConnectionInputs,
 ) -> io::Result<()> {

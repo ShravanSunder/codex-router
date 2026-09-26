@@ -5,6 +5,7 @@ use crate::{
 };
 use message_board::Identity;
 use serde_json::{Value, json};
+use session_event_model::session_profile_codec::ProfileAdvertisement;
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -34,7 +35,17 @@ enum RouteOutput {
 /// connection shell owns transport, initialize, actor identity, and routing.
 pub trait AcpSessionRoute: Send {
     fn endpoint_id(&self) -> &str;
-    fn run(self: Box<Self>, router: AcpRouterChannels, actor: Option<Identity>) -> AcpRouteFuture;
+    fn run(
+        self: Box<Self>,
+        router: AcpRouterChannels,
+        context: AcpConnectionContext,
+    ) -> AcpRouteFuture;
+}
+
+#[derive(Clone)]
+pub struct AcpConnectionContext {
+    pub actor: Option<Identity>,
+    pub client_profile: Option<ProfileAdvertisement>,
 }
 
 fn rpc_error(id: Value, code: i32, message: &'static str) -> Value {
@@ -42,7 +53,7 @@ fn rpc_error(id: Value, code: i32, message: &'static str) -> Value {
 }
 
 fn selected_endpoint(method: &str, params: &Value, sessions: &BTreeMap<String, String>) -> String {
-    if method == "session/new" {
+    if matches!(method, "session/new" | "session/list") {
         return params
             .pointer("/_meta/router/endpoint")
             .and_then(Value::as_str)
@@ -174,6 +185,11 @@ pub async fn serve_acp_router_connection<
                         let initialized = response.get("result").is_some();
                         connection.output.send(response).await?;
                         if initialized && let Some(routes) = unused_routes.take() {
+                            let context = AcpConnectionContext {
+                                actor,
+                                client_profile: params.pointer("/_meta/sessionProfile")
+                                    .and_then(|profile| serde_json::from_value(profile.clone()).ok()),
+                            };
                             for route in routes {
                                 let endpoint = route.endpoint_id().to_owned();
                                 let (input_sender, input_receiver) =
@@ -187,7 +203,7 @@ pub async fn serve_acp_router_connection<
                                 };
                                 let output = route_output_sender.clone();
                                 let route_endpoint = endpoint.clone();
-                                let route_actor = actor.clone();
+                                let route_context = context.clone();
                                 route_tasks.spawn(async move {
                                     let forward = async {
                                         while let Some(frame) = output_receiver.recv().await {
@@ -201,7 +217,7 @@ pub async fn serve_acp_router_connection<
                                         Ok(())
                                     };
                                     let (route_result, forward_result) =
-                                        tokio::join!(route.run(route_channels, route_actor), forward);
+                                        tokio::join!(route.run(route_channels, route_context), forward);
                                     let result = route_result.and(forward_result);
                                     let _sent = output.send(RouteOutput::Closed {
                                         endpoint: route_endpoint, result,

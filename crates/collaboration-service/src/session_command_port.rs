@@ -94,6 +94,8 @@ pub enum CommandFailure {
     SessionNotFound,
     #[error("operation is unsupported")]
     Unsupported,
+    #[error("operation is unsupported: {operation}")]
+    UnsupportedOperation { operation: &'static str },
     #[error("session is busy")]
     Busy,
     #[error("session settings are unresolved")]
@@ -112,6 +114,10 @@ pub enum CommandFailure {
 /// Read-side history and live events belong to the session event hub.
 pub trait SessionCommandPort: Send + Sync {
     fn create(&self, command: CreateSessionCommand) -> CommandFuture<'_, SessionRef>;
+    /// Activates a stored Session after resetting the hub's replay epoch.
+    fn load_session(&self, command: SessionTargetCommand) -> CommandFuture<'_, ()>;
+    /// Activates a stored Session without historical replay.
+    fn resume_session(&self, command: SessionTargetCommand) -> CommandFuture<'_, ()>;
     fn prompt(&self, command: PromptSessionCommand) -> CommandFuture<'_, SessionTurnHandle>;
     fn steer(&self, command: SteerSessionCommand) -> CommandFuture<'_, SessionSteerOutcome>;
     fn queue_add(&self, command: QueueInputCommand) -> CommandFuture<'_, QueuedSessionInput>;
@@ -137,6 +143,8 @@ mod tests {
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum RecordedCommand {
         Create(CreateSessionCommand),
+        Load(SessionTargetCommand),
+        Resume(SessionTargetCommand),
         Prompt(PromptSessionCommand),
         Steer(SteerSessionCommand),
         QueueAdd(QueueInputCommand),
@@ -165,6 +173,14 @@ mod tests {
             self.record(RecordedCommand::Create(command));
             let session = self.created_session.clone();
             Box::pin(async move { Ok(session) })
+        }
+        fn load_session(&self, command: SessionTargetCommand) -> CommandFuture<'_, ()> {
+            self.record(RecordedCommand::Load(command));
+            Box::pin(async { Ok(()) })
+        }
+        fn resume_session(&self, command: SessionTargetCommand) -> CommandFuture<'_, ()> {
+            self.record(RecordedCommand::Resume(command));
+            Box::pin(async { Ok(()) })
         }
         fn prompt(&self, command: PromptSessionCommand) -> CommandFuture<'_, SessionTurnHandle> {
             self.record(RecordedCommand::Prompt(command));
@@ -264,6 +280,8 @@ mod tests {
         })
         .await
         .expect("prompt");
+        port.load_session(target.clone()).await.expect("load");
+        port.resume_session(target.clone()).await.expect("resume");
         port.steer(SteerSessionCommand {
             target: session.clone(),
             expected_turn_id: "turn-1".into(),
@@ -295,13 +313,15 @@ mod tests {
         .expect("set setting");
 
         let recorded = recorded.lock().expect("test lock");
-        assert_eq!(recorded.len(), 9);
+        assert_eq!(recorded.len(), 11);
         assert!(recorded.iter().all(|command| match command {
             RecordedCommand::Create(command) => command.actor == actor,
             RecordedCommand::Prompt(command) => command.actor == actor,
             RecordedCommand::Steer(command) => command.actor == actor,
             RecordedCommand::QueueAdd(command) => command.actor == actor,
-            RecordedCommand::QueueList(command)
+            RecordedCommand::Load(command)
+            | RecordedCommand::Resume(command)
+            | RecordedCommand::QueueList(command)
             | RecordedCommand::QueueCancel(command, _)
             | RecordedCommand::Cancel(command)
             | RecordedCommand::Close(command) => command.actor == actor,

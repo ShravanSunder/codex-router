@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 message-board = { path = "../message-board", version = "0.1.20" }
+session-event-model = { path = "../session-event-model" }
 base64.workspace = true
 chrono.workspace = true
 sqlx.workspace = true

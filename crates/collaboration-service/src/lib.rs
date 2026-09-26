@@ -55,6 +55,8 @@ mod app_server_interaction_translation_tests;
 #[cfg(test)]
 #[path = "app_server_item_translation_tests.rs"]
 mod app_server_item_translation_tests;
+mod provider_acp_event_projection;
+mod provider_acp_session_route;
 mod provider_conversation_backend;
 mod router_session_app_server;
 mod schedule_preparation_evidence_sink;
@@ -72,6 +74,7 @@ mod session_delivery_router;
 mod stored_delivery_receipt;
 mod stored_run_receipt;
 pub use collaboration_protocol::{DeliveryClientReceipt, DeliveryReceipt};
+pub use provider_acp_session_route::ProviderAcpSessionRoute;
 pub use provider_conversation_backend::{ProviderConversationBackend, ProviderConversationFuture};
 pub use scheduled_run_contract::{
     FreshSessionRequest, NativeTurnRef, PreparationEvidenceSink, PreparedTarget, RunAcceptance,

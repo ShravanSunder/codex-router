@@ -226,6 +226,44 @@ async fn durable_unloaded_session_has_a_stable_uuid_alias() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn thread_resume_loads_an_unloaded_provider_session() -> Result<(), Box<dyn std::error::Error>>
+{
+    let backend = ScriptedSessionBackend::new()?;
+    backend
+        .durable_inventory
+        .lock()
+        .expect("test lock")
+        .push(HubSessionSummary {
+            session: backend.session.clone(),
+            working_directory: PathBuf::from("/tmp"),
+            updated_at_seconds: 1_700_000_000,
+            preview: String::new(),
+            name: None,
+            model: None,
+            state: SessionState::Unloaded,
+        });
+    let actor = ScriptedSessionBackend::actor()?;
+    let resumed = handle_app_server_thread_request(
+        "thread/resume",
+        json!({"threadId":backend.session.session_id.as_str()}),
+        Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
+        Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        backend.endpoint.clone(),
+        actor.clone(),
+    )
+    .await?;
+    assert_eq!(resumed["thread"]["status"]["type"], "idle");
+    assert_eq!(
+        backend.load_commands.lock().expect("test lock").as_slice(),
+        &[SessionTargetCommand {
+            target: backend.session.clone(),
+            actor
+        }]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn ephemeral_start_never_reaches_the_provider() -> Result<(), Box<dyn std::error::Error>> {
     let backend = ScriptedSessionBackend::new()?;
     let result = handle_app_server_thread_request(

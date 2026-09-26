@@ -347,7 +347,7 @@ async fn handle_app_server_thread_request(
                 .get("threadId")
                 .and_then(Value::as_str)
                 .ok_or(ThreadMethodError::InvalidParams)?;
-            let summary = events
+            let mut summary = events
                 .sessions(endpoint)
                 .await
                 .map_err(|_| ThreadMethodError::Unavailable)?
@@ -355,6 +355,25 @@ async fn handle_app_server_thread_request(
                 .find(|summary| thread_alias(&summary.session) == thread_id)
                 .ok_or(ThreadMethodError::NotFound)?;
             if method == "thread/resume" {
+                if summary.state == session_event_model::SessionState::Unloaded {
+                    commands
+                        .load_session(SessionTargetCommand {
+                            target: summary.session.clone(),
+                            actor,
+                        })
+                        .await
+                        .map_err(|error| match error {
+                            crate::CommandFailure::SessionNotFound => ThreadMethodError::NotFound,
+                            _ => ThreadMethodError::Unavailable,
+                        })?;
+                    summary = events
+                        .sessions(summary.session.endpoint.clone())
+                        .await
+                        .map_err(|_| ThreadMethodError::Unavailable)?
+                        .into_iter()
+                        .find(|current| current.session == summary.session)
+                        .ok_or(ThreadMethodError::NotFound)?;
+                }
                 let _attachment =
                     events
                         .attach(summary.session.clone())
