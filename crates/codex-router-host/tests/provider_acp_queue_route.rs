@@ -176,6 +176,7 @@ async fn idle_explicit_queue_is_accepted_and_drains_for_both_providers() {
             .expect("endpoint");
         let route = ProviderAcpDeliveryRoute::new(
             service_id,
+            std::iter::once(target.endpoint.clone()).collect(),
             directory,
             Arc::clone(&supervisor),
             store,

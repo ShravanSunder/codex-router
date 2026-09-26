@@ -28,7 +28,7 @@ use collaboration_service::{
     SessionDeliveryRoute,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex as StdMutex},
 };
 use tokio::sync::Mutex;
@@ -47,6 +47,7 @@ impl ProviderAcpDeliveryRoute {
     #[must_use]
     pub fn new(
         service_id: UuidIdentity,
+        provider_endpoints: HashSet<collaboration_protocol::EndpointRef>,
         directory: EndpointDirectory,
         supervisor: Arc<ExternalProviderSupervisor>,
         store: Arc<Mutex<ProviderOperationStore>>,
@@ -54,6 +55,7 @@ impl ProviderAcpDeliveryRoute {
     ) -> Self {
         let claim = ProviderAcpRouteClaim::new(
             service_id.clone(),
+            provider_endpoints,
             directory,
             Arc::clone(&supervisor),
             Arc::clone(&store),
@@ -91,8 +93,7 @@ impl ProviderAcpDeliveryRoute {
     }
 
     fn serves(&self, target: &SessionRef) -> bool {
-        target.endpoint.service_id == self.service_id
-            && self.supervisor.binding(&target.endpoint).is_some()
+        self.claim.serves(target)
     }
 
     fn receipt(outcome: DeliveryOutcome, operation_id: Option<OperationId>) -> DeliveryReceipt {

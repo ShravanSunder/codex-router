@@ -189,6 +189,7 @@ async fn prepared_route(
         .expect("endpoint");
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         directory,
         Arc::clone(&supervisor),
         store,

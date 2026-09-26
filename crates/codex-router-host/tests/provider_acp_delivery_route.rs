@@ -274,6 +274,7 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
     );
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         store,
@@ -354,6 +355,7 @@ async fn cursor_auto_queues_behind_a_running_prompt() {
     let directory = available_directory(&target, &binding);
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         directory,
         Arc::clone(&supervisor),
         store,
@@ -436,6 +438,7 @@ async fn router_queued_reconciliation_uses_only_the_operation_store() {
     );
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         EndpointDirectory::new(target.endpoint.service_id.clone()),
         supervisor,
         Arc::clone(&store),
@@ -554,6 +557,7 @@ async fn provider_load_auth_rejection_is_typed_without_session_new() {
     );
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         store,
@@ -624,6 +628,7 @@ async fn unadvertised_load_settles_not_submitted_without_sending_load() {
     );
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         store,
@@ -696,6 +701,7 @@ async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text
         );
         let route = ProviderAcpDeliveryRoute::new(
             target.endpoint.service_id.clone(),
+            std::iter::once(target.endpoint.clone()).collect(),
             available_directory(&target, &binding),
             Arc::clone(&supervisor),
             store,
@@ -786,6 +792,7 @@ async fn provider_process_transport_failure_remains_retryable() {
     .expect("provider exit marker deadline");
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         store,
@@ -862,6 +869,7 @@ async fn live_peer_recheck_prevents_provider_load() {
     );
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         store,

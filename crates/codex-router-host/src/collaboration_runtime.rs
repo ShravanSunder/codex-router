@@ -314,6 +314,11 @@ impl CollaborationRuntime {
         .await?;
         let provider_retirements = startup.retirements;
         let external_provider_supervisor = startup.supervisor;
+        let provider_endpoints = startup
+            .endpoints
+            .iter()
+            .map(|description| description.endpoint.clone())
+            .collect();
         if !startup.endpoints.is_empty() {
             identity = identity
                 .with_endpoints(startup.endpoints)
@@ -352,7 +357,7 @@ impl CollaborationRuntime {
             std::sync::Arc::new(collaboration_service::UnmaterializedThreadHolder::new());
         let message_routes =
             crate::session_message_route_composition::compose_session_message_routes(
-                service_id.clone(),
+                provider_endpoints,
                 identity.endpoint_directory(),
                 native_backend.clone(),
                 std::sync::Arc::clone(&unmaterialized_threads),

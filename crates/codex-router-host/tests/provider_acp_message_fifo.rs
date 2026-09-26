@@ -66,6 +66,7 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
     );
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         Arc::clone(&store),
@@ -246,6 +247,7 @@ async fn permanent_queued_load_failure_is_inspectable_and_does_not_stop_fifo() {
     );
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         store,
@@ -398,6 +400,7 @@ async fn failed_queued_prompt_advances_to_the_next_accepted_item() {
     assert_eq!(&active_bytes, b"active");
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         Arc::clone(&store),
@@ -567,6 +570,7 @@ async fn provider_retirement_marks_queued_items_not_submitted() {
     );
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         store,

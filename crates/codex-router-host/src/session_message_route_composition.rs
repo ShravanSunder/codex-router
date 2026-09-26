@@ -1,12 +1,12 @@
 //! Compose client-specific message routes behind one Host-owned router.
 use crate::{ClaudeCodePeerDeliveryRoute, ExternalProviderSupervisor, ProviderAcpDeliveryRoute};
 use claude_code_peer_messaging::{ClaudeCodePeerSocket, ClaudeCodeSessionRegistry};
-use collaboration_protocol::{EndpointId, EndpointRef, UuidIdentity};
+use collaboration_protocol::{EndpointId, EndpointRef};
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, ProviderOperationStore, SessionDeliveryRoute,
     SessionDeliveryRouter,
 };
-use std::{io, path::PathBuf, sync::Arc};
+use std::{collections::HashSet, io, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 pub(crate) struct SessionMessageRouteComposition {
@@ -15,7 +15,7 @@ pub(crate) struct SessionMessageRouteComposition {
 }
 
 pub(crate) fn compose_session_message_routes(
-    service_id: UuidIdentity,
+    provider_endpoints: HashSet<EndpointRef>,
     directory: EndpointDirectory,
     native_backend: NativeControlBackend,
     unmaterialized_threads: Arc<collaboration_service::UnmaterializedThreadHolder>,
@@ -23,6 +23,7 @@ pub(crate) fn compose_session_message_routes(
     provider_store: Option<Arc<Mutex<ProviderOperationStore>>>,
     peer_registry_directory: PathBuf,
 ) -> io::Result<SessionMessageRouteComposition> {
+    let service_id = native_backend.endpoint.service_id.clone();
     let codex_route: Arc<dyn SessionDeliveryRoute> =
         Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(
             service_id.clone(),
@@ -46,6 +47,7 @@ pub(crate) fn compose_session_message_routes(
         (Some(supervisor), Some(store)) => {
             let route = Arc::new(ProviderAcpDeliveryRoute::new(
                 service_id,
+                provider_endpoints,
                 directory,
                 supervisor,
                 store,
