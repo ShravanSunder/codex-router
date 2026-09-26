@@ -30,6 +30,7 @@ fn requires_action_cannot_start_with_an_empty_pending_set() {
     assert!(PendingInteractions::new(vec![]).is_none());
     let request: PendingInteraction = serde_json::from_value(serde_json::json!({
         "kind":"approval",
+        "approver":{"kind":"human","humanId":"owner"},
         "request":{"requestId":"request-1","title":"Run command","options":[
             {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}}
         ]}

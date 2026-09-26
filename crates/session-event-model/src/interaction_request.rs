@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use message_board::Identity;
 use serde::{Deserialize, Serialize};
 
 use crate::{ApprovalChoice, InteractionKind};
@@ -244,16 +245,22 @@ pub struct QuestionRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum PendingInteraction {
-    Approval { request: ApprovalRequest },
-    Question { request: QuestionRequest },
+    Approval {
+        approver: Identity,
+        request: ApprovalRequest,
+    },
+    Question {
+        approver: Identity,
+        request: QuestionRequest,
+    },
 }
 
 impl PendingInteraction {
     #[must_use]
     pub fn request_id(&self) -> &str {
         match self {
-            Self::Approval { request } => &request.request_id,
-            Self::Question { request } => &request.request_id,
+            Self::Approval { request, .. } => &request.request_id,
+            Self::Question { request, .. } => &request.request_id,
         }
     }
 
@@ -262,6 +269,13 @@ impl PendingInteraction {
         match self {
             Self::Approval { .. } => InteractionKind::Approval,
             Self::Question { .. } => InteractionKind::Question,
+        }
+    }
+
+    #[must_use]
+    pub fn approver(&self) -> &Identity {
+        match self {
+            Self::Approval { approver, .. } | Self::Question { approver, .. } => approver,
         }
     }
 }
