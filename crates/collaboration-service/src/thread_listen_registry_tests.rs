@@ -729,18 +729,37 @@ fn describe_record(record: &ListenDeliveryRecord) -> String {
 /// Two things paused time cannot do on its own. Auto-advance races task startup,
 /// so a single long sleep can jump the clock past the delivery task's first poll
 /// and leave its debounce window opening after the observation window closed.
-/// And the storage calls behind a Batch set complete on a background thread the
-/// paused clock cannot advance, so each step yields repeatedly instead of once.
+/// Storage calls behind a Batch set complete on a real background thread. An
+/// accepted Batch must reach durable progress before virtual time advances;
+/// cancellation exposes a failed delivery instead of leaving this driver parked.
 async fn drive_session_delivery(
     records: &Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
     minutes: u64,
+    batch_progress: Option<(&tokio::sync::Notify, &tokio_util::sync::CancellationToken)>,
     settled: impl Fn(&[ListenDeliveryRecord]) -> bool,
 ) {
+    let mut observed_batch_progress = false;
     for _ in 0..32 {
         tokio::task::yield_now().await;
     }
     for _ in 0..minutes {
-        if settled(&records.lock().await) {
+        let seen = records.lock().await;
+        let settled_now = settled(&seen);
+        let accepted_batch_seen = seen
+            .iter()
+            .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)));
+        drop(seen);
+        if accepted_batch_seen && !observed_batch_progress {
+            if let Some((progress, cancellation)) = batch_progress {
+                tokio::select! {
+                    biased;
+                    () = progress.notified() => {}
+                    () = cancellation.cancelled() => return,
+                }
+            }
+            observed_batch_progress = true;
+        }
+        if settled_now {
             // Finalization is published before the detached delivery task drops
             // its last store reference. Let that task finish so fixture cleanup
             // observes ownership rather than racing publication.
@@ -771,6 +790,7 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
         .await;
     fixture.reply("Rejected activity").await;
     let records = Arc::new(TokioMutex::new(Vec::new()));
+    let state = registry.state(&listen.listen_id).await.unwrap();
 
     // Act.
     registry.spawn_session_delivery(
@@ -787,9 +807,12 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
             heartbeat_rejected: Arc::new(tokio::sync::Notify::new()),
         }),
     );
-    drive_session_delivery(&records, 90, |seen| {
-        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
-    })
+    drive_session_delivery(
+        &records,
+        90,
+        Some((&state.batch_progress_recorded, &state.cancellation)),
+        |seen| matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_))),
+    )
     .await;
 
     // Assert: the listen reached its lifetime instead of failing, and the
@@ -808,6 +831,146 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
 struct RetryOnceSink {
     records: Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
     attempts: Arc<std::sync::atomic::AtomicU8>,
+}
+
+struct HeldAcceptedBatchSink {
+    records: Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
+    accepted: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl BatchSink for HeldAcceptedBatchSink {
+    fn deliver<'a>(
+        &'a self,
+        record: ListenDeliveryRecord,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), BatchSinkFailure>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let is_batch = matches!(record, ListenDeliveryRecord::Batch(_));
+            self.records.lock().await.push(record);
+            if is_batch {
+                self.accepted.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn delivery_driver_waits_for_durable_progress_after_sink_accepts_batch() {
+    let fixture = ListenFixture::create("held-accepted-batch").await;
+    let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
+    let listen = fixture
+        .register_session_delivery(
+            &registry,
+            ThreadListenMode::Repeating {
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
+            },
+        )
+        .await;
+    fixture.reply("Accepted before persistence").await;
+    let state = registry.state(&listen.listen_id).await.unwrap();
+    let records = Arc::new(TokioMutex::new(Vec::new()));
+    let accepted = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let observed = Arc::new(tokio::sync::Notify::new());
+    registry.spawn_session_delivery(
+        listen.listen_id.clone(),
+        Arc::clone(&fixture.store),
+        Arc::new(HeldAcceptedBatchSink {
+            records: Arc::clone(&records),
+            accepted: Arc::clone(&accepted),
+            release: Arc::clone(&release),
+        }),
+    );
+    let driver_records = Arc::clone(&records);
+    let driver_observed = Arc::clone(&observed);
+    let driver_state = Arc::clone(&state);
+    let mut driver = tokio::spawn(async move {
+        drive_session_delivery(
+            &driver_records,
+            30,
+            Some((
+                &driver_state.batch_progress_recorded,
+                &driver_state.cancellation,
+            )),
+            |seen| {
+                let has_batch = seen
+                    .iter()
+                    .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)));
+                if has_batch {
+                    driver_observed.notify_one();
+                }
+                has_batch
+            },
+        )
+        .await;
+    });
+    accepted.notified().await;
+    observed.notified().await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(1), &mut driver)
+            .await
+            .is_err(),
+        "a sink record must not settle delivery before its SQLite position write"
+    );
+    assert_eq!(
+        registry
+            .show(&listen.listen_id)
+            .await
+            .unwrap()
+            .batches_delivered,
+        0
+    );
+    release.notify_one();
+    driver
+        .await
+        .expect("delivery driver should finish after persistence");
+    assert_eq!(
+        registry
+            .show(&listen.listen_id)
+            .await
+            .unwrap()
+            .batches_delivered,
+        1
+    );
+    // The same wait must also end if delivery terminates without another
+    // durable Batch, as it does after a position-persistence failure.
+    let missing_progress = Arc::new(tokio::sync::Notify::new());
+    let failure_observed = Arc::new(tokio::sync::Notify::new());
+    let failure_records = Arc::clone(&records);
+    let failure_state = Arc::clone(&state);
+    let failure_progress = Arc::clone(&missing_progress);
+    let failure_started = Arc::clone(&failure_observed);
+    let failure_driver = tokio::spawn(async move {
+        drive_session_delivery(
+            &failure_records,
+            5,
+            Some((&failure_progress, &failure_state.cancellation)),
+            |seen| {
+                let has_batch = seen
+                    .iter()
+                    .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)));
+                if has_batch {
+                    failure_started.notify_one();
+                }
+                has_batch
+            },
+        )
+        .await;
+    });
+    failure_observed.notified().await;
+    registry.cancel(&listen.listen_id).await.unwrap();
+    failure_driver
+        .await
+        .expect("cancellation should release a missing-progress wait");
+    drive_session_delivery(&records, 5, None, |seen| {
+        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
+    })
+    .await;
+    fixture.finish().await;
 }
 
 impl BatchSink for RetryOnceSink {
@@ -845,6 +1008,7 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
     fixture.reply("Retry this provider push").await;
     let records = Arc::new(TokioMutex::new(Vec::new()));
     let attempts = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let state = registry.state(&listen.listen_id).await.unwrap();
 
     registry.spawn_session_delivery(
         listen.listen_id.clone(),
@@ -854,26 +1018,21 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
             attempts: Arc::clone(&attempts),
         }),
     );
-    drive_session_delivery(&records, 30, |seen| {
-        seen.iter()
-            .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)))
-    })
+    drive_session_delivery(
+        &records,
+        30,
+        Some((&state.batch_progress_recorded, &state.cancellation)),
+        |seen| {
+            seen.iter()
+                .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)))
+        },
+    )
     .await;
 
-    let mut snapshot = registry
+    let snapshot = registry
         .show(&listen.listen_id)
         .await
         .expect("retrying listen remains active");
-    for _ in 0..1_000 {
-        if snapshot.batches_delivered >= 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-        snapshot = registry
-            .show(&listen.listen_id)
-            .await
-            .expect("retrying listen remains active");
-    }
     assert_eq!(attempts.load(Ordering::Relaxed), 2);
     assert_eq!(snapshot.batches_delivered, 1);
     assert!(records.lock().await.iter().any(|record| matches!(
@@ -885,7 +1044,7 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
         .cancel(&listen.listen_id)
         .await
         .expect("cancel listen");
-    drive_session_delivery(&records, 5, |seen| {
+    drive_session_delivery(&records, 5, None, |seen| {
         matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
     })
     .await;

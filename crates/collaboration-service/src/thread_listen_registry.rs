@@ -33,6 +33,8 @@ struct ThreadListenState {
     last_rejection: std::sync::Mutex<Value>,
     #[cfg(test)]
     debounce_armed: tokio::sync::Notify,
+    #[cfg(test)]
+    batch_progress_recorded: tokio::sync::Notify,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -158,6 +160,8 @@ impl ThreadListenRegistry {
             last_rejection: std::sync::Mutex::new(Value::Null),
             #[cfg(test)]
             debounce_armed: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            batch_progress_recorded: tokio::sync::Notify::new(),
             _permit: permit,
         });
         let snapshot = state.snapshot(listen_id.clone());
@@ -454,6 +458,8 @@ fn record_batch_progress(state: &ThreadListenState, batch_set: &ThreadListenBatc
         state.last_sequence.store(last, Ordering::Relaxed);
     }
     state.batches_delivered.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    state.batch_progress_recorded.notify_one();
 }
 
 fn record_rejection(
