@@ -164,3 +164,8 @@ mod board_request_dispatch;
 mod board_request_validation;
 mod thread_listen_dispatch;
 mod thread_listen_registry;
+mod session_event_hub;
+pub use session_event_hub::{
+    HubEvent, HubFuture, HubSessionSummary, SessionEventAttachment, SessionEventHub,
+    SessionEventHubError,
+};

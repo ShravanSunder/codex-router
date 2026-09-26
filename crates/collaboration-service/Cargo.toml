@@ -33,3 +33,4 @@ thiserror.workspace = true
 tempfile = "3.27.0"
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
 tokio = { workspace = true, features = ["test-util"] }
+session-event-model = { path = "../session-event-model", version = "0.1.39" }
