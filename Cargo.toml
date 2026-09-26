@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/message-board",
+    "crates/session-event-model",
     "crates/message-board-storage",
     "crates/agent-automation",
     "crates/automation-storage",

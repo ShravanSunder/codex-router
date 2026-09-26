@@ -1,0 +1,16 @@
+[package]
+name = "session-event-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+message-board = { path = "../message-board", version = "0.1.39" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
