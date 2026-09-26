@@ -208,6 +208,125 @@ fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
     wait_for_upkeep_generation(&state_path, &account_id, 2);
 }
 
+#[derive(Clone)]
+struct HeldQueuedUpkeepRefreshClient {
+    entered_sender: mpsc::Sender<AccountId>,
+    release_receiver: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+
+impl CredentialRefreshClient for HeldQueuedUpkeepRefreshClient {
+    fn refresh_credentials(
+        &self,
+        account_id: &AccountId,
+        _refresh_token: &SecretString,
+    ) -> Result<AccountCredentialBundle, codex_router_auth::resolver::CredentialRefreshFailure>
+    {
+        self.entered_sender
+            .send(account_id.clone())
+            .expect("provider entry should report account");
+        self.release_receiver
+            .lock()
+            .expect("release lock")
+            .recv_timeout(Duration::from_secs(3))
+            .expect("claimed provider use should be released");
+        Ok(AccountCredentialBundle::imported_codex_auth(
+            "replacement-access-canary",
+            Some("replacement-refresh-canary".to_owned()),
+        )
+        .with_expires_unix_seconds(10_000))
+    }
+}
+
+#[test]
+fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
+    let test_root = TestRoot::new("credential-upkeep-queued-stop");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let account_ids = (0..5)
+        .map(|index| account_id(&format!("queued-upkeep-{index}")))
+        .collect::<Vec<_>>();
+    for (index, account_id) in account_ids.iter().enumerate() {
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(
+                account_id.clone(),
+                format!("queued-{index}"),
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
+        ));
+        let active_key = must_ok(account_credential_bundle_key(account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &active_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "initial-access-canary",
+                        Some("initial-refresh-canary".to_owned()),
+                    )
+                    .with_expires_unix_seconds(1_100)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+    }
+    drop(state);
+    drop(secrets);
+
+    let (entered_sender, entered_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let worker = must_ok(
+        start_background_credential_upkeep_worker_with_client_and_clock(
+            &state_path,
+            &secret_root,
+            HeldQueuedUpkeepRefreshClient {
+                entered_sender,
+                release_receiver: Arc::new(Mutex::new(release_receiver)),
+            },
+            || 1_000,
+        ),
+    );
+    let admitted = (0..4)
+        .map(|_| must_ok(entered_receiver.recv_timeout(Duration::from_secs(3))))
+        .collect::<Vec<_>>();
+    let (stopped_sender, stopped_receiver) = mpsc::channel();
+    let shutdown = thread::spawn(move || {
+        drop(worker);
+        stopped_sender.send(()).expect("shutdown should report");
+    });
+    assert!(matches!(
+        stopped_receiver.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    for _ in 0..4 {
+        must_ok(release_sender.send(()));
+    }
+    let post_stop_entry = entered_receiver.recv_timeout(Duration::from_secs(2)).ok();
+    if post_stop_entry.is_some() {
+        must_ok(release_sender.send(()));
+    }
+    must_ok(stopped_receiver.recv_timeout(Duration::from_secs(3)));
+    must_ok(shutdown.join().map_err(|_| "shutdown thread failed"));
+    assert!(
+        post_stop_entry.is_none(),
+        "queued account reached provider after Stop: {post_stop_entry:?}"
+    );
+    for account_id in &admitted {
+        wait_for_upkeep_generation(&state_path, account_id, 2);
+    }
+    let queued_id = account_ids
+        .iter()
+        .find(|account_id| !admitted.contains(account_id))
+        .expect("one account should remain queued");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let queued = must_ok(AccountStateRepository::load_account(&state, queued_id))
+        .expect("queued account should remain");
+    assert_eq!(queued.active_credential_generation(), Some(1));
+}
+
 pub(super) fn wait_for_upkeep_generation(state_path: &Path, account_id: &AccountId, expected: u64) {
     let runtime = must_ok(
         tokio::runtime::Builder::new_current_thread()

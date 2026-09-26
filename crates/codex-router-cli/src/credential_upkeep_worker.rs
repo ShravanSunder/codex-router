@@ -1,6 +1,8 @@
 //! Long-lived enabled-account OAuth upkeep, independent of quota observation.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::thread;
 use std::thread::JoinHandle;
@@ -22,6 +24,7 @@ use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use thiserror::Error;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 const UPKEEP_CYCLE_SECONDS: u64 = 180;
 const LOCAL_FAILURE_RETRY_SECONDS: u64 = 60;
@@ -32,15 +35,20 @@ const SHUTDOWN_DRAIN_SECONDS: u64 = 30;
 pub(crate) struct CredentialUpkeepWorker {
     control_sender: mpsc::Sender<WorkerControl>,
     stopped_receiver: mpsc::Receiver<()>,
+    stop_requested: CancellationToken,
+    shutdown_deadline: Arc<OnceLock<Instant>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for CredentialUpkeepWorker {
     fn drop(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(SHUTDOWN_DRAIN_SECONDS);
+        let _ = self.shutdown_deadline.set(deadline);
+        self.stop_requested.cancel();
         let _ = self.control_sender.send(WorkerControl::Stop);
         if self
             .stopped_receiver
-            .recv_timeout(Duration::from_secs(SHUTDOWN_DRAIN_SECONDS))
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .is_ok()
             && let Some(thread) = self.thread.take()
         {
@@ -137,18 +145,30 @@ where
     let secrets = FileSecretStore::open(secret_root).map_err(CredentialUpkeepStartError::Secret)?;
     let (control_sender, control_receiver) = mpsc::channel();
     let (stopped_sender, stopped_receiver) = mpsc::channel();
+    let stop_requested = CancellationToken::new();
+    let worker_stop = stop_requested.clone();
+    let shutdown_deadline = Arc::new(OnceLock::new());
+    let worker_deadline = Arc::clone(&shutdown_deadline);
     let thread = thread::Builder::new()
         .name("router-credential-upkeep".to_owned())
         .spawn(move || {
             loop {
+                if worker_stop.is_cancelled() {
+                    break;
+                }
                 let cycle_started = Instant::now();
                 let observed_now = observed_clock();
-                let cycle_result = runtime.block_on(run_upkeep_cycle(
+                let cycle_result = runtime.block_on(run_upkeep_cycle_until_stop(
                     &state,
                     &secrets,
                     refresh_client.clone(),
                     observed_now,
+                    &worker_stop,
+                    &worker_deadline,
                 ));
+                if worker_stop.is_cancelled() {
+                    break;
+                }
                 let remaining =
                     bounded_upkeep_wait(cycle_result, observed_now, cycle_started.elapsed());
                 match control_receiver.recv_timeout(remaining) {
@@ -158,18 +178,35 @@ where
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
             }
-            if let Err(error) = runtime.block_on(state.close()) {
-                eprintln!("credential upkeep state close failed: {error}");
+            let close_budget = remaining_shutdown_time(&worker_deadline);
+            if !close_budget.is_zero() {
+                match runtime
+                    .block_on(async { tokio::time::timeout(close_budget, state.close()).await })
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => eprintln!("credential upkeep state close failed: {error}"),
+                    Err(_) => eprintln!("credential upkeep state close exceeded drain bound"),
+                }
             }
-            runtime.shutdown_timeout(Duration::from_secs(SHUTDOWN_DRAIN_SECONDS));
+            runtime.shutdown_timeout(remaining_shutdown_time(&worker_deadline));
             let _ = stopped_sender.send(());
         })
         .map_err(CredentialUpkeepStartError::Thread)?;
     Ok(CredentialUpkeepWorker {
         control_sender,
         stopped_receiver,
+        stop_requested,
+        shutdown_deadline,
         thread: Some(thread),
     })
+}
+
+fn remaining_shutdown_time(deadline: &OnceLock<Instant>) -> Duration {
+    deadline
+        .get()
+        .map_or(Duration::from_secs(SHUTDOWN_DRAIN_SECONDS), |deadline| {
+            deadline.saturating_duration_since(Instant::now())
+        })
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -209,11 +246,34 @@ fn bounded_upkeep_wait(
     }
 }
 
+#[cfg(test)]
 async fn run_upkeep_cycle<C>(
     state: &AsyncSqliteStateStore,
     secrets: &FileSecretStore,
     refresh_client: C,
     observed_now: u64,
+) -> UpkeepCycleResult
+where
+    C: CredentialRefreshClient + Clone + Send + Sync + 'static,
+{
+    run_upkeep_cycle_until_stop(
+        state,
+        secrets,
+        refresh_client,
+        observed_now,
+        &CancellationToken::new(),
+        &OnceLock::new(),
+    )
+    .await
+}
+
+async fn run_upkeep_cycle_until_stop<C>(
+    state: &AsyncSqliteStateStore,
+    secrets: &FileSecretStore,
+    refresh_client: C,
+    observed_now: u64,
+    stop_requested: &CancellationToken,
+    shutdown_deadline: &OnceLock<Instant>,
 ) -> UpkeepCycleResult
 where
     C: CredentialRefreshClient + Clone + Send + Sync + 'static,
@@ -231,6 +291,9 @@ where
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ACCOUNTS));
     let mut tasks = JoinSet::new();
     for account in accounts {
+        if stop_requested.is_cancelled() {
+            break;
+        }
         if account.status() != AccountStatus::Enabled {
             continue;
         }
@@ -246,10 +309,19 @@ where
         let account_id = account.account_id().clone();
         let health_state = state.clone();
         let account_semaphore = std::sync::Arc::clone(&semaphore);
+        let account_stop = stop_requested.clone();
         tasks.spawn(async move {
-            let Ok(_permit) = account_semaphore.acquire_owned().await else {
+            let permit = tokio::select! {
+                biased;
+                _ = account_stop.cancelled() => return (None, false),
+                permit = account_semaphore.acquire_owned() => permit,
+            };
+            let Ok(_permit) = permit else {
                 return (None, true);
             };
+            if account_stop.is_cancelled() {
+                return (None, false);
+            }
             let maintenance_failed = resolver
                 .maintain_account_credentials(&account_id)
                 .await
@@ -298,7 +370,28 @@ where
         });
     }
     let mut cycle_result = UpkeepCycleResult::default();
-    while let Some(result) = tasks.join_next().await {
+    loop {
+        let next_result = if stop_requested.is_cancelled() {
+            let remaining = remaining_shutdown_time(shutdown_deadline);
+            if remaining.is_zero() {
+                tasks.abort_all();
+                break;
+            }
+            match tokio::time::timeout(remaining, tasks.join_next()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tasks.abort_all();
+                    break;
+                }
+            }
+        } else {
+            tokio::select! {
+                biased;
+                _ = stop_requested.cancelled() => continue,
+                result = tasks.join_next() => result,
+            }
+        };
+        let Some(result) = next_result else { break };
         match result {
             Ok((deadline, failed)) => {
                 cycle_result.had_local_error |= failed;
