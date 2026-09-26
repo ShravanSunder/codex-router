@@ -678,6 +678,30 @@ fn lost_provider_prompt_has_terminal_unknown_effect_and_sanitized_reason() {
     );
 }
 
+#[test]
+fn unsupported_prompt_content_is_a_validation_failure_without_provider_effect() {
+    // ACP v1 initialization.mdx:202-217 makes optional prompt content
+    // conditional on advertised capabilities.
+    for (content_type, expected_message) in [
+        ("image", "unsupportedContent{image}"),
+        ("audio", "unsupportedContent{audio}"),
+        ("embeddedResource", "unsupportedContent{embeddedResource}"),
+    ] {
+        let failure = runtime_failure(
+            OperationId::generate(),
+            None,
+            ExternalProviderRuntimeError::UnsupportedContent { content_type },
+        );
+        assert_eq!(
+            failure.kind,
+            ConversationOperationFailureKind::UnsupportedCapability
+        );
+        assert_eq!(failure.stage, ConversationOperationFailureStage::Validation);
+        assert_eq!(failure.effect, ProviderOperationEffect::None);
+        assert_eq!(String::from(failure.message), expected_message);
+    }
+}
+
 #[tokio::test]
 async fn unknown_agent_stop_reason_projects_applied_unknown_settlement() {
     // ACP v1 prompt-turn.mdx:369-390 defines the recognized stop reasons.

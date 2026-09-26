@@ -170,6 +170,19 @@ pub(super) fn runtime_failure(
             operation_id,
             target,
         ),
+        ExternalProviderRuntimeError::UnsupportedContent { content_type } => failure(
+            ConversationOperationFailureKind::UnsupportedCapability,
+            ConversationOperationFailureStage::Validation,
+            ProviderOperationEffect::None,
+            match content_type {
+                "image" => "unsupportedContent{image}",
+                "audio" => "unsupportedContent{audio}",
+                "embeddedResource" => "unsupportedContent{embeddedResource}",
+                _ => "unsupportedContent{unknown}",
+            },
+            operation_id,
+            target,
+        ),
         _ => failure(
             ConversationOperationFailureKind::OutcomeUnknown,
             ConversationOperationFailureStage::Settlement,
