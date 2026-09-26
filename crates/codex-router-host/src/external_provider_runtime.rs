@@ -9,6 +9,7 @@ mod approval_turn_cancellation;
 mod external_approval_dispatch;
 mod external_permission_options;
 mod provider_approval_dispatch;
+mod provider_request_fallback;
 
 use crate::provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
@@ -25,6 +26,9 @@ use agent_client_protocol::{
 };
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
 use external_approval_dispatch::spawn_external_approval_dispatch;
+use provider_request_fallback::{
+    ProviderKnownSessions, ProviderRequestFallback, ProviderRequestSessionGuard,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -536,6 +540,8 @@ impl ExternalProviderRuntime {
             ExternalProviderApprovalContext,
         >::new()));
         let callback_approval_contexts = Arc::clone(&approval_contexts);
+        let known_sessions = ProviderKnownSessions::default();
+        let request_known_sessions = known_sessions.clone();
         let permission_refusal_reasons = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let callback_permission_refusal_reasons = Arc::clone(&permission_refusal_reasons);
         let endpoint_id = Arc::new(tokio::sync::RwLock::new(None::<String>));
@@ -584,6 +590,7 @@ impl ExternalProviderRuntime {
             });
             let final_approval_broker = Arc::clone(&callback_approval_broker);
             let connection = Client.builder().name("codex-router-host")
+                .with_handler(ProviderRequestSessionGuard::new(request_known_sessions))
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, connection| {
                         #[cfg(test)]
@@ -643,6 +650,7 @@ impl ExternalProviderRuntime {
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
+                .with_handler(ProviderRequestFallback)
                 .connect_with(
                 Lines::new(outgoing, incoming),
                 async move |connection| {
@@ -716,6 +724,9 @@ impl ExternalProviderRuntime {
                                             let result = result.and_then(|registration| {
                                                 register_provider_session(registration, &mut sessions)
                                             });
+                                            if let Ok(created) = &result {
+                                                known_sessions.track(created.provider_session_id.clone()).await;
+                                            }
                                             let _result = reply.send(result);
                                         }
                                         PendingSessionAdmission::Load { provider_session_id, result, reply } => {
@@ -731,6 +742,9 @@ impl ExternalProviderRuntime {
                                                     #[cfg(test)] Arc::clone(&session_test_tool_calls),
                                                 )
                                             }).map(|_| ());
+                                            if result.is_err() {
+                                                known_sessions.forget(&provider_session_id).await;
+                                            }
                                             let _result = reply.send(result);
                                         }
                                     }
@@ -770,6 +784,7 @@ impl ExternalProviderRuntime {
                                             if sessions.contains_key(&provider_session_id) || !pending_loads.insert(provider_session_id.clone()) {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
                                             } else {
+                                                known_sessions.track(provider_session_id.clone()).await;
                                                 let request = LoadSessionRequest::new(
                                                     provider_session_id.clone(),
                                                     &cwd,

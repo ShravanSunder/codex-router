@@ -80,6 +80,12 @@ impl AcpFixtureScript {
         self
     }
 
+    pub(super) fn write_marker(mut self, path: &std::path::Path) -> Self {
+        self.steps
+            .push(json!({"action": "write_marker", "path": path}));
+        self
+    }
+
     pub(super) fn launch(self) -> ExternalProviderLaunch {
         let script = serde_json::to_string(&self.steps).expect("fixture script serializes");
         ExternalProviderLaunch {

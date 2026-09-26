@@ -91,6 +91,9 @@ for step_number, step in enumerate(steps, start=1):
         with open(step["processIdPath"], "w", encoding="utf-8") as destination:
             destination.write(str(os.getpid()))
         signal.pause()
+    elif action == "write_marker":
+        with open(step["path"], "w", encoding="utf-8") as destination:
+            destination.write("observed")
     else:
         fail(step_number, "known fixture action", step)
 

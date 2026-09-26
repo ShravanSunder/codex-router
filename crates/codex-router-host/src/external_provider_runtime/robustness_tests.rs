@@ -378,6 +378,118 @@ async fn unknown_sessionless_requests_receive_method_not_found() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn request_naming_unknown_session_receives_method_not_found() {
+    // ACP v1 JSON-RPC requests require a response. Specification R3 requires
+    // -32601 for a request Router does not implement, even for an unknown ID.
+    let root = tempfile::tempdir().expect("fixture root");
+    let marker = root.path().join("unknown-session-answered");
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "unknown-session-fixture", "version": "1"}}))
+        .expect_request("create", "session/new", serde_json::json!({}))
+        .respond("create", serde_json::json!({"sessionId": "fixture-session"}))
+        .send(serde_json::json!({"jsonrpc": "2.0", "id": 91, "method": "session/unknown", "params": {"sessionId": "not-loaded"}}))
+        .expect_message(serde_json::json!({"jsonrpc": "2.0", "id": 91, "error": {"code": -32601}}))
+        .write_marker(&marker)
+        .record_diagnostics(root.path().join("fixture-diagnostics.txt"))
+        .launch();
+    let runtime = ExternalProviderRuntime::initialize(fixture)
+        .await
+        .expect("fixture initializes");
+    runtime
+        .create_session(root.path().to_owned())
+        .await
+        .expect("session created");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !marker.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "unknown session request was not answered: {}",
+            std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
+                .unwrap_or_default()
+        )
+    });
+    runtime.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn implemented_permission_request_during_load_replay_is_answered() {
+    // ACP v1 session-setup.mdx:134-161 permits updates during session/load;
+    // Specification R3 keeps implemented requests live during that replay.
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": true}, "agentInfo": {"name": "load-permission-fixture", "version": "1"}}))
+        .expect_request("load", "session/load", serde_json::json!({"sessionId": "fixture-session"}))
+        .send(serde_json::json!({"jsonrpc": "2.0", "id": 91, "method": "session/request_permission", "params": {"sessionId": "fixture-session", "toolCall": {"toolCallId": "replay-tool", "title": "Replay permission", "kind": "execute"}, "options": [{"optionId": "reject", "name": "Reject", "kind": "reject_once"}]}}))
+        .expect_message(serde_json::json!({"jsonrpc": "2.0", "id": 91, "result": {"outcome": {"outcome": "cancelled"}}}))
+        .respond("load", serde_json::json!({}))
+        .launch();
+    let runtime = ExternalProviderRuntime::initialize(fixture)
+        .await
+        .expect("fixture initializes");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.load_session("fixture-session".to_owned(), PathBuf::from("/tmp")),
+    )
+    .await
+    .expect("permission request does not block load")
+    .expect("session load succeeds");
+    let observation = runtime.permission_observation();
+    assert_eq!(observation.request_count, 1);
+    assert_eq!(
+        observation.last_outcome,
+        Some(ExternalProviderPermissionOutcome::Cancelled)
+    );
+    runtime.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn permission_request_naming_unknown_session_receives_method_not_found() {
+    // Specification R3: unknown session IDs receive -32601 even when the
+    // method is implemented for loaded or currently loading Sessions.
+    let root = tempfile::tempdir().expect("fixture root");
+    let marker = root.path().join("unknown-permission-answered");
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "unknown-permission-fixture", "version": "1"}}))
+        .expect_request("create", "session/new", serde_json::json!({}))
+        .respond("create", serde_json::json!({"sessionId": "fixture-session"}))
+        .send(serde_json::json!({"jsonrpc": "2.0", "id": 92, "method": "session/request_permission", "params": {"sessionId": "not-loaded", "toolCall": {"toolCallId": "unknown-tool", "title": "Unknown session permission", "kind": "execute"}, "options": [{"optionId": "reject", "name": "Reject", "kind": "reject_once"}]}}))
+        .expect_message(serde_json::json!({"jsonrpc": "2.0", "id": 92, "error": {"code": -32601}}))
+        .write_marker(&marker)
+        .record_diagnostics(root.path().join("fixture-diagnostics.txt"))
+        .launch();
+    let runtime = ExternalProviderRuntime::initialize(fixture)
+        .await
+        .expect("fixture initializes");
+    runtime
+        .create_session(root.path().to_owned())
+        .await
+        .expect("session created");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !marker.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "unknown session permission was not rejected: {}",
+            std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
+                .unwrap_or_default()
+        )
+    });
+    runtime.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn large_tool_update_and_result_do_not_retire_other_provider_sessions() {
     let runtime = ExternalProviderRuntime::initialize(large_provider_frames_fixture())
         .await
