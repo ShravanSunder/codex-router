@@ -2,8 +2,8 @@ use super::*;
 use crate::ExternalProviderLaunch;
 use collaboration_protocol::{
     CodexGeneration, ConversationCreateRequest, ConversationPromptRequest, EndpointId,
-    GenerationNumber, MessageContent, MessageText, ProviderBindingId, ProviderCapabilities,
-    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    GenerationNumber, MessageContent, MessageText, PositiveSeconds, ProviderBindingId,
+    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy, ProviderRuntimeIdentity,
     ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId, UuidIdentity,
 };
@@ -592,6 +592,83 @@ fn lost_provider_prompt_has_terminal_unknown_effect_and_sanitized_reason() {
         String::from(failure.message),
         "provider connection lost before the agent ended the turn (providerRetired)"
     );
+}
+
+#[tokio::test]
+async fn unknown_agent_stop_reason_projects_applied_unknown_settlement() {
+    // ACP v1 prompt-turn.mdx:369-390 defines the recognized stop reasons.
+    // R4 preserves an unknown value until E4 has a typed unknown reason.
+    let fixture = crate::external_provider_runtime::acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "unknown-stop-fixture", "version": "1"}}))
+        .expect_request("create", "session/new", serde_json::json!({}))
+        .respond("create", serde_json::json!({"sessionId": "fixture-session"}))
+        .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId": "fixture-session"}))
+        .respond("prompt", serde_json::json!({"stopReason": "future_reason"}))
+        .launch();
+    let root = tempfile::tempdir().expect("temporary root");
+    let runtime = ExternalProviderRuntime::initialize(fixture)
+        .await
+        .expect("fixture initializes");
+    runtime
+        .create_session(root.path().to_owned())
+        .await
+        .expect("session created");
+    let store = Arc::new(Mutex::new(
+        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("operation store"),
+    ));
+    let backend = ExternalProviderSupervisor::new(
+        vec![ExternalProviderBinding {
+            identity: binding(),
+            runtime,
+        }],
+        store,
+    )
+    .expect("supervisor");
+    let operation_id = OperationId::generate();
+    assert_eq!(
+        backend
+            .submit_delivery_prompt(ConversationPromptRequest {
+                operation_id: operation_id.clone(),
+                target: SessionRef {
+                    endpoint: endpoint(),
+                    session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
+                },
+                generation: Some(generation()),
+                requested_by: requester(),
+                approver: requester(),
+                prompt: MessageContent::Router {
+                    text: MessageText::try_from("continue".to_owned()).expect("message"),
+                },
+            })
+            .await
+            .expect("prompt submitted"),
+        provider_delivery_submission::ProviderPromptDispatch::Submitted
+    );
+    let failure = backend
+        .wait(ConversationOperationWaitRequest {
+            operation_id: operation_id.clone(),
+            timeout_seconds: PositiveSeconds::try_from(5).expect("timeout"),
+        })
+        .await
+        .expect_err("unknown stop reason is a terminal failure projection");
+    assert_eq!(
+        failure.kind,
+        ConversationOperationFailureKind::OutcomeUnknown
+    );
+    assert_eq!(failure.effect, ProviderOperationEffect::Applied);
+    assert_eq!(
+        String::from(failure.message),
+        "agent ended the turn with an unrecognized stop reason (future_reason)"
+    );
+    let operation = backend
+        .show(ConversationOperationShowRequest { operation_id })
+        .await
+        .expect("terminal operation");
+    assert_eq!(operation.stage, ProviderOperationStage::Terminal);
+    backend.shutdown().await.expect("supervisor shutdown");
 }
 
 #[test]

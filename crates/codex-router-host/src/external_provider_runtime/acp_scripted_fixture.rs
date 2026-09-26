@@ -10,19 +10,19 @@ use std::path::PathBuf;
 const AGENT_SCRIPT: &str = include_str!("acp_scripted_fixture.py");
 
 #[derive(Default)]
-pub(super) struct AcpFixtureScript {
+pub(crate) struct AcpFixtureScript {
     steps: Vec<Value>,
     diagnostic_path: Option<PathBuf>,
 }
 
 impl AcpFixtureScript {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Read a client request, match its method and selected parameter fields,
     /// and remember its ID under `request_name` for a later response.
-    pub(super) fn expect_request(
+    pub(crate) fn expect_request(
         mut self,
         request_name: &str,
         method: &str,
@@ -39,7 +39,7 @@ impl AcpFixtureScript {
 
     /// Read and check an entire client message. Use this for notifications or
     /// responses to requests sent by the fixture agent.
-    pub(super) fn expect_message(mut self, expected_message: Value) -> Self {
+    pub(crate) fn expect_message(mut self, expected_message: Value) -> Self {
         self.steps.push(json!({
             "action": "expect_message",
             "message": expected_message,
@@ -47,7 +47,7 @@ impl AcpFixtureScript {
         self
     }
 
-    pub(super) fn respond(mut self, request_name: &str, result: Value) -> Self {
+    pub(crate) fn respond(mut self, request_name: &str, result: Value) -> Self {
         self.steps.push(json!({
             "action": "respond",
             "requestName": request_name,
@@ -56,18 +56,18 @@ impl AcpFixtureScript {
         self
     }
 
-    pub(super) fn send(mut self, message: Value) -> Self {
+    pub(crate) fn send(mut self, message: Value) -> Self {
         self.steps
             .push(json!({"action": "send", "message": message}));
         self
     }
 
-    pub(super) fn exit(mut self) -> Self {
+    pub(crate) fn exit(mut self) -> Self {
         self.steps.push(json!({"action": "exit"}));
         self
     }
 
-    pub(super) fn wait_for_signal(mut self, process_id_path: &std::path::Path) -> Self {
+    pub(crate) fn wait_for_signal(mut self, process_id_path: &std::path::Path) -> Self {
         self.steps.push(json!({
             "action": "wait_for_signal",
             "processIdPath": process_id_path,
@@ -75,18 +75,18 @@ impl AcpFixtureScript {
         self
     }
 
-    pub(super) fn record_diagnostics(mut self, path: PathBuf) -> Self {
+    pub(crate) fn record_diagnostics(mut self, path: PathBuf) -> Self {
         self.diagnostic_path = Some(path);
         self
     }
 
-    pub(super) fn write_marker(mut self, path: &std::path::Path) -> Self {
+    pub(crate) fn write_marker(mut self, path: &std::path::Path) -> Self {
         self.steps
             .push(json!({"action": "write_marker", "path": path}));
         self
     }
 
-    pub(super) fn launch(self) -> ExternalProviderLaunch {
+    pub(crate) fn launch(self) -> ExternalProviderLaunch {
         let script = serde_json::to_string(&self.steps).expect("fixture script serializes");
         ExternalProviderLaunch {
             executable: PathBuf::from("/usr/bin/python3"),

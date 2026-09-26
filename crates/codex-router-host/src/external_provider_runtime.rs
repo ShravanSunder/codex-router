@@ -1,7 +1,7 @@
 //! Host-owned ACP provider process admission and connection lifetime.
 
 #[cfg(test)]
-mod acp_scripted_fixture;
+pub(crate) mod acp_scripted_fixture;
 #[cfg(test)]
 mod approval_dispatch_tests;
 mod approval_presentation;
@@ -313,6 +313,8 @@ pub enum ExternalProviderRuntimeError {
     FrameLimitExceeded,
     #[error("provider ACP message could not be decoded or classified")]
     FrameDecodeFailure,
+    #[error("agent ended the turn with an unrecognized stop reason{suffix}")]
+    UnknownStopReason { suffix: String },
     #[error("provider ACP operation failed: {0}")]
     Operation(String),
 }
@@ -320,6 +322,9 @@ pub enum ExternalProviderRuntimeError {
 pub(crate) fn acp_operation_error(
     error: agent_client_protocol::Error,
 ) -> ExternalProviderRuntimeError {
+    if agent_client_protocol::is_incoming_transport_closed(&error) {
+        return ExternalProviderRuntimeError::TransportFailure;
+    }
     use agent_client_protocol::schema::v1::ErrorCode;
     let code = i64::from(i32::from(error.code));
     match error.code {

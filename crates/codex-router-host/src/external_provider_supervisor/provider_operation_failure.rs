@@ -22,6 +22,22 @@ pub(super) fn prompt_runtime_failure(
             target,
         );
     }
+    if let ExternalProviderRuntimeError::UnknownStopReason { suffix } = error {
+        let mut operation_failure = failure(
+            ConversationOperationFailureKind::OutcomeUnknown,
+            ConversationOperationFailureStage::Settlement,
+            ProviderOperationEffect::Applied,
+            "agent ended the turn with an unrecognized stop reason",
+            operation_id,
+            target,
+        );
+        if let Ok(message) = collaboration_protocol::NonEmptyText::try_from(format!(
+            "agent ended the turn with an unrecognized stop reason{suffix}"
+        )) {
+            operation_failure.message = message;
+        }
+        return operation_failure;
+    }
     runtime_failure(operation_id, target, error)
 }
 

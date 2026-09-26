@@ -7,7 +7,7 @@ use crate::external_provider_runtime::{
 };
 use crate::provider_prompt_observation::read_bounded_prompt;
 use agent_client_protocol::schema::v1::{CancelNotification, PromptRequest};
-use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, UntypedMessage};
+use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, JsonRpcMessage, UntypedMessage};
 use collaboration_protocol::OperationId;
 use serde_json::json;
 use std::sync::Arc;
@@ -89,13 +89,21 @@ pub(crate) async fn run_provider_session(
                             session.session_id().clone(),
                             vec![prompt.into()],
                         );
+                        let prompt_request = match prompt_request.to_untyped_message() {
+                            Ok(request) => request,
+                            Err(error) => {
+                                if let Some(dispatch) = dispatch {
+                                    let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
+                                }
+                                let _result = reply.send(Err(acp_operation_error(error)));
+                                continue;
+                            }
+                        };
                         if let Err(error) = session
                             .connection()
                             .send_request(prompt_request)
                             .on_receiving_result(async move |result| {
-                                let _result = terminal_tx.send(
-                                    result.map(|response| response.stop_reason),
-                                );
+                                let _result = terminal_tx.send(result);
                                 Ok(())
                             })
                         {
