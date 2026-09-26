@@ -50,7 +50,7 @@ fn approval_event_round_trip_carries_prompt_subject_and_ordered_choices() {
             approver: Identity::Human {
                 human_id: HumanId::try_from("owner".to_owned()).expect("human"),
             },
-            request,
+            request: Box::new(request),
         },
     };
     let wire = serde_json::to_value(&event).expect("encode pending approval");
@@ -110,7 +110,7 @@ fn question_event_round_trip_preserves_field_labels_and_descriptions() {
             approver: Identity::Human {
                 human_id: HumanId::try_from("owner".to_owned()).expect("human"),
             },
-            request,
+            request: Box::new(request),
         },
     };
     let wire = serde_json::to_value(&event).expect("encode pending question");

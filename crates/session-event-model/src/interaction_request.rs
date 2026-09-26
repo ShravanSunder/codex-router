@@ -247,11 +247,11 @@ pub struct QuestionRequest {
 pub enum PendingInteraction {
     Approval {
         approver: Identity,
-        request: ApprovalRequest,
+        request: Box<ApprovalRequest>,
     },
     Question {
         approver: Identity,
-        request: QuestionRequest,
+        request: Box<QuestionRequest>,
     },
 }
 
