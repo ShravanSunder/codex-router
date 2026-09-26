@@ -44,7 +44,9 @@ pub use provider_configuration_file::{
 };
 mod provider_startup_composition;
 pub use provider_startup_composition::ExternalProviderStartup;
+mod provider_capability_report;
 mod provider_operation_settlement;
+mod provider_prompt_content;
 mod provider_prompt_observation;
 mod provider_prompt_result_codec;
 mod provider_session_actor;

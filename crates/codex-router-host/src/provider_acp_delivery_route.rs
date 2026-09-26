@@ -1,4 +1,6 @@
 //! ACP provider message delivery, evidence, and reconciliation.
+mod provider_queue_submission;
+
 use crate::external_provider_supervisor::ProviderPromptDispatch;
 use crate::provider_acp_message_fifo::ProviderAcpMessageFifo;
 use crate::provider_acp_route_claim::ProviderAcpRouteClaim;
@@ -90,14 +92,7 @@ impl ProviderAcpDeliveryRoute {
 
     fn serves(&self, target: &SessionRef) -> bool {
         target.endpoint.service_id == self.service_id
-            && matches!(
-                String::from(target.endpoint.endpoint_id.clone()).as_str(),
-                "claude-local" | "cursor-local"
-            )
-    }
-
-    fn is_cursor(target: &SessionRef) -> bool {
-        String::from(target.endpoint.endpoint_id.clone()) == "cursor-local"
+            && self.supervisor.binding(&target.endpoint).is_some()
     }
 
     fn receipt(outcome: DeliveryOutcome, operation_id: Option<OperationId>) -> DeliveryReceipt {
@@ -169,12 +164,6 @@ impl ProviderAcpDeliveryRoute {
                 "provider route does not serve this endpoint",
             ));
         }
-        if Self::is_cursor(&request.target) && request.mode == MessageDelivery::Steer {
-            return Ok(Self::rejected(
-                DeliveryRejectionReason::SteerUnsupported,
-                "steer unsupported by Cursor",
-            ));
-        }
         let Some(binding) = self.supervisor.binding(&request.target.endpoint) else {
             return Ok(Self::not_submitted(
                 "provider runtime is unavailable",
@@ -212,6 +201,14 @@ impl ProviderAcpDeliveryRoute {
         let Some(runtime) = self.supervisor.runtime_for(&request.target.endpoint) else {
             return Ok(Self::not_submitted("provider runtime is unavailable", true));
         };
+        let provider_session_id = String::from(request.target.session_id.clone());
+        let capabilities = runtime.capability_report(&provider_session_id).await;
+        if request.mode == MessageDelivery::Steer && !capabilities.supports_steering {
+            return Ok(Self::rejected(
+                DeliveryRejectionReason::SteerUnsupported,
+                "steer unsupported by provider",
+            ));
+        }
         let activity = match runtime
             .session_activity(String::from(request.target.session_id.clone()))
             .await
@@ -225,49 +222,13 @@ impl ProviderAcpDeliveryRoute {
             }
         };
         if request.mode == MessageDelivery::Queue
-            || (Self::is_cursor(&request.target)
+            || (!capabilities.supports_steering
                 && request.mode == MessageDelivery::Auto
                 && activity == ProviderSessionActivity::Running)
         {
-            let record = self
-                .store
-                .lock()
-                .await
-                .session_record(&request.target)
-                .await
-                .map_err(|_| DeliveryContractError::ClientOperation)?;
-            let Some(record) = record else {
-                return Ok(Self::not_submitted(
-                    "provider session record is missing",
-                    false,
-                ));
-            };
-            let requested_by = match &request.message {
-                MessageContent::Agent { sender, .. } => sender.clone(),
-                MessageContent::HumanUser { .. } | MessageContent::Router { .. } => {
-                    record.created_by
-                }
-            };
-            let permit = match self.queue.reserve(&request.target) {
-                Ok(permit) => permit,
-                Err(reason) => return Ok(Self::rejected(DeliveryRejectionReason::Busy, reason)),
-            };
-            let effect = Self::effect(&request, &binding, SubmissionEffect::RouterQueued)?;
-            sink.record(effect).await?;
-            self.supervisor.queued_operation_registry().record_queued(
-                operation_id.clone(),
-                request.target.clone(),
-                binding.clone(),
-            );
-            permit.send(ConversationPromptRequest {
-                operation_id: operation_id.clone(),
-                target: request.target.clone(),
-                generation: Some(binding.generation),
-                requested_by,
-                approver: record.approver,
-                prompt: request.message,
-            });
-            return Ok(Self::receipt(DeliveryOutcome::Queued, Some(operation_id)));
+            return self
+                .queue_delivery(&request, sink, &binding, &operation_id)
+                .await;
         }
         let mut effect = Self::effect(&request, &binding, SubmissionEffect::Dispatching)?;
         sink.record(effect.clone()).await?;
@@ -280,6 +241,11 @@ impl ProviderAcpDeliveryRoute {
         .await
         {
             ProviderSessionLoadOutcome::Ready => {}
+            ProviderSessionLoadOutcome::UnsupportedLoad => {
+                return self
+                    .finish_known_none(&request, sink, &mut effect, "unsupported: load", false)
+                    .await;
+            }
             ProviderSessionLoadOutcome::MissingRecord => {
                 return self
                     .finish_known_none(
@@ -318,18 +284,12 @@ impl ProviderAcpDeliveryRoute {
             Ok(activity) => activity,
             Err(_) => return self.finish_unknown(sink, &mut effect).await,
         };
-        if Self::is_cursor(&request.target) && activity == ProviderSessionActivity::Running {
+        if !capabilities.supports_steering && activity == ProviderSessionActivity::Running {
             return self
-                .finish_known_none(
-                    &request,
-                    sink,
-                    &mut effect,
-                    "provider session became busy",
-                    true,
-                )
+                .queue_delivery(&request, sink, &binding, &operation_id)
                 .await;
         }
-        if !Self::is_cursor(&request.target) {
+        if capabilities.supports_steering {
             let prompt = match render_message(&request.target, &request.message) {
                 Ok(prompt) => prompt,
                 Err(_) => {
@@ -359,7 +319,29 @@ impl ProviderAcpDeliveryRoute {
                 }
                 Ok(ProviderSteeringOutcome::Injected {
                     running_operation_id: None,
-                }) => return self.finish_unknown(sink, &mut effect).await,
+                }) => {
+                    update_submission(&mut effect, SubmissionEffect::Accepted);
+                    if sink.record(effect).await.is_err() {
+                        return Ok(Self::receipt(DeliveryOutcome::Unknown, None));
+                    }
+                    return Ok(Self::receipt(DeliveryOutcome::Steered, None));
+                }
+                Ok(ProviderSteeringOutcome::StartedNewTurn) => {
+                    update_submission(&mut effect, SubmissionEffect::Accepted);
+                    if sink.record(effect).await.is_err() {
+                        return Ok(Self::receipt(DeliveryOutcome::Unknown, None));
+                    }
+                    tracing::info!(
+                        session_id = %String::from(request.target.session_id.clone()),
+                        "agent started a new turn from a steer"
+                    );
+                    return Ok(Self::receipt(DeliveryOutcome::Started, None));
+                }
+                Ok(ProviderSteeringOutcome::Failed) => {
+                    return self
+                        .finish_known_none(&request, sink, &mut effect, "steerFailed", false)
+                        .await;
+                }
                 Ok(ProviderSteeringOutcome::PromptRequired)
                     if request.mode == MessageDelivery::Steer =>
                 {

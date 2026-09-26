@@ -1,7 +1,7 @@
 //! Compose client-specific message routes behind one Host-owned router.
 use crate::{ClaudeCodePeerDeliveryRoute, ExternalProviderSupervisor, ProviderAcpDeliveryRoute};
 use claude_code_peer_messaging::{ClaudeCodePeerSocket, ClaudeCodeSessionRegistry};
-use collaboration_protocol::UuidIdentity;
+use collaboration_protocol::{EndpointId, EndpointRef, UuidIdentity};
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, ProviderOperationStore, SessionDeliveryRoute,
     SessionDeliveryRouter,
@@ -31,7 +31,11 @@ pub(crate) fn compose_session_message_routes(
             unmaterialized_threads,
         ));
     let peer_route = Arc::new(ClaudeCodePeerDeliveryRoute::new(
-        service_id.clone(),
+        EndpointRef {
+            service_id: service_id.clone(),
+            endpoint_id: EndpointId::try_from("claude-local".to_owned())
+                .map_err(io::Error::other)?,
+        },
         Arc::new(ClaudeCodeSessionRegistry::new(
             peer_registry_directory.clone(),
         )),

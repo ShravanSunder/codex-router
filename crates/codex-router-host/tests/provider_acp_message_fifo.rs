@@ -629,7 +629,7 @@ async fn provider_retirement_marks_queued_items_not_submitted() {
         assert!(matches!(
             snapshot.queue_state,
             Some(collaboration_protocol::ConversationOperationQueueState::NotSubmitted { reason })
-                if reason.contains("provider retired")
+                if reason == "providerRetired"
         ));
     }
     let _ = first;

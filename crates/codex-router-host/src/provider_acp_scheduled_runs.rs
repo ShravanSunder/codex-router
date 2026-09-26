@@ -54,11 +54,7 @@ use collaboration_service::{
 
 impl ProviderAcpScheduledRuns {
     fn serves(&self, endpoint: &EndpointRef) -> bool {
-        endpoint.service_id == self.service_id
-            && matches!(
-                String::from(endpoint.endpoint_id.clone()).as_str(),
-                "claude-local" | "cursor-local"
-            )
+        endpoint.service_id == self.service_id && self.supervisor.binding(endpoint).is_some()
     }
 
     fn evidence_for(
@@ -222,6 +218,14 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
                 {
                     ProviderSessionLoadOutcome::Ready => {
                         SchedulePreparationOutcome::Prepared(PreparedTarget { target, evidence })
+                    }
+                    ProviderSessionLoadOutcome::UnsupportedLoad => {
+                        SchedulePreparationOutcome::Failed(SchedulePreparationFailure {
+                            kind: ScheduleFailureKind::UnsupportedCapability,
+                            explanation: "unsupported: load".into(),
+                            evidence,
+                            uncertain: false,
+                        })
                     }
                     ProviderSessionLoadOutcome::MissingRecord => {
                         SchedulePreparationOutcome::Failed(SchedulePreparationFailure {

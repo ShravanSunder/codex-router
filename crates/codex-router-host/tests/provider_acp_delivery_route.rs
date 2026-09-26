@@ -182,6 +182,23 @@ for line in sys.stdin:
     }
 }
 
+fn no_load_fixture() -> ExternalProviderLaunch {
+    let script = r#"
+import json,sys
+initialize=json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':initialize['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'no-load-fixture','version':'1'}}})); sys.stdout.flush()
+for line in sys.stdin:
+ request=json.loads(line)
+ assert request['method']=='session/new', request['method']
+ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})); sys.stdout.flush()
+"#;
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), script.to_owned()],
+        environment: Vec::new(),
+    }
+}
+
 fn exited_provider_fixture(exit_marker: &Path) -> ExternalProviderLaunch {
     let script = format!(
         r#"
@@ -217,18 +234,48 @@ fn request(target: SessionRef, text: &str) -> DeliveryRequest {
 async fn cursor_steer_rejects_before_evidence_or_client_io() {
     let root = tempfile::tempdir().expect("provider root");
     let target = target();
+    let binding = provider_binding(&target);
+    let runtime = ExternalProviderRuntime::initialize(no_load_fixture())
+        .await
+        .expect("fixture provider");
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
     let store = Arc::new(tokio::sync::Mutex::new(
         ProviderOperationStore::open(&root.path().join("operations.sqlite"))
             .await
             .expect("store"),
     ));
+    store
+        .lock()
+        .await
+        .record_session(&ProviderSessionRecord {
+            target: target.clone(),
+            working_directory: ProviderWorkingDirectory::try_from("/tmp".to_owned()).expect("cwd"),
+            requested_policy: ProviderRequestedPolicy {
+                access: RouterAccess::WriteRestricted,
+            },
+            created_by: target.clone(),
+            approver: target.clone(),
+            updated_at_ms: 1,
+        })
+        .await
+        .expect("session record");
     let supervisor = Arc::new(
-        ExternalProviderSupervisor::new(Vec::new(), Arc::clone(&store)).expect("supervisor"),
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: binding.clone(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor"),
     );
     let route = ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
-        EndpointDirectory::new(target.endpoint.service_id.clone()),
-        supervisor,
+        available_directory(&target, &binding),
+        Arc::clone(&supervisor),
         store,
         Arc::new(NoLivePeer),
     );
@@ -256,6 +303,8 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
         if rejection.reason == DeliveryRejectionReason::SteerUnsupported)
     );
     assert!(evidence.0.lock().await.is_empty());
+    route.shutdown_queue().await;
+    supervisor.shutdown().await.expect("supervisor shutdown");
 }
 
 #[tokio::test]
@@ -531,6 +580,73 @@ async fn provider_load_auth_rejection_is_typed_without_session_new() {
         if before.submission == SubmissionEffect::Dispatching && after.submission == SubmissionEffect::NotDispatched));
     route.shutdown_queue().await;
     supervisor.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn unadvertised_load_settles_not_submitted_without_sending_load() {
+    // ACP v1 initialization.mdx:245 requires an advertisement for session/load.
+    // R9 settles a cold delivery as unsupported: load without sending it.
+    let root = tempfile::tempdir().expect("provider root");
+    let target = target();
+    let binding = provider_binding(&target);
+    let runtime = ExternalProviderRuntime::initialize(no_load_fixture())
+        .await
+        .expect("fixture provider");
+    let store = Arc::new(tokio::sync::Mutex::new(
+        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("store"),
+    ));
+    store
+        .lock()
+        .await
+        .record_session(&ProviderSessionRecord {
+            target: target.clone(),
+            working_directory: ProviderWorkingDirectory::try_from("/tmp".to_owned()).expect("cwd"),
+            requested_policy: ProviderRequestedPolicy {
+                access: RouterAccess::WriteRestricted,
+            },
+            created_by: target.clone(),
+            approver: target.clone(),
+            updated_at_ms: 1,
+        })
+        .await
+        .expect("session record");
+    let supervisor = Arc::new(
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: binding.clone(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor"),
+    );
+    let route = ProviderAcpDeliveryRoute::new(
+        target.endpoint.service_id.clone(),
+        available_directory(&target, &binding),
+        Arc::clone(&supervisor),
+        store,
+        Arc::new(NoLivePeer),
+    );
+    let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
+    let receipt = tokio::time::timeout(
+        Duration::from_secs(2),
+        route.deliver(request(target, "hello"), &evidence),
+    )
+    .await
+    .expect("delivery cannot wait on unsupported load")
+    .expect("delivery receipt");
+    assert!(
+        matches!(
+            receipt.outcome,
+            DeliveryOutcome::NotSubmitted { retryable: false, ref reason }
+                if reason == "unsupported: load"
+        ),
+        "{receipt:?}"
+    );
+    route.shutdown_queue().await;
+    supervisor.shutdown().await.expect("supervisor shutdown");
 }
 
 #[tokio::test]

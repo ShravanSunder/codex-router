@@ -31,12 +31,7 @@ impl ProviderAcpRouteClaim {
     }
 
     pub(crate) async fn claim(&self, target: &SessionRef) -> RouteClaim {
-        if target.endpoint.service_id != self.service_id
-            || !matches!(
-                String::from(target.endpoint.endpoint_id.clone()).as_str(),
-                "claude-local" | "cursor-local"
-            )
-        {
+        if target.endpoint.service_id != self.service_id {
             return RouteClaim::NotMine;
         }
         let endpoint = self
@@ -57,6 +52,20 @@ impl ProviderAcpRouteClaim {
                 false,
             );
         };
+        if self.supervisor.binding(&target.endpoint).is_none()
+            && !endpoint.channels.iter().any(|channel| {
+                matches!(
+                    channel,
+                    collaboration_protocol::ChannelDescription::ExternalProvider { .. }
+                )
+            })
+            && !matches!(
+                endpoint.availability,
+                EndpointAvailability::Unavailable { .. }
+            )
+        {
+            return RouteClaim::NotMine;
+        }
         match endpoint.availability {
             EndpointAvailability::Unavailable { reason, fix, .. } => {
                 let reason = String::from(reason);

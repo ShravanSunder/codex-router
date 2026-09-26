@@ -84,7 +84,7 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
         session_id,
     };
     let route = ClaudeCodePeerDeliveryRoute::new(
-        target.endpoint.service_id.clone(),
+        target.endpoint.clone(),
         Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
         Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
     );

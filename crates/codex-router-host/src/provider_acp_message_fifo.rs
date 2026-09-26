@@ -180,6 +180,12 @@ async fn run_provider_message_fifo(
                 };
                 match load_outcome {
                     ProviderSessionLoadOutcome::Ready => loaded = true,
+                    ProviderSessionLoadOutcome::UnsupportedLoad => {
+                        supervisor
+                            .queued_operation_registry()
+                            .mark_not_submitted(&operation_id, "unsupported: load");
+                        break;
+                    }
                     ProviderSessionLoadOutcome::MissingRecord => {
                         supervisor.queued_operation_registry().mark_not_submitted(
                             &operation_id,

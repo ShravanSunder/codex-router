@@ -104,7 +104,7 @@ async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
         user
     });
     let route = ClaudeCodePeerDeliveryRoute::new(
-        target().endpoint.service_id,
+        target().endpoint,
         Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
         Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
     );
@@ -161,7 +161,7 @@ async fn peer_queue_rejects_but_idle_steer_writes_to_the_live_socket() {
             .expect("user JSON")
     });
     let route = ClaudeCodePeerDeliveryRoute::new(
-        target().endpoint.service_id,
+        target().endpoint,
         Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
         Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
     );
@@ -202,7 +202,7 @@ async fn live_unknown_peer_protocol_reports_live_elsewhere() {
     )
     .expect("unsupported registry entry");
     let route = ClaudeCodePeerDeliveryRoute::new(
-        target().endpoint.service_id,
+        target().endpoint,
         Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
         Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
     );
@@ -255,7 +255,7 @@ async fn every_live_registry_status_allows_auto_and_steer_peer_writes() {
                 .expect("user JSON")
             });
             let route = ClaudeCodePeerDeliveryRoute::new(
-                target().endpoint.service_id,
+                target().endpoint,
                 Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
                 Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
             );
@@ -286,7 +286,7 @@ async fn every_live_registry_status_allows_auto_and_steer_peer_writes() {
 async fn peer_reconciliation_rejects_evidence_for_another_session() {
     let root = tempfile::tempdir().expect("registry root");
     let route = ClaudeCodePeerDeliveryRoute::new(
-        target().endpoint.service_id,
+        target().endpoint,
         Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
         Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
     );

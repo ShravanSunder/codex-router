@@ -9,8 +9,8 @@ use claude_code_peer_messaging::{
 };
 use collaboration_protocol::{
     CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
-    DeliveryRejection, DeliveryRejectionReason, MessageContent, MessageDelivery,
-    SessionReachability, SessionRef, UuidIdentity, render_message,
+    DeliveryRejection, DeliveryRejectionReason, EndpointRef, MessageContent, MessageDelivery,
+    SessionReachability, SessionRef, render_message,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ClaudeCodePeerDeliveryRoute {
-    service_id: UuidIdentity,
+    endpoint: EndpointRef,
     registry: Arc<ClaudeCodeSessionRegistry>,
     socket: Arc<ClaudeCodePeerSocket>,
 }
@@ -29,20 +29,19 @@ pub struct ClaudeCodePeerDeliveryRoute {
 impl ClaudeCodePeerDeliveryRoute {
     #[must_use]
     pub fn new(
-        service_id: UuidIdentity,
+        endpoint: EndpointRef,
         registry: Arc<ClaudeCodeSessionRegistry>,
         socket: Arc<ClaudeCodePeerSocket>,
     ) -> Self {
         Self {
-            service_id,
+            endpoint,
             registry,
             socket,
         }
     }
 
     pub(crate) fn serves(&self, target: &SessionRef) -> bool {
-        target.endpoint.service_id == self.service_id
-            && String::from(target.endpoint.endpoint_id.clone()) == "claude-local"
+        target.endpoint == self.endpoint
     }
 
     pub(crate) async fn lookup(&self, target: &SessionRef) -> PeerSessionLookup {

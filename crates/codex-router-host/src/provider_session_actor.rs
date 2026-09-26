@@ -5,6 +5,7 @@ use crate::external_provider_runtime::{
     ExternalProviderPromptOutcome, ExternalProviderRuntimeError, ProviderFrameObservation,
     acp_operation_error,
 };
+use crate::provider_prompt_content::ProviderPromptContent;
 use crate::provider_prompt_observation::read_bounded_prompt;
 use agent_client_protocol::schema::v1::{CancelNotification, PromptRequest};
 use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, JsonRpcMessage, UntypedMessage};
@@ -22,6 +23,8 @@ pub enum ProviderSteeringOutcome {
         running_operation_id: Option<OperationId>,
     },
     PromptRequired,
+    StartedNewTurn,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,7 +43,7 @@ pub enum ProviderSessionActivity {
 pub(crate) enum ProviderSessionCommand {
     Prompt {
         operation_id: Option<OperationId>,
-        prompt: String,
+        prompt: ProviderPromptContent,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>,
@@ -87,7 +90,7 @@ pub(crate) async fn run_provider_session(
                         let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
                         let prompt_request = PromptRequest::new(
                             session.session_id().clone(),
-                            vec![prompt.into()],
+                            prompt.into_blocks(),
                         );
                         let prompt_request = match prompt_request.to_untyped_message() {
                             Ok(request) => request,
@@ -259,7 +262,9 @@ async fn steer_provider_turn(
         Some("injected") => Ok(ProviderSteeringOutcome::Injected {
             running_operation_id,
         }),
+        Some("startedNewTurn") => Ok(ProviderSteeringOutcome::StartedNewTurn),
         Some("promptRequired") => Ok(ProviderSteeringOutcome::PromptRequired),
+        Some("failed") => Ok(ProviderSteeringOutcome::Failed),
         _ => Err(ExternalProviderRuntimeError::Operation(
             "provider returned an invalid steering result".to_owned(),
         )),
