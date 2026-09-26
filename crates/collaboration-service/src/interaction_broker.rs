@@ -26,8 +26,13 @@ use std::{
 use tokio::sync::{Mutex, oneshot};
 
 mod external_requests;
+mod interaction_history;
 #[cfg(test)]
 use external_requests::map_external_options;
+use interaction_history::InteractionHistoryStore;
+pub use interaction_history::{
+    InteractionHistoryError, InteractionHistoryRecord, InteractionHistoryState,
+};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -170,6 +175,7 @@ pub struct ServiceApprovalBroker {
     pending: Arc<Mutex<BTreeMap<String, PendingApproval>>>,
     history_path: PathBuf,
     history: Arc<Mutex<Vec<ApprovalRequestRecord>>>,
+    interaction_history: InteractionHistoryStore,
 }
 
 impl ServiceApprovalBroker {
@@ -196,6 +202,10 @@ impl ServiceApprovalBroker {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(_) => return Err(ApprovalBrokerError::Unavailable),
         };
+        let interaction_history =
+            InteractionHistoryStore::load(routes_path.with_file_name("interaction-history.json"))
+                .await
+                .map_err(|_| ApprovalBrokerError::Unavailable)?;
         Ok(Arc::new(Self {
             service_id,
             backend,
@@ -205,6 +215,7 @@ impl ServiceApprovalBroker {
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             history_path,
             history: Arc::new(Mutex::new(history)),
+            interaction_history,
         }))
     }
 
@@ -242,6 +253,26 @@ impl ServiceApprovalBroker {
             approvals.retain(|record| record.state == ApprovalState::PendingClientDecision);
         }
         ApprovalListResult { approvals }
+    }
+
+    /// New typed interaction records use their own history file. The legacy
+    /// approval record and reader remain byte-shape compatible with 0.1.38.
+    pub async fn record_typed_interaction(
+        &self,
+        record: InteractionHistoryRecord,
+    ) -> Result<(), InteractionHistoryError> {
+        self.interaction_history.record(record).await
+    }
+
+    pub async fn decide_typed_interaction(
+        &self,
+        request_id: &str,
+        actor: &message_board::Identity,
+        option_id: &str,
+    ) -> Result<(), InteractionHistoryError> {
+        self.interaction_history
+            .decide(request_id, actor, option_id)
+            .await
     }
 
     async fn record(&self, record: ApprovalRequestRecord) -> Result<(), ApprovalBrokerError> {
@@ -772,5 +803,5 @@ impl ApprovalBroker for ServiceApprovalBroker {
 }
 
 #[cfg(test)]
-#[path = "approval_broker_tests.rs"]
+#[path = "interaction_broker_tests.rs"]
 mod tests;

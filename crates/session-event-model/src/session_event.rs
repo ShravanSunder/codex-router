@@ -73,28 +73,6 @@ pub struct SessionItem {
     pub text: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-pub enum QuestionField {
-    Text {
-        field_id: String,
-        required: bool,
-    },
-    Number {
-        field_id: String,
-        required: bool,
-    },
-    Boolean {
-        field_id: String,
-        required: bool,
-    },
-    SingleChoice {
-        field_id: String,
-        required: bool,
-        options: Vec<String>,
-    },
-}
-
 /// Events carry domain facts; the hub assigns sequence numbers and owns replay.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]

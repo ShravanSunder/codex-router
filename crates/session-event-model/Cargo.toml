@@ -11,6 +11,4 @@ workspace = true
 [dependencies]
 message-board = { path = "../message-board", version = "0.1.39" }
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
