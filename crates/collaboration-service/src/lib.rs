@@ -45,6 +45,7 @@ mod scheduled_run_router;
 mod session_command_port;
 mod session_delivery_contract;
 mod session_delivery_router;
+mod session_event_hub;
 mod stored_delivery_receipt;
 mod stored_run_receipt;
 pub use collaboration_protocol::{DeliveryClientReceipt, DeliveryReceipt};
@@ -69,6 +70,10 @@ pub use session_delivery_contract::{
     RouteUnavailableReason, SessionDeliveryRoute, SessionMessageDelivery,
 };
 pub use session_delivery_router::SessionDeliveryRouter;
+pub use session_event_hub::{
+    HubEvent, HubFuture, HubSessionSummary, SessionEventAttachment, SessionEventHub,
+    SessionEventHubError,
+};
 mod provider_conversation_dispatch;
 mod service_identity_storage;
 pub use service_identity_storage::{load_service_identity, new_service_uuid};
@@ -164,8 +169,3 @@ mod board_request_dispatch;
 mod board_request_validation;
 mod thread_listen_dispatch;
 mod thread_listen_registry;
-mod session_event_hub;
-pub use session_event_hub::{
-    HubEvent, HubFuture, HubSessionSummary, SessionEventAttachment, SessionEventHub,
-    SessionEventHubError,
-};
