@@ -213,9 +213,7 @@ B still sends its own reply explicitly.
 
 ## Human input, interruption and other protocols
 
-Select human input when submitting a human user's input, including acting on the
-owner's behalf when no caller identity route is available (see the skill's
-[Identity guidance](../../agent-skills/agent-collaboration/SKILL.md#identity)):
+Only select human input when explicitly submitting a human user's input:
 
 ```sh
 agent-collaboration message send --human-user \
