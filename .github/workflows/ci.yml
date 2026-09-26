@@ -6,10 +6,18 @@ on:
     branches:
       - main
 
+# A newer push to the same PR makes the older run obsolete.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   rust:
     name: Validate Rust workspace
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -20,17 +28,14 @@ jobs:
           toolchain: 1.98.1
           components: clippy,rustfmt,rust-src
 
-      - name: Cache cargo crates, tools, and target
-        uses: actions/cache@v4
+      # Keyed on the toolchain and Cargo.lock only, with prefix fallback, so a
+      # workflow edit or a dependency bump reuses the previous build instead of
+      # starting cold.
+      - name: Cache cargo crates and target
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/advisory-db
-            target
-          key: ${{ runner.os }}-cargo-1.98.1-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml', '.github/workflows/ci.yml') }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-1.98.1-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml', '.github/workflows/ci.yml') }}-
+          shared-key: validate
+          cache-on-failure: true
 
       - name: Cache pinned Rust tools
         uses: actions/cache@v4
@@ -103,11 +108,28 @@ jobs:
         background: true
         run: cargo nextest run --profile ci --workspace
 
-      # Debug code generation does not reproduce the FuturesUnordered waker bug.
-      - name: Test optimized idle provider transport
-        id: provider_transport_idle
-        background: true
-        run: cargo test --locked --release -p codex-router-host --test provider_transport_idle
-
       - name: Wait for validation
         wait-all:
+
+  # Production runs on macOS, and the FuturesUnordered waker bug only
+  # reproduced with optimized code on the kqueue reactor.
+  macos:
+    name: Validate macOS-specific behaviour
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache cargo crates and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-release
+          cache-on-failure: true
+
+      - name: Test optimized idle provider transport
+        run: cargo test --locked --release -p codex-router-host --test provider_transport_idle
