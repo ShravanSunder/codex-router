@@ -1,15 +1,14 @@
-//! Shared message preparation and generation discovery for CLI and MCP callers.
+//! Shared message request preparation for CLI and MCP callers.
 use crate::{
     ClientError, ControlClient, OperationEffect, OperationFailure,
     operation_failure_from_client_error,
 };
 use collaboration_protocol::{
-    ChannelDescription, CodexGeneration, MessageContent, MessageDelivery, NativeSendParams,
-    NativeSendReceipt, NonEmptyText, SessionRef,
+    CodexGeneration, DeliveryCorrelationId, DeliveryReceipt, MessageContent, MessageDelivery,
+    SessionMessageSendParams, SessionRef,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -19,7 +18,7 @@ pub struct MessageSendRequest {
     #[serde(default)]
     pub delivery: MessageDelivery,
     pub generation_guard: Option<CodexGeneration>,
-    pub client_user_message_id: Option<NonEmptyText>,
+    pub correlation: Option<DeliveryCorrelationId>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,55 +87,20 @@ impl ControlClient {
     pub async fn send_message(
         &mut self,
         request: MessageSendRequest,
-    ) -> Result<NativeSendReceipt, MessageSendError> {
+    ) -> Result<DeliveryReceipt, MessageSendError> {
         if request.target.endpoint.service_id != self.identity().service_id {
             return Err(MessageSendError::Preparation(Box::new(
                 ClientError::InvalidRequest("message target belongs to another service"),
             )));
         }
-        let inventory = self
-            .list_endpoints()
-            .await
-            .map_err(|error| MessageSendError::Preparation(Box::new(error)))?;
-        let generation = inventory
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.endpoint == request.target.endpoint)
-            .and_then(|endpoint| {
-                endpoint.channels.iter().find_map(|channel| match channel {
-                    ChannelDescription::NativeCodex {
-                        generation: Some(generation),
-                        ..
-                    } => Some(generation.clone()),
-                    _ => None,
-                })
-            })
-            .ok_or(MessageSendError::Preparation(Box::new(
-                ClientError::Rejected {
-                    code: -32050,
-                    data: Some(json!({"kind":"unavailable","stage":"discovery"})),
-                },
-            )))?;
-        if request
-            .generation_guard
-            .as_ref()
-            .is_some_and(|expected| expected != &generation)
-        {
-            return Err(MessageSendError::Preparation(Box::new(
-                ClientError::Rejected {
-                    code: -32050,
-                    data: Some(json!({"kind":"staleGeneration","stage":"discovery"})),
-                },
-            )));
-        }
         let is_agent = matches!(request.message, PublicMessageContent::Agent { .. });
         let target = request.target.clone();
-        let params = NativeSendParams {
+        let params = SessionMessageSendParams {
             target: request.target,
-            generation,
             message: request.message.into(),
-            delivery: request.delivery,
-            client_user_message_id: request.client_user_message_id,
+            mode: request.delivery,
+            generation_guard: request.generation_guard,
+            correlation: request.correlation,
         };
         if is_agent {
             self.send_agent_message(params)
@@ -212,7 +176,7 @@ mod tests {
             },
             delivery: MessageDelivery::Auto,
             generation_guard: None,
-            client_user_message_id: None,
+            correlation: None,
         };
         let error = client
             .send_message(request)
@@ -230,7 +194,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_generation_guard_is_rejected_after_discovery_without_submission() {
+    async fn strict_generation_guard_reaches_the_service_and_reports_known_none() {
         let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
         let peer = tokio::spawn(async move {
             let (read, mut write) = server_stream.into_split();
@@ -251,26 +215,24 @@ mod tests {
                 .write_all(format!("{response}\n").as_bytes())
                 .await
                 .expect("write init");
-            let inventory: Value = serde_json::from_str(
+            let sent: Value = serde_json::from_str(
                 &lines
                     .next_line()
                     .await
-                    .expect("read inventory")
-                    .expect("inventory frame"),
+                    .expect("read message")
+                    .expect("message frame"),
             )
-            .expect("inventory JSON");
-            assert_eq!(inventory["method"], "endpoint/list");
-            let response = json!({"jsonrpc":"2.0","id":inventory["id"],"result":{
-                "serviceEpoch":"00000000-0000-4000-8000-000000000002","sequence":1,
-                "endpoints":[{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-                    "label":"fixture","availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
-                    "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,
-                        "generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":2}}]}]
+            .expect("message JSON");
+            assert_eq!(sent["method"], "message/send");
+            assert_eq!(sent["params"]["generationGuard"]["generation"], 1);
+            let response = json!({"jsonrpc":"2.0","id":sent["id"],"result":{
+                "outcome":{"kind":"notSubmitted","retryable":false,"reason":"staleGeneration"},
+                "reachability":"codexAppServer","client":null
             }});
             write
                 .write_all(format!("{response}\n").as_bytes())
                 .await
-                .expect("write inventory");
+                .expect("write receipt");
             assert!(lines.next_line().await.expect("read close").is_none());
         });
         let mut client = ControlClient::initialize(client_stream, "message-test", "1")
@@ -280,27 +242,24 @@ mod tests {
             "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"target"},
             "message":{"kind":"humanUser","text":"hello"},"delivery":"auto",
             "generationGuard":{"serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":1},
-            "clientUserMessageId":null
+            "correlation":null
         }))
         .expect("message request");
-        let error = client
+        let receipt = client
             .send_message(request)
             .await
-            .expect_err("stale generation");
+            .expect("stale guard is an E5 result");
         assert!(matches!(
-            error,
-            MessageSendError::Preparation(source)
-                if matches!(source.as_ref(), ClientError::Rejected {
-                    code: -32050,
-                    data: Some(data),
-                } if data["kind"] == "staleGeneration")
+            receipt.outcome,
+            collaboration_protocol::DeliveryOutcome::NotSubmitted { retryable: false, reason }
+                if reason == "staleGeneration"
         ));
         client.close().await.expect("close client");
         peer.await.expect("join peer");
     }
 
     #[tokio::test]
-    async fn discovery_transport_loss_is_preparation_failure_without_submission() {
+    async fn unpinned_send_uses_service_route_without_native_catalog_precheck() {
         let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
         let peer = tokio::spawn(async move {
             let (read, mut write) = server_stream.into_split();
@@ -321,15 +280,24 @@ mod tests {
                 .write_all(format!("{response}\n").as_bytes())
                 .await
                 .expect("write init");
-            let discovery: Value = serde_json::from_str(
+            let sent: Value = serde_json::from_str(
                 &lines
                     .next_line()
                     .await
-                    .expect("read discovery")
-                    .expect("discovery frame"),
+                    .expect("read message")
+                    .expect("message frame"),
             )
-            .expect("discovery JSON");
-            assert_eq!(discovery["method"], "endpoint/list");
+            .expect("message JSON");
+            assert_eq!(sent["method"], "message/send");
+            assert!(sent["params"]["generationGuard"].is_null());
+            let response = json!({"jsonrpc":"2.0","id":sent["id"],"result":{
+                "outcome":{"kind":"notSubmitted","retryable":true,"reason":"provider starting"},
+                "reachability":null,"client":null
+            }});
+            write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .expect("write receipt");
         });
         let mut client = ControlClient::initialize(client_stream, "message-test", "1")
             .await
@@ -337,7 +305,14 @@ mod tests {
         let request = fixture_request(None);
         assert!(matches!(
             client.send_message(request).await,
-            Err(super::MessageSendError::Preparation(_))
+            Ok(collaboration_protocol::DeliveryReceipt {
+                outcome: collaboration_protocol::DeliveryOutcome::NotSubmitted {
+                    retryable: true,
+                    ..
+                },
+                reachability: None,
+                client: None
+            })
         ));
         peer.await.expect("join peer");
     }
@@ -364,25 +339,6 @@ mod tests {
                 .write_all(format!("{response}\n").as_bytes())
                 .await
                 .expect("write init");
-            let discovery: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read discovery")
-                    .expect("discovery frame"),
-            )
-            .expect("discovery JSON");
-            let response = json!({"jsonrpc":"2.0","id":discovery["id"],"result":{
-                "serviceEpoch":"00000000-0000-4000-8000-000000000002","sequence":1,
-                "endpoints":[{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-                    "label":"fixture","availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
-                    "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,
-                        "generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":2}}]}]
-            }});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write discovery");
             let send: Value = serde_json::from_str(
                 &lines
                     .next_line()
@@ -391,7 +347,7 @@ mod tests {
                     .expect("send frame"),
             )
             .expect("send JSON");
-            assert_eq!(send["method"], "codex/messageSend");
+            assert_eq!(send["method"], "message/send");
         });
         let mut client = ControlClient::initialize(client_stream, "message-test", "1")
             .await
@@ -412,7 +368,7 @@ mod tests {
         serde_json::from_value(json!({
             "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"target"},
             "message":{"kind":"humanUser","text":"hello"},"delivery":"auto",
-            "generationGuard":generation_guard,"clientUserMessageId":null
+            "generationGuard":generation_guard,"correlation":null
         }))
         .expect("message request")
     }

@@ -2,8 +2,9 @@
 use super::proof_context::{ProofContext, ProofResult, agent_text};
 use collaboration_client::protocol::{
     ContinuityInput, ExecutionDestination, InstructionCreateParams, InstructionUpdateParams,
-    OperationId, RunListRequest, RunSnapshot, RunState, ScheduleCreateRequest, ScheduleDefinition,
-    ScheduleId, ScheduleShowRequest, ScheduleUpdateRequest, TimingRequest, WorkerOutcome,
+    OperationId, RunExecution, RunListRequest, RunSnapshot, RunState, ScheduleCreateRequest,
+    ScheduleDefinition, ScheduleId, ScheduleShowRequest, ScheduleUpdateRequest,
+    SummarySourceReference, TimingRequest, WorkerOutcome,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -61,6 +62,9 @@ pub async fn exercise() -> ProofResult<()> {
     else {
         return Err("First scheduled worker did not complete successfully".into());
     };
+    let RunExecution::CodexAppServer(first_execution) = first_execution else {
+        return Err("First scheduled worker did not use the native route".into());
+    };
     proof.client.update_instruction(InstructionUpdateParams {
         operation_id: OperationId::generate(),
         instruction_id: instruction.instruction_id,
@@ -102,15 +106,18 @@ pub async fn exercise() -> ProofResult<()> {
     else {
         return Err("Second scheduled worker did not complete successfully".into());
     };
+    let RunExecution::CodexAppServer(execution) = execution else {
+        return Err("Second scheduled worker did not use the native route".into());
+    };
     if execution.target == first_execution.target || second.run_id == first.run_id {
         return Err(
             "Fresh scheduled execution reused its previous native thread or Run identity".into(),
         );
     }
     if inputs.instruction_text.as_str().contains(&token)
-        || !matches!(&inputs.continuity, ContinuityInput::LocalSummary { text, source_run_id, source_target, source_turn_id }
+        || !matches!(&inputs.continuity, ContinuityInput::LocalSummary { text, source_run_id, source_target, source_reference: SummarySourceReference::NativeTurn { turn_id } }
             if text == &summary.text && source_run_id == &first.run_id
-                && source_target == &first_execution.target && source_turn_id == &first_execution.turn_id)
+                && source_target == &first_execution.target && turn_id == &first_execution.turn_id)
     {
         return Err("Second Run did not capture the exact prior summary independently of its current instructions".into());
     }

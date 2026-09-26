@@ -1,6 +1,8 @@
 //! Shared input options keep immediate messages and timed wake-ups semantically identical.
 use clap::{Args, ValueEnum};
-use collaboration_client::protocol::{MessageContent, MessageDelivery, SavedMessage, UuidIdentity};
+use collaboration_client::protocol::{
+    MessageContent, MessageDelivery, MessageText, SavedMessage, SessionRef, UuidIdentity,
+};
 use serde_json::json;
 use std::{
     io::{self, Read},
@@ -17,11 +19,7 @@ pub(crate) struct SendArguments {
     #[command(flatten)]
     pub(crate) target: crate::session_target_arguments::SessionTargetArguments,
     /// Use the supplied self address as SessionRef JSON; this is not authenticated identity.
-    #[arg(
-        long = "from",
-        required_unless_present = "human_user",
-        conflicts_with = "human_user"
-    )]
+    #[arg(long = "from", conflicts_with = "human_user")]
     pub(crate) sender: Option<String>,
     /// Explicit human input; omit the agent declaration.
     #[arg(long)]
@@ -78,15 +76,22 @@ pub(crate) fn prepare(args: &SendArguments) -> Result<(PathBuf, PreparedMessage)
         .try_into()
         .map_err(|_| "Invalid or oversized message text")?;
     let content = if args.human_user {
-        MessageContent::HumanUser { text }
+        PreparedMessageContent::HumanUser { text }
     } else {
-        let sender = serde_json::from_str(
-            args.sender
-                .as_deref()
-                .ok_or("Self-declared sender required")?,
-        )
-        .map_err(|_| session_ref_guidance("--from"))?;
-        MessageContent::Agent { sender, text }
+        let sender = args
+            .sender
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| session_ref_guidance("--from"))?;
+        if sender.is_none() {
+            crate::current_session_identity::read_harness_session_identity().map_err(|error| {
+                format!(
+                    "{error}; run agent-collaboration whoami --json or pass --from SessionRef JSON"
+                )
+            })?;
+        }
+        PreparedMessageContent::Agent { sender, text }
     };
     let generation_guard = match (&args.expected_service_epoch, args.expected_generation) {
         (Some(epoch), Some(generation)) => Some(
@@ -119,17 +124,85 @@ pub(crate) fn session_ref_guidance(field: &str) -> String {
 
 pub(crate) struct PreparedMessage {
     pub(crate) target: crate::session_target_arguments::ParsedSessionTarget,
-    pub(crate) content: MessageContent,
+    content: PreparedMessageContent,
     pub(crate) delivery: MessageDelivery,
     pub(crate) generation_guard: Option<collaboration_client::protocol::CodexGeneration>,
 }
+enum PreparedMessageContent {
+    HumanUser {
+        text: MessageText,
+    },
+    Agent {
+        sender: Option<SessionRef>,
+        text: MessageText,
+    },
+}
 impl PreparedMessage {
     pub(crate) fn resolve(self, service_id: &UuidIdentity) -> Result<SavedMessage, String> {
+        let content = match self.content {
+            PreparedMessageContent::HumanUser { text } => MessageContent::HumanUser { text },
+            PreparedMessageContent::Agent { sender, text } => {
+                let sender = resolve_sender_ref(
+                    service_id,
+                    sender,
+                    crate::current_session_identity::read_harness_session_identity,
+                )?;
+                MessageContent::Agent { sender, text }
+            }
+        };
         Ok(SavedMessage {
             target: self.target.resolve(service_id)?,
-            content: self.content,
+            content,
             delivery: self.delivery,
             generation_guard: self.generation_guard,
         })
+    }
+}
+
+fn resolve_sender_ref(
+    service_id: &UuidIdentity,
+    explicit: Option<SessionRef>,
+    read_harness: impl FnOnce() -> Result<
+        crate::current_session_identity::HarnessSessionIdentity,
+        crate::current_session_identity::CurrentSessionIdentityError,
+    >,
+) -> Result<SessionRef, String> {
+    if let Some(sender) = explicit {
+        return Ok(sender);
+    }
+    read_harness()
+        .map_err(|error| {
+            format!("{error}; run agent-collaboration whoami --json or pass --from SessionRef JSON")
+        })?
+        .session_ref(service_id)
+        .map_err(|error| {
+            format!("{error}; run agent-collaboration whoami --json or pass --from SessionRef JSON")
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_sender_ref;
+    use collaboration_client::protocol::UuidIdentity;
+
+    #[test]
+    fn sender_uses_harness_identity_and_fails_with_whoami_guidance_when_absent() {
+        let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
+            .expect("service identity");
+        let resolved = resolve_sender_ref(&service_id, None, || {
+            crate::current_session_identity::resolve_harness_session_identity(|name| {
+                (name == "CURSOR_CONVERSATION_ID").then(|| "cursor-1".into())
+            })
+        })
+        .expect("harness identity");
+        assert_eq!(String::from(resolved.endpoint.endpoint_id), "cursor-local");
+        assert_eq!(String::from(resolved.session_id), "cursor-1");
+
+        let error = resolve_sender_ref(&service_id, None, || {
+            crate::current_session_identity::resolve_harness_session_identity(|_| None)
+        })
+        .expect_err("sender must fail closed");
+        assert!(error.contains("agent-collaboration whoami --json"));
+        assert!(error.contains("--from SessionRef JSON"));
     }
 }

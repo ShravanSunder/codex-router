@@ -181,7 +181,10 @@ impl BoardError {
         Self {
             kind: BoardFailureKind::ParticipantRequired,
             stage: BoardFailureStage::Admission,
-            message: "This session must Join the Thread before continuing.".to_owned(),
+            message: format!(
+                "This session must join the Thread before session delivery. Run: agent-collaboration board thread join --root-message-id {} --actor self --role participant --no-watch --json",
+                String::from(root_message_id.clone())
+            ),
             next_action: BoardNextAction::JoinThread,
             details: BoardErrorDetails::ParticipantRefusal {
                 refusal: Box::new(ParticipantRefusalDetails {

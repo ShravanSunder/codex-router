@@ -127,7 +127,7 @@ async fn select_continuity<TTarget: DeserializeOwned>(
         SummarySource::Skipped { reason } => Ok(ContinuityInput::Omitted { reason }),
         SummarySource::Completed {
             source_target,
-            source_turn_id,
+            source_reference,
             ..
         } => {
             let text: String = prior
@@ -139,7 +139,7 @@ async fn select_continuity<TTarget: DeserializeOwned>(
                 text,
                 source_run_id,
                 source_target,
-                source_turn_id,
+                source_reference,
             })
         }
     }

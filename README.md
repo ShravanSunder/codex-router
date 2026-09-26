@@ -73,8 +73,14 @@ cargo run -p codex-router-cli -- host
 ```
 
 The host starts `codex-router serve` when a compatible router is absent, starts
-the managed Codex app-server, and keeps lifecycle
-control on an owner-only Unix socket. Hosted `agent-sessions` new/resume launches
+the managed Codex app-server and enabled ACP providers, and keeps lifecycle
+control on an owner-only Unix socket. On first start it creates owner-editable
+`<router-root>/providers.json` with Claude and Cursor enabled. The default
+executables are `claude-agent-acp` and `agent acp`; explicit Host provider flags
+override the file for that start. If one provider is unavailable, the endpoint
+catalog reports its reason and fix while the other endpoints remain available.
+
+Hosted `agent-sessions` new/resume launches
 resolve the advertised public native selector. Backend replacement closes native
 connections; the native TUI owns bounded reconnection without a Sessions supervisor.
 
@@ -108,6 +114,11 @@ replacement proof.
 
 For discovery, agent-declared messages, queue/steer, timed wake-ups and scheduled
 work, see the [agent CLI guide](docs/agent-guidance/agent-collaboration.md).
+`agent-collaboration conversation create|prompt|load|cancel` uses the target
+endpoint's client, including Codex, Claude, and Cursor. Use `conversation
+operation show|wait|reconcile` for inspectable operations. `message send` can
+also reach a live Claude Code session through its peer socket; its
+`peerMessageWritten` receipt confirms the write, not the session's response.
 That guide also documents registering the running Router Host's manifest-advertised
 Streamable HTTP MCP endpoint with Codex. Use the selected current `service.json`;
 do not guess a port or expose the unauthenticated endpoint beyond loopback.
@@ -116,3 +127,32 @@ and CLI. [Debug testing instructions](docs/testing/automation-debug-testing.md)
 cover the opt-in Luna acceptance runner and its isolated Host. Shared message boards use the same client and service; see the
 [agent collaboration skill](agent-skills/agent-collaboration/SKILL.md). Other language
 SDK implementations and remote transport follow separately.
+
+## Install and upgrade
+
+Install `codex-router` from the Homebrew tap:
+
+```shell
+brew tap shravansunder/taps
+brew trust shravansunder/taps  # Homebrew 7+
+brew install shravansunder/taps/codex-router
+```
+
+Upgrade the installed binaries and restart a running Host:
+
+```shell
+brew update && brew upgrade codex-router
+codex-router host restart
+```
+
+A running Host continues using the build it started with until restarted. `codex-router host status` and the `agent-collaboration` CLI warn when the installed or connected Router version is newer.
+
+If Homebrew reports conflicts in its tap clone, inspect and restore only the formula file, then fast-forward the tap:
+
+```shell
+git -C "$(brew --repository)/Library/Taps/shravansunder/homebrew-taps" status
+git -C "$(brew --repository)/Library/Taps/shravansunder/homebrew-taps" checkout -- Formula/codex-router.rb
+git -C "$(brew --repository)/Library/Taps/shravansunder/homebrew-taps" pull --ff-only
+```
+
+Do not edit the installed tap clone; formula changes go through the release workflow.

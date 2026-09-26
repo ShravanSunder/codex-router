@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT working_directory,requested_policy_json,created_by_json,approver_json,updated_at_ms\n             FROM provider_session_records\n             WHERE target_service_id=? AND target_endpoint_id=? AND target_session_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "working_directory",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "working_directory"
+          }
+        }
+      },
+      {
+        "name": "requested_policy_json",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "requested_policy_json"
+          }
+        }
+      },
+      {
+        "name": "created_by_json",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "created_by_json"
+          }
+        }
+      },
+      {
+        "name": "approver_json",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "approver_json"
+          }
+        }
+      },
+      {
+        "name": "updated_at_ms",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_session_records",
+            "name": "updated_at_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "096a49b27e38c140d5d0f6efc8fac682bf437a60d01c70b0bda486733ea6a6b1"
+}

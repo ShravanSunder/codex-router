@@ -1,18 +1,19 @@
 use super::{CollaborationMcpListener, CollaborationMcpListenerConfig, LoopbackBindAddress};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use rmcp::{ServerHandler as _, ServiceExt as _};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
+pub(super) const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
-const CREATE_OPERATION: &str = "019f0000-0000-7000-8000-000000000001";
+pub(super) const CREATE_OPERATION: &str = "019f0000-0000-7000-8000-000000000001";
 const PROMPT_OPERATION: &str = "019f0000-0000-7000-8000-000000000002";
-const WAIT_OPERATION: &str = "019f0000-0000-7000-8000-000000000003";
+pub(super) const WAIT_OPERATION: &str = "019f0000-0000-7000-8000-000000000003";
 const LOAD_OPERATION: &str = "019f0000-0000-7000-8000-000000000004";
+const PENDING_OPERATION: &str = "019f0000-0000-7000-8000-000000000005";
+const CANCEL_OPERATION: &str = "019f0000-0000-7000-8000-000000000006";
 
 #[tokio::test]
-async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
+async fn initialized_http_exposes_one_conversation_surface_for_provider_operations() {
     let temporary = tempfile::tempdir().expect("temporary service directory");
     let _publication = publish_manifest(temporary.path());
     let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
@@ -28,6 +29,15 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
             let (reader, mut writer) = stream.into_split();
             let mut lines = BufReader::new(reader).lines();
             initialize_control(&mut lines, &mut writer).await;
+            if expected != "conversation/operationShow" {
+                let inventory = read_json_line(&mut lines).await;
+                assert_eq!(inventory["method"], "endpoint/list");
+                write_json_line(
+                    &mut writer,
+                    json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
+                )
+                .await;
+            }
             let request = read_json_line(&mut lines).await;
             assert_eq!(request["method"], expected);
             let operation_id = request["params"]["operationId"]
@@ -57,7 +67,11 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
                 "conversation/prompt" => "conversationPrompt",
                 _ => "conversationPrompt",
             };
-            let snapshot = operation_snapshot(operation_id, operation);
+            let snapshot = if expected == "conversation/create" {
+                terminal_snapshot(operation_id, operation)
+            } else {
+                operation_snapshot(operation_id, operation)
+            };
             let result = if expected == "conversation/operationShow" {
                 snapshot
             } else {
@@ -68,6 +82,23 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
                 json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
             )
             .await;
+            if expected == "conversation/prompt" {
+                let wait = read_json_line(&mut lines).await;
+                assert_eq!(wait["method"], "conversation/operationWait");
+                assert_eq!(wait["params"]["operationId"], PROMPT_OPERATION);
+                write_json_line(
+                    &mut writer,
+                    json!({"jsonrpc":"2.0","id":wait["id"],"result":{
+                        "operation":terminal_snapshot(PROMPT_OPERATION,"conversationPrompt"),
+                        "output":{"kind":"available","settlement":{
+                            "kind":"promptCompleted",
+                            "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
+                            "stopReason":"end_turn","response":"provider reply"
+                        }}
+                    }}),
+                )
+                .await;
+            }
         }
     });
     let listener = start_listener(temporary.path()).await;
@@ -77,25 +108,19 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
     let tools = call_mcp(&client, &listener, &session, 2, "tools/list", json!({})).await;
     let listed = tools["result"]["tools"].as_array().expect("tool array");
     for name in [
-        "provider_conversation_create",
-        "provider_conversation_load",
-        "provider_conversation_prompt",
-        "provider_conversation_cancel",
-        "provider_conversation_operation_show",
-        "provider_conversation_operation_wait",
-        "provider_conversation_operation_reconcile",
+        "conversation_create",
+        "conversation_load",
+        "conversation_prompt",
+        "conversation_cancel",
+        "conversation_operation_show",
+        "conversation_operation_wait",
+        "conversation_operation_reconcile",
     ] {
         let tool = listed
             .iter()
             .find(|tool| tool["name"] == name)
-            .unwrap_or_else(|| panic!("missing provider tool {name}"));
-        if matches!(
-            name,
-            "provider_conversation_create"
-                | "provider_conversation_load"
-                | "provider_conversation_prompt"
-                | "provider_conversation_cancel"
-        ) {
+            .unwrap_or_else(|| panic!("missing conversation tool {name}"));
+        if matches!(name, "conversation_create" | "conversation_cancel") {
             assert!(
                 tool["inputSchema"]["required"]
                     .as_array()
@@ -113,7 +138,7 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
         &listener,
         &session,
         3,
-        "provider_conversation_create",
+        "conversation_create",
         json!({
             "operationId":CREATE_OPERATION,
             "endpoint":endpoint,
@@ -121,13 +146,13 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
             "workingDirectory":temporary.path(),
             "createdBy":actor,
             "approver":actor,
-            "requestedPolicy":{"access":"workspace-write"}
+            "access":"workspace-write"
         }),
     )
     .await;
-    assert_eq!(create["result"]["isError"], false);
+    assert_eq!(create["result"]["isError"], false, "{create}");
     assert_eq!(
-        create["result"]["structuredContent"]["operation"]["operationId"],
+        create["result"]["structuredContent"]["operationId"],
         CREATE_OPERATION
     );
 
@@ -137,21 +162,38 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
         &listener,
         &session,
         4,
-        "provider_conversation_prompt",
+        "conversation_prompt",
         json!({
             "operationId":PROMPT_OPERATION,
             "target":target,
             "generation":generation(),
             "requestedBy":actor,
             "approver":actor,
-            "prompt":{"kind":"humanUser","text":"continue the assignment"}
+            "message":{"kind":"humanUser","text":"continue the assignment"}
         }),
     )
     .await;
     assert_eq!(prompt["result"]["isError"], false);
+    assert_eq!(prompt["result"]["structuredContent"]["kind"], "completed");
     assert_eq!(
-        prompt["result"]["structuredContent"]["operation"]["operationId"],
+        prompt["result"]["structuredContent"]["operationId"],
         PROMPT_OPERATION
+    );
+    assert_eq!(
+        prompt["result"]["structuredContent"]["settlement"]["stopReason"],
+        "endTurn"
+    );
+    assert_eq!(
+        prompt["result"]["structuredContent"]["settlement"]["detail"]["kind"],
+        "providerPrompt"
+    );
+    assert_eq!(
+        prompt["result"]["structuredContent"]["settlement"]["detail"]["output"]["kind"],
+        "available"
+    );
+    assert_eq!(
+        prompt["result"]["structuredContent"]["settlement"]["detail"]["output"]["text"],
+        "provider reply"
     );
 
     let show = call_tool(
@@ -159,7 +201,7 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
         &listener,
         &session,
         5,
-        "provider_conversation_operation_show",
+        "conversation_operation_show",
         json!({"operationId":PROMPT_OPERATION}),
     )
     .await;
@@ -174,7 +216,7 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
         &listener,
         &session,
         6,
-        "provider_conversation_load",
+        "conversation_load",
         json!({
             "operationId":LOAD_OPERATION,
             "target":target,
@@ -182,7 +224,7 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
             "workingDirectory":temporary.path(),
             "requestedBy":actor,
             "approver":actor,
-            "requestedPolicy":{"access":"workspace-write"}
+            "access":"workspace-write"
         }),
     )
     .await;
@@ -197,229 +239,258 @@ async fn initialized_http_exposes_and_calls_provider_conversation_tools() {
 }
 
 #[tokio::test]
-async fn cancelling_provider_operation_wait_detaches_without_backend_cancel() {
+async fn provider_prompt_wait_timeout_returns_pending_exact_operation_and_target() {
     let temporary = tempfile::tempdir().expect("temporary service directory");
     let _publication = publish_manifest(temporary.path());
     let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
         .expect("Control listener");
-    let (wait_started_tx, wait_started_rx) = tokio::sync::oneshot::channel();
     let peer = tokio::spawn(async move {
         let (stream, _) = control.accept().await.expect("Control accept");
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
         initialize_control(&mut lines, &mut writer).await;
-        let request = read_json_line(&mut lines).await;
-        assert_eq!(request["method"], "conversation/operationWait");
-        assert_eq!(request["params"]["operationId"], WAIT_OPERATION);
-        wait_started_tx.send(()).expect("wait started signal");
+        let inventory = read_json_line(&mut lines).await;
+        assert_eq!(inventory["method"], "endpoint/list");
+        write_json_line(
+            &mut writer,
+            json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
+        )
+        .await;
+        let prompt = read_json_line(&mut lines).await;
+        assert_eq!(prompt["method"], "conversation/prompt");
+        assert_eq!(prompt["params"]["operationId"], PENDING_OPERATION);
+        let snapshot = operation_snapshot(PENDING_OPERATION, "conversationPrompt");
+        write_json_line(
+            &mut writer,
+            json!({"jsonrpc":"2.0","id":prompt["id"],"result":{
+                "admission":"admitted","operation":snapshot.clone()
+            }}),
+        )
+        .await;
+        let wait = read_json_line(&mut lines).await;
+        assert_eq!(wait["method"], "conversation/operationWait");
+        assert_eq!(wait["params"]["operationId"], PENDING_OPERATION);
+        write_json_line(
+            &mut writer,
+            json!({"jsonrpc":"2.0","id":wait["id"],"result":{
+                "operation":snapshot,"output":{"kind":"pending"}
+            }}),
+        )
+        .await;
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+            lines
+                .next_line()
                 .await
-                .expect("call-local Control connection closes")
-                .expect("Control EOF read")
+                .expect("call-local connection read")
                 .is_none(),
-            "MCP cancellation must detach the waiter without sending conversation/cancel"
+            "a pending prompt must not send conversation/cancel or retry"
         );
     });
     let listener = start_listener(temporary.path()).await;
     let client = reqwest::Client::new();
     let session = initialize_mcp(&client, &listener).await;
-    let request_client = client.clone();
-    let request_url = listener.local_url();
-    let request_session = session.clone();
-    let mut wait_request = tokio::spawn(async move {
-        let response = request_client
-            .post(request_url)
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json, text/event-stream")
-            .header("mcp-session-id", request_session)
-            .header("mcp-protocol-version", "2025-11-25")
-            .json(&json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"provider_conversation_operation_wait","arguments":{"operationId":WAIT_OPERATION,"timeoutSeconds":60}}}))
-            .send()
-            .await?;
-        response.bytes().await
-    });
-    tokio::select! {
-        started = wait_started_rx => started.expect("provider wait started"),
-        result = &mut wait_request => panic!("wait ended before cancellation: {result:?}"),
-    }
-    let cancellation = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session)
-        .header("mcp-protocol-version", "2025-11-25")
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9,"reason":"caller stopped waiting"}}))
-        .send()
-        .await
-        .expect("MCP cancellation response");
-    assert!(cancellation.status().is_success());
-    let _request_result = tokio::time::timeout(std::time::Duration::from_secs(1), wait_request)
-        .await
-        .expect("cancelled MCP wait settles")
-        .expect("wait request join");
-    peer.await.expect("Control peer");
-    listener.shutdown().await.expect("listener shutdown");
-}
-
-#[tokio::test]
-async fn cancellation_during_control_connect_is_no_effect_for_mutation() {
-    let temporary = tempfile::tempdir().expect("temporary service directory");
-    let _publication = publish_manifest(temporary.path());
-    let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
-        .expect("Control listener");
-    let (initialize_started_tx, initialize_started_rx) = tokio::sync::oneshot::channel();
-    let peer = tokio::spawn(async move {
-        let (stream, _) = control.accept().await.expect("Control accept");
-        let (reader, _writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        let initialize = read_json_line(&mut lines).await;
-        assert_eq!(initialize["method"], "control/initialize");
-        initialize_started_tx
-            .send(())
-            .expect("initialize started signal");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
-                .await
-                .expect("call-local Control connection closes")
-                .expect("Control EOF read")
-                .is_none(),
-            "cancellation before Control initialization must not submit the mutation"
-        );
-    });
-    let listener = start_listener(temporary.path()).await;
-    let client = reqwest::Client::new();
-    let session = initialize_mcp(&client, &listener).await;
-    let request_client = client.clone();
-    let request_url = listener.local_url();
-    let request_session = session.clone();
-    let working_directory = temporary.path().to_owned();
-    let mut create_request = tokio::spawn(async move {
-        let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
-        let actor = json!({"endpoint":endpoint,"sessionId":"caller-session"});
-        let response = request_client
-            .post(request_url)
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json, text/event-stream")
-            .header("mcp-session-id", request_session)
-            .header("mcp-protocol-version", "2025-11-25")
-            .json(&json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"provider_conversation_create","arguments":{
-                "operationId":CREATE_OPERATION,
-                "endpoint":endpoint,
-                "generation":generation(),
-                "workingDirectory":working_directory,
-                "createdBy":actor,
-                "approver":actor,
-                "requestedPolicy":{"access":"workspace-write"}
-            }}}))
-            .send()
-            .await?;
-        response.text().await
-    });
-    tokio::select! {
-        started = initialize_started_rx => started.expect("Control initialize started"),
-        result = &mut create_request => panic!("create ended before cancellation: {result:?}"),
-    }
-    let cancellation = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session)
-        .header("mcp-protocol-version", "2025-11-25")
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":10,"reason":"caller cancelled before connect"}}))
-        .send()
-        .await
-        .expect("MCP cancellation response");
-    assert!(cancellation.status().is_success());
-    let body = tokio::time::timeout(std::time::Duration::from_secs(1), create_request)
-        .await
-        .expect("cancelled MCP create settles")
-        .expect("create request join")
-        .expect("create response body");
-    assert!(
-        !body.contains(CREATE_OPERATION),
-        "cancelled stream must not fabricate a mutation result"
-    );
-    peer.await.expect("Control peer");
-    listener.shutdown().await.expect("listener shutdown");
-}
-
-#[tokio::test]
-async fn registered_mutation_handler_returns_no_effect_when_connect_is_cancelled() {
-    #[derive(Clone)]
-    struct TestClient;
-    impl rmcp::handler::client::ClientHandler for TestClient {}
-
-    let temporary = tempfile::tempdir().expect("temporary service directory");
-    let _publication = publish_manifest(temporary.path());
-    let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
-        .expect("Control listener");
-    let (initialize_started_tx, initialize_started_rx) = tokio::sync::oneshot::channel();
-    let peer = tokio::spawn(async move {
-        let (stream, _) = control.accept().await.expect("Control accept");
-        let (reader, _writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        let initialize = read_json_line(&mut lines).await;
-        assert_eq!(initialize["method"], "control/initialize");
-        initialize_started_tx
-            .send(())
-            .expect("initialize started signal");
-        assert!(
-            lines.next_line().await.expect("Control EOF read").is_none(),
-            "cancelled handler must not submit the mutation"
-        );
-    });
-    let server = crate::mcp_server::CollaborationMcpServer::new(temporary.path().to_owned());
-    let handler = server.clone();
-    let (server_transport, client_transport) = tokio::io::duplex(4096);
-    let (running_server, running_client) = tokio::join!(
-        server.serve(server_transport),
-        TestClient.serve(client_transport),
-    );
-    let running_server = running_server.expect("test MCP server");
-    let running_client = running_client.expect("test MCP client");
-    let request_context = rmcp::service::RequestContext::new(
-        rmcp::model::NumberOrString::Number(10),
-        running_server.peer().clone(),
-    );
-    let cancellation = request_context.ct.clone();
     let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
+    let target = json!({"endpoint":endpoint,"sessionId":"provider-thread"});
     let actor = json!({"endpoint":endpoint,"sessionId":"caller-session"});
-    let arguments = json!({
-        "operationId":CREATE_OPERATION,
-        "endpoint":endpoint,
-        "generation":generation(),
-        "workingDirectory":temporary.path(),
-        "createdBy":actor,
-        "approver":actor,
-        "requestedPolicy":{"access":"workspace-write"}
-    });
-    let mut call = Box::pin(
-        handler.call_tool(
-            rmcp::model::CallToolRequestParams::new("provider_conversation_create")
-                .with_arguments(arguments.as_object().expect("arguments").clone()),
-            request_context,
-        ),
+    let response = call_tool(
+        &client,
+        &listener,
+        &session,
+        2,
+        "conversation_prompt",
+        json!({
+            "operationId":PENDING_OPERATION,"target":target,
+            "requestedBy":actor,"approver":actor,
+            "message":{"kind":"humanUser","text":"pending proof"},
+            "timeoutSeconds":1
+        }),
+    )
+    .await;
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(response["result"]["structuredContent"]["kind"], "pending");
+    assert_eq!(
+        response["result"]["structuredContent"]["operationId"],
+        PENDING_OPERATION
     );
-    tokio::select! {
-        started = initialize_started_rx => started.expect("Control initialize started"),
-        result = &mut call => panic!("registered handler ended before cancellation: {result:?}"),
-    }
-    cancellation.cancel();
-    let response = call.await.expect("registered handler response");
-    let rmcp::model::CallToolResponse::Complete(result) = response else {
-        panic!("expected complete tool result")
-    };
-    assert_eq!(result.is_error, Some(true));
-    let structured = result.structured_content.expect("structured cancellation");
-    assert_eq!(structured["kind"], "callerCancelled");
-    assert_eq!(structured["effect"], "none");
+    assert_eq!(response["result"]["structuredContent"]["target"], target);
     peer.await.expect("Control peer");
-    running_client.cancel().await.expect("client cancel");
-    running_server.cancel().await.expect("server cancel");
+    listener.shutdown().await.expect("listener shutdown");
 }
 
-fn publish_manifest(path: &std::path::Path) -> collaboration_service::ManifestPublication {
+#[tokio::test]
+async fn provider_prompt_without_operation_id_names_uuidv7_generator_before_mutation() {
+    let temporary = tempfile::tempdir().expect("temporary service directory");
+    let _publication = publish_manifest(temporary.path());
+    let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
+        .expect("Control listener");
+    let peer = tokio::spawn(async move {
+        for operation in ["prompt", "load"] {
+            let (stream, _) = control.accept().await.expect("Control accept");
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            initialize_control(&mut lines, &mut writer).await;
+            let inventory = read_json_line(&mut lines).await;
+            assert_eq!(inventory["method"], "endpoint/list");
+            write_json_line(
+                &mut writer,
+                json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
+            )
+            .await;
+            assert!(
+                lines
+                    .next_line()
+                    .await
+                    .expect("call-local connection read")
+                    .is_none(),
+                "a provider {operation} without operationId must not mutate the provider"
+            );
+        }
+    });
+    let listener = start_listener(temporary.path()).await;
+    let client = reqwest::Client::new();
+    let session = initialize_mcp(&client, &listener).await;
+    let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
+    let target = json!({"endpoint":endpoint,"sessionId":"provider-thread"});
+    let actor = json!({"endpoint":endpoint,"sessionId":"caller-session"});
+    let response = call_tool(
+        &client,
+        &listener,
+        &session,
+        2,
+        "conversation_prompt",
+        json!({"target":target,"requestedBy":actor,
+            "message":{"kind":"humanUser","text":"must not submit"},"timeoutSeconds":1}),
+    )
+    .await;
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["kind"],
+        "invalidRequest"
+    );
+    assert_eq!(response["result"]["structuredContent"]["effect"], "none");
+    assert_eq!(
+        response["result"]["structuredContent"]["operation"],
+        "prompt"
+    );
+    let message = response["result"]["structuredContent"]["message"]
+        .as_str()
+        .expect("provider operation ID message");
+    assert!(
+        message.contains("canonical lowercase RFC UUIDv7"),
+        "{message}"
+    );
+    let fix = response["result"]["structuredContent"]["fix"]
+        .as_str()
+        .expect("generator fix");
+    assert!(
+        fix.contains("python3 -c 'import uuid; print(uuid.uuid7())'"),
+        "{fix}"
+    );
+    let load = call_tool(
+        &client,
+        &listener,
+        &session,
+        3,
+        "conversation_load",
+        json!({"target":target,"workingDirectory":temporary.path(),
+            "requestedBy":actor,"access":"workspace-write","timeoutSeconds":1}),
+    )
+    .await;
+    assert_eq!(load["result"]["isError"], true, "{load}");
+    assert_eq!(
+        load["result"]["structuredContent"]["kind"],
+        "invalidRequest"
+    );
+    assert_eq!(load["result"]["structuredContent"]["effect"], "none");
+    assert_eq!(load["result"]["structuredContent"]["operation"], "load");
+    assert!(
+        load["result"]["structuredContent"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("UUIDv7"))
+    );
+    assert!(
+        load["result"]["structuredContent"]["fix"]
+            .as_str()
+            .is_some_and(|fix| fix.contains("python3 -c 'import uuid; print(uuid.uuid7())'"))
+    );
+    peer.await.expect("Control peer");
+    listener.shutdown().await.expect("listener shutdown");
+}
+
+#[tokio::test]
+async fn provider_cancel_keeps_the_exact_target_operation_on_the_common_mcp_surface() {
+    let temporary = tempfile::tempdir().expect("temporary service directory");
+    let _publication = publish_manifest(temporary.path());
+    let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
+        .expect("Control listener");
+    let peer = tokio::spawn(async move {
+        let (stream, _) = control.accept().await.expect("Control accept");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        initialize_control(&mut lines, &mut writer).await;
+        let inventory = read_json_line(&mut lines).await;
+        assert_eq!(inventory["method"], "endpoint/list");
+        write_json_line(
+            &mut writer,
+            json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
+        )
+        .await;
+        let cancel = read_json_line(&mut lines).await;
+        assert_eq!(cancel["method"], "conversation/cancel");
+        assert_eq!(cancel["params"]["operationId"], CANCEL_OPERATION);
+        assert_eq!(cancel["params"]["targetOperationId"], PROMPT_OPERATION);
+        assert_eq!(cancel["params"]["target"]["sessionId"], "provider-thread");
+        write_json_line(
+            &mut writer,
+            json!({"jsonrpc":"2.0","id":cancel["id"],"result":{
+                "admission":"admitted",
+                "operation":operation_snapshot(CANCEL_OPERATION,"conversationCancel")
+            }}),
+        )
+        .await;
+        assert!(
+            lines
+                .next_line()
+                .await
+                .expect("call-local connection read")
+                .is_none(),
+            "cancel is one exact mutation, not a replay or wait"
+        );
+    });
+    let listener = start_listener(temporary.path()).await;
+    let client = reqwest::Client::new();
+    let session = initialize_mcp(&client, &listener).await;
+    let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
+    let target = json!({"endpoint":endpoint,"sessionId":"provider-thread"});
+    let actor = json!({"endpoint":endpoint,"sessionId":"caller-session"});
+    let response = call_tool(
+        &client,
+        &listener,
+        &session,
+        2,
+        "conversation_cancel",
+        json!({
+            "operationId":CANCEL_OPERATION,"targetOperationId":PROMPT_OPERATION,
+            "target":target,"requestedBy":actor,"approver":actor
+        }),
+    )
+    .await;
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["operation"]["operationId"],
+        CANCEL_OPERATION
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["operation"]["operation"],
+        "conversationCancel"
+    );
+    peer.await.expect("Control peer");
+    listener.shutdown().await.expect("listener shutdown");
+}
+
+pub(super) fn publish_manifest(
+    path: &std::path::Path,
+) -> collaboration_service::ManifestPublication {
     collaboration_service::ManifestPublication::publish(
         path,
         &serde_json::from_value(json!({
@@ -435,7 +506,7 @@ fn publish_manifest(path: &std::path::Path) -> collaboration_service::ManifestPu
     .expect("manifest publication")
 }
 
-async fn start_listener(path: &std::path::Path) -> CollaborationMcpListener {
+pub(super) async fn start_listener(path: &std::path::Path) -> CollaborationMcpListener {
     CollaborationMcpListener::start(CollaborationMcpListenerConfig {
         bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
         service_directory: path.to_owned(),
@@ -445,7 +516,7 @@ async fn start_listener(path: &std::path::Path) -> CollaborationMcpListener {
     .expect("MCP listener starts")
 }
 
-async fn initialize_control(
+pub(super) async fn initialize_control(
     lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
     writer: &mut tokio::net::unix::OwnedWriteHalf,
 ) {
@@ -458,7 +529,7 @@ async fn initialize_control(
     .await;
 }
 
-async fn read_json_line(
+pub(super) async fn read_json_line(
     lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
 ) -> Value {
     serde_json::from_str(
@@ -482,14 +553,14 @@ fn operation_snapshot(operation_id: &str, operation: &str) -> Value {
     json!({
         "operationId":operation_id,
         "operation":operation,
-        "binding":{
+        "binding":{"kind":"externalProvider","binding":{
             "endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},
             "bindingId":"binding-1",
             "runtime":{"provider":"claudeCode","runtimeName":"claude-agent-acp","runtimeVersion":"1.0.0"},
             "transport":"stdioAcp",
             "generation":generation(),
             "capabilities":[{"name":"prompt","status":"supported","evidence":"advertised"}]
-        },
+        }},
         "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
         "stage":"mayHaveDispatched",
         "effect":"unknown",
@@ -499,11 +570,37 @@ fn operation_snapshot(operation_id: &str, operation: &str) -> Value {
     })
 }
 
-fn generation() -> Value {
+fn terminal_snapshot(operation_id: &str, operation: &str) -> Value {
+    let mut snapshot = operation_snapshot(operation_id, operation);
+    snapshot["stage"] = json!("terminal");
+    snapshot["effect"] = json!("applied");
+    snapshot["reconciliation"] = json!("confirmed");
+    snapshot["terminalAt"] = json!("2026-09-20T12:00:01Z");
+    snapshot
+}
+
+fn endpoint_inventory() -> Value {
+    json!({
+        "serviceEpoch":SERVICE_EPOCH,"sequence":1,
+        "endpoints":[{
+            "endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},
+            "label":"Fixture provider",
+            "availability":{"state":"available","observedAt":"2026-09-20T12:00:00Z"},
+            "channels":[{
+                "kind":"externalProvider","transport":"stdioAcp",
+                "bindingId":"binding-1","bindingGeneration":3,
+                "runtime":{"provider":"claudeCode","runtimeName":"claude-agent-acp"},
+                "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]
+            }]
+        }]
+    })
+}
+
+pub(super) fn generation() -> Value {
     json!({"serviceEpoch":SERVICE_EPOCH,"generation":3})
 }
 
-async fn initialize_mcp(
+pub(super) async fn initialize_mcp(
     client: &reqwest::Client,
     listener: &CollaborationMcpListener,
 ) -> reqwest::header::HeaderValue {

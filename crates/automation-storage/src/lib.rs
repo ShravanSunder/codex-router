@@ -23,6 +23,7 @@ mod wakeup_mutations;
 pub use wakeup_mutations::{RetainedDelivery, WakeAction, WakeMutation, WakeMutationResult};
 mod delivery_claims;
 pub use delivery_claims::DeliveryClaim;
+mod delivery_effect_transition;
 mod delivery_outcomes;
 pub use delivery_outcomes::{DeliveryCompletion, DeliveryResult};
 mod delivery_preparation;
@@ -67,6 +68,7 @@ pub use run_preparation_state::{RunPreparationFailure, RunPreparationIntent, Run
 mod run_uncertainty_state;
 pub use run_uncertainty_state::RunUncertainty;
 mod run_stop_state;
+pub use run_stop_state::RunStopIdentity;
 mod schedule_worker_inventory;
 mod summary_admission;
 pub use summary_admission::SummaryAdmission;

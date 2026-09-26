@@ -68,10 +68,20 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         submission: SubmissionEffect::Dispatching,
         cessation: CessationEvidence::Unconfirmed,
     };
+    let mut prepared = effects.clone();
+    prepared.submission = SubmissionEffect::NotDispatched;
+    store
+        .begin_run_preparation::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+            automation_storage::RunPreparationIntent {
+                run_id: run.clone(),
+                effects: prepared.into(),
+            },
+        )
+        .await?;
     store
         .begin_run_dispatch::<_, EndpointRef, _, NativeSendReceipt>(RunDispatchIntent {
             run_id: run.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
             configured_timeout_seconds: 3600,
             now_ms: 1000,
         })
@@ -84,7 +94,7 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
     store
         .record_run_submission::<_, EndpointRef, _, _>(RunSubmissionResult {
             run_id: run.clone(),
-            effects,
+            effects: effects.into(),
             outcome: RunSubmissionOutcome::Accepted {
                 turn_id: "fixture-turn".into(),
                 receipt,
@@ -92,10 +102,10 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         })
         .await?;
     store
-        .complete_run_turn::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+        .complete_run_settlement::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
             RunCompletion {
                 run_id: run.clone(),
-                native_turn_id: "fixture-turn".into(),
+                settlement: automation_storage::RunStopIdentity::NativeTurn("fixture-turn".into()),
                 outcome: agent_automation::WorkerOutcome::Completed { explanation: None },
                 now_ms: 2000,
             },
@@ -108,6 +118,7 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         backend_socket: root.join("absent.sock"),
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await?;
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
@@ -136,12 +147,23 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         .pointer("/result/record")
         .ok_or("missing Run result")?;
     let _: collaboration_client::protocol::RunSnapshot = serde_json::from_value(snapshot.clone())?;
+    if snapshot
+        .pointer("/state/execution/kind")
+        .and_then(Value::as_str)
+        != Some("codexAppServer")
+        || snapshot
+            .pointer("/executionEvidence/route/kind")
+            .and_then(Value::as_str)
+            != Some("codexAppServer")
+    {
+        return Err("CLI lost the native run route identity".into());
+    }
     for (pointer, replacement) in [
         ("/state/execution/nativeTurnId", json!("another-turn")),
         ("/state/execution/target/sessionId", json!("another-thread")),
         ("/state/execution/deadlineAt", json!("2026-09-09T23:59:59Z")),
         (
-            "/executionEvidence/acceptance/acceptance/turnId",
+            "/executionEvidence/acceptance/client/acceptance/turnId",
             json!("another-turn"),
         ),
     ] {
@@ -162,7 +184,7 @@ async fn cli_reads_finished_run_from_host_storage() -> Result<(), Box<dyn std::e
         .and_then(Value::as_str)
         != Some("finished")
         || value
-            .pointer("/result/record/executionEvidence/acceptance/acceptance/turnId")
+            .pointer("/result/record/executionEvidence/acceptance/client/acceptance/turnId")
             .and_then(Value::as_str)
             != Some("fixture-turn")
     {

@@ -201,6 +201,7 @@ pub struct HostSnapshot {
     remote_control: RemoteControlCondition,
     remote_control_identity: Option<RemoteControlIdentity>,
     executable_relation: ExecutableRelation,
+    router_executable_relation: crate::RouterExecutableRelation,
     recovery_budget: RecoveryBudget,
     last_lifecycle_outcome: Option<LifecycleOutcome>,
 }
@@ -219,6 +220,8 @@ pub struct HostSnapshotDimensions {
     pub remote_control_identity: Option<RemoteControlIdentity>,
     /// Running-versus-installed executable relation.
     pub executable_relation: ExecutableRelation,
+    /// Running-versus-installed Router executable relation.
+    pub router_executable_relation: crate::RouterExecutableRelation,
     /// One-attempt automatic recovery budget.
     pub recovery_budget: RecoveryBudget,
     /// Most recent completed lifecycle outcome in this host lifetime.
@@ -236,6 +239,7 @@ impl HostSnapshot {
             remote_control: dimensions.remote_control,
             remote_control_identity: dimensions.remote_control_identity,
             executable_relation: dimensions.executable_relation,
+            router_executable_relation: dimensions.router_executable_relation,
             recovery_budget: dimensions.recovery_budget,
             last_lifecycle_outcome: dimensions.last_lifecycle_outcome,
         }
@@ -293,6 +297,12 @@ impl HostSnapshot {
     #[must_use]
     pub const fn executable_relation(&self) -> ExecutableRelation {
         self.executable_relation
+    }
+
+    /// Returns the Router Host's running-versus-installed executable relation.
+    #[must_use]
+    pub fn router_executable_relation(&self) -> &crate::RouterExecutableRelation {
+        &self.router_executable_relation
     }
 
     /// Returns the most recent completed lifecycle outcome.

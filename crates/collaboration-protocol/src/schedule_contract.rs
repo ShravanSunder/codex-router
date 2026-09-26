@@ -16,16 +16,20 @@ pub enum ExecutionDestination {
 }
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(extend("allOf" = [{
+    "if": {"properties": {"destination": {"properties": {"kind": {"const": "freshEachRun"}}}}},
+    "then": {"required": ["model"]}
+}]))]
 pub struct ScheduleDefinition {
     pub instruction_id: InstructionId,
     pub timing: TimingRequest,
     pub enabled: bool,
     pub destination: ExecutionDestination,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, deserialize_with = "Option::deserialize")]
     pub execution_timeout_seconds: Option<PositiveSeconds>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
+    #[schemars(required)]
     pub effort: Option<String>,
 }
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]

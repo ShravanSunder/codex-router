@@ -35,6 +35,22 @@ pub(crate) fn initial_effects(destination: &DestinationPreparation) -> NativeEff
         cessation: CessationEvidence::NotApplicable,
     }
 }
+pub(crate) fn initial_automation_effects(
+    destination: &DestinationPreparation,
+) -> agent_automation::NativeEffectEvidence<SessionRef, collaboration_protocol::CodexGeneration> {
+    let native = initial_effects(destination);
+    agent_automation::NativeEffectEvidence {
+        target: native.target,
+        generation: native.generation,
+        client_user_message_id: native.client_user_message_id,
+        native_turn_id: native.native_turn_id,
+        native_submission_id: native.native_submission_id,
+        allocation: agent_automation::PreparationEffect::NotRequested,
+        resume: agent_automation::PreparationEffect::NotRequested,
+        submission: agent_automation::SubmissionEffect::NotDispatched,
+        cessation: agent_automation::CessationEvidence::NotApplicable,
+    }
+}
 pub(crate) fn endpoint(destination: &DestinationPreparation) -> &EndpointRef {
     match destination {
         DestinationPreparation::Fresh { endpoint, .. } => endpoint,

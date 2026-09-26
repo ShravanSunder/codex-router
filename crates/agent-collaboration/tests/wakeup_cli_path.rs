@@ -16,6 +16,7 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         backend_socket: root.join("absent.sock"),
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await?;
     // Act: the documented CLI operation must reach Host-created persistent state.

@@ -105,13 +105,26 @@ pub(crate) async fn has_domain_objects(
 pub(crate) async fn validate_target_schema(
     transaction: &mut Transaction<'_, Sqlite>,
 ) -> Result<(), StorageError> {
+    validate_schema(transaction, false).await
+}
+
+pub(crate) async fn validate_legacy_schema(
+    transaction: &mut Transaction<'_, Sqlite>,
+) -> Result<(), StorageError> {
+    validate_schema(transaction, true).await
+}
+
+async fn validate_schema(
+    transaction: &mut Transaction<'_, Sqlite>,
+    legacy: bool,
+) -> Result<(), StorageError> {
     validate_object_inventory(transaction).await?;
     for table in &TABLE_SPECS {
-        validate_columns(transaction, table).await?;
+        validate_columns(transaction, table, legacy).await?;
         validate_foreign_keys(transaction, table).await?;
     }
     validate_indexes(transaction).await?;
-    validate_known_definitions(transaction).await?;
+    validate_known_definitions(transaction, legacy).await?;
     Ok(())
 }
 
@@ -151,6 +164,7 @@ async fn validate_object_inventory(
 async fn validate_columns(
     transaction: &mut Transaction<'_, Sqlite>,
     table: &TableSpec,
+    legacy: bool,
 ) -> Result<(), StorageError> {
     let rows = sqlx::query(
         "SELECT name,type,\"notnull\",coalesce(dflt_value,'<NULL>') AS default_value,pk FROM pragma_table_info(?1) ORDER BY cid",
@@ -172,7 +186,14 @@ async fn validate_columns(
         })
         .collect::<Vec<_>>()
         .join(";");
-    if actual != table.columns {
+    let expected = if !legacy && table.name == "mailbox_deliveries" {
+        table
+            .columns
+            .replace("accepted_receipt_json", "outcome_receipt_json")
+    } else {
+        table.columns.to_owned()
+    };
+    if actual != expected {
         return Err(StorageError::InvalidSchema);
     }
     Ok(())
@@ -262,6 +283,7 @@ async fn validate_indexes(transaction: &mut Transaction<'_, Sqlite>) -> Result<(
 
 async fn validate_known_definitions(
     transaction: &mut Transaction<'_, Sqlite>,
+    legacy: bool,
 ) -> Result<(), StorageError> {
     for table in &TABLE_SPECS {
         let sql: String =
@@ -269,7 +291,9 @@ async fn validate_known_definitions(
                 .bind(table.name)
                 .fetch_one(&mut **transaction)
                 .await?;
-        if tokenize_schema_definition(&sql)? != expected_definition_tokens("table", table.name)? {
+        if tokenize_schema_definition(&sql)?
+            != expected_definition_tokens("table", table.name, legacy)?
+        {
             return Err(StorageError::InvalidSchema);
         }
     }
@@ -284,7 +308,8 @@ async fn validate_known_definitions(
                 .bind(index)
                 .fetch_one(&mut **transaction)
                 .await?;
-        if tokenize_schema_definition(&sql)? != expected_definition_tokens("index", index)? {
+        if tokenize_schema_definition(&sql)? != expected_definition_tokens("index", index, legacy)?
+        {
             return Err(StorageError::InvalidSchema);
         }
     }
@@ -294,8 +319,14 @@ async fn validate_known_definitions(
 fn expected_definition_tokens(
     object_type: &str,
     object_name: &str,
+    legacy: bool,
 ) -> Result<Vec<String>, StorageError> {
-    let tokens = tokenize_schema_definition(CURRENT_TARGET_DEFINITION_SOURCE)?;
+    let source = if legacy {
+        CURRENT_TARGET_DEFINITION_SOURCE.to_owned()
+    } else {
+        CURRENT_TARGET_DEFINITION_SOURCE.replace("accepted_receipt_json", "outcome_receipt_json")
+    };
+    let tokens = tokenize_schema_definition(&source)?;
     tokens
         .split(|token| token == ";")
         .find(|statement| {

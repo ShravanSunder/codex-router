@@ -153,7 +153,26 @@ impl AcpConversation {
         let mut conversation = Self::connect_with_context(directory, endpoint.endpoint_id.clone())
             .await
             .map_err(|error| error.with_known_target(requested_target.clone()))?;
-        validate_conversation_endpoint(conversation.endpoint(), &endpoint).map_err(|source| {
+        conversation
+            .prompt_existing_on_connection(request, cancel)
+            .await
+    }
+
+    pub async fn prompt_existing_on_connection(
+        &mut self,
+        request: ExistingConversationPromptRequest,
+        cancel: CancellationToken,
+    ) -> Result<ExistingConversationPromptResult, ExistingConversationPromptError> {
+        let requested_target = request.target.clone();
+        request.prompt.validate().map_err(|source| {
+            crate::OperationError::before_dispatch(
+                "validation",
+                Some(requested_target.clone()),
+                source,
+            )
+        })?;
+        let endpoint = requested_target.endpoint.clone();
+        validate_conversation_endpoint(self.endpoint(), &endpoint).map_err(|source| {
             crate::OperationError::before_dispatch(
                 "validation",
                 Some(requested_target.clone()),
@@ -173,6 +192,7 @@ impl AcpConversation {
             Ok(())
         };
         let create = ConversationCreateRequest {
+            operation_id: collaboration_protocol::OperationId::generate(),
             endpoint,
             cwd: request.cwd,
             session: Some(request.target.session_id.clone()),
@@ -184,10 +204,8 @@ impl AcpConversation {
             approver: None,
             root_message_id: None,
         };
-        let target = conversation
-            .open_session_with_context(&create, &mut emit)
-            .await?;
-        let end = conversation
+        let target = self.open_session_with_context(&create, &mut emit).await?;
+        let end = self
             .prompt_and_wait(request.prompt, cancel, &mut emit)
             .await
             .map_err(|source| {
@@ -303,7 +321,7 @@ impl AcpConversation {
             .map_err(crate::OperationError::into_source)
     }
 
-    async fn open_session_with_context(
+    pub(crate) async fn open_session_with_context(
         &mut self,
         request: &ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
@@ -392,6 +410,7 @@ impl AcpConversation {
             router_metadata.insert("rootMessageId".into(), json!(request.root_message_id));
             router_metadata.insert("scratchScope".into(), json!(scratch_scope));
             router_metadata.insert("scratchPath".into(), json!(scratch_path));
+            router_metadata.insert("operationId".into(), json!(request.operation_id));
             if let Some(source_thread_id) = &request.fork {
                 router_metadata.insert("forkThreadId".into(), json!(source_thread_id));
             }
@@ -778,9 +797,11 @@ fn validate_conversation_create_request(
             .ok_or(ClientError::InvalidRequest(
                 "new or forked conversation requires approver",
             ))?;
-        if created_by.endpoint != request.endpoint || approver.endpoint != request.endpoint {
+        if created_by.endpoint.service_id != request.endpoint.service_id
+            || approver.endpoint.service_id != request.endpoint.service_id
+        {
             return Err(ClientError::InvalidRequest(
-                "conversation identities belong to another endpoint",
+                "conversation identities belong to another service",
             ));
         }
     }

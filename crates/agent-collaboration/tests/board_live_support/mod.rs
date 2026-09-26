@@ -11,7 +11,7 @@ use collaboration_client::board::{
     SessionRef as BoardSessionRef, ThreadShowRequest, TopicCreateRequest, TopicId,
 };
 use collaboration_client::protocol::{
-    MessageContent, MessageDelivery, NativeSendParams, SessionRef,
+    MessageContent, MessageDelivery, SessionMessageSendParams, SessionRef,
 };
 use serde_json::{Value, json};
 
@@ -237,15 +237,15 @@ async fn send_task(
 ) -> ProofResult<()> {
     let receipt = proof
         .client
-        .send_agent_message(NativeSendParams {
+        .send_agent_message(SessionMessageSendParams {
             target: target.clone(),
-            generation: proof.generation.clone(),
+            generation_guard: Some(proof.generation.clone()),
             message: MessageContent::Agent {
                 sender: target.clone(),
                 text: task.to_owned().try_into()?,
             },
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            correlation: None,
         })
         .await?;
     proof.record(event, json!(receipt))?;

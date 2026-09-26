@@ -4,7 +4,7 @@ mod trace_evidence;
 
 use crate::proof_context::{ProofContext, ProofResult};
 use collaboration_client::protocol::{
-    MessageContent, MessageDelivery, NativeSendParams, NativeSessionView, OperationId,
+    MessageContent, MessageDelivery, NativeSessionView, OperationId, SessionMessageSendParams,
 };
 use serde_json::json;
 use state::MessagingProofState;
@@ -41,14 +41,14 @@ pub(super) async fn prepare_recipient() -> ProofResult<()> {
     );
     let receipt = proof
         .client
-        .send_human_input(NativeSendParams {
+        .send_human_input(SessionMessageSendParams {
             target: recipient.clone(),
-            generation: proof.generation.clone(),
+            generation_guard: Some(proof.generation.clone()),
             message: MessageContent::HumanUser {
                 text: task.try_into()?,
             },
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            correlation: None,
         })
         .await?;
     proof.record("messagingRecipientPreparationAccepted", json!(receipt))?;
@@ -157,14 +157,14 @@ pub(super) async fn exercise_round_trip() -> ProofResult<()> {
     );
     let initial_receipt = proof
         .client
-        .send_human_input(NativeSendParams {
+        .send_human_input(SessionMessageSendParams {
             target: sender.clone(),
-            generation: proof.generation.clone(),
+            generation_guard: Some(proof.generation.clone()),
             message: MessageContent::HumanUser {
                 text: task.try_into()?,
             },
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            correlation: None,
         })
         .await?;
     proof.record("messagingSenderGoalAccepted", json!(initial_receipt))?;

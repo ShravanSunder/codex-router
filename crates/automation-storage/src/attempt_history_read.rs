@@ -24,6 +24,7 @@ pub struct StoredAttemptRecord {
     pub attempt_id: AttemptId,
     pub started_at_ms: i64,
     pub body: serde_json::Value,
+    pub receipt: Option<serde_json::Value>,
 }
 pub struct StoredAttemptPage {
     pub records: Vec<StoredAttemptRecord>,
@@ -62,13 +63,13 @@ impl AutomationStore {
             AttemptCollection::Delivery(id) => (
                 "delivery",
                 id.as_str(),
-                "SELECT latest_attempt_json AS attempt_json,NULL AS owner_phase FROM mailbox_deliveries WHERE delivery_id=?",
+                "SELECT latest_attempt_json AS attempt_json,outcome_receipt_json AS receipt_json,NULL AS owner_phase FROM mailbox_deliveries WHERE delivery_id=?",
                 StorageError::DeliveryNotFound,
             ),
             AttemptCollection::Summary(id) => (
                 "run",
                 id.as_str(),
-                "SELECT summary_attempt_json AS attempt_json,run_status AS owner_phase FROM workflow_runs WHERE run_id=?",
+                "SELECT summary_attempt_json AS attempt_json,NULL AS receipt_json,run_status AS owner_phase FROM workflow_runs WHERE run_id=?",
                 StorageError::RunNotFound,
             ),
         };
@@ -78,9 +79,13 @@ impl AutomationStore {
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(missing)?;
+        let current_receipt = owner
+            .try_get::<Option<String>, _>("receipt_json")?
+            .map(|raw| serde_json::from_str(&raw).map_err(|_| StorageError::InvalidRecord))
+            .transpose()?;
         let current = owner
             .try_get::<Option<String>, _>("attempt_json")?
-            .map(decode_attempt)
+            .map(|raw| decode_attempt(raw, current_receipt))
             .transpose()?;
         let current_id = current.as_ref().map(|attempt| attempt.attempt_id.clone());
         let owner_phase = owner
@@ -129,6 +134,7 @@ impl AutomationStore {
                     attempt_id: pinned.attempt_id.clone(),
                     started_at_ms: pinned.started_at_ms,
                     body: pinned.body.clone(),
+                    receipt: pinned.receipt.clone(),
                 })
             } else {
                 find_retained_attempt(
@@ -159,13 +165,13 @@ impl AutomationStore {
             .map(|position| position.last_attempt_id.as_str());
         let rows = sqlx::query(
             "WITH candidates AS (
-                SELECT event_sequence,json_extract(event_body_json,'$.attempt') AS attempt_json,
+                SELECT event_sequence,event_body_json,
                     json_extract(event_body_json,'$.attempt.attemptId') AS attempt_id,
                     json_extract(event_body_json,'$.attempt.startedAtMs') AS started_at_ms
                 FROM automation_events WHERE subject_kind=? AND subject_id=? AND recorded_at_ms>=? AND recorded_at_ms<=?
                     AND event_kind IN ('attemptArchived','attemptCompleted','dispatchInterrupted','summaryAttemptArchived')
             ), versions AS (SELECT attempt_id,MAX(event_sequence) AS event_sequence FROM candidates GROUP BY attempt_id)
-            SELECT c.attempt_json FROM candidates c JOIN versions v ON c.event_sequence=v.event_sequence
+            SELECT c.event_body_json FROM candidates c JOIN versions v ON c.event_sequence=v.event_sequence
                 WHERE c.attempt_id<>? AND (c.started_at_ms,c.attempt_id)<=(?,?)
                     AND (? IS NULL OR (c.started_at_ms,c.attempt_id)>(?,?))
                 ORDER BY c.started_at_ms,c.attempt_id LIMIT ?")
@@ -175,7 +181,7 @@ impl AutomationStore {
             .fetch_all(&mut *transaction).await?;
         let mut records = rows
             .into_iter()
-            .map(|row| decode_attempt(row.try_get("attempt_json")?))
+            .map(|row| decode_event_attempt(row.try_get("event_body_json")?))
             .collect::<Result<Vec<_>, StorageError>>()?;
         if request.position.as_ref().is_none_or(|position| {
             (pinned.started_at_ms, &pinned.attempt_id)
@@ -208,11 +214,25 @@ async fn find_retained_attempt(
     attempt_id: &AttemptId,
     cutoff: i64,
 ) -> Result<Option<StoredAttemptRecord>, StorageError> {
-    let body: Option<String> = sqlx::query_scalar("SELECT json_extract(event_body_json,'$.attempt') FROM automation_events WHERE subject_kind=? AND subject_id=? AND recorded_at_ms>=? AND json_extract(event_body_json,'$.attempt.attemptId')=? ORDER BY event_sequence DESC LIMIT 1")
+    let body: Option<String> = sqlx::query_scalar("SELECT event_body_json FROM automation_events WHERE subject_kind=? AND subject_id=? AND recorded_at_ms>=? AND json_extract(event_body_json,'$.attempt.attemptId')=? ORDER BY event_sequence DESC LIMIT 1")
         .bind(kind).bind(id).bind(cutoff).bind(attempt_id.as_str()).fetch_optional(connection).await?;
-    body.map(decode_attempt).transpose()
+    body.map(decode_event_attempt).transpose()
 }
-fn decode_attempt(body: String) -> Result<StoredAttemptRecord, StorageError> {
+fn decode_event_attempt(raw: String) -> Result<StoredAttemptRecord, StorageError> {
+    let envelope: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|_| StorageError::InvalidRecord)?;
+    let attempt = envelope.get("attempt").ok_or(StorageError::InvalidRecord)?;
+    let body = serde_json::to_string(attempt).map_err(|_| StorageError::InvalidRecord)?;
+    let receipt = envelope
+        .get("receipt")
+        .filter(|value| !value.is_null())
+        .cloned();
+    decode_attempt(body, receipt)
+}
+fn decode_attempt(
+    body: String,
+    receipt: Option<serde_json::Value>,
+) -> Result<StoredAttemptRecord, StorageError> {
     let body: serde_json::Value =
         serde_json::from_str(&body).map_err(|_| StorageError::InvalidRecord)?;
     let attempt_id = body
@@ -231,5 +251,6 @@ fn decode_attempt(body: String) -> Result<StoredAttemptRecord, StorageError> {
         attempt_id,
         started_at_ms,
         body,
+        receipt,
     })
 }

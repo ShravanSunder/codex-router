@@ -2,10 +2,11 @@
 use crate::session_setup_task::{SetupTaskInputs, SetupTaskOutput, run_session_setup};
 use crate::{
     AcpNegotiation, AcpRouterChannels, AcpSchemaCatalog, AcpSessionRegistry,
+    ConversationOperationRecorder, HeldBindingCheckout, UnmaterializedBindingStore,
     acp_connection_channels, run_acp_transport,
 };
 use codex_native_integration::NativePayloadSchemas;
-use collaboration_protocol::CodexGeneration;
+use collaboration_protocol::{CodexGeneration, OperationId};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, future::Future, io, path::PathBuf, pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -22,6 +23,8 @@ pub struct AcpConnectionInputs {
     pub stored_sessions: Arc<dyn AcpStoredSessions>,
     pub retired: CancellationToken,
     pub approval_broker: Arc<dyn crate::ApprovalBroker>,
+    pub holder: Arc<dyn UnmaterializedBindingStore>,
+    pub recorder: Arc<dyn ConversationOperationRecorder>,
 }
 pub async fn serve_acp_connection<TStream: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: TStream,
@@ -44,7 +47,11 @@ async fn route_connection(
     let mut schema = AcpSchemaCatalog::load().map_err(io::Error::other)?;
     let mut negotiation = AcpNegotiation::default();
     let actor_retirement = inputs.retired.child_token();
-    let mut sessions = AcpSessionRegistry::new(router.output.clone(), actor_retirement);
+    let mut sessions = AcpSessionRegistry::new(
+        router.output.clone(),
+        actor_retirement,
+        Arc::clone(&inputs.holder),
+    );
     let mut used_ids = BTreeSet::new();
     let mut catalog_requests: tokio::task::JoinSet<(Value, io::Result<Value>)> =
         tokio::task::JoinSet::new();
@@ -67,13 +74,37 @@ async fn route_connection(
                 },
                 completed=setup_requests.join_next(),if !setup_requests.is_empty()=>{
                     let Some(Ok((id, requested_session, completed)))=completed else {break Err(io::Error::other("ACP setup task failed"));};
-                    if let Some(session_id)=requested_session {
-                        sessions.finish_failed_load(&session_id);
-                        if completed.outcome.is_ok() { sessions.clear_cancellation_barrier(&session_id); }
+                    if let Some(session_id)=requested_session.as_ref() {
+                        sessions.finish_failed_load(session_id);
+                        if completed.outcome.is_ok() { sessions.clear_cancellation_barrier(session_id); }
                     }
-                    if let Some(binding)=completed.binding && sessions.insert(binding).is_err() {router.output.send(error(id,-32603,"Session capacity unavailable")).await?;continue;}
+                    if let Some(binding)=completed.binding && let Err((_,binding))=sessions.insert(binding) {
+                        inputs.holder.restore(*binding);
+                        router.output.send(error(id,-32603,"Session capacity unavailable")).await?;
+                        continue;
+                    }
                     match completed.outcome {
                         Ok((history,result))=>{
+                            if requested_session.is_none() {
+                                let Some(session_id)=result.get("sessionId").and_then(Value::as_str) else {
+                                    router.output.send(error(id,-32603,"Created session identity unavailable")).await?;
+                                    continue;
+                                };
+                                match inputs.holder.checkout(session_id) {
+                                    HeldBindingCheckout::Ready(binding) => {
+                                        if let Err((_,binding)) = sessions.insert(*binding) {
+                                            inputs.holder.restore(*binding);
+                                            router.output.send(error(id,-32603,"Session capacity unavailable")).await?;
+                                            continue;
+                                        }
+                                        inputs.holder.finish(session_id);
+                                    }
+                                    HeldBindingCheckout::Busy | HeldBindingCheckout::Missing => {
+                                        router.output.send(error(id,-32603,"Created session binding unavailable")).await?;
+                                        continue;
+                                    }
+                                }
+                            }
                             for update in history {router.output.send(update).await?;}
                             router.output.send(json!({"jsonrpc":"2.0","id":id,"result":result})).await?;
                         },
@@ -110,23 +141,76 @@ async fn route_connection(
                     let create_new=method=="session/new";
                     let definition=if create_new {"NewSessionRequest"} else {"LoadSessionRequest"};
                     if !schema.validate(definition,&params).unwrap_or(false) {router.output.send(error(id,-32602,"Invalid session setup parameters")).await?;continue;}
+                    let operation_id = if create_new {
+                        match params.pointer("/_meta/codexRouter/operationId").and_then(Value::as_str)
+                            .and_then(|value| OperationId::try_from(value.to_owned()).ok()) {
+                            Some(value) => Some(value),
+                            None => {router.output.send(error(id,-32602,"Create requires a UUIDv7 operation ID")).await?;continue;}
+                        }
+                    } else {None};
                     if setup_requests.len()>=64 || (create_new && !sessions.has_setup_capacity(setup_requests.len())) {
                         router.output.send(error(id,-32603,"Session setup capacity unavailable")).await?;continue;
                     }
                     let requested_session=if create_new {None} else {params.get("sessionId").and_then(Value::as_str).map(str::to_owned)};
-                    let known_session=if let Some(session_id)=requested_session.as_ref() {
+                    let mut known_session=if let Some(session_id)=requested_session.as_ref() {
                         match sessions.reserve_load(session_id,setup_requests.len()) {
                             Ok(binding)=>binding,
                             Err(_)=>{router.output.send(error(id,-32600,"Session busy or capacity unavailable")).await?;continue;},
                         }
                     } else {None};
+                    let mut adopted_held = false;
+                    if known_session.is_none() && let Some(session_id) = requested_session.as_ref() {
+                        match inputs.holder.checkout(session_id) {
+                            HeldBindingCheckout::Ready(binding) => {
+                                known_session = Some(*binding);
+                                adopted_held = true;
+                            }
+                            HeldBindingCheckout::Busy => {
+                                sessions.finish_failed_load(session_id);
+                                router.output.send(error(id,-32600,"Held session is busy")).await?;
+                                continue;
+                            }
+                            HeldBindingCheckout::Missing => {}
+                        }
+                    }
                     let cancellation_barrier=requested_session.as_ref().and_then(|session| sessions.cancellation_barrier(session));
-                    let setup=SetupTaskInputs { cancellation_barrier, known_session, backend_path:inputs.backend_path.clone(), schemas:Arc::clone(&inputs.schemas), generation:inputs.generation.clone(), params, create_new, approval_broker:Arc::clone(&inputs.approval_broker) };
-                    setup_requests.spawn(async move {
-                        let outcome=run_session_setup(setup).await;
-                        drop(frame);
-                        (id,requested_session,outcome)
-                    });
+                    let setup=SetupTaskInputs { cancellation_barrier, known_session, adopt_unmaterialized:adopted_held, backend_path:inputs.backend_path.clone(), schemas:Arc::clone(&inputs.schemas), generation:inputs.generation.clone(), params, create_new, operation_id, recorder:Arc::clone(&inputs.recorder), approval_broker:Arc::clone(&inputs.approval_broker) };
+                    let holder=Arc::clone(&inputs.holder);
+                    if create_new {
+                        let (result_sender,result_receiver)=tokio::sync::oneshot::channel();
+                        holder.create_tasks().spawn(async move {
+                            let mut outcome=run_session_setup(setup).await;
+                            if let Some(binding)=outcome.binding.take() {
+                                holder.hold(binding);
+                            }
+                            let _sent=result_sender.send(outcome);
+                        });
+                        setup_requests.spawn(async move {
+                            let outcome=result_receiver.await.unwrap_or(SetupTaskOutput {
+                                binding:None,
+                                outcome:Err(crate::SessionSetupError::OutcomeUnknown),
+                            });
+                            drop(frame);
+                            (id,None,outcome)
+                        });
+                    } else {
+                        setup_requests.spawn(async move {
+                            let mut checkout = match (adopted_held, requested_session.as_ref()) {
+                                (true, Some(session_id)) => Some(CheckedOutBinding::new(holder, session_id.clone())),
+                                _ => None,
+                            };
+                            let mut outcome=run_session_setup(setup).await;
+                            if let Some(checkout) = checkout.as_mut() {
+                                if outcome.outcome.is_err() && let Some(binding)=outcome.binding.take() {
+                                    checkout.restore(binding);
+                                } else {
+                                    checkout.finish();
+                                }
+                            }
+                            drop(frame);
+                            (id,requested_session,outcome)
+                        });
+                    }
                 },
                 "session/prompt"=>{
                     if sessions.begin_prompt(&mut schema,id.clone(),params).is_err() {router.output.send(error(id,-32600,"Session prompt unavailable or already pending")).await?;}
@@ -152,6 +236,35 @@ async fn route_connection(
     while catalog_requests.join_next().await.is_some() {}
     sessions.shutdown().await;
     result
+}
+struct CheckedOutBinding {
+    holder: Arc<dyn UnmaterializedBindingStore>,
+    session_id: String,
+    active: bool,
+}
+impl CheckedOutBinding {
+    fn new(holder: Arc<dyn UnmaterializedBindingStore>, session_id: String) -> Self {
+        Self {
+            holder,
+            session_id,
+            active: true,
+        }
+    }
+    fn restore(&mut self, binding: crate::AcpSessionBinding) {
+        self.holder.restore(binding);
+        self.active = false;
+    }
+    fn finish(&mut self) {
+        self.holder.finish(&self.session_id);
+        self.active = false;
+    }
+}
+impl Drop for CheckedOutBinding {
+    fn drop(&mut self) {
+        if self.active {
+            self.holder.finish(&self.session_id);
+        }
+    }
 }
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})

@@ -80,6 +80,11 @@ async fn exercise_preparation(
     )?;
     let gate = NativeGenerationGate::default();
     gate.activate(generation, path.clone(), Some(schemas))?;
+    let native_backend = NativeControlBackend {
+        endpoint: target.endpoint.clone(),
+        gate,
+        codex_home: root.clone(),
+    };
     let identity = ServiceIdentity::new(
         service_id,
         service_id,
@@ -87,11 +92,10 @@ async fn exercise_preparation(
     )?
     .with_endpoints(vec![description])?
     .with_automation_store(store.clone())
-    .with_native_backend(NativeControlBackend {
-        endpoint: target.endpoint.clone(),
-        gate,
-        codex_home: root.clone(),
-    })?;
+    .with_scheduled_run_execution(Arc::new(
+        collaboration_service::CodexAppServerScheduledRuns::new(native_backend.clone()),
+    ))
+    .with_native_backend(native_backend)?;
     let (socket, server) = tokio::net::UnixStream::pair()?;
     let service = tokio::spawn(serve_control_connection(server, identity.clone()));
     let mut client = ControlClient::initialize(socket, "prepare-fixture", "1").await?;
@@ -244,7 +248,7 @@ async fn exercise_preparation(
             Err(collaboration_client::ScheduleClientError::Rejected(error)) => error,
             _ => return Err("lost allocation response lacked typed evidence".into()),
         };
-        if !matches!(&error.effects,collaboration_protocol::ScheduleEffects::Native{evidence} if matches!(evidence.allocation,collaboration_protocol::PreparationEffect::Unknown))
+        if !matches!(&error.effects,collaboration_protocol::ScheduleEffects::Route{evidence: collaboration_protocol::DeliveryRouteEvidence::CodexAppServer(evidence)} if matches!(evidence.allocation,collaboration_protocol::PreparationEffect::Unknown))
         {
             return Err("lost allocation response invented no effect".into());
         }

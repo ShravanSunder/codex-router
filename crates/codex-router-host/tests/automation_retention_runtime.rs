@@ -28,6 +28,7 @@ async fn owned_host_automatically_prunes_events_without_deleting_current_state()
         backend_socket: root.join("unavailable.sock"),
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await?;
     let mut observer = sqlx::SqliteConnection::connect_with(

@@ -206,11 +206,21 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
                 3
             }
         }
-        Err(ClientError::Rejected { data, .. }) => {
+        Err(ClientError::Rejected {
+            data,
+            code: native_code,
+        }) => {
             let kind = data
                 .as_ref()
                 .and_then(|data| data.get("kind"))
                 .and_then(Value::as_str);
+            let message = data
+                .as_ref()
+                .and_then(|data| data.get("message"))
+                .and_then(Value::as_str)
+                .filter(|message| !message.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Control request rejected with code {native_code}"));
             let code = match kind {
                 Some("outcomeUnknown") => 5,
                 Some("unavailable") => 3,
@@ -219,17 +229,21 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
             };
             crate::endpoint_commands::report_failure(
                 kind.unwrap_or("rejected"),
-                "Native control operation rejected",
+                &message,
                 code,
                 machine_output,
             )
         }
-        Err(_) if mutation_started => crate::endpoint_commands::report_failure(
-            "outcomeUnknown",
-            "Interruption outcome unknown; no request was replayed",
-            5,
-            machine_output,
-        ),
+        Err(error) if mutation_started && mutation_may_have_been_dispatched(&error) => {
+            crate::endpoint_commands::report_failure(
+                "outcomeUnknown",
+                &format!(
+                    "Native {operation_kind} outcome is unknown; no request was replayed: {error}"
+                ),
+                5,
+                machine_output,
+            )
+        }
         Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
             &error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
@@ -243,5 +257,38 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
                 machine_output,
             )
         }),
+    }
+}
+
+fn mutation_may_have_been_dispatched(error: &ClientError) -> bool {
+    matches!(
+        error,
+        ClientError::Transport(_) | ClientError::Protocol(_) | ClientError::Timeout
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mutation_may_have_been_dispatched;
+    use collaboration_client::ClientError;
+
+    #[test]
+    fn client_failures_are_uncertain_only_after_the_mutation_call_begins() {
+        assert!(mutation_may_have_been_dispatched(&ClientError::Transport(
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "fixture connection lost"
+            )
+        )));
+        assert!(mutation_may_have_been_dispatched(&ClientError::Protocol(
+            "connection closed"
+        )));
+        assert!(mutation_may_have_been_dispatched(&ClientError::Timeout));
+        assert!(!mutation_may_have_been_dispatched(
+            &ClientError::UnsupportedCapability("thread/name/set")
+        ));
+        assert!(!mutation_may_have_been_dispatched(
+            &ClientError::InvalidRequest("invalid session target")
+        ));
     }
 }

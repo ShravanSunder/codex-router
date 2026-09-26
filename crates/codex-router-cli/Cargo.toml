@@ -28,6 +28,7 @@ codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.4" }
 codex-router-selection = { path = "../codex-router-selection", version = "0.1.4" }
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4" }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4" }
+collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14" }
 clap.workspace = true
 comfy-table.workspace = true
 crossterm.workspace = true
@@ -50,6 +51,7 @@ tracing-subscriber.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+tempfile = "3.27.0"
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
 codex-router-auth = { path = "../codex-router-auth", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }

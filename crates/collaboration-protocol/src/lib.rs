@@ -8,11 +8,14 @@ mod operation_failure_contract;
 pub use operation_failure_contract::{
     AdapterOperationFailure, OperationEffect, OperationFailureKind,
 };
+mod conversation_create_outcome;
 mod provider_conversation_contract;
+pub use conversation_create_outcome::ConversationCreateOutcome;
 pub use provider_conversation_contract::{
-    ConversationAdmissionState, ConversationCancelRequest, ConversationCreateRequest,
-    ConversationLoadRequest, ConversationOperationFailure, ConversationOperationFailureKind,
-    ConversationOperationFailureStage, ConversationOperationReconcileRequest,
+    ConversationAdmissionState, ConversationBindingIdentity, ConversationCancelRequest,
+    ConversationCreateRequest, ConversationLoadRequest, ConversationOperationFailure,
+    ConversationOperationFailureKind, ConversationOperationFailureStage,
+    ConversationOperationQueueState, ConversationOperationReconcileRequest,
     ConversationOperationSettlement, ConversationOperationShowRequest,
     ConversationOperationSnapshot, ConversationOperationSubmission,
     ConversationOperationWaitOutput, ConversationOperationWaitRequest,
@@ -32,8 +35,9 @@ pub use access_contract::{
     RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,
 };
 pub use approval_contract::{
-    ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalListParams,
-    ApprovalListResult, ApprovalRequestRecord, ApprovalState,
+    ApprovalArgument, ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision,
+    ApprovalListParams, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionScope,
+    ApprovalPresentation, ApprovalRequestRecord, ApprovalState,
 };
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,
@@ -46,7 +50,19 @@ pub use control_error_validation::control_error_is_valid;
 pub use control_schema_document::control_schema_document;
 mod control_schema_identity;
 pub use control_schema_identity::{ControlSchema, ControlSchemaError};
+mod delivery_rejection;
+mod delivery_route_evidence;
 mod message_content;
+mod session_delivery_outcome;
+pub use delivery_rejection::{DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason};
+mod session_delivery_receipt;
+mod session_message_send;
+pub use delivery_route_evidence::DeliveryRouteEvidence;
+pub use session_delivery_outcome::{
+    DeliveryCorrelationId, DeliveryIdentityError, DeliveryOutcome, SessionReachability,
+};
+pub use session_delivery_receipt::{DeliveryClientReceipt, DeliveryReceipt};
+pub use session_message_send::SessionMessageSendParams;
 mod native_schema_references;
 mod native_session_catalog;
 pub use message_content::{
@@ -84,6 +100,8 @@ mod control_frame_decoder;
 pub use control_frame_decoder::{ControlFrameDecoder, FrameError, MAX_CONTROL_FRAME_BYTES};
 mod request_admission;
 pub use request_admission::{AdmissionError, ControlAdmission};
+mod router_executable_relation;
+pub use router_executable_relation::{RouterExecutableRelation, router_build_warning};
 
 mod endpoint_description;
 pub use endpoint_description::{
@@ -123,7 +141,7 @@ pub use acp_schema_catalog::{
 };
 
 mod instruction_contract;
-pub use agent_automation::{AttemptId, DeliveryId, EventId};
+pub use agent_automation::{AttemptId, DeliveryId, EventId, PeerWriteEffect};
 pub use agent_automation::{InstructionId, InstructionText, OperationId, RevisionId, WakeupId};
 pub use instruction_contract::{
     InstructionCreateParams, InstructionShowParams, InstructionSnapshot, InstructionUpdateParams,
@@ -210,11 +228,14 @@ pub use schedule_preparation_contract::{DestinationPreparation, SchedulePrepareR
 
 mod run_evidence_validation;
 mod run_execution_contract;
+mod run_execution_reference;
+pub use agent_automation::SummarySourceReference;
 pub use run_execution_contract::{
     CapturedRunInputs, ContinuityInput, ExecutionTiming, FrozenExecutionConfiguration,
-    NativeExecution, RetainedSummary, RunExecutionEvidence, RunRecoveryRequest, RunShowRequest,
-    RunSnapshot, RunState, WorkerOutcome,
+    RetainedSummary, RunExecutionEvidence, RunRecoveryRequest, RunShowRequest, RunSnapshot,
+    RunState, WorkerOutcome,
 };
+pub use run_execution_reference::{NativeExecution, RunExecution};
 mod run_failure_contract;
 pub use run_failure_contract::{RunFailure, RunFailureKind, RunFailureStage, RunNextAction};
 

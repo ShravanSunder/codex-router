@@ -264,6 +264,13 @@ impl HostRuntime {
         startup_started_at: tokio::time::Instant,
         progress: Option<HostProgressCallback<'_>>,
     ) -> Result<HostExit, HostError> {
+        let running_version = std::env::var("CODEX_ROUTER_DEBUG_RUNNING_VERSION")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+        let router_executable_observer = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::RouterExecutableObserver::capture(std::env::current_exe(), running_version),
+        ));
         let mut interrupt =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
                 .map_err(HostError::Signal)?;
@@ -314,9 +321,11 @@ impl HostRuntime {
             }
             emit(None);
         }
+        let router_executable_relation = router_executable_observer.lock().await.subscribe();
         let mut collaboration = match collaboration_lifecycle::CollaborationLifecycle::start(
             &config,
             &app_server,
+            router_executable_relation,
         )
         .await
         {
@@ -329,6 +338,8 @@ impl HostRuntime {
             }
         };
         let mut state = RuntimeState::ready(router_condition, readiness);
+        let initial_router_relation = router_executable_observer.lock().await.relation();
+        state.observe_router_executable(initial_router_relation);
         state.record_lifecycle(
             HostOperation::Start,
             "succeeded",
@@ -349,6 +360,10 @@ impl HostRuntime {
         let mut active_status = None::<request_admission::ActiveStatusObservation>;
         let mut pending_identity = None::<codex_native_integration::ExecutableIdentityTask>;
         let mut retained_updater = None::<ProcessGroupChild>;
+        let mut router_executable_check =
+            tokio::time::interval(std::time::Duration::from_secs(120));
+        router_executable_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        router_executable_check.tick().await;
         loop {
             if let Some(owner) = &mut collaboration {
                 let result = if active_host_replacement.is_some() {
@@ -407,7 +422,12 @@ impl HostRuntime {
                         active_host_replacement: &mut active_host_replacement,
                         active_status: &mut active_status,
                         update_drain_active,
+                        router_executable_observer: std::sync::Arc::clone(&router_executable_observer),
                     });
+                }
+                _ = router_executable_check.tick() => {
+                    let relation = router_executable_observer.lock().await.observe().await;
+                    state.observe_router_executable(relation);
                 }
                 completed = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
                     let _completed_connection = completed;
@@ -552,6 +572,7 @@ impl HostRuntime {
                         continue;
                     };
                     state.executable_relation = status_observation.executable_relation();
+                    state.observe_router_executable(status_observation.router_executable_relation());
                     let (snapshot, status_identity) = status_observation.snapshot(&state);
                     if pending_identity.is_none() {
                         pending_identity = status_identity;

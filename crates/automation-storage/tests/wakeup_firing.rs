@@ -73,7 +73,7 @@ async fn firing_persists_one_obligation_and_coalesces_until_delivery_resolves()
         return Err("duplicate reminder obligations".into());
     }
     let receipt: Option<String> =
-        sqlx::query_scalar("SELECT accepted_receipt_json FROM mailbox_deliveries")
+        sqlx::query_scalar("SELECT outcome_receipt_json FROM mailbox_deliveries")
             .fetch_one(&mut check)
             .await?;
     if receipt.is_some() {

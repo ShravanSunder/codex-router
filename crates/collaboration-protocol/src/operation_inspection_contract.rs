@@ -1,7 +1,7 @@
 //! Durable operation state is distinct from native work completion and connection-local request IDs.
 use crate::{
     AutomationConfiguration, AutomationOperationMethod, ConfigurationFileState,
-    NativeEffectEvidence, ObservationTimestamp, OperationId, OperationSuccess,
+    DeliveryRouteEvidence, ObservationTimestamp, OperationId, OperationSuccess,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -23,8 +23,8 @@ pub enum OperationEffects {
     Local {
         mutation: OperationLocalMutation,
     },
-    Native {
-        evidence: Box<NativeEffectEvidence>,
+    Route {
+        evidence: Box<DeliveryRouteEvidence>,
     },
     Configuration {
         file_state: ConfigurationFileState,

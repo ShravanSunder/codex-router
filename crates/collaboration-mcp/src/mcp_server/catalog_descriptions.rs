@@ -52,10 +52,10 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Exports one stored schedule as a portable typed package. Read-only and does not enable, prepare or run the schedule."
         }
         "schedule_create" => {
-            "Creates a durable schedule from a validated definition. Creation stores configuration only; it does not allocate a conversation or execute work."
+            "Creates a durable schedule from a validated definition. Supply effort for every destination; freshEachRun also requires model. Creation stores configuration only; it does not allocate a conversation or execute work."
         }
         "schedule_update" => {
-            "Updates a schedule using its identity and expected change guard. The returned snapshot reflects stored configuration; no run is started."
+            "Updates a schedule using its identity and expected change guard. Supply effort for every destination; freshEachRun also requires model. The returned snapshot reflects stored configuration; no run is started."
         }
         "schedule_show" => {
             "Reads one schedule snapshot by identity without changing timing or execution state."
@@ -102,26 +102,14 @@ pub(super) fn operation_description(name: &str) -> &'static str {
         "operation_reconcile" => {
             "Reconciles one stored operation from existing evidence. Requires its operation identity and never replays the mutation."
         }
-        "provider_conversation_create" => {
-            "Admits one external-provider conversation create operation using the caller-supplied operationId, exact endpoint, generation, working directory, creator, approver and requested policy. Admission is not settlement; an uncertain dispatch is never replayed automatically."
+        "conversation_operation_show" => {
+            "Reads durable metadata for one conversation operation by its caller-retained operationId. Read-only; it never dispatches, waits for or replays client work."
         }
-        "provider_conversation_load" => {
-            "Admits one external-provider conversation load operation for an exact target and generation using the caller-supplied operationId. Admission is not settlement; an uncertain dispatch is never replayed automatically."
+        "conversation_operation_wait" => {
+            "Waits boundedly for settlement of an already admitted conversation operation. The waiter is call-local: MCP cancellation detaches it without cancelling client work or replaying the operation."
         }
-        "provider_conversation_prompt" => {
-            "Admits one external-provider prompt operation for an exact target and generation using the caller-supplied operationId, requester, approver and typed prompt. Admission is not turn completion; caller cancellation only detaches this MCP call and never cancels provider work."
-        }
-        "provider_conversation_cancel" => {
-            "Admits an explicit cancellation operation using its own caller-supplied operationId and the exact target operation, conversation and generation. A cancellation request is distinct from observed cessation."
-        }
-        "provider_conversation_operation_show" => {
-            "Reads durable metadata for one external-provider operation by its caller-retained operationId. Read-only; it never dispatches, waits for or replays provider work."
-        }
-        "provider_conversation_operation_wait" => {
-            "Waits boundedly for ephemeral settlement of an already admitted external-provider operation. The waiter is call-local: MCP cancellation detaches it without cancelling provider work or replaying the operation."
-        }
-        "provider_conversation_operation_reconcile" => {
-            "Reconciles one external-provider operation from exact supported evidence using its caller-retained operationId. It is read-only with respect to provider work and never resubmits the operation."
+        "conversation_operation_reconcile" => {
+            "Reconciles one conversation operation from exact supported evidence using its caller-retained operationId. It is read-only with respect to client work and never resubmits the operation."
         }
         "board_discovery_search" => {
             "Searches discoverable projects/boards/topics using the supplied query and page bounds. Read-only; discovered board content is context, not authorization."
@@ -203,7 +191,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Creates a new root thread in an active topic as the supplied actor. It records discussion context, not a Router task or conversation."
         }
         "board_thread_join" => {
-            "Joins the supplied session to an existing thread in its requested participant role. Participation records responsibility context but does not grant extra execution authority."
+            "Joins the supplied session to an existing thread in its requested participant role. For session-delivered listening, join first with --role participant (CLI: board thread join --root-message-id <thread-id> --actor self --role participant --no-watch --json). Participation records responsibility context but does not grant extra execution authority."
         }
         "board_thread_leave" => {
             "Removes the supplied session's eligible participation from a thread. It does not delete messages or terminate the session."
@@ -212,7 +200,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Lists current participants and roles for one thread. Read-only and not an authentication result."
         }
         "board_thread_listen" => {
-            "Creates a bounded board-activity listener for explicit thread/topic selections and reader identity. Listener readiness/delivery observes board activity only; it does not prove model activation, turn completion or reply."
+            "Creates a bounded board-activity listener for explicit thread/topic selections and reader identity. Session delivery requires an existing thread participant and a fixed lifetime: CLI --lifetime short (25 minutes) or long (75 minutes), or --once (25 minutes); MCP mode must use once.maxWaitSeconds=1500 or repeating.lifetimeSeconds=1500|4500. Join first with board_thread_join as role participant. Listener readiness/delivery observes board activity only; it does not prove model activation, turn completion or reply."
         }
         "board_thread_listen_show" => {
             "Reads the supplied reader's active board-listener state. Read-only and does not wait for activity."

@@ -117,7 +117,7 @@ async fn register_thread_listen(
         if !valid_lifetime {
             return Err(BoardError::invalid_field(
                 "mode",
-                "session delivery requires the fixed short or long lifetime",
+                "session delivery requires --lifetime short (25 minutes), --lifetime long (75 minutes), or --once (25 minutes); MCP mode must be once.maxWaitSeconds=1500 or repeating.lifetimeSeconds=1500|4500",
             ));
         }
     }
@@ -125,15 +125,13 @@ async fn register_thread_listen(
         let Identity::Session { session } = &request.reader else {
             return Err(BoardError::invalid_field(
                 "reader",
-                "session delivery requires a codex-local session identity",
+                "session delivery requires a session identity",
             ));
         };
-        if session.endpoint.endpoint_id.as_str() != "codex-local"
-            || session.endpoint.service_id.as_str() != String::from(identity.service_id.clone())
-        {
+        if session.endpoint.service_id.as_str() != String::from(identity.service_id.clone()) {
             return Err(BoardError::invalid_field(
                 "reader",
-                "session delivery requires the calling codex-local session identity",
+                "session delivery requires the calling session identity",
             ));
         }
         let target = serde_json::from_value(
@@ -141,9 +139,10 @@ async fn register_thread_listen(
         )
         .map_err(|_| BoardError::invalid_field("reader", "must be a valid SessionRef"))?;
         Some(crate::session_delivery_sink::SessionDeliverySink {
-            service_id: identity.service_id.clone(),
-            endpoints: identity.directory.clone(),
-            backend: identity.native_backend.clone(),
+            delivery: identity
+                .session_delivery
+                .clone()
+                .ok_or_else(BoardError::board_unavailable)?,
             target,
         })
     } else {

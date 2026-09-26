@@ -1,4 +1,4 @@
-use codex_native_integration::NativeSchemaBundle;
+use codex_native_integration::{NativeOperation, NativePayloadSchemas, NativeSchemaBundle};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -49,4 +49,36 @@ fn native_envelope_validation_resolves_top_level_and_v2_references() {
         !validator.is_valid(&json!({"id":1,"method":"fixture/update","params":{"threadId":"one"}}))
     );
     assert!(bundle.validator_for_root("../ServerNotification").is_err());
+}
+
+#[test]
+fn thread_rename_capability_uses_codex_app_server_schema_type_names() {
+    let mut definitions = serde_json::Map::new();
+    for operation in [
+        "ThreadRead",
+        "ThreadResume",
+        "ThreadStart",
+        "ThreadLoadedList",
+        "TurnStart",
+        "TurnSteer",
+        "TurnInterrupt",
+        "ThreadSetName",
+    ] {
+        definitions.insert(format!("{operation}Params"), json!({"type":"object"}));
+        definitions.insert(format!("{operation}Response"), json!({"type":"object"}));
+    }
+    let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
+        "codex_app_server_protocol.schemas.json".to_owned(),
+        serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))
+            .unwrap_or_else(|error| panic!("schema: {error}")),
+    )]))
+    .unwrap_or_else(|error| panic!("bundle: {error}"));
+    let schemas = NativePayloadSchemas::from_bundle(&bundle)
+        .unwrap_or_else(|error| panic!("native operations: {error}"));
+
+    assert_eq!(
+        NativeOperation::SetThreadName.method_name(),
+        "thread/name/set"
+    );
+    assert!(schemas.supports_operation(NativeOperation::SetThreadName));
 }

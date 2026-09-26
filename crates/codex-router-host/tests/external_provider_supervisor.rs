@@ -342,25 +342,49 @@ async fn approval_broker_fixture(
     }))?;
     let endpoints = EndpointDirectory::new(service_id.clone());
     endpoints.publish(endpoint_description)?;
+    let native_backend = NativeControlBackend {
+        codex_home: root.path().to_path_buf(),
+        endpoint: approver.endpoint.clone(),
+        gate,
+    };
     let broker = ServiceApprovalBroker::load(
         service_id.clone(),
-        endpoints,
-        NativeControlBackend {
-            codex_home: root.path().to_path_buf(),
-            endpoint: approver.endpoint.clone(),
-            gate,
-        },
+        native_backend.clone(),
         root.path().join("approval-routes.json"),
     )
     .await?;
+    let route: Arc<dyn collaboration_service::SessionDeliveryRoute> =
+        Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(
+            service_id.clone(),
+            endpoints,
+            native_backend,
+            Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+        ));
+    broker.install_session_delivery(Arc::new(
+        collaboration_service::SessionDeliveryRouter::new(vec![route]),
+    ))?;
     let backend = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut socket = tokio_tungstenite::accept_async(stream).await?;
         let mut requests = Vec::new();
         for expected_method in ["initialize", "initialized", "thread/read", "turn/start"] {
             let frame = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
-                .await?
-                .ok_or("native approver connection closed")??;
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "native approver timed out waiting for {expected_method}: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "native approver connection closed while waiting for {expected_method}"
+                    ))
+                })?
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "native approver websocket failed while waiting for {expected_method}: {error}"
+                    ))
+                })?;
             let request: Value = serde_json::from_str(frame.to_text()?)?;
             ensure_eq!(
                 request.get("method").and_then(Value::as_str),
@@ -464,7 +488,7 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
     let create_request = ConversationCreateRequest {
         operation_id: operation_id.clone(),
         endpoint: endpoint.clone(),
-        generation: generation()?,
+        generation: Some(generation()?),
         working_directory: working_directory()?,
         created_by: requester.clone(),
         approver: requester.clone(),
@@ -482,6 +506,15 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
         } => target,
         output => return Err(format!("unexpected create output: {output:?}").into()),
     };
+    let mut stored =
+        ProviderOperationStore::open(&root.path().join("provider-operations.sqlite")).await?;
+    let session_record = stored
+        .session_record(&target)
+        .await?
+        .ok_or("created session record missing")?;
+    ensure_eq!(session_record.created_by, requester);
+    ensure_eq!(session_record.approver, requester);
+    stored.close().await?;
 
     let prompt_operation_id = OperationId::generate();
     let prompt = operation(
@@ -489,7 +522,7 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_operation_id.clone(),
                 target: target.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
                 approver: requester.clone(),
                 prompt: MessageContent::HumanUser {
@@ -508,7 +541,7 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 operation_id: cancel_operation_id.clone(),
                 target_operation_id: prompt_operation_id.clone(),
                 target: target.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
                 approver: requester.clone(),
             })
@@ -541,9 +574,9 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 operation_id: cancel_operation_id,
                 target_operation_id: prompt_operation_id,
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
-                approver: requester,
+                approver: requester.clone(),
             })
             .await,
     )?;
@@ -574,7 +607,7 @@ async fn supervisor_shutdown_joins_runtime_and_settles_held_work() -> TestResult
             .create(ConversationCreateRequest {
                 operation_id: create_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -595,7 +628,7 @@ async fn supervisor_shutdown_joins_runtime_and_settles_held_work() -> TestResult
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_id.clone(),
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
                 approver: requester,
                 prompt: MessageContent::HumanUser {
@@ -643,7 +676,7 @@ async fn supervisor_shutdown_drains_saturated_load_completions_and_preserves_unk
                 .load(ConversationLoadRequest {
                     operation_id: operation_id.clone(),
                     target: actor(provider_endpoint.clone(), &format!("held-load-{index}"))?,
-                    generation: generation()?,
+                    generation: Some(generation()?),
                     working_directory: working_directory()?,
                     requested_by: requester.clone(),
                     approver: requester.clone(),
@@ -705,7 +738,7 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
             .create(ConversationCreateRequest {
                 operation_id: create_operation_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: approver.clone(),
@@ -727,7 +760,7 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_operation_id.clone(),
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester,
                 approver: approver.clone(),
                 prompt: MessageContent::HumanUser {
@@ -767,6 +800,10 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
         String::from(prompt_operation_id.clone())
     );
     ensure_eq!(pending.operation["method"], "session/request_permission");
+    let native_requests = native_backend
+        .await?
+        .map_err(|error| format!("native approver fixture failed: {error}"))?;
+    ensure_eq!(native_requests.len(), 4);
     let decision = broker
         .decide(ApprovalDecideParams {
             request_id: pending.request_id,
@@ -788,10 +825,6 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
         }
     ));
     ensure_eq!(broker.list(false).await.approvals.len(), 1);
-    let native_requests = native_backend
-        .await?
-        .map_err(|error| format!("native approver fixture failed: {error}"))?;
-    ensure_eq!(native_requests.len(), 4);
     Ok(())
 }
 
@@ -818,7 +851,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             .create(ConversationCreateRequest {
                 operation_id: create_operation_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: approver.clone(),
@@ -839,7 +872,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_operation_id.clone(),
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester,
                 approver: approver.clone(),
                 prompt: MessageContent::HumanUser {
@@ -856,13 +889,14 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await
+    .map_err(|_| "approval did not enter pending state")?;
     let native_requests = native_backend
         .await?
         .map_err(|error| format!("native approver fixture failed: {error}"))?;
     ensure_eq!(native_requests.len(), 4);
     binding_retirement.cancel();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let retirement_settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             if broker.list(true).await.approvals.is_empty() {
                 break;
@@ -870,7 +904,14 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await;
+    if retirement_settled.is_err() {
+        return Err(format!(
+            "retired approval remained pending: {:?}",
+            broker.list(false).await.approvals
+        )
+        .into());
+    }
     ensure!(matches!(
         broker
             .decide(ApprovalDecideParams {
@@ -893,6 +934,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
         failure.kind,
         ConversationOperationFailureKind::OutcomeUnknown
     );
+    backend.shutdown().await?;
     Ok(())
 }
 
@@ -923,10 +965,10 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
             .load(ConversationLoadRequest {
                 operation_id: operation_id.clone(),
                 target: target.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 requested_by: requester.clone(),
-                approver: requester,
+                approver: requester.clone(),
                 requested_policy: policy(),
             })
             .await,
@@ -938,6 +980,15 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
             settlement: ConversationOperationSettlement::Loaded { .. }
         }
     ));
+    let mut stored =
+        ProviderOperationStore::open(&root.path().join("provider-operations.sqlite")).await?;
+    let session_record = stored
+        .session_record(&target)
+        .await?
+        .ok_or("loaded session record missing")?;
+    ensure_eq!(session_record.created_by, requester);
+    ensure_eq!(session_record.approver, requester);
+    stored.close().await?;
     Ok(())
 }
 
@@ -963,7 +1014,7 @@ sys.stdin.readline()
             .create(ConversationCreateRequest {
                 operation_id: operation_id.clone(),
                 endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester,
@@ -1001,7 +1052,11 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
         .await;
     if !matches!(
         classification,
-        Err(codex_router_host::ExternalProviderRuntimeError::AuthenticationRequired)
+        Err(
+            codex_router_host::ExternalProviderRuntimeError::AuthenticationRequired {
+                code: -32000
+            }
+        )
     ) {
         return Err(format!("unexpected authentication classification: {classification:?}").into());
     }
@@ -1018,7 +1073,7 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
             .create(ConversationCreateRequest {
                 operation_id: first_id.clone(),
                 endpoint: provider_endpoint.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -1039,7 +1094,7 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
             .create(ConversationCreateRequest {
                 operation_id: first_id,
                 endpoint: provider_endpoint.clone(),
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -1054,7 +1109,7 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
             .create(ConversationCreateRequest {
                 operation_id: second_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester,
@@ -1095,7 +1150,7 @@ async fn prompt_authentication_required_is_no_effect_and_fresh_prompt_retains_fi
             .create(ConversationCreateRequest {
                 operation_id: create_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -1115,7 +1170,7 @@ async fn prompt_authentication_required_is_no_effect_and_fresh_prompt_retains_fi
     let prompt_request = |operation_id: OperationId| ConversationPromptRequest {
         operation_id,
         target: target.clone(),
-        generation: generation().expect("generation"),
+        generation: Some(generation().expect("generation")),
         requested_by: requester.clone(),
         approver: requester.clone(),
         prompt: MessageContent::HumanUser {
@@ -1172,7 +1227,7 @@ async fn provider_prompt_error_text_cannot_become_a_local_no_effect_rejection() 
             .create(ConversationCreateRequest {
                 operation_id: create_id.clone(),
                 endpoint: provider_endpoint,
-                generation: generation()?,
+                generation: Some(generation()?),
                 working_directory: working_directory()?,
                 created_by: requester.clone(),
                 approver: requester.clone(),
@@ -1193,7 +1248,7 @@ async fn provider_prompt_error_text_cannot_become_a_local_no_effect_rejection() 
             .prompt(ConversationPromptRequest {
                 operation_id: prompt_id.clone(),
                 target,
-                generation: generation()?,
+                generation: Some(generation()?),
                 requested_by: requester.clone(),
                 approver: requester,
                 prompt: MessageContent::HumanUser {

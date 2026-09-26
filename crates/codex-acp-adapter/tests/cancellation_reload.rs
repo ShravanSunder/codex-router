@@ -1,12 +1,53 @@
-use codex_acp_adapter::{AcpConnectionInputs, AcpStoredSessions, serve_acp_connection};
+use codex_acp_adapter::{
+    AcpConnectionInputs, AcpSessionBinding, AcpStoredSessions, HeldBindingCheckout,
+    UnmaterializedBindingStore, serve_acp_connection,
+};
 use codex_native_integration::{NativePayloadSchemas, NativeSchemaBundle};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, future::Future, io, pin::Pin, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    io,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/conversation_operation_recorder.rs"]
+mod conversation_operation_recorder;
+use conversation_operation_recorder::AcceptingConversationRecorder;
 
 struct EmptyCatalog;
+#[derive(Default)]
+struct TestBindingHolder {
+    bindings: Mutex<BTreeMap<String, AcpSessionBinding>>,
+    tasks: tokio_util::task::TaskTracker,
+}
+impl UnmaterializedBindingStore for TestBindingHolder {
+    fn hold(&self, binding: AcpSessionBinding) {
+        self.bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(binding.session_id().to_owned(), binding);
+    }
+    fn checkout(&self, session_id: &str) -> HeldBindingCheckout {
+        self.bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id)
+            .map_or(HeldBindingCheckout::Missing, |binding| {
+                HeldBindingCheckout::Ready(Box::new(binding))
+            })
+    }
+    fn restore(&self, binding: AcpSessionBinding) {
+        self.hold(binding);
+    }
+    fn finish(&self, _session_id: &str) {}
+    fn create_tasks(&self) -> tokio_util::task::TaskTracker {
+        self.tasks.clone()
+    }
+}
 impl AcpStoredSessions for EmptyCatalog {
     fn list(&self, _: Value) -> Pin<Box<dyn Future<Output = io::Result<Value>> + Send + '_>> {
         Box::pin(async { Ok(json!({"sessions":[]})) })
@@ -104,6 +145,8 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
             schemas: Arc::new(NativePayloadSchemas::from_bundle(&bundle).unwrap()),
             stored_sessions: Arc::new(EmptyCatalog),
             approval_broker: std::sync::Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+            holder: Arc::new(TestBindingHolder::default()),
+            recorder: Arc::new(AcceptingConversationRecorder),
             retired: tokio_util::sync::CancellationToken::new(),
         },
     ));
@@ -115,7 +158,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
             (
                 2,
                 "session/new",
-                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
+                json!({"cwd":"/work","mcpServers":[],"_meta":{"codexRouter":{"operationId":collaboration_protocol::OperationId::generate(),"model":"gpt-5.6-sol","effort":"medium","access":"workspace-write","scratchScope":"session-00000000-0000-4000-8000-000000000099","scratchPath":TEST_SCRATCH,"createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"},"approver":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}}}}),
             ),
         ] {
             write

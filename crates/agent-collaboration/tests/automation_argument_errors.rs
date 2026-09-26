@@ -136,7 +136,7 @@ fn finite_control_groups_keep_json_for_missing_required_arguments() {
 }
 
 #[test]
-fn resume_and_fork_accept_absent_choices_while_new_still_requires_them() {
+fn resume_fork_and_new_accept_absent_model_or_effort() {
     // Arrange: resume and fork omit the choices; --new omits them too.
     let resume = [
         "conversation",
@@ -198,7 +198,7 @@ fn resume_and_fork_accept_absent_choices_while_new_still_requires_them() {
         .output()
         .expect("CLI executes");
 
-    // Assert: resume passes validation and fails later, on discovery; --new does not.
+    // Assert: all three requests pass optional model and effort validation.
     let record: serde_json::Value =
         serde_json::from_slice(&resumed.stdout).expect("JSON conversation record");
     assert_ne!(
@@ -211,58 +211,20 @@ fn resume_and_fork_accept_absent_choices_while_new_still_requires_them() {
         fork_record["error"]["stage"], "validation",
         "fork inherits the source thread's model and effort: {fork_record}"
     );
-    assert_eq!(created.status.code(), Some(2));
-    let refusal: serde_json::Value =
-        serde_json::from_slice(&created.stdout).expect("JSON error record");
-    assert!(
-        refusal["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("--effort")),
-        "{refusal}"
-    );
+    assert_eq!(created.status.code(), Some(3));
+    let records = serde_json::Deserializer::from_slice(&created.stdout)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("create start and failure records");
+    assert_eq!(records[0]["kind"], "conversationOperationStarted");
+    assert!(records[0]["operationId"].as_str().is_some());
+    let failure = records.last().expect("failure record");
+    assert_ne!(failure["error"]["stage"], "validation", "{failure}");
 }
 
 #[test]
-fn conversation_model_choice_is_validated_before_service_discovery() {
+fn conversation_invalid_choices_are_rejected_before_service_discovery() {
     let cases = [
-        (
-            vec![
-                "conversation",
-                "prompt",
-                "--endpoint",
-                "codex-local",
-                "--cwd",
-                "/tmp",
-                "--new",
-                "--model",
-                "gpt-5.6-sol",
-                "--access",
-                "workspace-write",
-                "--text",
-                "hello",
-                "--json",
-            ],
-            "--effort",
-        ),
-        (
-            vec![
-                "conversation",
-                "prompt",
-                "--endpoint",
-                "codex-local",
-                "--cwd",
-                "/tmp",
-                "--new",
-                "--effort",
-                "medium",
-                "--access",
-                "workspace-write",
-                "--text",
-                "hello",
-                "--json",
-            ],
-            "--model",
-        ),
         (
             vec![
                 "conversation",

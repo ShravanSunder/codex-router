@@ -1,6 +1,6 @@
 //! Shared service identity and composed dependencies, separate from connection admission.
 use crate::EndpointDirectory;
-use collaboration_protocol::{EndpointDescription, UuidIdentity};
+use collaboration_protocol::{EndpointAvailability, EndpointDescription, UuidIdentity};
 
 #[derive(Clone)]
 pub struct ServiceIdentity {
@@ -16,11 +16,15 @@ pub struct ServiceIdentity {
     pub(crate) wake_wait_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
     pub(crate) native_backend: Option<crate::NativeControlBackend>,
+    pub(crate) session_delivery: Option<std::sync::Arc<dyn crate::SessionMessageDelivery>>,
+    pub(crate) scheduled_run_execution: Option<std::sync::Arc<dyn crate::ScheduledRunExecution>>,
     pub(crate) approval_broker: Option<std::sync::Arc<crate::ServiceApprovalBroker>>,
     pub(crate) automation:
         Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
     pub(crate) provider_operations:
         Option<std::sync::Arc<tokio::sync::Mutex<crate::ProviderOperationStore>>>,
+    pub(crate) codex_conversation_recorder:
+        Option<std::sync::Arc<crate::CodexConversationOperationRecorder>>,
     pub(crate) provider_conversations:
         Option<std::sync::Arc<dyn crate::ProviderConversationBackend>>,
 }
@@ -48,27 +52,32 @@ impl ServiceIdentity {
     }
 
     pub fn schedule_timing_worker(&self) -> Option<crate::ScheduleTimingWorker> {
-        self.automation.as_ref().map(|store| {
-            crate::ScheduleTimingWorker::new(
-                std::sync::Arc::clone(store),
-                self.native_backend.clone(),
-                self.configuration.clone(),
-            )
-        })
+        self.automation
+            .as_ref()
+            .zip(self.scheduled_run_execution.as_ref())
+            .map(|(store, execution)| {
+                crate::ScheduleTimingWorker::new(
+                    std::sync::Arc::clone(store),
+                    std::sync::Arc::clone(execution),
+                    self.native_backend.clone(),
+                    self.configuration.clone(),
+                )
+            })
     }
 
     pub fn wake_timing_worker(&self) -> Option<crate::WakeTimingWorker> {
-        self.automation.as_ref().map(|store| {
-            crate::WakeTimingWorker::new(
-                std::sync::Arc::clone(store),
-                crate::wakeup_native_sender::WakeNativeSender {
-                    service_id: self.service_id.clone(),
-                    endpoints: self.directory.clone(),
-                    backend: self.native_backend.clone(),
-                    configuration: self.configuration.clone(),
-                },
-            )
-        })
+        self.automation
+            .as_ref()
+            .zip(self.session_delivery.as_ref())
+            .map(|(store, delivery)| {
+                crate::WakeTimingWorker::new(
+                    std::sync::Arc::clone(store),
+                    crate::wakeup_delivery_sender::WakeDeliverySender {
+                        delivery: std::sync::Arc::clone(delivery),
+                        configuration: self.configuration.clone(),
+                    },
+                )
+            })
     }
 
     pub fn with_automation_store(
@@ -84,6 +93,14 @@ impl ServiceIdentity {
         store: std::sync::Arc<tokio::sync::Mutex<crate::ProviderOperationStore>>,
     ) -> Self {
         self.provider_operations = Some(store);
+        self
+    }
+
+    pub fn with_codex_conversation_recorder(
+        mut self,
+        recorder: std::sync::Arc<crate::CodexConversationOperationRecorder>,
+    ) -> Self {
+        self.codex_conversation_recorder = Some(recorder);
         self
     }
 
@@ -104,6 +121,23 @@ impl ServiceIdentity {
         }
         self.native_backend = Some(backend);
         Ok(self)
+    }
+
+    #[must_use]
+    pub fn with_session_delivery(
+        mut self,
+        delivery: std::sync::Arc<dyn crate::SessionMessageDelivery>,
+    ) -> Self {
+        self.session_delivery = Some(delivery);
+        self
+    }
+    #[must_use]
+    pub fn with_scheduled_run_execution(
+        mut self,
+        execution: std::sync::Arc<dyn crate::ScheduledRunExecution>,
+    ) -> Self {
+        self.scheduled_run_execution = Some(execution);
+        self
     }
     #[must_use]
     pub fn with_approval_broker(
@@ -126,7 +160,13 @@ impl ServiceIdentity {
             if !identities.insert(endpoint.endpoint.clone()) {
                 return Err("duplicate endpoint identity".into());
             }
-            if !(1..=2).contains(&endpoint.channels.len()) {
+            if endpoint.channels.len() > 2
+                || (endpoint.channels.is_empty()
+                    && !matches!(
+                        endpoint.availability,
+                        EndpointAvailability::Unavailable { .. }
+                    ))
+            {
                 return Err("invalid channel count".into());
             }
         }
@@ -164,10 +204,13 @@ impl ServiceIdentity {
             schema_digest: digest,
             journal: None,
             native_backend: None,
+            session_delivery: None,
+            scheduled_run_execution: None,
             approval_broker: None,
             wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,
             provider_operations: None,
+            codex_conversation_recorder: None,
             provider_conversations: None,
             board: None,
             thread_listens: crate::thread_listen_registry::ThreadListenRegistry::new(),

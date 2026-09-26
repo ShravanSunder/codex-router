@@ -22,6 +22,7 @@ async fn collaboration_runtime_binds_a_fixed_mcp_port_once() {
         backend_socket: root.join("backend.sock"),
         mcp_bind,
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await
     .unwrap_or_else(|error| panic!("communication startup: {error}"));

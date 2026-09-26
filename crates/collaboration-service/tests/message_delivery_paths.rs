@@ -1,8 +1,8 @@
 #[path = "test_support/message_backend_fixture.rs"]
 mod message_backend_fixture;
-use collaboration_protocol::{MessageDelivery, NativeSendAcceptance};
+use collaboration_protocol::{DeliveryClientReceipt, MessageDelivery, NativeSendAcceptance};
 use message_backend_fixture::{
-    MessageScenario, NativeReply, NativeStep, error_data, exercise, read,
+    MessageScenario, NativeReply, NativeStep, exercise, outcome_data, read,
 };
 use serde_json::json;
 
@@ -14,12 +14,9 @@ async fn explicit_queue_rejects_unloaded_without_resume_or_enqueue() {
     })
     .await
     .unwrap();
-    let error = error_data(result).unwrap();
-    assert_eq!(error["kind"], "threadNotLoaded");
-    assert_eq!(
-        error["effects"],
-        json!({"resume":"notRequested","submission":"notDispatched"})
-    );
+    let outcome = outcome_data(result).unwrap();
+    assert_eq!(outcome["kind"], "notSubmitted");
+    assert_eq!(outcome["reason"], "threadNotLoaded");
     assert_eq!(requests.len(), 1);
 }
 #[tokio::test]
@@ -43,18 +40,21 @@ async fn unload_after_loaded_admission_preserves_queue_acceptance_without_compen
     .unwrap();
     // Assert: a loaded-at-admission check is not falsely presented as a residency lease.
     let receipt = result.unwrap();
+    let Some(DeliveryClientReceipt::CodexAppServer(native)) = receipt.client else {
+        panic!("queued delivery lost its native receipt");
+    };
     assert!(
-        matches!(receipt.acceptance, NativeSendAcceptance::QueueAccepted { submission_id }
+        matches!(native.acceptance, NativeSendAcceptance::QueueAccepted { submission_id }
         if String::from(submission_id.clone()) == "accepted-while-unloaded")
     );
     assert!(matches!(
-        receipt.resume_effect,
+        native.resume_effect,
         collaboration_protocol::AcceptedResumeEffect::NotRequested
     ));
     assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[1]["params"]["clientUserMessageId"],
-        serde_json::to_value(receipt.client_user_message_id).unwrap()
+        serde_json::to_value(native.client_user_message_id).unwrap()
     );
     // The fixture additionally rejects any extra resume, start, queue deletion or replay.
 }
@@ -76,15 +76,16 @@ async fn auto_resume_preserves_effect_when_submission_rejected() {
     })
     .await
     .unwrap();
-    let error = error_data(result).unwrap();
-    assert_eq!(error["kind"], "nativeRejected");
-    assert_eq!(
-        error["effects"],
-        json!({"resume":"accepted","submission":"rejected"})
-    );
-    assert_eq!(
-        error["clientUserMessageId"],
+    let outcome = outcome_data(result).unwrap();
+    assert_eq!(outcome["kind"], "rejected");
+    assert_eq!(outcome["reason"], "unknown");
+    assert_eq!(outcome["nextAction"], "retryLater");
+    assert_eq!(outcome["clientCode"], -32602);
+    assert_eq!(requests.len(), 3);
+    assert!(
         requests[2]["params"]["clientUserMessageId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
     );
     assert_eq!(requests[1]["params"]["excludeTurns"], true);
 }
@@ -102,11 +103,8 @@ async fn lost_resume_receipt_never_submits_input() {
     })
     .await
     .unwrap();
-    let error = error_data(result).unwrap();
-    assert_eq!(
-        error["effects"],
-        json!({"resume":"unknown","submission":"notDispatched"})
-    );
+    let outcome = outcome_data(result).unwrap();
+    assert_eq!(outcome["kind"], "unknown");
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1]["params"]["excludeTurns"], true);
 }
@@ -117,8 +115,13 @@ async fn auto_active_steers_exact_turn_without_loading_history() {
         NativeStep { method:"turn/steer", reply:NativeReply::Result(json!({"turnId":"active-turn"})) },
     ] }).await.unwrap();
     assert!(matches!(
-        result.unwrap().acceptance,
-        NativeSendAcceptance::SteerAccepted { .. }
+        result.unwrap().client,
+        Some(DeliveryClientReceipt::CodexAppServer(
+            collaboration_protocol::NativeSendReceipt {
+                acceptance: NativeSendAcceptance::SteerAccepted { .. },
+                ..
+            }
+        ))
     ));
     assert_eq!(requests.len(), 3);
     assert_eq!(
@@ -140,6 +143,8 @@ async fn explicit_steer_rejects_idle_without_starting_work() {
     })
     .await
     .unwrap();
-    assert_eq!(error_data(result).unwrap()["kind"], "noActiveTurn");
+    let outcome = outcome_data(result).unwrap();
+    assert_eq!(outcome["kind"], "notSubmitted");
+    assert_eq!(outcome["reason"], "noActiveTurn");
     assert_eq!(requests.len(), 1);
 }

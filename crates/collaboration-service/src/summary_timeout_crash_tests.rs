@@ -1,5 +1,6 @@
 //! Actual child exits at timeout intent/receipt boundaries; recovery observes without resend.
 use super::*;
+use collaboration_protocol::NativeSendReceipt;
 use std::path::{Path, PathBuf};
 const ROOT_ENV: &str = "SUMMARY_TIMEOUT_TEST_ROOT";
 const STAGE_ENV: &str = "SUMMARY_TIMEOUT_TEST_STAGE";
@@ -156,12 +157,21 @@ async fn recover_and_observe(root: &Path) -> TestResult<()> {
         let record = store
             .lock()
             .await
-            .read_run::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(&id)
+            .read_run::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(&id)
             .await?;
+        let summary_endpoint = record
+            .summary_attempt
+            .as_ref()
+            .ok_or("summary attempt missing")?
+            .source_target
+            .endpoint
+            .clone();
         step(SummaryStep {
             work: SummaryWork::Advance,
             store: &store,
             admission: &admission,
+            summary_endpoint,
+            source: None,
             record,
             timeout_seconds: 999,
         })

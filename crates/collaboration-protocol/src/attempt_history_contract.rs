@@ -75,7 +75,7 @@ pub struct AttemptHistoryPage<TRecord> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryAttemptsRequest {
     pub delivery_id: DeliveryId,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
     pub limit: PageLimit,
 }
@@ -83,7 +83,7 @@ pub struct DeliveryAttemptsRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunSummariesRequest {
     pub run_id: RunId,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
     pub limit: PageLimit,
 }

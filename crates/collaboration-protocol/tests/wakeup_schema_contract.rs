@@ -28,13 +28,14 @@ fn wake_creation_preserves_message_modes_and_rejects_invalid_timing()
         .as_object_mut()
         .ok_or("missing fixture object")?
         .remove("generationGuard");
-    if validator.is_valid(&absent) {
-        return Err("nullable generation guard was not required".into());
+    if !validator.is_valid(&absent) {
+        return Err("schema rejected an omitted optional generation guard".into());
     }
-    if serde_json::from_value::<collaboration_protocol::WakeSendRequest>(absent["params"].clone())
-        .is_ok()
-    {
-        return Err("Rust request allowed an omitted nullable field".into());
+    let parsed = serde_json::from_value::<collaboration_protocol::WakeSendRequest>(
+        absent["params"].clone(),
+    )?;
+    if parsed.message.generation_guard.is_some() {
+        return Err("omitted generation guard did not normalize to None".into());
     }
     for seconds in [0, 31536001] {
         let mut invalid = request.clone();

@@ -78,7 +78,7 @@ pub(crate) async fn read_current<
             .map(decode)
             .transpose()?,
         receipt: row
-            .try_get::<Option<String>, _>("accepted_receipt_json")?
+            .try_get::<Option<String>, _>("outcome_receipt_json")?
             .map(decode)
             .transpose()?,
     })

@@ -36,8 +36,10 @@ pub(crate) fn snapshot(
 }
 fn project_effects(method: Method, effects: Value) -> Result<OperationEffects, StorageError> {
     if method == Method::SchedulePrepare {
-        Ok(OperationEffects::Native {
-            evidence: Box::new(decode(effects)?),
+        Ok(OperationEffects::Route {
+            evidence: Box::new(
+                crate::schedule_preparation_evidence_sink::project_stored_evidence(effects)?,
+            ),
         })
     } else {
         decode(effects)
@@ -51,7 +53,9 @@ fn project_failure(
     let effects = project_effects(method, effects)?;
     match method {
         Method::SchedulePrepare => {
-            let error: collaboration_protocol::ScheduleFailure = decode(failure)?;
+            let error: collaboration_protocol::ScheduleFailure = decode(
+                crate::schedule_preparation_evidence_sink::upgrade_stored_failure(failure)?,
+            )?;
             Ok(OperationFailure {
                 kind: token(error.kind)?,
                 stage: token(error.stage)?,
@@ -140,8 +144,10 @@ fn success(
         Method::SummaryRetry | Method::SummarySkip => Ok(OperationSuccess::RunRecovery {
             method: decode(method_value)?,
             result: Box::new(
-                crate::run_projection::snapshot(decode(result)?)
-                    .map_err(|_| StorageError::InvalidRecord)?,
+                crate::run_projection::snapshot::<crate::stored_run_receipt::StoredRunReceipt>(
+                    decode(result)?,
+                )
+                .map_err(|_| StorageError::InvalidRecord)?,
             ),
         }),
         Method::Configure => Ok(OperationSuccess::Configuration {

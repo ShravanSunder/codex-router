@@ -4,7 +4,7 @@ mod trace_evidence;
 use crate::proof_context::{ProofContext, ProofResult};
 use collaboration_client::board::*;
 use collaboration_client::protocol::{
-    MessageContent, MessageDelivery, NativeSendParams, SessionRef,
+    MessageContent, MessageDelivery, SessionMessageSendParams, SessionRef,
 };
 use serde_json::{Value, json};
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
@@ -221,15 +221,15 @@ async fn run_operator(
 ) -> ProofResult<Vec<Value>> {
     proof
         .client
-        .send_agent_message(NativeSendParams {
+        .send_agent_message(SessionMessageSendParams {
             target: target.clone(),
-            generation: proof.generation.clone(),
+            generation_guard: Some(proof.generation.clone()),
             message: MessageContent::Agent {
                 sender: target.clone(),
                 text: task.to_owned().try_into()?,
             },
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            correlation: None,
         })
         .await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);

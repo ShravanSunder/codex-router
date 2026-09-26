@@ -115,6 +115,7 @@ impl PendingAcpPrompt {
             .settlement
             .accepted_turn(turn_id.to_owned())
             .map_err(|_| PromptExecutionError::Projection)?;
+        pending.session.materialized = true;
         Ok(pending)
     }
     pub async fn next_event(

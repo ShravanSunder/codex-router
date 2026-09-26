@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE provider_operations\n             SET stage=?,effect=?,reconciliation_state=?,\n                 terminal_at_ms=COALESCE(terminal_at_ms,MAX(admitted_at_ms,?)),\n                 updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)\n             WHERE operation_id=? AND target_session_id IS NOT NULL\n               AND stage!=? AND reconciliation_state!=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "977098af6dd66a7b428f321f91859cf74e1df100a83ae055de55c25005c7179e"
+}

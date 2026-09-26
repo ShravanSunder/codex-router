@@ -2,8 +2,9 @@
 use crate::schedule_preparation_arguments::{PreparationArguments, PreparedDestination};
 use clap::{Parser, Subcommand};
 use collaboration_client::protocol::{
-    LocalMutationState, OperationId, ScheduleCreateRequest, ScheduleDefinition, ScheduleEffects,
-    ScheduleEnableRequest, ScheduleShowRequest, ScheduleSnapshot, ScheduleUpdateRequest,
+    DeliveryRouteEvidence, LocalMutationState, OperationId, ScheduleCreateRequest,
+    ScheduleDefinition, ScheduleEffects, ScheduleEnableRequest, ScheduleShowRequest,
+    ScheduleSnapshot, ScheduleUpdateRequest,
 };
 use collaboration_client::{ControlClient, ScheduleClientError};
 use serde_json::json;
@@ -270,7 +271,13 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
                 ScheduleEffects::Local {
                     mutation: LocalMutationState::Unknown | LocalMutationState::Committed
                 }
-            ) || matches!(&error.effects,ScheduleEffects::Native{evidence} if matches!(evidence.allocation,collaboration_client::protocol::PreparationEffect::Accepted|collaboration_client::protocol::PreparationEffect::Unknown) || matches!(evidence.resume,collaboration_client::protocol::PreparationEffect::Accepted|collaboration_client::protocol::PreparationEffect::Unknown) || matches!(evidence.submission,collaboration_client::protocol::SubmissionEffect::Accepted|collaboration_client::protocol::SubmissionEffect::Dispatching|collaboration_client::protocol::SubmissionEffect::Unknown));
+            ) || matches!(&error.effects, ScheduleEffects::Route { evidence } if match evidence {
+                DeliveryRouteEvidence::CodexAppServer(native) => matches!(native.allocation, collaboration_client::protocol::PreparationEffect::Accepted | collaboration_client::protocol::PreparationEffect::Unknown)
+                    || matches!(native.resume, collaboration_client::protocol::PreparationEffect::Accepted | collaboration_client::protocol::PreparationEffect::Unknown)
+                    || matches!(native.submission, collaboration_client::protocol::SubmissionEffect::Accepted | collaboration_client::protocol::SubmissionEffect::Dispatching | collaboration_client::protocol::SubmissionEffect::Unknown),
+                DeliveryRouteEvidence::ProviderAcp { submission, .. } => matches!(submission, collaboration_client::protocol::SubmissionEffect::Accepted | collaboration_client::protocol::SubmissionEffect::Dispatching | collaboration_client::protocol::SubmissionEffect::Unknown),
+                DeliveryRouteEvidence::ClaudeCodePeer { write, .. } => matches!(write, collaboration_client::protocol::PeerWriteEffect::Dispatching | collaboration_client::protocol::PeerWriteEffect::Written | collaboration_client::protocol::PeerWriteEffect::Unknown),
+            });
             (
                 json!({"kind":"error","operationId":operation_id,"error":error}),
                 if uncertain { 5 } else { 4 },

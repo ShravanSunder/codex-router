@@ -1,5 +1,12 @@
 # Release Notes
 
+## Unreleased - 2026-09-24
+
+- Enable configured Claude and Cursor ACP providers by default from owner-editable `providers.json`. A failed provider reports endpoint-specific reason and fix without taking down the other endpoints.
+- Use one CLI and MCP conversation surface for Codex, Claude, and Cursor, including create, prompt, load, and operation inspection. Claude and Cursor can cancel one exact operation; Codex directs callers to turn interrupt. Provider operations retain caller IDs and report completed or pending work.
+- Route messages, wakes, listen pushes, approvals, and scheduled runs through the selected Codex, provider ACP, or live Claude Code peer route. Delivery receipts expose the observed outcome and reachability; `peerMessageWritten` confirms a socket write, not a peer reply.
+- Preserve Codex create-then-message across frontend closure while the Host remains running. Provider schedules run on existing sessions and finish from provider settlement without a summary.
+
 ## 0.1.29 - 2026-09-17
 
 - Rename the human session picker binary from `agent-session` to `agent-sessions`; it replaces the retired standalone `agent-sessions` install and keeps every flag, including model and effort restoration on resume and fork.

@@ -27,7 +27,8 @@ impl MessageEffects {
     pub fn native_rejection(&self, stage: &str, code: i64, native: Option<&Value>) -> Value {
         let (reason, next_action) = classify_native_rejection(code, native);
         let mut data = json!({"kind":"nativeRejected","stage":stage,"message":"Message operation failed",
-            "reason":reason,"nextAction":next_action,"effects":{"resume":self.resume,"submission":self.submission}});
+            "reason":reason,"nextAction":next_action,"clientCode":code,
+            "effects":{"resume":self.resume,"submission":self.submission}});
         if reason == "unknown"
             && let Some(fields) = data.as_object_mut()
         {

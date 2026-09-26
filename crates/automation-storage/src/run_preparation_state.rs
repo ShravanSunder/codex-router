@@ -1,11 +1,13 @@
 //! Run-owned allocation evidence prevents a restart from silently creating another execution thread.
 use crate::{AutomationStore, StorageError, ThreadBindingClaim};
-use agent_automation::{NativeEffectEvidence, RunId, RunPhase};
+use agent_automation::{
+    NativeEffectEvidence, PeerWriteEffect, RouteEffectEvidence, RunId, RunPhase, SubmissionEffect,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::Connection;
 pub struct RunPreparationIntent<TTarget, TGeneration> {
     pub run_id: RunId,
-    pub effects: NativeEffectEvidence<TTarget, TGeneration>,
+    pub effects: RouteEffectEvidence<TTarget, TGeneration>,
 }
 pub struct RunPreparedTarget<TTarget, TGeneration> {
     pub run_id: RunId,
@@ -14,7 +16,7 @@ pub struct RunPreparedTarget<TTarget, TGeneration> {
 }
 pub struct RunPreparationFailure<TTarget, TGeneration> {
     pub run_id: RunId,
-    pub effects: NativeEffectEvidence<TTarget, TGeneration>,
+    pub effects: RouteEffectEvidence<TTarget, TGeneration>,
     pub explanation: String,
     pub now_ms: i64,
 }
@@ -22,24 +24,35 @@ impl AutomationStore {
     /// A known preparation failure never consumed an execution budget.
     /// Preserve an already prepared target when local input validation fails afterward.
     pub async fn fail_run_preparation<
-        TTarget: Serialize + DeserializeOwned,
+        TTarget: PartialEq + Serialize + DeserializeOwned,
         TEndpoint: DeserializeOwned,
-        TGeneration: Serialize + DeserializeOwned,
+        TGeneration: PartialEq + Serialize + DeserializeOwned,
         TReceipt: Serialize + DeserializeOwned,
     >(
         &mut self,
         request: RunPreparationFailure<TTarget, TGeneration>,
     ) -> Result<bool, StorageError> {
         use agent_automation::{PreparationEffect, SubmissionEffect};
-        if request.now_ms < 0
-            || request.explanation.is_empty()
-            || request.effects.allocation == PreparationEffect::Unknown
-            || request.effects.resume == PreparationEffect::Unknown
-            || !matches!(
-                request.effects.submission,
-                SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
-            )
-        {
+        let known_none = match &request.effects {
+            RouteEffectEvidence::CodexAppServer(native) => {
+                native.allocation != PreparationEffect::Unknown
+                    && native.resume != PreparationEffect::Unknown
+                    && matches!(
+                        native.submission,
+                        SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
+                    )
+            }
+            RouteEffectEvidence::ProviderAcp(provider) => {
+                matches!(
+                    provider.submission,
+                    SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
+                ) && provider.settlement == agent_automation::ProviderSettlementEffect::NotObserved
+            }
+            RouteEffectEvidence::ClaudeCodePeer(peer) => {
+                peer.write == PeerWriteEffect::NotDispatched
+            }
+        };
+        if request.now_ms < 0 || request.explanation.is_empty() || !known_none {
             return Err(StorageError::InvalidRecord);
         }
         let mut transaction = self.connection.begin_with("BEGIN IMMEDIATE").await?;
@@ -56,7 +69,15 @@ impl AutomationStore {
             transaction.commit().await?;
             return Ok(false);
         }
-        record.evidence.native = request.effects;
+        if record
+            .evidence
+            .route
+            .as_ref()
+            .is_some_and(|prior| !prior.same_client_identity(&request.effects))
+        {
+            return Err(StorageError::InvalidRecord);
+        }
+        record.evidence.route = Some(request.effects);
         let outcome = agent_automation::WorkerOutcome::Failed {
             explanation: Some(request.explanation),
         };
@@ -86,19 +107,40 @@ impl AutomationStore {
                 &request.run_id,
             )
             .await?;
-        if record.phase != RunPhase::Preparing
-            || record.evidence.timing.is_some()
-            || record.evidence.native.target.is_some()
-            || matches!(
-                record.evidence.native.allocation,
-                agent_automation::PreparationEffect::Unknown
-                    | agent_automation::PreparationEffect::Accepted
-            )
-        {
+        if record.phase != RunPhase::Preparing || record.evidence.timing.is_some() {
             transaction.commit().await?;
             return Ok(false);
         }
-        record.evidence.native = request.effects;
+        let prior_is_safe = match record.evidence.route.as_ref() {
+            None => true,
+            Some(RouteEffectEvidence::CodexAppServer(native)) => {
+                native.target.is_none()
+                    && !matches!(
+                        native.allocation,
+                        agent_automation::PreparationEffect::Unknown
+                            | agent_automation::PreparationEffect::Accepted
+                    )
+                    && !matches!(
+                        native.submission,
+                        SubmissionEffect::Dispatching
+                            | SubmissionEffect::Accepted
+                            | SubmissionEffect::Unknown
+                    )
+            }
+            Some(RouteEffectEvidence::ProviderAcp(provider)) => {
+                matches!(
+                    provider.submission,
+                    SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
+                )
+            }
+            Some(RouteEffectEvidence::ClaudeCodePeer(peer)) => {
+                peer.write == PeerWriteEffect::NotDispatched
+            }
+        };
+        if !prior_is_safe {
+            return Err(StorageError::InvalidRecord);
+        }
+        record.evidence.route = Some(request.effects);
         sqlx::query("UPDATE workflow_runs SET execution_evidence_json=? WHERE run_id=?")
             .bind(serde_json::to_string(&record.evidence).map_err(|_| StorageError::InvalidRecord)?)
             .bind(request.run_id.as_str())
@@ -136,7 +178,7 @@ impl AutomationStore {
             &request.binding,
         )
         .await?;
-        record.evidence.native = request.effects;
+        record.evidence.route = Some(request.effects.into());
         sqlx::query("UPDATE workflow_runs SET run_status='preparing',thread_binding_id=?,execution_evidence_json=? WHERE run_id=?").bind(binding.as_str()).bind(serde_json::to_string(&record.evidence).map_err(|_|StorageError::InvalidRecord)?).bind(request.run_id.as_str()).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(true)

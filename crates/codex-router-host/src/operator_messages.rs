@@ -107,14 +107,14 @@ pub enum TerminalClassification {
 pub struct HostTerminalResponse {
     request: OperatorRequest,
     classification: TerminalClassification,
-    snapshot: HostSnapshot,
+    snapshot: Box<HostSnapshot>,
     message: String,
 }
 
 impl HostTerminalResponse {
     /// Creates one terminal response from lifecycle-owned state.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         request: OperatorRequest,
         classification: TerminalClassification,
         snapshot: HostSnapshot,
@@ -123,7 +123,7 @@ impl HostTerminalResponse {
         Self {
             request,
             classification,
-            snapshot,
+            snapshot: Box::new(snapshot),
             message,
         }
     }
@@ -142,8 +142,8 @@ impl HostTerminalResponse {
 
     /// Returns the live snapshot captured with this terminal result.
     #[must_use]
-    pub const fn snapshot(&self) -> &HostSnapshot {
-        &self.snapshot
+    pub fn snapshot(&self) -> &HostSnapshot {
+        self.snapshot.as_ref()
     }
 
     /// Returns the bounded human-readable terminal explanation.
@@ -172,11 +172,11 @@ impl OperatorFrame {
 
     /// Creates an immediate busy terminal result for a rejected mutation.
     #[must_use]
-    pub const fn busy(request: OperatorRequest, snapshot: HostSnapshot, message: String) -> Self {
+    pub fn busy(request: OperatorRequest, snapshot: HostSnapshot, message: String) -> Self {
         Self::Terminal(HostTerminalResponse {
             request,
             classification: TerminalClassification::Busy,
-            snapshot,
+            snapshot: Box::new(snapshot),
             message,
         })
     }

@@ -4,7 +4,7 @@
 mod proof_context;
 
 use collaboration_client::board::*;
-use collaboration_client::protocol::{MessageContent, MessageDelivery, NativeSendParams};
+use collaboration_client::protocol::{MessageContent, MessageDelivery, SessionMessageSendParams};
 use proof_context::{ProofContext, ProofResult};
 use serde_json::{Value, json};
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
@@ -66,15 +66,15 @@ async fn luna_recovers_from_combined_board_argument_diagnostic() -> ProofResult<
     );
     proof
         .client
-        .send_agent_message(NativeSendParams {
+        .send_agent_message(SessionMessageSendParams {
             target: agent.clone(),
-            generation: proof.generation.clone(),
+            generation_guard: Some(proof.generation.clone()),
             message: MessageContent::Agent {
                 sender: agent.clone(),
                 text: task.try_into()?,
             },
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            correlation: None,
         })
         .await?;
     let turns = wait_for_terminal_turn(&mut proof, &agent).await?;

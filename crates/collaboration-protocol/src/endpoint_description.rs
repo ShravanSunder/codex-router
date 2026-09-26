@@ -78,6 +78,8 @@ pub enum EndpointAvailability {
     Unavailable {
         observed_at: ObservationTimestamp,
         reason: NonEmptyText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fix: Option<NonEmptyText>,
     },
     Unprobed,
 }
@@ -118,24 +120,43 @@ pub enum ChannelDescription {
     },
 }
 
-#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EndpointDescription {
     pub endpoint: EndpointRef,
     pub label: NonEmptyText,
     pub availability: EndpointAvailability,
-    #[serde(deserialize_with = "deserialize_channels")]
-    #[schemars(length(min = 1, max = 2))]
+    #[schemars(length(min = 0, max = 2))]
     pub channels: Vec<ChannelDescription>,
 }
-fn deserialize_channels<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<ChannelDescription>, D::Error> {
-    let channels = Vec::<ChannelDescription>::deserialize(deserializer)?;
-    if !(1..=2).contains(&channels.len()) {
-        return Err(serde::de::Error::custom(
-            "endpoint requires one or two channels",
-        ));
+
+impl<'de> Deserialize<'de> for EndpointDescription {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct EndpointDocument {
+            endpoint: EndpointRef,
+            label: NonEmptyText,
+            availability: EndpointAvailability,
+            channels: Vec<ChannelDescription>,
+        }
+        let document = EndpointDocument::deserialize(deserializer)?;
+        if document.channels.len() > 2
+            || (document.channels.is_empty()
+                && !matches!(
+                    document.availability,
+                    EndpointAvailability::Unavailable { .. }
+                ))
+        {
+            return Err(serde::de::Error::custom(
+                "endpoint channel count does not match availability",
+            ));
+        }
+        Ok(Self {
+            endpoint: document.endpoint,
+            label: document.label,
+            availability: document.availability,
+            channels: document.channels,
+        })
     }
-    Ok(channels)
 }

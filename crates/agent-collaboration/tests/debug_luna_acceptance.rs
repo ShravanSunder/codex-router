@@ -18,8 +18,8 @@ mod summary_failure_recovery;
 #[path = "automation_live_support/worker_timeout_proof.rs"]
 mod worker_timeout_proof;
 use collaboration_client::protocol::{
-    AutomationPageRequest, DeliveryEvidence, DeliveryListRequest, MessageContent, MessageDelivery,
-    NativeSendParams, NativeSendReceipt,
+    AutomationPageRequest, DeliveryClientReceipt, DeliveryEvidence, DeliveryListRequest,
+    MessageContent, MessageDelivery, NativeSendReceipt, SessionMessageSendParams,
 };
 use proof_context::{ProofContext, ProofResult, shell_quote};
 use serde_json::{Value, json};
@@ -78,24 +78,28 @@ async fn fresh_native_history_becomes_readable_without_resubmission() -> ProofRe
         .await?;
     let receipt = proof
         .client
-        .send_agent_message(NativeSendParams {
+        .send_agent_message(SessionMessageSendParams {
             target: target.clone(),
-            generation: proof.generation.clone(),
+            generation_guard: Some(proof.generation.clone()),
             message: MessageContent::Agent {
                 sender: target.clone(),
                 text: "Output exactly HISTORY_READY. Do not call tools or other agents."
                     .to_owned()
                     .try_into()?,
             },
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            correlation: None,
         })
         .await?;
-    let turn_id = match &receipt.acceptance {
-        collaboration_client::protocol::NativeSendAcceptance::NativeInputAccepted {
-            turn_id,
+    let turn_id = match &receipt.client {
+        Some(DeliveryClientReceipt::CodexAppServer(NativeSendReceipt {
+            acceptance:
+                collaboration_client::protocol::NativeSendAcceptance::NativeInputAccepted {
+                    turn_id,
+                    ..
+                },
             ..
-        } => String::from(turn_id.clone()),
+        })) => String::from(turn_id.clone()),
         _ => return Err("Fresh history probe did not receive an exact native turn".into()),
     };
     proof.record("historyProbeInputAccepted", json!(receipt))?;
@@ -223,26 +227,28 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
     );
     let initial = proof
         .client
-        .send_agent_message(NativeSendParams {
+        .send_agent_message(SessionMessageSendParams {
             target: alpha.clone(),
-            generation: proof.generation.clone(),
+            generation_guard: Some(proof.generation.clone()),
             message: MessageContent::Agent {
                 sender: alpha.clone(),
                 text: alpha_task.try_into()?,
             },
-            delivery: MessageDelivery::Auto,
-            client_user_message_id: None,
+            mode: MessageDelivery::Auto,
+            correlation: None,
         })
         .await?;
     proof.record("alphaInputAccepted", json!(initial))?;
-    let initial_turn = match &initial.acceptance {
-        collaboration_client::protocol::NativeSendAcceptance::NativeInputAccepted {
-            turn_id,
+    let initial_turn = match &initial.client {
+        Some(DeliveryClientReceipt::CodexAppServer(NativeSendReceipt {
+            acceptance:
+                collaboration_client::protocol::NativeSendAcceptance::NativeInputAccepted {
+                    turn_id,
+                    ..
+                }
+                | collaboration_client::protocol::NativeSendAcceptance::SteerAccepted { turn_id, .. },
             ..
-        }
-        | collaboration_client::protocol::NativeSendAcceptance::SteerAccepted { turn_id, .. } => {
-            String::from(turn_id.clone())
-        }
+        })) => String::from(turn_id.clone()),
         _ => return Err("Initial sender did not receive a native turn identity".into()),
     };
     proof

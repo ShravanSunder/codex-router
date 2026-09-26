@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE provider_operations SET\n                target_service_id=?,target_endpoint_id=?,target_session_id=?,\n                stage=?,effect=?,reconciliation_state=?,\n                terminal_at_ms=MAX(admitted_at_ms,?),\n                updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)\n             WHERE operation_id=? AND stage=? AND operation_kind IN (?,?)\n             AND (target_session_id IS NULL OR\n                 (target_service_id=? AND target_endpoint_id=? AND target_session_id=?))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 15
+    },
+    "nullable": []
+  },
+  "hash": "a169a85150af8019db1c2bd3feaa7413540f4ed7a5bf53ebef6a115662919ed1"
+}

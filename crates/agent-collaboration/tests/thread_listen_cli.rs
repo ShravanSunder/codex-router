@@ -25,7 +25,10 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
     let digest = format!("sha256:{}", "a".repeat(64));
     let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, &digest)
         .map_err(std::io::Error::other)?
-        .with_board_store(Arc::clone(&store));
+        .with_board_store(Arc::clone(&store))
+        .with_session_delivery(Arc::new(collaboration_service::SessionDeliveryRouter::new(
+            vec![],
+        )));
     let service = LocalControlService::bind(&root.join("control.sock"), identity)?;
     let manifest = serde_json::from_value(serde_json::json!({
         "version":2,

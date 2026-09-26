@@ -70,7 +70,7 @@ pub struct AutomationEvent {
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AutomationEventsRequest {
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, deserialize_with = "Option::deserialize")]
     pub after: Option<String>,
     pub limit: PageLimit,
 }

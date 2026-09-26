@@ -156,6 +156,10 @@ pub(super) async fn run_foreground_host(
         provider_operation_retention_days,
         &external_provider_launches,
     );
+    let provider_startups = super::provider_launch_configuration::configured_provider_startups(
+        &router_root,
+        &external_provider_launches,
+    )?;
     let mut config = HostConfig::new(HostConfigInputs {
         coordination_paths,
         router_endpoint: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
@@ -166,8 +170,8 @@ pub(super) async fn run_foreground_host(
     })
     .with_provider_operation_retention_days(provider_operation_retention_days)
     .with_collaboration_directory(collaboration_directory, codex_home);
-    for provider_launch in external_provider_launches {
-        config = config.with_external_provider_launch(provider_launch);
+    for provider_startup in provider_startups {
+        config = config.with_external_provider_startup(provider_startup);
     }
     let child_launch_plans = ManagedChildLaunchPlans::new(Some(router_command), app_server);
     let mut update_inputs =

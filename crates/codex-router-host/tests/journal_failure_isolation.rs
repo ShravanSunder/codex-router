@@ -21,6 +21,7 @@ async fn journal_open_failure_does_not_disable_control_and_native_publication() 
         backend_socket: root.join("backend.sock"),
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
+        peer_registry_directory: None,
     })
     .await
     .unwrap_or_else(|error| panic!("communication startup: {error}"));

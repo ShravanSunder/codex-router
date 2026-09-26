@@ -12,6 +12,9 @@ use message_board::*;
 use sqlx::Connection;
 use std::collections::{BTreeMap, HashSet};
 
+#[path = "thread_listen_delivery_position.rs"]
+mod delivery_position;
+
 /// How a Thread entered a listen's selection. Only a Thread the Reader watches
 /// directly carries the per-Thread Participant gate; a Topic Watch contributes
 /// Threads on the Topic's own read terms.
@@ -22,6 +25,12 @@ enum RootOrigin {
 }
 
 const THREAD_BATCH_MESSAGE_LIMIT: i64 = 100;
+
+#[derive(Clone, Copy)]
+enum ThreadListenBatchPositionPolicy {
+    CommitOnSelection,
+    CommitAfterDelivery,
+}
 
 struct ThreadListenBoundary {
     stored_delivered_position: Option<i64>,
@@ -407,6 +416,38 @@ impl BoardStore {
         context: &ThreadListenContext,
         maximum_batch_set_bytes: usize,
     ) -> Result<ThreadListenBatchSet, BoardError> {
+        self.select_thread_listen_batch_set_with_policy(
+            listen_id,
+            context,
+            maximum_batch_set_bytes,
+            ThreadListenBatchPositionPolicy::CommitOnSelection,
+        )
+        .await
+    }
+
+    /// Select a batch for session delivery without consuming it before the route accepts it.
+    pub async fn select_pending_thread_listen_batch_set(
+        &mut self,
+        listen_id: ListenId,
+        context: &ThreadListenContext,
+        maximum_batch_set_bytes: usize,
+    ) -> Result<ThreadListenBatchSet, BoardError> {
+        self.select_thread_listen_batch_set_with_policy(
+            listen_id,
+            context,
+            maximum_batch_set_bytes,
+            ThreadListenBatchPositionPolicy::CommitAfterDelivery,
+        )
+        .await
+    }
+
+    async fn select_thread_listen_batch_set_with_policy(
+        &mut self,
+        listen_id: ListenId,
+        context: &ThreadListenContext,
+        maximum_batch_set_bytes: usize,
+        position_policy: ThreadListenBatchPositionPolicy,
+    ) -> Result<ThreadListenBatchSet, BoardError> {
         let mut transaction = self
             .connection
             .begin_with("BEGIN IMMEDIATE")
@@ -503,43 +544,47 @@ impl BoardStore {
                 }
             }
         }
-        for batch in &batch_set.batches {
-            let delivered_through = batch.delivered_through;
-            let delivered_value =
-                i64::try_from(delivered_through.get()).map_err(|_| invalid_record())?;
-            let watch_start: i64 = sqlx::query_scalar!(
-                "SELECT starts_after_activity FROM thread_watches WHERE reader_key=? AND root_id=? AND active=1",
-                reader_key,
-                batch.root_message_id.as_str(),
-            )
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(storage_error)?;
-            validate_stored_boundary(
-                delivered_value,
-                watch_start,
-                latest,
-                ResourceIdentity::Thread {
-                    root_message_id: batch.root_message_id.clone(),
-                },
-            )?;
-            sqlx::query!(
-                "INSERT INTO thread_delivery_positions(reader_key,root_id,delivered_through) VALUES(?,?,?) \
-                 ON CONFLICT(reader_key,root_id) DO UPDATE SET delivered_through=excluded.delivered_through",
-                reader_key,
-                batch.root_message_id.as_str(),
-                delivered_value,
-            )
-            .execute(&mut *transaction)
-            .await
-            .map_err(storage_error)?;
-            advance_participant_last_seen(
-                &mut transaction,
-                &reader_key,
-                &batch.root_message_id,
-                delivered_value,
-            )
-            .await?;
+        if matches!(
+            position_policy,
+            ThreadListenBatchPositionPolicy::CommitOnSelection
+        ) {
+            for batch in &batch_set.batches {
+                let delivered_value =
+                    i64::try_from(batch.delivered_through.get()).map_err(|_| invalid_record())?;
+                let watch_start: i64 = sqlx::query_scalar!(
+                    "SELECT starts_after_activity FROM thread_watches WHERE reader_key=? AND root_id=? AND active=1",
+                    reader_key,
+                    batch.root_message_id.as_str(),
+                )
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                validate_stored_boundary(
+                    delivered_value,
+                    watch_start,
+                    latest,
+                    ResourceIdentity::Thread {
+                        root_message_id: batch.root_message_id.clone(),
+                    },
+                )?;
+                sqlx::query!(
+                    "INSERT INTO thread_delivery_positions(reader_key,root_id,delivered_through) VALUES(?,?,?) \
+                     ON CONFLICT(reader_key,root_id) DO UPDATE SET delivered_through=excluded.delivered_through",
+                    reader_key,
+                    batch.root_message_id.as_str(),
+                    delivered_value,
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                advance_participant_last_seen(
+                    &mut transaction,
+                    &reader_key,
+                    &batch.root_message_id,
+                    delivered_value,
+                )
+                .await?;
+            }
         }
         transaction.commit().await.map_err(storage_error)?;
         Ok(batch_set)

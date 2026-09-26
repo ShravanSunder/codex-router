@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT operation_id,operation_kind,binding_json,\n                    target_service_id,target_endpoint_id,target_session_id,\n                    stage,effect,reconciliation_state,admitted_at_ms,dispatched_at_ms,\n                    terminal_at_ms,updated_at_ms\n             FROM provider_operations WHERE operation_id=?",
+  "query": "SELECT operation_id,operation_kind,binding_json,\n                    target_service_id,target_endpoint_id,target_session_id,\n                    stage,effect,reconciliation_state,admitted_at_ms,dispatched_at_ms,\n                    terminal_at_ms,terminal_stop_reason,updated_at_ms\n             FROM provider_operations WHERE operation_id=?",
   "describe": {
     "columns": [
       {
@@ -136,8 +136,19 @@
         }
       },
       {
-        "name": "updated_at_ms",
+        "name": "terminal_stop_reason",
         "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_operations",
+            "name": "terminal_stop_reason"
+          }
+        }
+      },
+      {
+        "name": "updated_at_ms",
+        "ordinal": 13,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -163,8 +174,9 @@
       false,
       true,
       true,
+      true,
       false
     ]
   },
-  "hash": "05a422f96d8a3e7ed88d4239104bbba9f39e2ee21ae80d3c56d62e5cb283e9f2"
+  "hash": "80169c9ef0c1ae435e5fb211b7b096ac8b04bc12748de0a1b8fd958fb120ac98"
 }

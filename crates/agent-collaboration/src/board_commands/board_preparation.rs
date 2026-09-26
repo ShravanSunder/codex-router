@@ -56,6 +56,7 @@ pub(super) enum PreparedBoardCommand {
         repository: BoardRepositoryLocation,
         reader: Option<Identity>,
         page: PageRequest,
+        default_repository_path: Option<String>,
     },
     ThreadCreate(Box<PendingThreadCreate>),
     ThreadJoin(Box<PendingThreadJoin>),
@@ -241,12 +242,10 @@ pub(super) fn finalize_command(
             pending.request.reader = finalize_actor(&pending.actor, client)?;
             if pending.request.delivery == ThreadListenDelivery::Session {
                 match &pending.request.reader {
-                    Identity::Session { session }
-                        if session.endpoint.endpoint_id.as_str() == "codex-local" => {}
+                    Identity::Session { .. } => {}
                     _ => {
                         return Err(
-                            "--deliver session requires the calling codex-local session identity"
-                                .into(),
+                            "--deliver session requires the calling session identity".into()
                         );
                     }
                 }
@@ -592,20 +591,7 @@ fn prepare_thread(
         ThreadCommand::Watch(arguments) => prepare_watch(arguments, true),
         ThreadCommand::Unwatch(arguments) => prepare_watch(arguments, false),
         ThreadCommand::List(arguments) => Ok((
-            match (arguments.project_id, arguments.repository_path) {
-                (Some(project_id), None) => PreparedBoardCommand::ThreadList(ThreadListRequest {
-                    project_id: parse_uuid_v7(project_id, "--project-id")?,
-                    reader: parse_identity(arguments.reader.as_deref().ok_or("--reader is required with --project-id")?, "--reader")?,
-                    watched_only: arguments.watched_only,
-                    page: prepare_page_request(arguments.page)?,
-                }),
-                (None, Some(path)) if !arguments.watched_only => PreparedBoardCommand::RepositoryThreadList {
-                    repository: BoardRepositoryLocation::discover(&path).map_err(|error| error.to_string())?,
-                    reader: arguments.reader.as_deref().map(|value| parse_identity(value, "--reader")).transpose()?,
-                    page: prepare_page_request(arguments.page)?,
-                },
-                _ => return Err("Choose exactly one of --project-id or --repository-path; --watched-only requires --project-id".into()),
-            },
+            super::board_thread_list_preparation::prepare_thread_list(&arguments)?,
             command_context(arguments.common),
         )),
         ThreadCommand::Listen(arguments) => prepare_thread_listen(arguments),
@@ -944,7 +930,7 @@ fn prepare_thread_listen(
                 return Err("--for applies only with --lifetime short|long".into());
             }
             if delivery == ThreadListenDelivery::Session && arguments.max_wait.is_some() {
-                return Err("--deliver session uses the fixed 25 minute Once lifetime and forbids --max-wait".into());
+                return Err("--deliver session with --once uses the fixed 25 minute lifetime and forbids --max-wait".into());
             }
             let seconds = arguments
                 .max_wait
@@ -967,7 +953,7 @@ fn prepare_thread_listen(
                 ThreadListenLifetimeKind::Long => ThreadListenLifetime::Long,
             };
             if delivery == ThreadListenDelivery::Session && arguments.shorten_for.is_some() {
-                return Err("--deliver session uses its fixed lifetime and forbids --for".into());
+                return Err("--deliver session uses its fixed lifetime and forbids --for; choose --lifetime short (25 minutes) or --lifetime long (75 minutes)".into());
             }
             let seconds = arguments
                 .shorten_for
@@ -982,18 +968,16 @@ fn prepare_thread_listen(
                 lifetime_seconds: seconds,
             }
         }
-        _ => return Err("Choose exactly one Listen mode: --once or --lifetime short|long".into()),
+        _ => return Err("Choose exactly one Listen mode: --once (25 minutes) or --lifetime short (25 minutes) or --lifetime long (75 minutes)".into()),
     };
-    let actor = arguments
-        .actor
-        .as_deref()
-        .ok_or_else(|| "Thread Listen requires --actor".to_owned())
-        .and_then(parse_actor_input)?;
+    let actor = arguments.actor.as_deref().ok_or_else(|| {
+        "Thread Listen requires --actor; use --actor self or pass an explicit Reader Identity JSON".to_owned()
+    }).and_then(parse_actor_input)?;
     if delivery == ThreadListenDelivery::Session
         && let ActorInput::Explicit(identity) = &actor
-        && !is_codex_session_identity(identity)
+        && !is_session_identity(identity)
     {
-        return Err("--deliver session requires the calling codex-local session identity".into());
+        return Err("--deliver session requires the calling session identity".into());
     }
     let acknowledge = match (arguments.acknowledge, arguments.no_acknowledge) {
         (true, false) => true,
@@ -1025,8 +1009,8 @@ fn prepare_thread_listen(
     ))
 }
 
-pub(super) fn is_codex_session_identity(identity: &Identity) -> bool {
-    matches!(identity, Identity::Session { session } if session.endpoint.endpoint_id.as_str() == "codex-local")
+pub(super) fn is_session_identity(identity: &Identity) -> bool {
+    matches!(identity, Identity::Session { .. })
 }
 
 fn prepare_thread_wait(

@@ -67,10 +67,20 @@ async fn execution_budget_starts_at_dispatch_not_trigger_and_cannot_restart()
         submission: SubmissionEffect::Dispatching,
         cessation: CessationEvidence::Unconfirmed,
     };
+    let mut prepared = effects.clone();
+    prepared.submission = SubmissionEffect::NotDispatched;
+    store
+        .begin_run_preparation::<String, String, String, String>(
+            automation_storage::RunPreparationIntent {
+                run_id: run.clone(),
+                effects: prepared.into(),
+            },
+        )
+        .await?;
     let started = store
         .begin_run_dispatch::<_, String, _, String>(RunDispatchIntent {
             run_id: run.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
             configured_timeout_seconds: 3600,
             now_ms: 500000,
         })
@@ -85,7 +95,7 @@ async fn execution_budget_starts_at_dispatch_not_trigger_and_cannot_restart()
     if store
         .begin_run_dispatch::<_, String, _, String>(RunDispatchIntent {
             run_id: run.clone(),
-            effects,
+            effects: effects.into(),
             configured_timeout_seconds: 3600,
             now_ms: 600000,
         })
@@ -101,14 +111,20 @@ async fn execution_budget_starts_at_dispatch_not_trigger_and_cannot_restart()
         return Err("budget and SQL projections diverged".into());
     }
     let captured_inputs = serde_json::to_value(&read.inputs)?;
-    let mut rejected_effects = read.evidence.native;
+    let mut rejected_effects = read
+        .evidence
+        .route
+        .as_ref()
+        .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+        .ok_or("expected Codex evidence")?
+        .clone();
     rejected_effects.submission = SubmissionEffect::Rejected;
     rejected_effects.cessation = CessationEvidence::Confirmed;
     store
         .record_run_submission::<String, String, String, String>(
             automation_storage::RunSubmissionResult {
                 run_id: run.clone(),
-                effects: rejected_effects,
+                effects: rejected_effects.into(),
                 outcome: automation_storage::RunSubmissionOutcome::Rejected {
                     explanation: "Native turn start rejected before execution".into(),
                 },

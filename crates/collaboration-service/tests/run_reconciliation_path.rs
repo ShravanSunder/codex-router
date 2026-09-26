@@ -97,10 +97,20 @@ async fn exercise(
     let mut effects: NativeEffectEvidence<SessionRef, CodexGeneration> = serde_json::from_value(
         json!({"target":target,"generation":generation,"clientUserMessageId":run_id,"nativeTurnId":null,"nativeSubmissionId":null,"allocation":"notRequested","resume":"notRequested","submission":"dispatching","cessation":"unconfirmed"}),
     )?;
+    let mut prepared = effects.clone();
+    prepared.submission = agent_automation::SubmissionEffect::NotDispatched;
+    store
+        .begin_run_preparation::<SessionRef, EndpointRef, CodexGeneration, NativeSendReceipt>(
+            automation_storage::RunPreparationIntent {
+                run_id: run_id.clone(),
+                effects: prepared.into(),
+            },
+        )
+        .await?;
     store
         .begin_run_dispatch::<_, EndpointRef, _, NativeSendReceipt>(RunDispatchIntent {
             run_id: run_id.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
             configured_timeout_seconds: 3600,
             now_ms: 61000,
         })
@@ -113,7 +123,7 @@ async fn exercise(
     store
         .record_run_submission::<_, EndpointRef, _, _>(automation_storage::RunSubmissionResult {
             run_id: run_id.clone(),
-            effects: effects.clone(),
+            effects: effects.clone().into(),
             outcome: automation_storage::RunSubmissionOutcome::Accepted {
                 turn_id: "recorded-turn".into(),
                 receipt,
@@ -158,17 +168,21 @@ async fn exercise(
         path,
         Some(schemas),
     )?;
+    let native_backend = NativeControlBackend {
+        endpoint: target.endpoint,
+        gate,
+        codex_home: root.clone(),
+    };
     let identity = ServiceIdentity::new(
         service_id,
         service_id,
         &format!("sha256:{}", "a".repeat(64)),
     )?
     .with_automation_store(store.clone())
-    .with_native_backend(NativeControlBackend {
-        endpoint: target.endpoint,
-        gate,
-        codex_home: root.clone(),
-    })?;
+    .with_scheduled_run_execution(Arc::new(
+        collaboration_service::CodexAppServerScheduledRuns::new(native_backend.clone()),
+    ))
+    .with_native_backend(native_backend)?;
     let (socket, server) = tokio::net::UnixStream::pair()?;
     let service = tokio::spawn(serve_control_connection(server, identity));
     let mut client = ControlClient::initialize(socket, "run-reconcile-fixture", "1").await?;
@@ -247,7 +261,15 @@ async fn exercise(
     if !completed && stored.phase != agent_automation::RunPhase::Uncertain {
         return Err("reconciliation released or interrupted unresolved work".into());
     }
-    if stored.evidence.native.generation != Some(generation) {
+    if stored
+        .evidence
+        .route
+        .as_ref()
+        .and_then(agent_automation::RouteEffectEvidence::codex_app_server)
+        .ok_or("expected Codex evidence")?
+        .generation
+        != Some(generation)
+    {
         return Err("observation replaced original dispatch generation".into());
     }
     client.close().await?;

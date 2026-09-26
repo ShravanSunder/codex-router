@@ -153,6 +153,7 @@ mod tests {
         let load_error = client
             .open_session(
                 &ConversationCreateRequest {
+                    operation_id: collaboration_protocol::OperationId::generate(),
                     endpoint: client.endpoint().clone(),
                     cwd: root.clone(),
                     session: Some("rejected-thread".to_owned().try_into().unwrap()),
@@ -173,6 +174,7 @@ mod tests {
             client
                 .open_session(
                     &ConversationCreateRequest {
+                        operation_id: collaboration_protocol::OperationId::generate(),
                         endpoint: client.endpoint().clone(),
                         cwd: root.clone(),
                         session: Some("another-thread".to_owned().try_into().unwrap()),

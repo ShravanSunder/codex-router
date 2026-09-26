@@ -1,11 +1,12 @@
 //! Real socket fixture with scripted native responses; never a live model backend.
 use collaboration_client::{ClientError, ControlClient};
 use collaboration_protocol::{
-    CodexGeneration, EndpointDescription, MessageContent, MessageDelivery, NativeSendParams,
-    NativeSendReceipt, SessionRef,
+    CodexGeneration, DeliveryReceipt, EndpointDescription, MessageContent, MessageDelivery,
+    SessionMessageSendParams, SessionRef,
 };
 use collaboration_service::{
-    NativeControlBackend, NativeGenerationGate, ServiceIdentity, new_service_uuid,
+    CodexAppServerDeliveryRoute, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
+    SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery, new_service_uuid,
     serve_control_connection,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -30,7 +31,7 @@ pub struct MessageScenario {
 type FixtureError = Box<dyn std::error::Error + Send + Sync>;
 pub async fn exercise(
     scenario: MessageScenario,
-) -> Result<(Result<NativeSendReceipt, ClientError>, Vec<Value>), FixtureError> {
+) -> Result<(Result<DeliveryReceipt, ClientError>, Vec<Value>), FixtureError> {
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "message-fixture-{}",
         String::from(new_service_uuid()?)
@@ -71,17 +72,27 @@ pub async fn exercise(
     )?;
     let gate = NativeGenerationGate::default();
     gate.activate(generation.clone(), socket_path.clone(), Some(schemas))?;
+    let native_backend = NativeControlBackend {
+        codex_home: root.clone(),
+        endpoint: target.endpoint.clone(),
+        gate,
+    };
     let identity = ServiceIdentity::new(
         service_id,
         service_id,
         &format!("sha256:{}", "a".repeat(64)),
     )?
     .with_endpoints(vec![description])?
-    .with_native_backend(NativeControlBackend {
-        codex_home: root.clone(),
-        endpoint: target.endpoint.clone(),
-        gate,
-    })?;
+    .with_native_backend(native_backend.clone())?;
+    let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
+        service_id.to_owned().try_into()?,
+        identity.endpoint_directory(),
+        native_backend,
+        Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+    ));
+    let delivery: Arc<dyn SessionMessageDelivery> =
+        Arc::new(SessionDeliveryRouter::new(vec![route]));
+    let identity = identity.with_session_delivery(delivery);
     let (client, server) = tokio::net::UnixStream::pair()?;
     let service = tokio::spawn(serve_control_connection(server, identity));
     let backend = tokio::spawn(async move {
@@ -162,15 +173,15 @@ pub async fn exercise(
     let mut client = ControlClient::initialize(client, "message-proof", "1").await?;
     let result = tokio::time::timeout(
         Duration::from_secs(3),
-        client.send_agent_message(NativeSendParams {
+        client.send_agent_message(SessionMessageSendParams {
             target: target.clone(),
-            generation,
+            generation_guard: Some(generation),
             message: MessageContent::Agent {
                 sender: target,
                 text: "A finding".to_owned().try_into()?,
             },
-            delivery: scenario.delivery,
-            client_user_message_id: None,
+            mode: scenario.delivery,
+            correlation: None,
         }),
     )
     .await?;
@@ -187,11 +198,9 @@ pub fn read(status: &str) -> NativeStep {
         reply: NativeReply::Result(json!({"thread":{"id":"target","status":{"type":status}}})),
     }
 }
-pub fn error_data(result: Result<NativeSendReceipt, ClientError>) -> Result<Value, &'static str> {
+pub fn outcome_data(result: Result<DeliveryReceipt, ClientError>) -> Result<Value, &'static str> {
     match result {
-        Err(ClientError::Rejected {
-            data: Some(data), ..
-        }) => Ok(data),
-        _ => Err("expected typed rejection"),
+        Ok(receipt) => serde_json::to_value(receipt.outcome).map_err(|_| "invalid outcome"),
+        Err(_) => Err("expected a typed delivery outcome"),
     }
 }

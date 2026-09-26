@@ -82,6 +82,7 @@ async fn create_and_first_prompt_share_one_connection_and_return_correlated_sett
         &root,
         ConversationCreatePromptRequest {
             create: ConversationCreateRequest {
+                operation_id: collaboration_protocol::OperationId::generate(),
                 endpoint: sender.endpoint.clone(),
                 cwd: root.clone(),
                 session: None,
@@ -166,6 +167,7 @@ async fn create_and_first_prompt_backend_rejection_retains_created_target() {
         &root,
         ConversationCreatePromptRequest {
             create: ConversationCreateRequest {
+                operation_id: collaboration_protocol::OperationId::generate(),
                 endpoint: sender.endpoint.clone(),
                 cwd: root.clone(),
                 session: None,
@@ -271,6 +273,7 @@ async fn streamed_prompt_updates_hit_aggregate_count_bound_and_retain_target() {
         &root,
         ConversationCreatePromptRequest {
             create: ConversationCreateRequest {
+                operation_id: collaboration_protocol::OperationId::generate(),
                 endpoint: sender.endpoint.clone(),
                 cwd: root.clone(),
                 session: None,
@@ -410,6 +413,7 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
     client
         .open_session(
             &ConversationCreateRequest {
+                operation_id: collaboration_protocol::OperationId::generate(),
                 endpoint: client.endpoint().clone(),
                 cwd: root.clone(),
                 session: Some(SessionId::try_from("owned".to_owned()).unwrap()),

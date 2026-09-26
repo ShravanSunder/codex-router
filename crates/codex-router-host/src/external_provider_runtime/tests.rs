@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn provider_initialize_errors_expose_only_safe_metadata() {
+    let account_sentinel = "synthetic-account-sentinel@example.invalid";
+    let token_sentinel = "synthetic-token-sentinel-7f4e";
+    let error = agent_client_protocol::Error::new(-32001, format!("denied {token_sentinel}"))
+        .data(serde_json::json!({"account": account_sentinel, "token": token_sentinel}));
+
+    let diagnostic = sanitized_initialization_error(&error);
+
+    assert!(diagnostic.contains("initialize"));
+    assert!(diagnostic.contains("stage=initialize"));
+    assert!(diagnostic.contains("-32001"));
+    assert!(diagnostic.contains("error_data_bytes="));
+    assert!(!diagnostic.contains(account_sentinel));
+    assert!(!diagnostic.contains(token_sentinel));
+
+    let operation_error = sanitized_acp_error(&error, "session/update", "load replay");
+    assert!(operation_error.contains("method=session/update"));
+    assert!(operation_error.contains("stage=load replay"));
+    assert!(operation_error.contains("-32001"));
+    assert!(!operation_error.contains(account_sentinel));
+    assert!(!operation_error.contains(token_sentinel));
+}
+
 #[cfg(unix)]
 fn python_fixture(
     response_version: u16,
@@ -25,8 +49,10 @@ fn python_fixture(
 async fn assert_process_reaped(process_id_path: &std::path::Path) {
     let process_id = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Ok(value) = std::fs::read_to_string(process_id_path) {
-                break value.parse::<i32>().expect("fixture process id");
+            if let Ok(value) = std::fs::read_to_string(process_id_path)
+                && let Ok(process_id) = value.trim().parse::<i32>()
+            {
+                break process_id;
             }
             tokio::task::yield_now().await;
         }
@@ -59,6 +85,127 @@ sys.stdin.read()
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
     }
+}
+
+#[cfg(unix)]
+fn steering_fixture(observed_prompt_socket: &std::path::Path) -> ExternalProviderLaunch {
+    let fixture = format!(
+        r#"
+import json,socket,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{'loadSession':True}},'agentInfo':{{'name':'steering-fixture','version':'1'}},'_meta':{{'steering':{{'supported':True}}}}}}}})); sys.stdout.flush()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='session/new'
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'sessionId':'fixture-session'}}}})); sys.stdout.flush()
+prompt=json.loads(sys.stdin.readline())
+assert prompt['method']=='session/prompt'
+notice=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+notice.connect({observed_socket:?})
+notice.sendall(b'prompt')
+notice.close()
+steer=json.loads(sys.stdin.readline())
+assert steer['method']=='_session/steering'
+assert steer['params']['sessionId']=='fixture-session'
+assert steer['params']['prompt'][0]['text']=='follow-up'
+assert steer['params']['_meta']['steering']['idleBehavior']=='promptRequired'
+print(json.dumps({{'jsonrpc':'2.0','id':steer['id'],'result':{{'outcome':'injected'}}}})); sys.stdout.flush()
+print(json.dumps({{'jsonrpc':'2.0','id':prompt['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
+idle=json.loads(sys.stdin.readline())
+assert idle['method']=='_session/steering'
+print(json.dumps({{'jsonrpc':'2.0','id':idle['id'],'result':{{'outcome':'promptRequired','reason':'noRunningTurn'}}}})); sys.stdout.flush()
+sys.stdin.read()
+"#,
+        observed_socket = observed_prompt_socket.display().to_string(),
+    );
+    ExternalProviderLaunch {
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), fixture],
+        environment: vec![],
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn steering_injects_during_prompt_and_returns_prompt_required_when_idle() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let marker = root.path().join("prompt.sock");
+    let listener = tokio::net::UnixListener::bind(&marker).expect("prompt event listener");
+    let runtime = std::sync::Arc::new(
+        ExternalProviderRuntime::initialize(steering_fixture(&marker))
+            .await
+            .expect("provider runtime"),
+    );
+    assert!(runtime.admission().supports_steering);
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
+    let running_operation_id =
+        OperationId::try_from("018f1f62-6571-7ef0-8f0c-001122334499".to_owned())
+            .expect("running operation ID");
+    let prompt_runtime = std::sync::Arc::clone(&runtime);
+    let prompt_operation_id = running_operation_id.clone();
+    let (dispatch, dispatched) = tokio::sync::oneshot::channel();
+    let prompt = tokio::spawn(async move {
+        prompt_runtime
+            .prompt_for_operation(
+                "fixture-session".to_owned(),
+                Some(prompt_operation_id),
+                "first".to_owned(),
+                Some(dispatch),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), dispatched)
+        .await
+        .expect("prompt dispatch notification")
+        .expect("prompt was sent before settlement");
+    tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("prompt observed before steer")
+        .expect("prompt notification");
+    assert_eq!(
+        runtime
+            .session_activity("fixture-session".to_owned())
+            .await
+            .expect("active session state"),
+        ProviderSessionActivity::Running
+    );
+    let wait_runtime = std::sync::Arc::clone(&runtime);
+    let waiting = tokio::spawn(async move {
+        wait_runtime
+            .wait_session_idle("fixture-session".to_owned())
+            .await
+    });
+
+    let injected = runtime
+        .steer_session("fixture-session".to_owned(), "follow-up".to_owned())
+        .await
+        .expect("steer active turn");
+    assert_eq!(
+        injected,
+        ProviderSteeringOutcome::Injected {
+            running_operation_id: Some(running_operation_id),
+        }
+    );
+    prompt
+        .await
+        .expect("prompt task")
+        .expect("prompt settlement");
+    waiting.await.expect("idle wait task").expect("idle event");
+    assert_eq!(
+        runtime
+            .session_activity("fixture-session".to_owned())
+            .await
+            .expect("idle state"),
+        ProviderSessionActivity::Idle
+    );
+    let idle = runtime
+        .steer_session("fixture-session".to_owned(), "later".to_owned())
+        .await
+        .expect("steer idle session");
+    assert_eq!(idle, ProviderSteeringOutcome::PromptRequired);
+    runtime.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -253,7 +400,7 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     authentication.message = "provider conversation is busy".to_owned();
     assert!(matches!(
         acp_operation_error(authentication),
-        ExternalProviderRuntimeError::AuthenticationRequired
+        ExternalProviderRuntimeError::AuthenticationRequired { code: -32000 }
     ));
     for message in [
         "provider conversation is busy",
@@ -263,11 +410,24 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     ] {
         let mut provider = agent_client_protocol::Error::internal_error();
         provider.message = message.to_owned();
+        provider.data = Some(serde_json::json!({"privateText":"must not escape"}));
+        let reason = acp_operation_error(provider);
         assert!(matches!(
-            acp_operation_error(provider),
-            ExternalProviderRuntimeError::ProviderFailure
+            &reason,
+            ExternalProviderRuntimeError::ProviderRejected { code } if *code == -32603
         ));
+        assert!(!reason.to_string().contains("must not escape"));
+        assert!(!reason.to_string().contains(message));
     }
+
+    let mut missing = agent_client_protocol::Error::new(-32002, "private missing-session text");
+    missing.data = Some(serde_json::json!({"privateText":"must not escape"}));
+    let reason = acp_operation_error(missing);
+    assert!(matches!(
+        &reason,
+        ExternalProviderRuntimeError::ProviderSessionNotFound { code } if *code == -32002
+    ));
+    assert!(!reason.to_string().contains("private"));
 }
 
 #[cfg(unix)]
@@ -282,7 +442,9 @@ prompt=json.loads(sys.stdin.readline())
 chunk='x'*(600*1024)
 update={'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':chunk}}}}
 print(json.dumps(update)); print(json.dumps(update)); sys.stdout.flush()
-print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})); sys.stdout.flush()
+cancel=json.loads(sys.stdin.readline())
+assert cancel['method']=='session/cancel'
+print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})); sys.stdout.flush()
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
@@ -364,6 +526,7 @@ async fn stable_v1_initialize_admits_runtime_and_capabilities() {
             runtime_version: Some("1.2.3".to_owned()),
             supports_load: true,
             supports_mcp_http: false,
+            supports_steering: false,
         }
     );
 
@@ -501,8 +664,9 @@ async fn dropping_admitted_runtime_reaps_owned_process() {
     drop(runtime);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Ok(value) = std::fs::read_to_string(&process_id_path) {
-                let raw = value.parse::<i32>().expect("fixture process id");
+            if let Ok(value) = std::fs::read_to_string(&process_id_path)
+                && let Ok(raw) = value.trim().parse::<i32>()
+            {
                 let process_id = rustix::process::Pid::from_raw(raw).expect("positive process id");
                 if matches!(
                     rustix::process::test_kill_process(process_id),
@@ -577,6 +741,7 @@ async fn permission_request_is_counted_once_and_cancelled_without_payload_retent
     let runtime = ExternalProviderRuntime::initialize(permission_request_fixture())
         .await
         .expect("fixture initializes");
+    runtime.set_endpoint_id("cursor-local".to_owned()).await;
     runtime
         .create_session(PathBuf::from("/tmp"))
         .await
@@ -590,6 +755,16 @@ async fn permission_request_is_counted_once_and_cancelled_without_payload_retent
         .await
         .expect("prompt settles after permission cancellation");
     assert_eq!(outcome.stop_reason, ProviderPromptStopReason::EndTurn);
+    assert_eq!(outcome.permission_refusal_reason, None);
+    assert_eq!(
+        runtime.approval_refusal_warnings(),
+        vec![ExternalProviderApprovalRefusalWarning {
+            endpoint: "cursor-local".to_owned(),
+            provider_session_id: "fixture-session".to_owned(),
+            method: "session/request_permission",
+            reason_code: ExternalProviderApprovalRefusalReason::MissingPromptContext,
+        }]
+    );
     assert_eq!(
         runtime.permission_observation(),
         ExternalProviderPermissionObservation {
@@ -901,6 +1076,7 @@ async fn prompt_cancel_remains_responsive_during_create_admission() {
         "active-session".to_owned(),
         Some(prompt_id.clone()),
         "hold".to_owned(),
+        None,
     ));
     assert!(futures_util::poll!(&mut prompt).is_pending());
     let mut create = Box::pin(runtime.create_session(PathBuf::from("/tmp")));
@@ -947,6 +1123,7 @@ async fn prompt_cancel_remains_responsive_during_load_admission() {
         "active-session".to_owned(),
         Some(prompt_id.clone()),
         "hold".to_owned(),
+        None,
     ));
     assert!(futures_util::poll!(&mut prompt).is_pending());
     let mut load =
@@ -1030,7 +1207,10 @@ async fn aggregate_prompt_output_is_bounded_across_valid_frames() {
         .prompt("fixture-session".to_owned(), "overflow".to_owned())
         .await
         .expect_err("aggregate output must be bounded");
-    assert!(error.to_string().contains("output byte limit"), "{error}");
+    assert!(matches!(
+        error,
+        ExternalProviderRuntimeError::PromptOutputLimitExceeded
+    ));
 
     runtime.shutdown().await;
 }

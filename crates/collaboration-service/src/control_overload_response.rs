@@ -88,11 +88,7 @@ pub(crate) fn response(id: Value, method: &str, params: &Value) -> Value {
     if method.starts_with("instruction/") {
         return crate::instruction_dispatch::overloaded(id);
     }
-    let data = if method == "codex/messageSend" {
-        json!({"kind":"overloaded","stage":"discovery","message":MESSAGE,"effects":{"resume":"notRequested","submission":"notDispatched"}})
-    } else {
-        json!({"kind":"overloaded","stage":"discovery","message":MESSAGE})
-    };
+    let data = json!({"kind":"overloaded","stage":"discovery","message":MESSAGE});
     typed(id, data)
 }
 fn identity<TIdentity: serde::de::DeserializeOwned>(

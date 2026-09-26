@@ -76,6 +76,25 @@ impl ListenFixture {
         registry: &ThreadListenRegistry,
         mode: ThreadListenMode,
     ) -> ThreadListenSnapshot {
+        self.register_with_delivery(registry, mode, ThreadListenDelivery::Stdout)
+            .await
+    }
+
+    async fn register_session_delivery(
+        &self,
+        registry: &ThreadListenRegistry,
+        mode: ThreadListenMode,
+    ) -> ThreadListenSnapshot {
+        self.register_with_delivery(registry, mode, ThreadListenDelivery::Session)
+            .await
+    }
+
+    async fn register_with_delivery(
+        &self,
+        registry: &ThreadListenRegistry,
+        mode: ThreadListenMode,
+        delivery: ThreadListenDelivery,
+    ) -> ThreadListenSnapshot {
         let request = ThreadListenRequest {
             reader: self.reader.clone(),
             selection: ThreadListenSelection::Roots {
@@ -84,7 +103,7 @@ impl ListenFixture {
             mode,
             from_activity_sequence: None,
             acknowledge: false,
-            delivery: ThreadListenDelivery::Stdout,
+            delivery,
         };
         let context = self
             .store
@@ -573,6 +592,7 @@ struct RecordingSink {
     rejections_remaining: Arc<std::sync::atomic::AtomicU8>,
     batch_recorded: Arc<tokio::sync::Notify>,
     batch_rejected: Arc<tokio::sync::Notify>,
+    first_batch_rejection_release: Option<Arc<tokio::sync::Notify>>,
     heartbeat_recorded: Arc<tokio::sync::Notify>,
     heartbeat_rejected: Arc<tokio::sync::Notify>,
 }
@@ -585,6 +605,7 @@ impl RecordingSink {
             rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             batch_recorded: Arc::new(tokio::sync::Notify::new()),
             batch_rejected: Arc::new(tokio::sync::Notify::new()),
+            first_batch_rejection_release: None,
             heartbeat_recorded: Arc::new(tokio::sync::Notify::new()),
             heartbeat_rejected: Arc::new(tokio::sync::Notify::new()),
         })
@@ -610,6 +631,11 @@ impl BatchSink for RecordingSink {
                     .store(remaining.saturating_sub(1), Ordering::Relaxed);
                 if matches!(record, ListenDeliveryRecord::Batch(_)) {
                     self.batch_rejected.notify_one();
+                    if remaining == u8::MAX
+                        && let Some(release) = &self.first_batch_rejection_release
+                    {
+                        release.notified().await;
+                    }
                 }
                 if matches!(record, ListenDeliveryRecord::Heartbeat(_)) {
                     self.heartbeat_rejected.notify_one();
@@ -637,7 +663,7 @@ async fn long_session_delivery_heartbeats_only_at_silent_marks_then_finalizes() 
     let fixture = ListenFixture::create("session-heartbeat").await;
     let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
     let listen = fixture
-        .register(
+        .register_session_delivery(
             &registry,
             ThreadListenMode::Repeating {
                 lifetime_seconds: ThreadListenLifetime::Long.seconds(),
@@ -736,7 +762,7 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
     let fixture = ListenFixture::create("rejection-reset").await;
     let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
     let listen = fixture
-        .register(
+        .register_session_delivery(
             &registry,
             ThreadListenMode::Repeating {
                 lifetime_seconds: ThreadListenLifetime::Long.seconds(),
@@ -756,6 +782,7 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
             rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(2)),
             batch_recorded: Arc::new(tokio::sync::Notify::new()),
             batch_rejected: Arc::new(tokio::sync::Notify::new()),
+            first_batch_rejection_release: None,
             heartbeat_recorded: Arc::new(tokio::sync::Notify::new()),
             heartbeat_rejected: Arc::new(tokio::sync::Notify::new()),
         }),
@@ -778,13 +805,100 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
     fixture.finish().await;
 }
 
+struct RetryOnceSink {
+    records: Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
+    attempts: Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl BatchSink for RetryOnceSink {
+    fn deliver<'a>(
+        &'a self,
+        record: ListenDeliveryRecord,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), BatchSinkFailure>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if matches!(record, ListenDeliveryRecord::Batch(_))
+                && self.attempts.fetch_add(1, Ordering::Relaxed) == 0
+            {
+                return Err(BatchSinkFailure::Unavailable);
+            }
+            self.records.lock().await.push(record);
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_succeeds() {
+    let fixture = ListenFixture::create("retryable-unavailable").await;
+    let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
+    let listen = fixture
+        .register_session_delivery(
+            &registry,
+            ThreadListenMode::Repeating {
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
+            },
+        )
+        .await;
+    assert_eq!(listen.delivery, ThreadListenDelivery::Session);
+    fixture.reply("Retry this provider push").await;
+    let records = Arc::new(TokioMutex::new(Vec::new()));
+    let attempts = Arc::new(std::sync::atomic::AtomicU8::new(0));
+
+    registry.spawn_session_delivery(
+        listen.listen_id.clone(),
+        Arc::clone(&fixture.store),
+        Arc::new(RetryOnceSink {
+            records: Arc::clone(&records),
+            attempts: Arc::clone(&attempts),
+        }),
+    );
+    drive_session_delivery(&records, 30, |seen| {
+        seen.iter()
+            .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)))
+    })
+    .await;
+
+    let mut snapshot = registry
+        .show(&listen.listen_id)
+        .await
+        .expect("retrying listen remains active");
+    for _ in 0..1_000 {
+        if snapshot.batches_delivered >= 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+        snapshot = registry
+            .show(&listen.listen_id)
+            .await
+            .expect("retrying listen remains active");
+    }
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    assert_eq!(snapshot.batches_delivered, 1);
+    assert!(records.lock().await.iter().any(|record| matches!(
+        record,
+        ListenDeliveryRecord::Batch(batch_set)
+            if batch_set.batches[0].messages[0].text.as_str() == "Retry this provider push"
+    )));
+    registry
+        .cancel(&listen.listen_id)
+        .await
+        .expect("cancel listen");
+    drive_session_delivery(&records, 5, |seen| {
+        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
+    })
+    .await;
+    fixture.finish().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
     // Arrange: a long session listen with activity waiting in its first mark window.
     let fixture = ListenFixture::create("mark-suppression").await;
     let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
     let listen = fixture
-        .register(
+        .register_session_delivery(
             &registry,
             ThreadListenMode::Repeating {
                 lifetime_seconds: ThreadListenLifetime::Long.seconds(),
@@ -802,9 +916,13 @@ async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
     let delivery_sink = sink.clone();
     tokio::time::resume();
     let delivery = tokio::spawn(async move {
-        delivery_registry
-            .run_session_delivery(delivery_listen_id, delivery_store, delivery_sink)
-            .await;
+        session_delivery::run(
+            delivery_registry,
+            delivery_listen_id,
+            delivery_store,
+            delivery_sink,
+        )
+        .await;
     });
     // Real SQLite work must finish before virtual time reaches the mark.
     state.debounce_armed.notified().await;
@@ -847,7 +965,7 @@ async fn a_third_consecutive_rejection_ends_the_listen_with_its_evidence() {
     let fixture = ListenFixture::create("rejection-terminal").await;
     let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
     let listen = fixture
-        .register(
+        .register_session_delivery(
             &registry,
             ThreadListenMode::Repeating {
                 lifetime_seconds: ThreadListenLifetime::Long.seconds(),
@@ -858,12 +976,14 @@ async fn a_third_consecutive_rejection_ends_the_listen_with_its_evidence() {
     let records = Arc::new(TokioMutex::new(Vec::new()));
 
     // Act: a refused Batch set, then two refused heartbeats.
+    let first_batch_rejection_release = Arc::new(tokio::sync::Notify::new());
     let sink = Arc::new(RecordingSink {
         records: Arc::clone(&records),
         reject_batches: false,
         rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(u8::MAX)),
         batch_recorded: Arc::new(tokio::sync::Notify::new()),
         batch_rejected: Arc::new(tokio::sync::Notify::new()),
+        first_batch_rejection_release: Some(Arc::clone(&first_batch_rejection_release)),
         heartbeat_recorded: Arc::new(tokio::sync::Notify::new()),
         heartbeat_rejected: Arc::new(tokio::sync::Notify::new()),
     });
@@ -874,22 +994,32 @@ async fn a_third_consecutive_rejection_ends_the_listen_with_its_evidence() {
     let delivery_sink = sink.clone();
     tokio::time::resume();
     let delivery = tokio::spawn(async move {
-        delivery_registry
-            .run_session_delivery(delivery_listen_id, delivery_store, delivery_sink)
-            .await;
+        session_delivery::run(
+            delivery_registry,
+            delivery_listen_id,
+            delivery_store,
+            delivery_sink,
+        )
+        .await;
     });
     state.debounce_armed.notified().await;
     tokio::time::pause();
     tokio::time::advance(THREAD_LISTEN_DEBOUNCE).await;
     tokio::time::resume();
     sink.batch_rejected.notified().await;
-    tokio::time::pause();
     let store_guard = fixture.store.lock().await;
+    tokio::time::pause();
+    first_batch_rejection_release.notify_one();
     tokio::time::advance(THREAD_LISTEN_MARK - THREAD_LISTEN_DEBOUNCE).await;
     sink.heartbeat_rejected.notified().await;
     tokio::time::advance(THREAD_LISTEN_MARK).await;
     sink.heartbeat_rejected.notified().await;
     delivery.await.unwrap();
+    assert_eq!(
+        sink.rejections_remaining.load(Ordering::Relaxed),
+        u8::MAX - 3,
+        "one batch and two heartbeat refusals should end this listen"
+    );
     assert_eq!(Arc::strong_count(&fixture.store), 1);
     drop(store_guard);
 

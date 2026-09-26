@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use codex_native_integration::ExecutableIdentity;
 use codex_native_integration::ExecutableIdentityTask;
@@ -21,11 +22,16 @@ pub(super) struct StatusObservation {
     remote_control_identity: Option<RemoteControlIdentity>,
     executable_relation: ExecutableRelation,
     pending_identity: Option<ExecutableIdentityTask>,
+    router_executable_relation: crate::RouterExecutableRelation,
 }
 
 impl StatusObservation {
     pub(super) const fn executable_relation(&self) -> ExecutableRelation {
         self.executable_relation
+    }
+
+    pub(super) fn router_executable_relation(&self) -> crate::RouterExecutableRelation {
+        self.router_executable_relation.clone()
     }
 
     pub(super) fn snapshot(
@@ -39,6 +45,7 @@ impl StatusObservation {
             remote_control: self.remote_control,
             remote_control_identity: self.remote_control_identity,
             executable_relation: self.executable_relation,
+            router_executable_relation: self.router_executable_relation.clone(),
             recovery_budget: state.recovery_budget,
             last_lifecycle_outcome: state.last_lifecycle_outcome.clone(),
         });
@@ -53,6 +60,7 @@ pub(super) fn observe_status(
     running_identity: Option<ExecutableIdentity>,
     identity_deadline: std::time::Duration,
     observe_installed_identity: bool,
+    router_executable_observer: Arc<tokio::sync::Mutex<crate::RouterExecutableObserver>>,
 ) -> StatusObservationFuture {
     Box::pin(async move {
         let router = probe_router(config.router_endpoint(), config.deadlines().router_start());
@@ -75,8 +83,14 @@ pub(super) fn observe_status(
             identity_deadline,
             observe_installed_identity,
         );
-        let (router_result, app_server_result, installed_identity) =
-            tokio::join!(router, app_server, installed_identity);
+        let router_executable_relation =
+            async { router_executable_observer.lock().await.observe().await };
+        let (router_result, app_server_result, installed_identity, router_executable_relation) = tokio::join!(
+            router,
+            app_server,
+            installed_identity,
+            router_executable_relation
+        );
 
         let router = match router_result {
             Ok(RouterProbeResult::Compatible) => match router_ownership {
@@ -137,6 +151,7 @@ pub(super) fn observe_status(
             remote_control_identity,
             executable_relation,
             pending_identity,
+            router_executable_relation,
         }
     })
 }

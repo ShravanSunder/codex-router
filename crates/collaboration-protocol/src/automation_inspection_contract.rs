@@ -10,16 +10,33 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunListRequest {
     pub schedule_id: ScheduleId,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
     pub limit: PageLimit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunListRequest;
+    use serde_json::json;
+
+    #[test]
+    fn run_list_defaults_an_omitted_cursor_to_null() {
+        let request: RunListRequest = serde_json::from_value(json!({
+            "scheduleId":"019f0000-0000-7000-8000-000000000001",
+            "limit":25
+        }))
+        .expect("cursor is optional");
+
+        assert_eq!(request.cursor, None);
+    }
 }
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryListRequest {
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, deserialize_with = "Option::deserialize")]
     pub wakeup_id: Option<WakeupId>,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
     pub limit: PageLimit,
 }
@@ -27,7 +44,7 @@ pub struct DeliveryListRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RevisionListRequest {
     pub instruction_id: InstructionId,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(default, deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
     pub limit: PageLimit,
 }

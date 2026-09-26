@@ -1,0 +1,1 @@
+ALTER TABLE mailbox_deliveries RENAME COLUMN accepted_receipt_json TO outcome_receipt_json;

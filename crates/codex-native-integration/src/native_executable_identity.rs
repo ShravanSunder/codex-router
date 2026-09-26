@@ -120,10 +120,15 @@ pub async fn executable_identity(
     start_executable_identity(executable).wait().await
 }
 
-/// Reads the installed version from the same resolved managed executable.
-pub async fn managed_executable_version(
+/// Resolves and hashes an executable with the same identity algorithm used for managed Codex.
+pub fn executable_identity_sync(
     executable: &Path,
-) -> Result<String, ExecutableIdentityError> {
+) -> Result<ExecutableIdentity, ExecutableIdentityError> {
+    hash_executable(executable.to_path_buf())
+}
+
+/// Reads the version token from an executable's `--version` output.
+pub async fn executable_version(executable: &Path) -> Result<String, ExecutableIdentityError> {
     let output = tokio::process::Command::new(executable)
         .arg("--version")
         .output()
@@ -134,7 +139,26 @@ pub async fn managed_executable_version(
             status: output.status,
         });
     }
-    let stdout = String::from_utf8(output.stdout)
+    parse_executable_version(&output.stdout)
+}
+
+/// Reads the version token synchronously for APIs whose initialization hook is synchronous.
+pub fn executable_version_sync(executable: &Path) -> Result<String, ExecutableIdentityError> {
+    let output = std::process::Command::new(executable)
+        .arg("--version")
+        .output()
+        .map_err(ExecutableIdentityError::VersionCommand)?;
+    if !output.status.success() {
+        return Err(ExecutableIdentityError::VersionExit {
+            status: output.status,
+        });
+    }
+    parse_executable_version(&output.stdout)
+}
+
+/// Parses the conventional `<binary-name> <version>` line returned by `--version`.
+pub fn parse_executable_version(output: &[u8]) -> Result<String, ExecutableIdentityError> {
+    let stdout = String::from_utf8(output.to_vec())
         .map_err(|_error| ExecutableIdentityError::VersionEncoding)?;
     stdout
         .split_whitespace()
@@ -142,6 +166,13 @@ pub async fn managed_executable_version(
         .filter(|version| !version.is_empty())
         .map(str::to_owned)
         .ok_or(ExecutableIdentityError::VersionFormat)
+}
+
+/// Reads the installed version from the same resolved managed executable.
+pub async fn managed_executable_version(
+    executable: &Path,
+) -> Result<String, ExecutableIdentityError> {
+    executable_version(executable).await
 }
 
 fn hash_executable(executable: PathBuf) -> Result<ExecutableIdentity, ExecutableIdentityError> {

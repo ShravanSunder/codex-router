@@ -15,8 +15,12 @@ pub enum NativeConnectionError {
     InvalidInput,
     #[error("native connection unavailable before dispatch")]
     Unavailable,
+    #[error("native connection unavailable: {0}")]
+    UnavailableWithCause(String),
     #[error("native request outcome is unknown")]
     OutcomeUnknown,
+    #[error("native request outcome is unknown: {0}")]
+    OutcomeUnknownWithCause(String),
     #[error("native connection protocol violation")]
     Protocol,
     #[error("native request rejected with code {code}")]
@@ -54,8 +58,16 @@ impl NativeProtocolConnection {
             self.socket.send(Message::Text(text.into())),
         )
         .await
-        .map_err(|_| NativeConnectionError::OutcomeUnknown)?
-        .map_err(|_| NativeConnectionError::OutcomeUnknown)?;
+        .map_err(|_| {
+            NativeConnectionError::OutcomeUnknownWithCause(
+                "native callback response timed out after dispatch".to_owned(),
+            )
+        })?
+        .map_err(|error| {
+            NativeConnectionError::OutcomeUnknownWithCause(format!(
+                "native callback write failed: {error}"
+            ))
+        })?;
         self.failed = false;
         Ok(())
     }
@@ -136,12 +148,15 @@ impl NativeProtocolConnection {
             self.socket
                 .send(Message::Text(text.into()))
                 .await
-                .map_err(|_| NativeConnectionError::OutcomeUnknown)?;
+                .map_err(|error| {
+                    NativeConnectionError::OutcomeUnknownWithCause(format!(
+                        "native app-server write failed: {error}"
+                    ))
+                })?;
             loop {
-                let (message, size) = self
-                    .read_message()
-                    .await
-                    .map_err(|_| NativeConnectionError::OutcomeUnknown)?;
+                let (message, size) = self.read_message().await.map_err(|error| {
+                    NativeConnectionError::OutcomeUnknownWithCause(error.to_string())
+                })?;
                 if message.get("method").is_some() {
                     if self.messages.len() >= 1024
                         || size > MESSAGE_LIMIT.saturating_sub(self.buffered_bytes)
@@ -171,7 +186,11 @@ impl NativeProtocolConnection {
         };
         let result = tokio::time::timeout(Duration::from_secs(30), exchange)
             .await
-            .map_err(|_| NativeConnectionError::OutcomeUnknown)?;
+            .map_err(|_| {
+                NativeConnectionError::OutcomeUnknownWithCause(
+                    "native app-server response timed out after dispatch".to_owned(),
+                )
+            })?;
         if result.is_ok() || matches!(result, Err(NativeConnectionError::Rejected { .. })) {
             self.failed = false;
         }
@@ -212,13 +231,23 @@ impl NativeProtocolConnection {
                     return Ok((value, size));
                 }
                 Some(Ok(Message::Ping(_))) => {
-                    self.socket
-                        .flush()
-                        .await
-                        .map_err(|_| NativeConnectionError::Unavailable)?;
+                    self.socket.flush().await.map_err(|error| {
+                        NativeConnectionError::UnavailableWithCause(format!(
+                            "native app-server ping flush failed: {error}"
+                        ))
+                    })?;
                 }
                 Some(Ok(Message::Pong(_))) => {}
-                _ => return Err(NativeConnectionError::Unavailable),
+                Some(Err(error)) => {
+                    return Err(NativeConnectionError::UnavailableWithCause(format!(
+                        "native app-server read failed: {error}"
+                    )));
+                }
+                _ => {
+                    return Err(NativeConnectionError::UnavailableWithCause(
+                        "native app-server closed the socket".to_owned(),
+                    ));
+                }
             }
         }
     }

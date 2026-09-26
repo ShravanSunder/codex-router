@@ -30,6 +30,11 @@ fn missing_from_is_machine_readable_when_json_is_requested() {
     assert_eq!(record["error"]["kind"], "invalidField");
     assert_eq!(record["error"]["stage"], "validation");
     assert_eq!(record["error"]["nextAction"], "correctRequest");
+    assert!(
+        record["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("agent-collaboration whoami --json"))
+    );
 }
 
 #[test]

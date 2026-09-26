@@ -16,7 +16,11 @@ pub enum SummaryPhase {
 pub struct SummaryAttempt<TTarget, TGeneration> {
     pub attempt_id: crate::AttemptId,
     pub source_target: TTarget,
-    pub source_turn_id: String,
+    #[serde(
+        alias = "sourceTurnId",
+        deserialize_with = "crate::summary_source_reference::deserialize_stored_source_reference"
+    )]
+    pub source_reference: crate::SummarySourceReference,
     pub target: Option<TTarget>,
     pub native_turn_id: Option<String>,
     pub effective_timeout_seconds: u32,

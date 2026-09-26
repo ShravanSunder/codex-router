@@ -46,7 +46,7 @@ impl AutomationStore {
         let encoded = serde_json::to_string(&attempt).map_err(|_| StorageError::InvalidRecord)?;
         let source = agent_automation::SummarySource::Completed {
             source_target: attempt.source_target,
-            source_turn_id: attempt.source_turn_id,
+            source_reference: attempt.source_reference,
             summary_attempt_id: attempt.attempt_id,
         };
         sqlx::query("UPDATE workflow_runs SET run_status='finished',summary_attempt_json=?,summary_text=?,summary_source_json=?,completed_at_ms=? WHERE run_id=?")
