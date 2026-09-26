@@ -42,6 +42,7 @@ mod schedule_preparation_evidence_sink;
 mod scheduled_run_contract;
 mod scheduled_run_evidence_sink;
 mod scheduled_run_router;
+mod session_command_port;
 mod session_delivery_contract;
 mod session_delivery_router;
 mod stored_delivery_receipt;
@@ -55,6 +56,12 @@ pub use scheduled_run_contract::{
     SchedulePreparationFailure, SchedulePreparationOutcome, SchedulePreparationRequest,
     ScheduleSupport, ScheduledRunExecution, ScheduledRunRoute, ScheduledRunSubmission,
     SettlementEvidence, StopRequestOutcome,
+};
+pub use session_command_port::{
+    CommandContent, CommandFailure, CommandFuture, CreateSessionCommand, PromptSessionCommand,
+    QueueInputCommand, QueuedSessionInput, SessionCommandPort, SessionSettingsCommand,
+    SessionSteerOutcome, SessionTargetCommand, SessionTurnHandle, SetSessionSettingCommand,
+    SteerSessionCommand,
 };
 pub use session_delivery_contract::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
