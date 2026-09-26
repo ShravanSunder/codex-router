@@ -15,8 +15,6 @@ IF operating a board (projects, boards, topics, threads, seats, messages, watch,
 
 IF using agent-router MCP, including external-provider conversations, load `references/mcp-usage.md` and return the verified service, exact target, and observed result. It uses the running server's advertised schemas; do not infer tool arguments from CLI flags.
 
-IF sending to a session (a message, reply, wake, or scheduled run), load `references/message-delivery.md` and return the route, what the receipt proves for it, and whether the content goes inline or as a file path.
-
 One conversation surface serves every endpoint: CLI `conversation create|prompt|load|cancel` and `conversation operation show|wait|reconcile`, or the corresponding advertised MCP tools. The endpoint selects the client. A create result is `created` with a target or `pending` with an inspectable operation ID; a prompt or load returns a completed settlement or a pending provider operation. Keep the returned operation ID and inspect pending or uncertain work before another mutation.
 
 The Host reads owner-editable `<router-root>/providers.json` at startup and creates enabled Claude and Cursor defaults if the file is absent. When a provider cannot start, the endpoint list reports it unavailable with a reason and fix.
@@ -34,7 +32,7 @@ IF taking one of these actions, read the named help or advertised schema and ret
 |---|---|---|
 | Discover or inspect a conversation | `sessions --help`, `session inspect --help`, or `sessions_list` / `session_inspect` | exact target, or gap |
 | Continue, create, or fork | `conversation --help`, or `conversation_prompt` / `conversation_create` | SessionRef and strongest observed stage |
-| Send a message or reply | `message send --help`, or `message_send` | delivery receipt with observed outcome and reachability, not completion or a peer reply |
+| Send a message or reply | `message send --help`, or `message_send` | delivery receipt and its `outcome` (see "Sending to a session"); not completion or a reply |
 | Wait for board activity | `board thread --help`, or `board_thread_listen` / `board_thread_wait` | armed listener, batch, timeout, or gap |
 | Wake | `wake --help`, or `wake_send` / `wake_show` | saved wake id; saved is not fired or accepted |
 | Schedule | `schedule --help`, `instruction --help`, or `schedule_create` / `schedule_prepare` / `instruction_create` | schedule id and observed run state |
@@ -51,6 +49,19 @@ Caller identity has two layers. Do not collapse them.
 - **`--from`** is the override when `conversation create --help` or `conversation prompt --help` lists it: exact SessionRef JSON, the same shape as `message send --from`. It supplies `createdBy` and the prompt sender. `--approver` is separate and defaults to that creating identity. If help does not list `--from`, the installed CLI still has no override.
 
 `current session identity unavailable` means implicit self was missing and `--from` was omitted or unavailable. That is not "agent-router rejects non-Codex sessions." Do not mint a `codex exec` thread, invent a session ID, create a duplicate conversation, or use `--human-user` to manufacture a caller. When implicit env is missing, pass `--from` if help exposes it, wrapping a real host session as SessionRef on the selected endpoint, or ask the owner for that SessionRef.
+
+## Sending to a session
+
+Send with `message send` (or `wake send` / a schedule) using `--delivery auto` unless the caller asked to steer or queue; agent-router picks the route. Then read the receipt's `outcome`:
+
+| `outcome` | Meaning | Next |
+|---|---|---|
+| `started`, `steered`, `queued`, `startedOrSteered` | the session received it | wait for the reply or result the caller expects |
+| `peerMessageWritten` | delivered, but agent-router can't see what happens next | wait for the reply; don't resend |
+| `notSubmitted`, `rejected` | not delivered | follow the receipt's reason and next action |
+| `unknown` | not known | check `delivery show` before sending again |
+
+Messages cap at 1 MiB and board posts at 64 KiB, and pasted terminal colour codes are rejected. Put logs, diffs and reports in a file (the repository's `tmp/`, or `scratch/<root-id>/` for sessions sharing a board root) and send a short summary with its absolute path.
 
 ## Act on evidence
 
