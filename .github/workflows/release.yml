@@ -93,6 +93,12 @@ jobs:
         working-directory: release-source
         run: cargo build --locked --release -p codex-router-cli -p agent-collaboration --bins
 
+      # Optimized macOS build only: debug code generation does not reproduce the
+      # FuturesUnordered waker-identity bug behind the 0.1.38 idle CPU loop.
+      - name: Test optimized idle provider transport
+        working-directory: release-source
+        run: cargo test --locked --release -p codex-router-host --test provider_transport_idle
+
       - name: Export collaboration schemas
         working-directory: release-source
         run: |

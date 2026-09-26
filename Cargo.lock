@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-automation"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "agent-collaboration"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -314,7 +314,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "automation-storage"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -544,7 +544,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "claude-code-peer-messaging"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "agent-automation",
  "collaboration-protocol",
@@ -565,7 +565,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codex-acp-adapter"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "codex-native-integration"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "futures-util",
  "jsonschema",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "codex-router-core",
  "codex-router-secret-store",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "agent-collaboration",
  "base64 0.22.1",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "agent-automation",
  "agent-client-protocol",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "bytes",
  "codex-router-auth",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "codex-native-integration",
  "codex-router-cli",
@@ -821,14 +821,14 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "iocraft",
 ]
 
 [[package]]
 name = "collaboration-client"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "codex-native-integration",
  "collaboration-protocol",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-mcp"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "agent-collaboration",
  "bytes",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-protocol"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-service"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -1566,9 +1566,9 @@ dependencies = [
 
 [[package]]
 name = "futures-channel"
-version = "0.3.32"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
+checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -1589,9 +1589,9 @@ dependencies = [
 
 [[package]]
 name = "futures-core"
-version = "0.3.32"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
 name = "futures-executor"
@@ -1617,9 +1617,9 @@ dependencies = [
 
 [[package]]
 name = "futures-io"
-version = "0.3.32"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
 name = "futures-lite"
@@ -1636,32 +1636,32 @@ dependencies = [
 
 [[package]]
 name = "futures-macro"
-version = "0.3.32"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
+checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.118",
+ "syn 3.0.5",
 ]
 
 [[package]]
 name = "futures-sink"
-version = "0.3.32"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
 
 [[package]]
 name = "futures-task"
-version = "0.3.32"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
 
 [[package]]
 name = "futures-util"
-version = "0.3.32"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-channel",
  "futures-core",
@@ -2354,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "lifecycle-observation"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2437,7 +2437,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "message-board"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -2448,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "message-board-storage"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
