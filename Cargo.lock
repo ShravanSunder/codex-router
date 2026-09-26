@@ -916,6 +916,7 @@ dependencies = [
  "message-board-storage",
  "serde",
  "serde_json",
+ "session-event-model",
  "sha2 0.10.9",
  "sqlx",
  "tempfile",

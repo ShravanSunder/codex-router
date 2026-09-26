@@ -15,7 +15,10 @@ fn message_features_do_not_import_client_routes() {
             "board listen push",
             include_str!("../src/session_delivery_sink.rs"),
         ),
-        ("approval notice", include_str!("../src/approval_broker.rs")),
+        (
+            "interaction notice",
+            include_str!("../src/interaction_broker.rs"),
+        ),
         (
             "listen admission",
             include_str!("../src/thread_listen_dispatch.rs"),

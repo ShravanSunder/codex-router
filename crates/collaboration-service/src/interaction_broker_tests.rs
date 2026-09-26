@@ -1166,3 +1166,110 @@ async fn malformed_persisted_history_fails_closed_while_absence_stays_empty() {
     // Assert.
     assert!(matches!(corrupt, Err(ApprovalBrokerError::Unavailable)));
 }
+
+// F9 and E12: v0.1.38's unchanged ApprovalRequestRecord reader must load a
+// populated approval-history.json after the new interaction store is written.
+// `git diff v0.1.38 -- crates/collaboration-protocol/src/approval_contract.rs`
+// is empty at this slice's base, so the imported type is that exact reader.
+#[tokio::test]
+async fn populated_old_approval_reader_survives_human_interaction_history() {
+    use message_board::{HumanId, Identity};
+    use session_event_model::InteractionKind;
+
+    let (broker, generation, directory) = fixture_broker().await;
+    let expiry = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+    let (_legacy_params, _legacy_receiver) = insert_pending(&broker, generation, expiry).await;
+    let requester: message_board::SessionRef = serde_json::from_value(
+        serde_json::to_value(session(&broker.service_id, "provider-session"))
+            .expect("requester JSON"),
+    )
+    .expect("board requester");
+    let human = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+    };
+    broker
+        .record_typed_interaction(crate::interaction_broker::InteractionHistoryRecord {
+            request_id: "human-approval-1".to_owned(),
+            requester,
+            approver: human.clone(),
+            kind: InteractionKind::Approval,
+            state: crate::interaction_broker::InteractionHistoryState::Pending,
+        })
+        .await
+        .expect("record new interaction");
+
+    let wrong_actor = Identity::Human {
+        human_id: HumanId::try_from("other".to_owned()).expect("other human ID"),
+    };
+    assert!(matches!(
+        broker
+            .decide_typed_interaction("human-approval-1", &wrong_actor, "allow-once")
+            .await,
+        Err(crate::interaction_broker::InteractionHistoryError::WrongActor)
+    ));
+    broker
+        .decide_typed_interaction("human-approval-1", &human, "allow-once")
+        .await
+        .expect("human decision");
+    assert!(matches!(
+        broker
+            .decide_typed_interaction("human-approval-1", &human, "allow-once")
+            .await,
+        Err(crate::interaction_broker::InteractionHistoryError::NotPending)
+    ));
+
+    let old_bytes = tokio::fs::read(directory.join("approval-history.json"))
+        .await
+        .expect("populated legacy history");
+    let old_records: Vec<ApprovalRequestRecord> =
+        serde_json::from_slice(&old_bytes).expect("v0.1.38 reader loads new-build history");
+    assert_eq!(old_records.len(), 1);
+    let new_bytes = tokio::fs::read(directory.join("interaction-history.json"))
+        .await
+        .expect("new interaction history");
+    let new_records: std::collections::BTreeMap<
+        String,
+        crate::interaction_broker::InteractionHistoryRecord,
+    > = serde_json::from_slice(&new_bytes).expect("typed interaction history");
+    assert!(matches!(
+        &new_records["human-approval-1"].state,
+        crate::interaction_broker::InteractionHistoryState::Decided { option_id }
+            if option_id == "allow-once"
+    ));
+}
+
+#[tokio::test]
+async fn typed_interaction_rejects_self_approver_and_corrupt_stored_rows() {
+    use message_board::Identity;
+    use session_event_model::InteractionKind;
+
+    let (broker, _generation, directory) = fixture_broker().await;
+    let requester: message_board::SessionRef = serde_json::from_value(
+        serde_json::to_value(session(&broker.service_id, "provider-session"))
+            .expect("requester JSON"),
+    )
+    .expect("board requester");
+    assert!(matches!(
+        broker
+            .record_typed_interaction(crate::interaction_broker::InteractionHistoryRecord {
+                request_id: "self-request".into(),
+                requester: requester.clone(),
+                approver: Identity::Session { session: requester },
+                kind: InteractionKind::Approval,
+                state: crate::interaction_broker::InteractionHistoryState::Pending,
+            })
+            .await,
+        Err(crate::interaction_broker::InteractionHistoryError::SelfApprover)
+    ));
+    let history_path = directory.join("interaction-history.json");
+    tokio::fs::write(&history_path, br#"{"bad":{"requestId":"other"}}"#)
+        .await
+        .expect("write corrupt stored row");
+    let reload = ServiceApprovalBroker::load(
+        broker.service_id.clone(),
+        broker.backend.clone(),
+        directory.join("approval-routes.json"),
+    )
+    .await;
+    assert!(matches!(reload, Err(ApprovalBrokerError::Unavailable)));
+}

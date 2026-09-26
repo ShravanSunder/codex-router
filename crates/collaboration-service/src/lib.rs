@@ -75,20 +75,21 @@ mod native_control_request;
 mod session_message_dispatch;
 pub use native_control_dispatch::NativeControlBackend;
 
-mod approval_broker;
 mod codex_app_server_delivery_route;
 mod codex_app_server_scheduled_runs;
 mod codex_queue_reconciliation;
+mod interaction_broker;
 mod message_effect_state;
 mod native_message_dispatch;
 pub use codex_app_server_delivery_route::CodexAppServerDeliveryRoute;
 pub use codex_app_server_scheduled_runs::CodexAppServerScheduledRuns;
 mod session_delivery_sink;
-pub use approval_broker::{
-    ExternalApprovalOperationMetadata, ExternalApprovalOption, ExternalApprovalOptionScope,
-    ExternalApprovalRefusal, ExternalApprovalRequest, ServiceApprovalBroker,
-};
 pub use codex_acp_adapter::BrokeredApprovalOutcome;
+pub use interaction_broker::{
+    ExternalApprovalOperationMetadata, ExternalApprovalOption, ExternalApprovalOptionScope,
+    ExternalApprovalRefusal, ExternalApprovalRequest, InteractionHistoryError,
+    InteractionHistoryRecord, InteractionHistoryState, ServiceApprovalBroker,
+};
 
 mod acp_channel_listener;
 pub use acp_channel_listener::AcpChannelListener;
