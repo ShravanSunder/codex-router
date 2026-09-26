@@ -226,7 +226,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
     }
 }
 
-fn parse_actor(value: &str) -> Result<Identity, ()> {
+pub(crate) fn parse_actor(value: &str) -> Result<Identity, ()> {
     let parsed: serde_json::Value = serde_json::from_str(value).map_err(|_| ())?;
     if parsed.get("kind").is_some() {
         return serde_json::from_value(parsed).map_err(|_| ());

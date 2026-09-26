@@ -424,6 +424,67 @@ impl ControlClient {
         }
         Ok(result)
     }
+
+    pub async fn list_questions(
+        &mut self,
+        pending_only: bool,
+    ) -> Result<collaboration_protocol::QuestionListResult, ClientError> {
+        let value = self
+            .connection
+            .call(
+                "question/list",
+                json!(collaboration_protocol::QuestionListParams {
+                    pending: pending_only
+                }),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|_| ClientError::Protocol("invalid question list"))
+    }
+
+    pub async fn answer_question(
+        &mut self,
+        params: collaboration_protocol::QuestionAnswerParams,
+    ) -> Result<collaboration_protocol::QuestionAnswerResult, crate::OperationError> {
+        let request_id = params.request_id.clone();
+        let encoded = serde_json::to_value(params).map_err(|_| {
+            crate::OperationError::before_dispatch(
+                "question-answer",
+                None,
+                ClientError::InvalidRequest("invalid question answer"),
+            )
+        })?;
+        self.connection
+            .validate_call_before_transmission("question/answer", &encoded)
+            .map_err(|source| {
+                crate::OperationError::before_dispatch("question-answer", None, source)
+            })?;
+        let value = self
+            .connection
+            .call("question/answer", encoded)
+            .await
+            .map_err(|source| {
+                crate::OperationError::after_dispatch("question-answer", None, None, source)
+            })?;
+        let result: collaboration_protocol::QuestionAnswerResult = serde_json::from_value(value)
+            .map_err(|_| {
+                crate::OperationError::after_dispatch(
+                    "question-answer",
+                    None,
+                    None,
+                    ClientError::Protocol("invalid question result"),
+                )
+            })?;
+        if result.request_id != request_id {
+            self.connection.failed = true;
+            return Err(crate::OperationError::after_dispatch(
+                "question-answer",
+                None,
+                None,
+                ClientError::Protocol("inconsistent question result"),
+            ));
+        }
+        Ok(result)
+    }
     pub async fn journal_status(&mut self) -> Result<crate::JournalStatus, ClientError> {
         let value = self
             .connection

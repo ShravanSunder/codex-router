@@ -166,42 +166,8 @@ pub struct ApprovalDecideParams {
     pub option_id: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub acknowledge_persistent: bool,
-    #[serde(deserialize_with = "deserialize_approval_actor")]
+    #[serde(deserialize_with = "crate::interaction_actor::deserialize_interaction_actor")]
     pub actor: Identity,
-}
-
-fn deserialize_approval_actor<'de, D>(deserializer: D) -> Result<Identity, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum ActorWire {
-        Typed(Identity),
-        Legacy(SessionRef),
-    }
-    match ActorWire::deserialize(deserializer)? {
-        ActorWire::Typed(actor) => Ok(actor),
-        ActorWire::Legacy(session) => {
-            let board_session = message_board::SessionRef {
-                endpoint: message_board::SessionEndpointRef {
-                    service_id: message_board::ServiceId::try_from(String::from(
-                        session.endpoint.service_id,
-                    ))
-                    .map_err(serde::de::Error::custom)?,
-                    endpoint_id: message_board::EndpointId::try_from(String::from(
-                        session.endpoint.endpoint_id,
-                    ))
-                    .map_err(serde::de::Error::custom)?,
-                },
-                session_id: message_board::SessionId::try_from(String::from(session.session_id))
-                    .map_err(serde::de::Error::custom)?,
-            };
-            Ok(Identity::Session {
-                session: board_session,
-            })
-        }
-    }
 }
 
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]

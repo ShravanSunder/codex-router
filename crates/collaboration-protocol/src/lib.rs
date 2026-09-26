@@ -30,7 +30,9 @@ pub use provider_conversation_contract::{
 };
 mod access_contract;
 mod approval_contract;
+mod interaction_actor;
 mod permission_diagnostic;
+mod question_contract;
 pub use access_contract::{
     RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,
 };
@@ -44,6 +46,10 @@ pub use approval_contract::{
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,
     PermissionDiagnosticStage,
+};
+pub use question_contract::{
+    QuestionAnswerParams, QuestionAnswerResult, QuestionAnswerValue, QuestionFieldView,
+    QuestionListParams, QuestionListResult, QuestionRecord, QuestionResponse, QuestionState,
 };
 mod backend_generation;
 mod control_error_validation;

@@ -33,6 +33,7 @@ use external_requests::map_external_options;
 use interaction_history::InteractionHistoryStore;
 pub use interaction_history::{
     InteractionHistoryError, InteractionHistoryRecord, InteractionHistoryState,
+    QuestionHistoryState, QuestionResponse,
 };
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -88,6 +89,8 @@ impl From<InteractionHistoryError> for ApprovalDecisionError {
             InteractionHistoryError::SelfApprover => Self::Code("selfDecision"),
             InteractionHistoryError::NotPending => Self::Code("approvalNotPending"),
             InteractionHistoryError::InvalidOptionId => Self::Code("invalidOptionId"),
+            InteractionHistoryError::InvalidQuestion => Self::Code("invalidQuestion"),
+            InteractionHistoryError::InvalidAnswer { .. } => Self::Code("invalidAnswer"),
             InteractionHistoryError::AlreadyExists | InteractionHistoryError::Unavailable => {
                 Self::Code("unavailable")
             }
@@ -237,6 +240,7 @@ pub struct ServiceApprovalBroker {
     interaction_history: InteractionHistoryStore,
     typed_pending_approvals:
         Mutex<BTreeMap<String, oneshot::Sender<session_event_model::OfferedOptionId>>>,
+    pending_questions: Mutex<BTreeMap<String, oneshot::Sender<QuestionResponse>>>,
 }
 
 impl ServiceApprovalBroker {
@@ -278,6 +282,7 @@ impl ServiceApprovalBroker {
             history: Arc::new(Mutex::new(history)),
             interaction_history,
             typed_pending_approvals: Mutex::new(BTreeMap::new()),
+            pending_questions: Mutex::new(BTreeMap::new()),
         }))
     }
 
@@ -348,7 +353,10 @@ impl ServiceApprovalBroker {
                 approver,
                 request,
                 state,
-            } = record;
+            } = record
+            else {
+                continue;
+            };
             let state = match state {
                 InteractionHistoryState::Pending => ApprovalState::PendingClientDecision,
                 InteractionHistoryState::Decided { .. } => ApprovalState::Decided,
@@ -402,8 +410,90 @@ impl ServiceApprovalBroker {
             .list_approvals(pending_only)
             .await
             .into_iter()
-            .map(|record| record.approval_request().clone())
+            .filter_map(|record| record.approval_request().cloned())
             .collect()
+    }
+
+    pub async fn request_question(
+        &self,
+        requester: message_board::SessionRef,
+        approver: message_board::Identity,
+        request: session_event_model::QuestionRequest,
+    ) -> Result<oneshot::Receiver<QuestionResponse>, InteractionHistoryError> {
+        let request_id = request.request_id.clone();
+        let mut pending = self.pending_questions.lock().await;
+        if pending.contains_key(&request_id) {
+            return Err(InteractionHistoryError::AlreadyExists);
+        }
+        self.interaction_history
+            .record_question(requester, approver, request)
+            .await?;
+        let (sender, receiver) = oneshot::channel();
+        pending.insert(request_id, sender);
+        Ok(receiver)
+    }
+
+    pub async fn list_questions(&self, pending_only: bool) -> Vec<InteractionHistoryRecord> {
+        self.interaction_history.list_questions(pending_only).await
+    }
+
+    pub async fn respond_question(
+        &self,
+        request_id: &str,
+        actor: &message_board::Identity,
+        response: QuestionResponse,
+    ) -> Result<(), InteractionHistoryError> {
+        let mut pending = self.pending_questions.lock().await;
+        if !pending.contains_key(request_id) {
+            return Err(InteractionHistoryError::NotPending);
+        }
+        self.interaction_history
+            .respond_question(request_id, actor, &response)
+            .await?;
+        let sender = pending
+            .remove(request_id)
+            .ok_or(InteractionHistoryError::NotPending)?;
+        sender
+            .send(response)
+            .map_err(|_| InteractionHistoryError::Unavailable)
+    }
+
+    pub async fn cancel_questions(
+        &self,
+        requester: &message_board::SessionRef,
+        reason: &str,
+    ) -> Result<usize, InteractionHistoryError> {
+        let mut pending = self.pending_questions.lock().await;
+        let cancelled = self
+            .interaction_history
+            .cancel_questions(requester, reason)
+            .await?;
+        for request_id in &cancelled {
+            if let Some(sender) = pending.remove(request_id) {
+                let _ = sender.send(QuestionResponse::Cancelled);
+            }
+        }
+        Ok(cancelled.len())
+    }
+
+    pub async fn cancel_question(
+        &self,
+        request_id: &str,
+        reason: &str,
+    ) -> Result<(), InteractionHistoryError> {
+        let mut pending = self.pending_questions.lock().await;
+        if !pending.contains_key(request_id) {
+            return Err(InteractionHistoryError::NotPending);
+        }
+        self.interaction_history
+            .cancel_question(request_id, reason)
+            .await?;
+        let sender = pending
+            .remove(request_id)
+            .ok_or(InteractionHistoryError::NotPending)?;
+        sender
+            .send(QuestionResponse::Cancelled)
+            .map_err(|_| InteractionHistoryError::Unavailable)
     }
 
     pub async fn decide_typed_interaction(
@@ -735,9 +825,12 @@ impl ServiceApprovalBroker {
                 .ok_or(ApprovalDecisionError::Code("approvalNotPending"))?;
             let option_id = match (&params.option_id, params.decision) {
                 (Some(option_id), None) => option_id.clone(),
-                (None, Some(decision)) => {
-                    legacy_choice_from_typed(record.approval_request(), decision)?
-                }
+                (None, Some(decision)) => legacy_choice_from_typed(
+                    record
+                        .approval_request()
+                        .ok_or(ApprovalDecisionError::Code("approvalNotPending"))?,
+                    decision,
+                )?,
                 _ => return Err(ApprovalDecisionError::Code("invalidSelection")),
             };
             let selected = self

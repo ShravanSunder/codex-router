@@ -566,7 +566,9 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
     assert!(tool_names.contains(&"endpoints_list"));
-    assert_eq!(tool_names.len(), 95);
+    assert!(tool_names.contains(&"question_list"));
+    assert!(tool_names.contains(&"question_answer"));
+    assert_eq!(tool_names.len(), 97);
     let tools = tools_body
         .pointer("/result/tools")
         .and_then(Value::as_array)

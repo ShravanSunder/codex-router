@@ -165,12 +165,15 @@ pub async fn serve_control_connection(
                     continue;
                 }
                 Ok(request)
-                    if matches!(request.method.as_str(), "approval/list" | "approval/decide") =>
+                    if matches!(
+                        request.method.as_str(),
+                        "approval/list" | "approval/decide" | "question/list" | "question/answer"
+                    ) =>
                 {
                     let identity = identity.clone();
                     pending.spawn(async move {
                         let id = request.id.clone();
-                        let response = dispatch_approval(
+                        let response = dispatch_interaction(
                             &request.method,
                             request.params,
                             json!(id),
@@ -554,7 +557,7 @@ pub async fn serve_control_connection(
         }
     }
 }
-async fn dispatch_approval(
+async fn dispatch_interaction(
     method: &str,
     params: Value,
     id: Value,
@@ -598,8 +601,109 @@ async fn dispatch_approval(
                 }
             }
         }
+        "question/list" => {
+            let Ok(params) =
+                serde_json::from_value::<collaboration_protocol::QuestionListParams>(params)
+            else {
+                return error(id, -32602, "Invalid params");
+            };
+            let records = broker.list_questions(params.pending).await;
+            let Ok(questions) = records
+                .into_iter()
+                .map(question_record_view)
+                .collect::<Result<Vec<_>, _>>()
+            else {
+                return error(id, -32050, "Question service unavailable");
+            };
+            json!({"jsonrpc":"2.0","id":id,"result":collaboration_protocol::QuestionListResult { questions }})
+        }
+        "question/answer" => {
+            let Ok(params) =
+                serde_json::from_value::<collaboration_protocol::QuestionAnswerParams>(params)
+            else {
+                return error(id, -32602, "Invalid params");
+            };
+            let state = match &params.response {
+                collaboration_protocol::QuestionResponse::Answered { .. } => {
+                    collaboration_protocol::QuestionState::Answered
+                }
+                collaboration_protocol::QuestionResponse::Declined => {
+                    collaboration_protocol::QuestionState::Declined
+                }
+                collaboration_protocol::QuestionResponse::Cancelled => {
+                    collaboration_protocol::QuestionState::Cancelled
+                }
+            };
+            match broker
+                .respond_question(&params.request_id, &params.actor, params.response)
+                .await
+            {
+                Ok(()) => {
+                    json!({"jsonrpc":"2.0","id":id,"result":collaboration_protocol::QuestionAnswerResult { request_id: params.request_id, state }})
+                }
+                Err(failure) => {
+                    let (kind, field_id) = match failure {
+                        crate::interaction_broker::InteractionHistoryError::WrongActor => {
+                            ("wrongActor", None)
+                        }
+                        crate::interaction_broker::InteractionHistoryError::NotPending => {
+                            ("questionNotPending", None)
+                        }
+                        crate::interaction_broker::InteractionHistoryError::InvalidAnswer {
+                            field_id,
+                        } => ("invalidAnswer", Some(field_id)),
+                        _ => ("unavailable", None),
+                    };
+                    let mut data = json!({"kind":kind,"stage":"inspect","message":"Question response rejected"});
+                    if let Some(field_id) = field_id
+                        && let Some(fields) = data.as_object_mut()
+                    {
+                        fields.insert("fieldId".to_owned(), json!(field_id));
+                    }
+                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Question response rejected","data":data}})
+                }
+            }
+        }
         _ => error(id, -32601, "Method not found"),
     }
+}
+
+fn question_record_view(
+    record: crate::interaction_broker::InteractionHistoryRecord,
+) -> Result<collaboration_protocol::QuestionRecord, ()> {
+    use crate::interaction_broker::{InteractionHistoryRecord, QuestionHistoryState};
+    let InteractionHistoryRecord::Question {
+        requester,
+        approver,
+        request,
+        state,
+    } = record
+    else {
+        return Err(());
+    };
+    let requester =
+        serde_json::from_value(serde_json::to_value(requester).map_err(|_| ())?).map_err(|_| ())?;
+    let fields = request
+        .fields
+        .iter()
+        .map(|field| {
+            serde_json::from_value(serde_json::to_value(field).map_err(|_| ())?).map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let state = match state {
+        QuestionHistoryState::Pending => collaboration_protocol::QuestionState::Pending,
+        QuestionHistoryState::Answered { .. } => collaboration_protocol::QuestionState::Answered,
+        QuestionHistoryState::Declined => collaboration_protocol::QuestionState::Declined,
+        QuestionHistoryState::Cancelled { .. } => collaboration_protocol::QuestionState::Cancelled,
+    };
+    Ok(collaboration_protocol::QuestionRecord {
+        request_id: request.request_id,
+        requester,
+        approver,
+        prompt: request.prompt,
+        fields,
+        state,
+    })
 }
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})

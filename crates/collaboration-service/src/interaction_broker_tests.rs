@@ -1265,8 +1265,8 @@ async fn populated_old_approval_reader_survives_human_interaction_history() {
         crate::interaction_broker::InteractionHistoryRecord,
     > = serde_json::from_slice(&new_bytes).expect("typed interaction history");
     assert!(matches!(
-        new_records["human-approval-1"].state(),
-        crate::interaction_broker::InteractionHistoryState::Decided { option_id }
+        new_records["human-approval-1"].approval_state(),
+        Some(crate::interaction_broker::InteractionHistoryState::Decided { option_id })
             if option_id.as_str() == "allow-once"
     ));
 }
@@ -1440,4 +1440,232 @@ async fn claude_choices_resolve_legacy_decisions_without_inventing_an_option() {
         .expect("legacy decline");
     assert_eq!(receipt.decision, Some(ApprovalDecision::Deny));
     assert_eq!(receiver.await.expect("agent option ID").as_str(), "no-once");
+}
+
+// R18: a form stays pending until its Approver answers it; values are checked
+// against the advertised fields before the agent receives an ACP action.
+#[tokio::test]
+async fn typed_question_checks_fields_and_keeps_answer_decline_cancel_distinct() {
+    use crate::interaction_broker::QuestionResponse;
+    use message_board::{HumanId, Identity};
+
+    let (broker, _generation, _directory) = fixture_broker().await;
+    let requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let approver = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+    };
+    let other = Identity::Human {
+        human_id: HumanId::try_from("other".to_owned()).expect("human ID"),
+    };
+    let question = |request_id: &str| {
+        serde_json::from_value(json!({
+        "requestId":request_id,"prompt":"Choose launch settings","fields":[
+            {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true},
+            {"kind":"boolean","fieldId":"dryRun","label":"Dry run","description":null,"required":true},
+            {"kind":"singleChoice","fieldId":"color","label":"Color","description":null,"required":true,"options":["red","blue"]}
+        ]
+    })).expect("question")
+    };
+    assert!(matches!(
+        broker
+            .request_question(
+                requester.clone(),
+                Identity::Session {
+                    session: requester.clone()
+                },
+                question("self-question"),
+            )
+            .await,
+        Err(crate::interaction_broker::InteractionHistoryError::SelfApprover)
+    ));
+    let duplicate_fields = serde_json::from_value(json!({
+        "requestId":"duplicate-fields","prompt":"Choose settings","fields":[
+            {"kind":"number","fieldId":"count","label":"First","description":null,"required":true},
+            {"kind":"number","fieldId":"count","label":"Second","description":null,"required":true}
+        ]
+    }))
+    .expect("parsed question");
+    assert!(matches!(
+        broker
+            .request_question(requester.clone(), approver.clone(), duplicate_fields)
+            .await,
+        Err(crate::interaction_broker::InteractionHistoryError::InvalidQuestion)
+    ));
+    let receiver = broker
+        .request_question(requester.clone(), approver.clone(), question("q-answer"))
+        .await
+        .expect("pending question");
+    assert_eq!(broker.list_questions(true).await.len(), 1);
+    let answer = QuestionResponse::Answered {
+        content: serde_json::from_value(json!({"count":3,"dryRun":true,"color":"blue"}))
+            .expect("typed content"),
+    };
+    assert!(
+        broker
+            .respond_question("q-answer", &other, answer.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        broker
+            .respond_question(
+                "q-answer",
+                &approver,
+                QuestionResponse::Answered {
+                    content: serde_json::from_value(
+                        json!({"count":"three","dryRun":true,"color":"blue"})
+                    )
+                    .expect("content"),
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(broker.list_questions(true).await.len(), 1);
+    assert!(matches!(
+        broker.respond_question("q-answer", &approver, QuestionResponse::Answered {
+            content: serde_json::from_value(json!({"count":3,"dryRun":true,"color":"green"})).expect("content"),
+        }).await,
+        Err(crate::interaction_broker::InteractionHistoryError::InvalidAnswer { field_id }) if field_id == "color"
+    ));
+    assert_eq!(broker.list_questions(true).await.len(), 1);
+    broker
+        .respond_question("q-answer", &approver, answer.clone())
+        .await
+        .expect("answer");
+    assert_eq!(receiver.await.expect("agent response"), answer);
+    assert!(
+        broker
+            .respond_question("q-answer", &approver, answer)
+            .await
+            .is_err()
+    );
+
+    for (request_id, response) in [
+        ("q-decline", QuestionResponse::Declined),
+        ("q-cancel", QuestionResponse::Cancelled),
+    ] {
+        let receiver = broker
+            .request_question(requester.clone(), approver.clone(), question(request_id))
+            .await
+            .expect("pending question");
+        broker
+            .respond_question(request_id, &approver, response.clone())
+            .await
+            .expect("response");
+        assert_eq!(receiver.await.expect("agent response"), response);
+    }
+    assert!(broker.list_questions(true).await.is_empty());
+}
+
+// R1: a Turn cancellation answers every pending question before the Turn ends.
+#[tokio::test]
+async fn cancelling_a_session_answers_its_pending_questions_only() {
+    use crate::interaction_broker::QuestionResponse;
+    use message_board::{HumanId, Identity};
+
+    let (broker, _generation, _directory) = fixture_broker().await;
+    let requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let other_requester =
+        board_session_ref(&session(&broker.service_id, "other-session")).expect("other requester");
+    let approver = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+    };
+    let question = |request_id: &str| {
+        serde_json::from_value(json!({
+            "requestId":request_id,"prompt":"Proceed?","fields":[
+                {"kind":"boolean","fieldId":"yes","label":"Yes","description":null,"required":true}
+            ]
+        }))
+        .expect("question")
+    };
+    let first = broker
+        .request_question(requester.clone(), approver.clone(), question("q-first"))
+        .await
+        .expect("first");
+    let second = broker
+        .request_question(requester.clone(), approver.clone(), question("q-second"))
+        .await
+        .expect("second");
+    let mut other = broker
+        .request_question(other_requester, approver, question("q-other"))
+        .await
+        .expect("other");
+    assert_eq!(
+        broker
+            .cancel_questions(&requester, "turn cancelled")
+            .await
+            .expect("cancel"),
+        2
+    );
+    assert_eq!(
+        first.await.expect("first response"),
+        QuestionResponse::Cancelled
+    );
+    assert_eq!(
+        second.await.expect("second response"),
+        QuestionResponse::Cancelled
+    );
+    assert_eq!(broker.list_questions(true).await.len(), 1);
+    assert!(matches!(
+        other.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    let all = broker.list_questions(false).await;
+    assert_eq!(all.len(), 3);
+    assert!(
+        all.iter()
+            .filter(|record| matches!(record,
+                crate::interaction_broker::InteractionHistoryRecord::Question {
+                    state: crate::interaction_broker::QuestionHistoryState::Cancelled { reason }, ..
+                } if reason == "turn cancelled"
+            ))
+            .count()
+            == 2
+    );
+}
+
+// R2: an agent withdrawal settles only its own request.
+#[tokio::test]
+async fn agent_withdrawal_cancels_one_question_without_touching_the_next() {
+    use crate::interaction_broker::QuestionResponse;
+    use message_board::{HumanId, Identity};
+
+    let (broker, _generation, _directory) = fixture_broker().await;
+    let requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let approver = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+    };
+    let question = |request_id: &str| {
+        serde_json::from_value(json!({
+            "requestId":request_id,"prompt":"Proceed?","fields":[
+                {"kind":"boolean","fieldId":"yes","label":"Yes","description":null,"required":true}
+            ]
+        }))
+        .expect("question")
+    };
+    let withdrawn = broker
+        .request_question(requester.clone(), approver.clone(), question("withdrawn"))
+        .await
+        .expect("first");
+    let mut still_pending = broker
+        .request_question(requester, approver, question("still-pending"))
+        .await
+        .expect("second");
+    broker
+        .cancel_question("withdrawn", "agent withdrew")
+        .await
+        .expect("withdraw");
+    assert_eq!(
+        withdrawn.await.expect("response"),
+        QuestionResponse::Cancelled
+    );
+    assert!(matches!(
+        still_pending.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(broker.list_questions(true).await.len(), 1);
 }

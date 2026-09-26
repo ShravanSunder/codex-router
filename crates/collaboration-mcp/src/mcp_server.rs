@@ -341,6 +341,40 @@ impl CollaborationMcpServer {
         }
     }
 
+    #[tool(name = "question_list", description = "Lists questions with their typed fields and current state. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<collaboration_protocol::QuestionListResult>())]
+    async fn question_list(
+        &self,
+        Parameters(request): Parameters<collaboration_protocol::QuestionListParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.list_questions(request.pending).await;
+        let _closed = client.close().await;
+        structured_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "question_answer", description = "Answers, declines, or cancels one question as its Approver.", output_schema = rmcp::handler::server::tool::schema_for_type::<collaboration_protocol::QuestionAnswerResult>())]
+    async fn question_answer(
+        &self,
+        Parameters(request): Parameters<collaboration_protocol::QuestionAnswerParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.answer_question(request).await;
+        let _closed = client.close().await;
+        match result {
+            Ok(value) => structured_result(Ok(value), OperationEffect::None),
+            Err(error) => {
+                let (failure, target, turn_id) = error.into_parts();
+                operation_error_result(failure, target, turn_id)
+            }
+        }
+    }
+
     #[tool(name = "journal_status", description = "Reads lifecycle-journal availability and bounds without mutating state.", output_schema = rmcp::handler::server::tool::schema_for_type::<JournalStatus>())]
     async fn journal_status(
         &self,
