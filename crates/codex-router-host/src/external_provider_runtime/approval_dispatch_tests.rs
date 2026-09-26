@@ -526,7 +526,7 @@ async fn permission_wait_observes_cancellation_during_provider_cancel() -> TestR
 async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestResult {
     // ACP v1 prompt-turn.mdx:365-367 ends a Turn only at the agent's prompt
     // result. Specification R5 projects connection loss as providerRetired.
-    let root = tempfile::tempdir_in("/private/tmp")?;
+    let root = tempfile::tempdir_in("/tmp")?;
     let exit_socket_path = root.path().join("fixture-exit.sock");
     let exit_listener = tokio::net::UnixListener::bind(&exit_socket_path)?;
     let fixture = acp_scripted_fixture::AcpFixtureScript::new()
