@@ -197,7 +197,7 @@ Negative space, which a capable implementer might assume but must not build:
 - **Security:** an approval decision is never inferred; the Approver of a Session is never that Session (E12); a `persistent` grant is disclosed before choosing (R17).
 - **Compatibility:** the existing CLI, MCP and delivery contracts continue (R30); the profile is versioned (R22).
 - **Observability:** each Session's state and capability report are readable on every front door (R12, R15, R19).
-- **Performance:** no new obligation beyond PR #79's frame limits. Not applicable otherwise: no latency target was set.
+- **Performance and resource use (owner, 2026-09-26: "I wanted Rust to be efficient, not to burn resources"):** an idle Host (no running Turn, providers connected and idle) MUST use near-zero CPU. No task may re-poll a stream or future that has ended or keeps returning ready without a new event; a connection whose input has ended is retired (R5), never spun on. Otherwise no latency target was set; PR #79's frame limits remain.
 
 ## Proof obligations
 
