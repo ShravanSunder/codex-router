@@ -398,7 +398,7 @@ fn render_thread(summary: &HubSessionSummary) -> Value {
             json!({"type":"active","activeFlags":[]})
         }
         session_event_model::SessionState::RequiresAction { pending } => {
-            let flag = match pending.first().kind {
+            let flag = match pending.first().kind() {
                 session_event_model::InteractionKind::Approval => "waitingOnApproval",
                 session_event_model::InteractionKind::Question => "waitingOnUserInput",
             };

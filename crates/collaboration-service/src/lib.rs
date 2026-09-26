@@ -40,9 +40,15 @@ pub use provider_session_record::ProviderSessionRecord;
 mod app_server_item_translation;
 mod app_server_model_catalog;
 pub use app_server_item_translation::{
-    HistoricalTurn, TranslatedSessionItem, group_historical_turns, render_historical_turn,
-    translate_session_item,
+    ApprovalPresentation, ApprovalReply, HistoricalTurn, InteractionDisplayContext,
+    InteractionReplyError, QuestionPresentation, QuestionReply, TranslatedSessionItem,
+    group_historical_turns, map_approval_reply, map_question_form_reply,
+    map_request_user_input_reply, render_historical_turn, translate_approval_request,
+    translate_question_request, translate_session_item,
 };
+#[cfg(test)]
+#[path = "app_server_interaction_translation_tests.rs"]
+mod app_server_interaction_translation_tests;
 #[cfg(test)]
 #[path = "app_server_item_translation_tests.rs"]
 mod app_server_item_translation_tests;
