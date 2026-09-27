@@ -61,6 +61,10 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
         "endpoint":endpoint,"sessionId":"provider-session"
     }))
     .expect("provider requester");
+    let prompting_requester: collaboration_protocol::SessionRef = serde_json::from_value(json!({
+        "endpoint":endpoint,"sessionId":"prompting-session"
+    }))
+    .expect("prompting requester");
     let approver: message_board::SessionRef = serde_json::from_value(json!({
         "endpoint":endpoint,"sessionId":"approver-session"
     }))
@@ -89,6 +93,7 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
                 .expect("target"),
                 generation: serde_json::from_value(json!({"serviceEpoch":epoch,"generation":1}))
                     .expect("generation"),
+                requested_by: prompting_requester.clone().into(),
             }),
         )
         .await
@@ -138,6 +143,7 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
         "CLI output: {output}"
     );
     assert_eq!(row["approver"], json!(approver));
+    assert_eq!(row["requester"], json!(prompting_requester));
     assert!(row["expiresAt"].is_string());
     assert!(row.get("optionsOrigin").is_none());
     let decided = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))

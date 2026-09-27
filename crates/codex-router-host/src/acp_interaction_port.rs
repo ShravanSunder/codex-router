@@ -100,6 +100,7 @@ impl InteractionPort for HostInteractionPort {
                         operation_id: context.operation_id.clone(),
                         target: context.target.clone(),
                         generation: context.binding_generation.clone(),
+                        requested_by: context.requester.clone(),
                     }),
                 )
                 .await

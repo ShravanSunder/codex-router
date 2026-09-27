@@ -129,6 +129,7 @@ async fn provider_session_approval_legacy_projection_survives_restart_without_du
         }))
         .expect("notice route");
     let target = session(&broker.service_id, "provider-session");
+    let prompting_requester = session(&broker.service_id, "prompting-session");
     let receiver = broker
         .request_typed_approval(
             requester,
@@ -140,6 +141,7 @@ async fn provider_session_approval_legacy_projection_survives_restart_without_du
                 operation_id: collaboration_protocol::OperationId::generate(),
                 target: target.clone(),
                 generation: generation.clone(),
+                requested_by: prompting_requester.clone().into(),
             }),
         )
         .await
@@ -148,6 +150,7 @@ async fn provider_session_approval_legacy_projection_survives_restart_without_du
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].generation, generation);
     assert_eq!(pending[0].operation["target"], json!(target));
+    assert_eq!(pending[0].requester, prompting_requester);
     assert!(!directory.join("approval-history.json").exists());
     assert_eq!(
         broker
@@ -180,6 +183,7 @@ async fn provider_session_approval_legacy_projection_survives_restart_without_du
     assert_eq!(history[0].request_id, "projected-approval");
     assert_eq!(history[0].reason.as_deref(), Some("hostRestarted"));
     assert_eq!(history[0].operation["target"], json!(target));
+    assert_eq!(history[0].requester, prompting_requester);
     assert_eq!(
         reloaded
             .list_detailed(false)
@@ -188,6 +192,98 @@ async fn provider_session_approval_legacy_projection_survives_restart_without_du
             .approvals
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn human_and_old_provider_approval_rows_stay_detailed_only() {
+    let (broker, generation, directory) = fixture_broker().await;
+    let target = session(&broker.service_id, "provider-session");
+    let requester = board_session_ref(&target).expect("provider requester");
+    let approver =
+        board_session_ref(&session(&broker.service_id, "approver-session")).expect("approver");
+    broker
+        .install_session_delivery(Arc::new(CapturingInteractionDelivery {
+            notices: Arc::new(Mutex::new(Vec::new())),
+            delivered: Arc::new(tokio::sync::Notify::new()),
+        }))
+        .expect("notice route");
+    for (request_id, requested_by) in [
+        (
+            "human-requester",
+            collaboration_protocol::ProviderIdentity::Human {
+                human_id: "owner".to_owned().try_into().expect("human ID"),
+            },
+        ),
+        ("old-row", target.clone().into()),
+    ] {
+        broker
+            .request_typed_approval(
+                requester.clone(),
+                message_board::Identity::Session {
+                    session: approver.clone(),
+                },
+                typed_approval_request(request_id),
+                tokio_util::sync::CancellationToken::new(),
+                tokio_util::sync::CancellationToken::new(),
+                Some(crate::interaction_broker::TypedApprovalLegacyContext {
+                    operation_id: collaboration_protocol::OperationId::generate(),
+                    target: target.clone(),
+                    generation: generation.clone(),
+                    requested_by,
+                }),
+            )
+            .await
+            .expect("pending approval");
+    }
+    assert_eq!(broker.list(true).await.approvals.len(), 1);
+    assert_eq!(
+        broker
+            .list_detailed(true)
+            .await
+            .expect("detailed list")
+            .approvals
+            .len(),
+        2
+    );
+    drop(broker);
+    let history_path = directory.join("interaction-history.json");
+    let mut stored: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(&history_path)
+            .await
+            .expect("stored history"),
+    )
+    .expect("history JSON");
+    stored["old-row"]["legacy_metadata"]
+        .as_object_mut()
+        .expect("legacy metadata")
+        .remove("requestedBy");
+    tokio::fs::write(
+        &history_path,
+        serde_json::to_vec(&stored).expect("history bytes"),
+    )
+    .await
+    .expect("older history row");
+    let reloaded = ServiceInteractionBroker::load(
+        target.endpoint.service_id.clone(),
+        NativeControlBackend {
+            endpoint: target.endpoint,
+            gate: crate::NativeGenerationGate::default(),
+            codex_home: directory.clone(),
+        },
+        directory.join("approval-routes.json"),
+    )
+    .await
+    .expect("reload older history");
+    assert!(reloaded.list(false).await.approvals.is_empty());
+    assert_eq!(
+        reloaded
+            .list_detailed(false)
+            .await
+            .expect("detailed list")
+            .approvals
+            .len(),
+        2
     );
 }
 
@@ -215,6 +311,7 @@ async fn unreachable_approver_cancellation_keeps_its_typed_state_in_both_lists()
                 operation_id: collaboration_protocol::OperationId::generate(),
                 target: session(&broker.service_id, "provider-session"),
                 generation,
+                requested_by: session(&broker.service_id, "provider-session").into(),
             }),
         )
         .await

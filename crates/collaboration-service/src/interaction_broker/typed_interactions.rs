@@ -18,13 +18,16 @@ impl ServiceInteractionBroker {
             return Err(InteractionHistoryError::Unavailable);
         }
         let legacy_metadata = if matches!(&approver, message_board::Identity::Session { .. }) {
-            legacy_context.map(|context| LegacyApprovalMetadata {
-                operation_id: context.operation_id,
-                target: context.target,
-                generation: context.generation,
-                expires_at: (chrono::Utc::now()
-                    + chrono::Duration::seconds(APPROVAL_TIMEOUT.as_secs() as i64))
-                .to_rfc3339(),
+            legacy_context.map(|context| {
+                Box::new(LegacyApprovalMetadata {
+                    operation_id: context.operation_id,
+                    target: context.target,
+                    generation: context.generation,
+                    expires_at: (chrono::Utc::now()
+                        + chrono::Duration::seconds(APPROVAL_TIMEOUT.as_secs() as i64))
+                    .to_rfc3339(),
+                    requested_by: Some(context.requested_by),
+                })
             })
         } else {
             None

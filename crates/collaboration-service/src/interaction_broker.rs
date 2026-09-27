@@ -215,6 +215,7 @@ pub struct TypedApprovalLegacyContext {
     pub operation_id: OperationId,
     pub target: SessionRef,
     pub generation: collaboration_protocol::CodexGeneration,
+    pub requested_by: collaboration_protocol::ProviderIdentity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

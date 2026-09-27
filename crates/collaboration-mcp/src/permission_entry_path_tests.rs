@@ -689,6 +689,7 @@ async fn provider_session_approval_uses_legacy_default_list_and_safe_decision() 
                 operation_id: collaboration_protocol::OperationId::generate(),
                 target: fixture.requester.clone(),
                 generation: fixture.generation.clone(),
+                requested_by: fixture.requester.clone().into(),
             }),
         )
         .await
