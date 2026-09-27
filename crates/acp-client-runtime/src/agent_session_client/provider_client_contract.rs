@@ -101,6 +101,7 @@ pub(crate) fn classify_mcp_tool_outcome(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderCreatedSession {
     pub provider_session_id: String,
+    pub effective_settings: crate::EffectiveProviderSettings,
 }
 
 #[cfg(any(test, feature = "test-observation"))]
@@ -153,6 +154,20 @@ pub enum ExternalProviderRuntimeError {
     ProviderRejected { code: i64 },
     #[error("provider operation response was unavailable")]
     TransportFailure,
+    #[error("invalidSetting: provider setting was not advertised")]
+    InvalidSetting {
+        setting: crate::ProviderSettingKind,
+        value: String,
+        advertised: Vec<String>,
+        provider_session_id: String,
+        disposition: crate::InvalidSettingSessionDisposition,
+    },
+    #[error("createdWithoutSettings: provider session needs setting resolution")]
+    CreatedWithoutSettings {
+        provider_session_id: String,
+        applied: Vec<crate::AppliedProviderSetting>,
+        failed: crate::FailedProviderSetting,
+    },
     #[error("session history replay could not begin")]
     HistoryReplayUnavailable,
     #[error(

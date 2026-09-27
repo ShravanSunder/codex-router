@@ -43,6 +43,7 @@ mod provider_prompt_content;
 mod provider_prompt_observation;
 mod provider_prompt_result_codec;
 mod provider_session_actor;
+mod provider_session_settings;
 mod provider_update_kind;
 mod session_event_sink;
 
@@ -59,6 +60,10 @@ pub use provider_persistence_target::ProviderPersistenceTarget;
 pub use provider_prompt_content::ProviderPromptContent;
 pub use provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSteeringOutcome,
+};
+pub use provider_session_settings::{
+    AppliedProviderSetting, EffectiveProviderSettings, FailedProviderSetting,
+    InvalidSettingSessionDisposition, ProviderSettingKind, RequestedProviderSettings,
 };
 pub use session_event_sink::{
     EventSinkOverflow, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,

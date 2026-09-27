@@ -17,6 +17,7 @@ pub(super) fn register_provider_session<P: InteractionPort>(
     );
     Ok(ExternalProviderCreatedSession {
         provider_session_id: registration.provider_session_id,
+        effective_settings: crate::EffectiveProviderSettings::default(),
     })
 }
 
@@ -48,6 +49,7 @@ pub(super) fn register_static_provider_session<P: InteractionPort>(
     ));
     Ok(ExternalProviderCreatedSession {
         provider_session_id,
+        effective_settings: crate::EffectiveProviderSettings::default(),
     })
 }
 
