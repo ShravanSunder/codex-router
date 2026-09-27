@@ -270,12 +270,17 @@ async fn listed_state(
             cursor: None,
         })
         .await?;
-    Ok(listing
+    let summary = listing
         .sessions
         .into_iter()
-        .find(|session| session.target == *target)
-        .ok_or("target omitted from provider session list")?
-        .state)
+        .find(|session| session.target() == target)
+        .ok_or("target omitted from provider session list")?;
+    match summary {
+        collaboration_protocol::ProviderSessionSummary::HostedProvider { state, .. } => Ok(state),
+        collaboration_protocol::ProviderSessionSummary::ClaudeCodeInteractive { .. } => {
+            Err("expected a Router-hosted provider session".into())
+        }
+    }
 }
 
 #[tokio::test]

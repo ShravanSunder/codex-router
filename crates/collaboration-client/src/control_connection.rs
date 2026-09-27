@@ -297,7 +297,7 @@ impl ControlClient {
             || result
                 .sessions
                 .iter()
-                .any(|row| row.target.endpoint != params.endpoint)
+                .any(|row| row.target().endpoint != params.endpoint)
         {
             self.connection.failed = true;
             return Err(ClientError::Protocol(
