@@ -36,6 +36,8 @@ unicode-width.workspace = true
 claude-code-peer-messaging = { path = "../claude-code-peer-messaging", version = "0.1.37" }
 tempfile = "3.27.0"
 jsonschema.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+sha2.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 chrono.workspace = true

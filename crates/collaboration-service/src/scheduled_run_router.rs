@@ -140,12 +140,16 @@ impl ScheduledRunExecution for SessionDeliveryRouter {
     fn prepare_existing_target<'a>(
         &'a self,
         target: &SessionRef,
+        declared_cwd: &str,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget> {
         let target = target.clone();
+        let declared_cwd = declared_cwd.to_owned();
         Box::pin(async move {
             let route = self.scheduled_for_existing(&target).await?;
-            route.prepare_existing_target(&target, sink).await
+            route
+                .prepare_existing_target(&target, &declared_cwd, sink)
+                .await
         })
     }
 

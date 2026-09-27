@@ -97,7 +97,10 @@ impl CodexAppServerDeliveryRoute {
             .checkout(&String::from(request.target.session_id.clone()));
         let (response, held_idle_submission) = match checked_out {
             HeldBindingCheckout::Ready(mut binding) => {
-                let mut checkout = HeldBindingCleanup::new(&self.holder, binding.session_id());
+                let mut checkout = crate::unmaterialized_thread_holder::HeldBindingCleanup::new(
+                    &self.holder,
+                    binding.session_id(),
+                );
                 if binding.generation() != &generation {
                     checkout.finish();
                     effects.submission = SubmissionEffect::NotDispatched;
@@ -185,39 +188,13 @@ impl CodexAppServerDeliveryRoute {
     }
 }
 
-struct HeldBindingCleanup<'a> {
-    holder: &'a crate::UnmaterializedThreadHolder,
-    session_id: String,
-    active: bool,
-}
-impl<'a> HeldBindingCleanup<'a> {
-    fn new(holder: &'a crate::UnmaterializedThreadHolder, session_id: &str) -> Self {
-        Self {
-            holder,
-            session_id: session_id.into(),
-            active: true,
-        }
-    }
-    fn disarm(&mut self) {
-        self.active = false;
-    }
-    fn finish(&mut self) {
-        self.holder.finish(&self.session_id);
-        self.disarm();
-    }
-}
-impl Drop for HeldBindingCleanup<'_> {
-    fn drop(&mut self) {
-        if self.active {
-            self.holder.finish(&self.session_id);
-        }
-    }
-}
-
 impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
     fn scheduled_runs(&self) -> Option<std::sync::Arc<dyn crate::ScheduledRunRoute>> {
         Some(std::sync::Arc::new(
-            crate::CodexAppServerScheduledRuns::new(self.backend.clone()),
+            crate::CodexAppServerScheduledRuns::new(
+                self.backend.clone(),
+                std::sync::Arc::clone(&self.holder),
+            ),
         ))
     }
 
