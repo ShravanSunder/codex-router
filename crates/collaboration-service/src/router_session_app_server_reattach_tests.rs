@@ -5,6 +5,150 @@ use std::{os::unix::fs::PermissionsExt, sync::Arc};
 use tokio::net::UnixListener;
 use tokio_tungstenite::client_async;
 
+struct ObservedConcreteHub {
+    inner: Arc<crate::ProviderSessionEventHub>,
+    attachment_count: std::sync::atomic::AtomicUsize,
+    attachment_created: tokio::sync::Notify,
+}
+
+impl SessionEventHub for ObservedConcreteHub {
+    fn attach(&self, session: SessionRef) -> crate::HubFuture<'_, SessionEventAttachment> {
+        Box::pin(async move {
+            let attachment = self.inner.attach(session).await?;
+            self.attachment_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.attachment_created.notify_one();
+            Ok(attachment)
+        })
+    }
+
+    fn state(
+        &self,
+        session: SessionRef,
+    ) -> crate::HubFuture<'_, session_event_model::SessionState> {
+        self.inner.state(session)
+    }
+
+    fn sessions(
+        &self,
+        endpoint: SessionEndpointRef,
+    ) -> crate::HubFuture<'_, Vec<HubSessionSummary>> {
+        self.inner.sessions(endpoint)
+    }
+}
+
+/// A concrete Hub epoch reset closes the old broadcast stream. The same
+/// app-server socket must attach to the new epoch and forward the next Turn.
+#[tokio::test]
+async fn concrete_hub_epoch_resync_reattaches_same_tui_socket()
+-> Result<(), Box<dyn std::error::Error>> {
+    use collaboration_protocol::{ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess};
+    use tokio::{
+        sync::Mutex,
+        time::{Duration, timeout},
+    };
+
+    let directory = tempfile::tempdir()?;
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+    let socket_path = directory.path().join("claude.sock");
+    let listener = UnixListener::bind(&socket_path)?;
+    let backend = ScriptedSessionBackend::new()?;
+    let stored_target: collaboration_protocol::SessionRef =
+        serde_json::from_value(serde_json::to_value(&backend.session)?)?;
+    let owner: collaboration_protocol::ProviderIdentity =
+        serde_json::from_value(json!({"humanId":"owner"}))?;
+    let mut store =
+        crate::ProviderOperationStore::open(&directory.path().join("operations.sqlite")).await?;
+    store
+        .record_session(&crate::ProviderSessionRecord {
+            target: stored_target,
+            working_directory: ProviderWorkingDirectory::try_from(
+                directory.path().display().to_string(),
+            )?,
+            requested_policy: ProviderRequestedPolicy {
+                access: RouterAccess::WriteRestricted,
+            },
+            created_by: owner.clone(),
+            approver: owner,
+            updated_at_ms: 1,
+        })
+        .await?;
+    let hub = Arc::new(crate::ProviderSessionEventHub::new(Arc::new(Mutex::new(
+        store,
+    ))));
+    hub.publish(
+        backend.session.clone(),
+        SessionEvent::StateChanged {
+            state: session_event_model::SessionState::Idle,
+        },
+    )
+    .await?;
+    let observed = Arc::new(ObservedConcreteHub {
+        inner: Arc::clone(&hub),
+        attachment_count: std::sync::atomic::AtomicUsize::new(0),
+        attachment_created: tokio::sync::Notify::new(),
+    });
+    let context = Arc::new(RouterSessionAppServerContext::new(
+        backend.endpoint.clone(),
+        ScriptedSessionBackend::actor()?,
+        Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
+        Arc::clone(&observed) as Arc<dyn SessionEventHub>,
+        tokio::sync::watch::channel(Vec::new()).1,
+    ));
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept client");
+        serve_router_session_app_server_connection(stream, context)
+            .await
+            .expect("serve client");
+    });
+    let stream = UnixStream::connect(&socket_path).await?;
+    let (mut client, _) = client_async("ws://localhost/rpc", stream).await?;
+    client
+        .send(Message::Text(
+            json!({"id":1,"method":"thread/resume","params":{
+                "threadId":backend.session.session_id.as_str()
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let resumed: Value = serde_json::from_str(client.next().await.ok_or("resume")??.to_text()?)?;
+    assert_eq!(resumed["id"], 1);
+    observed.attachment_created.notified().await;
+    hub.begin_history_unavailable(backend.session.clone())
+        .await?;
+    timeout(
+        Duration::from_secs(2),
+        observed.attachment_created.notified(),
+    )
+    .await?;
+    hub.publish(
+        backend.session.clone(),
+        SessionEvent::TurnStarted {
+            turn_id: "after-epoch-reset".into(),
+            input_id: session_event_model::InputId::generate(),
+        },
+    )
+    .await?;
+    let started: Value = serde_json::from_str(
+        timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("turn/started")??
+            .to_text()?,
+    )?;
+    assert_eq!(started["method"], "turn/started");
+    assert_eq!(started["params"]["turn"]["id"], "after-epoch-reset");
+    assert_eq!(
+        observed
+            .attachment_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    client.close(None).await?;
+    server.await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn resume_running_turn_uses_one_snapshot_and_receives_later_deltas()
 -> Result<(), Box<dyn std::error::Error>> {
