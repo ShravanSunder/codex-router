@@ -7,8 +7,8 @@ use super::{
     schedule_send, wake_send,
 };
 use collaboration_client::{
-    ConversationClient, ConversationCreateInput, ConversationOperationResult,
-    ConversationPromptInput, PublicPromptContent,
+    ConversationClient, ConversationCreateActor, ConversationCreateInput,
+    ConversationOperationResult, ConversationPromptInput, PublicPromptContent,
     board::Identity,
     protocol::{
         ApprovalDecideParams, ConversationCreateOutcome, OperationId, RouterAccess, SessionRef,
@@ -194,8 +194,8 @@ async fn create_provider_session(
                 endpoint,
                 working_directory: proof.workspace.clone(),
                 access: RouterAccess::WriteRestricted,
-                created_by: creator.clone(),
-                approver: Some(approver.clone()),
+                created_by: ConversationCreateActor::Session(creator.clone()),
+                approver: Some(ConversationCreateActor::Session(approver.clone())),
                 generation: None,
                 model: None,
                 mode: None,
