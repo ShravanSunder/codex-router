@@ -72,7 +72,7 @@ fn event_notification(
                 }
                 TurnOutcome::Lost { reason } if reason == "endNotObservable" => (
                     ProfileState::Idle,
-                    ProfileTurn::Failed {
+                    ProfileTurn::Lost {
                         turn_id: turn_id.clone(),
                         reason: reason.clone(),
                     },
@@ -440,5 +440,27 @@ mod state_tests {
             json!({"status":"interrupted","turnId":"turn-1","stopReason":"cancelled"})
         );
         assert!(active_turn.is_none());
+
+        let _started_again =
+            event_notification(&started, &session, true, &mut item_text, &mut active_turn);
+        let not_observable = SessionEvent::TurnEnded {
+            turn_id: "turn-1".into(),
+            outcome: TurnOutcome::Lost {
+                reason: "endNotObservable".into(),
+            },
+        };
+        let lost_frame = event_notification(
+            &not_observable,
+            &session,
+            true,
+            &mut item_text,
+            &mut active_turn,
+        )
+        .expect("lost turn state");
+        assert_eq!(lost_frame["params"]["state"], "idle");
+        assert_eq!(
+            lost_frame["params"]["turn"],
+            json!({"status":"lost","turnId":"turn-1","reason":"endNotObservable"})
+        );
     }
 }
