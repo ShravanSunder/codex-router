@@ -28,7 +28,7 @@ assert request['method']=='session/new'
 current={'mode':'auto','model':'a','effort':'low'}
 def options(): return [
     option('mode',current['mode'],['auto','ask'],'mode'),
-    option('model',current['model'],['a','b'],'model'),
+    option('model',current['model'],['a'] if current['mode']=='auto' else ['a','b'],'model'),
     option('effort',current['effort'],['low','high'],'thought_level')]
 send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session','configOptions':options()}})
 seen=[]
@@ -92,6 +92,33 @@ else:
     assert prompt['method']=='session/prompt',prompt
     with open(receipt,'w') as output: output.write('prompt-after-accept')
     send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+
+const LEGACY_MODE_FIXTURE: &str = r#"
+import json,sys
+receipt=sys.argv[1]
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{
+    'protocolVersion':1,'agentCapabilities':{},
+    'agentInfo':{'name':'legacy-mode-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+send({'jsonrpc':'2.0','id':request['id'],'result':{
+    'sessionId':'fixture-session',
+    'modes':{'currentModeId':'auto','availableModes':[
+        {'id':'auto','name':'Auto'},{'id':'ask','name':'Ask'}]}}})
+set_mode=read()
+assert set_mode['method']=='session/set_mode',set_mode
+assert set_mode['params']['modeId']=='ask',set_mode
+send({'jsonrpc':'2.0','id':set_mode['id'],'result':{}})
+prompt=read()
+assert prompt['method']=='session/prompt',prompt
+with open(receipt,'w') as output: output.write('mode-before-prompt')
+send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
 "#;
 
@@ -367,5 +394,50 @@ async fn partial_setup_can_be_resolved_by_setting_the_failed_value() {
     assert_eq!(
         std::fs::read_to_string(receipt).expect("prompt receipt"),
         "prompt-after-accept"
+    );
+}
+
+/// Oracle: ACP v1 session modes are the fallback only when no mode config
+/// option is offered (specification R14; session-modes.mdx).
+#[tokio::test]
+async fn legacy_mode_is_selected_before_prompt_when_no_mode_config_exists() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let receipt = root.path().join("legacy-mode.txt");
+    let client = AgentSessionClient::initialize(
+        ExternalProviderLaunch {
+            executable: PathBuf::from("python3"),
+            arguments: vec![
+                "-u".to_owned(),
+                "-c".to_owned(),
+                LEGACY_MODE_FIXTURE.to_owned(),
+                receipt.to_string_lossy().into_owned(),
+            ],
+            environment: Vec::new(),
+            persistence_target: ProviderPersistenceTarget::Unspecified,
+        },
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let created = client
+        .create_session_with_settings(
+            root.path().to_path_buf(),
+            RequestedProviderSettings {
+                mode: Some("ask".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("mode applied");
+    assert_eq!(created.effective_settings.mode.as_deref(), Some("ask"));
+    let prompt = client
+        .prompt_with_approval_context(created.provider_session_id, "Proceed".to_owned(), ())
+        .await;
+    client.shutdown().await;
+    assert!(prompt.is_ok(), "prompt result: {prompt:?}");
+    assert_eq!(
+        std::fs::read_to_string(receipt).expect("receipt"),
+        "mode-before-prompt"
     );
 }

@@ -9,12 +9,14 @@ impl<P: InteractionPort> AgentSessionClient<P> {
     }
 
     pub async fn capability_report(&self, provider_session_id: &str) -> ProviderCapabilityReport {
-        self.session_capabilities
+        let report = self
+            .session_capabilities
             .read()
             .await
             .get(provider_session_id)
             .cloned()
-            .unwrap_or_else(|| self.base_capabilities.clone())
+            .unwrap_or_else(|| self.base_capabilities.clone());
+        report.with_auth_status(self.auth_status.read().await.clone())
     }
 
     pub async fn settings_catalog(
@@ -150,8 +152,30 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         prompt: String,
         context: P::Context,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_with_approval_dispatch(provider_session_id, prompt, context, None)
-            .await
+        self.prompt_with_approval_context_for_input(
+            provider_session_id,
+            InputId::generate(),
+            prompt,
+            context,
+        )
+        .await
+    }
+
+    pub async fn prompt_with_approval_context_for_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        prompt: String,
+        context: P::Context,
+    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
+        self.prompt_with_approval_dispatch_for_input(
+            provider_session_id,
+            input_id,
+            prompt,
+            context,
+            None,
+        )
+        .await
     }
 
     pub async fn create_session(
@@ -195,11 +219,99 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         provider_session_id: String,
         cwd: PathBuf,
     ) -> Result<(), ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_load {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/load",
+            });
+        }
+        self.restore_session(
+            provider_session_id,
+            cwd,
+            super::provider_session_restore::RestoreHistoryMode::Replay,
+        )
+        .await
+    }
+
+    pub async fn resume_session(
+        &self,
+        provider_session_id: String,
+        cwd: PathBuf,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_resume {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/resume",
+            });
+        }
+        self.restore_session(
+            provider_session_id,
+            cwd,
+            super::provider_session_restore::RestoreHistoryMode::WithoutReplay,
+        )
+        .await
+    }
+
+    async fn restore_session(
+        &self,
+        provider_session_id: String,
+        cwd: PathBuf,
+        mode: super::provider_session_restore::RestoreHistoryMode,
+    ) -> Result<(), ExternalProviderRuntimeError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
-            .send(ProviderCommand::Load {
+            .send(ProviderCommand::Restore {
                 provider_session_id,
                 cwd,
+                mode,
+                reply,
+            })
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+        result
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+    }
+
+    pub async fn list_sessions(
+        &self,
+        cwd: Option<PathBuf>,
+    ) -> Result<Vec<super::ProviderSessionSummary>, ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_list {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/list",
+            });
+        }
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::List { cwd, reply })
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+        result
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+    }
+
+    pub async fn close_session(
+        &self,
+        provider_session_id: String,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_close {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/close",
+            });
+        }
+        if self.session_activity(provider_session_id.clone()).await?
+            == ProviderSessionActivity::Running
+        {
+            match self.cancel_active_prompt(provider_session_id.clone()).await {
+                Ok(()) | Err(ExternalProviderRuntimeError::LocalNotFound) => {}
+                Err(error) => return Err(error),
+            }
+            self.wait_session_idle(provider_session_id.clone()).await?;
+        }
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::Close {
+                provider_session_id,
                 reply,
             })
             .await
@@ -214,6 +326,16 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         provider_session_id: String,
         prompt: String,
     ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
+        self.steer_with_input(provider_session_id, InputId::generate(), prompt)
+            .await
+    }
+
+    pub async fn steer_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        prompt: String,
+    ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
         if !self.admission.supports_steering {
             return Err(ExternalProviderRuntimeError::UnsupportedSteering);
         }
@@ -221,6 +343,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         self.commands
             .send(ProviderCommand::Steer {
                 provider_session_id,
+                input_id,
                 prompt,
                 reply,
             })

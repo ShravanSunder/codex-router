@@ -1,6 +1,9 @@
 //! Capability report derived from ACP advertisements.
 
 use agent_client_protocol::schema::v1::{InitializeResponse, NewSessionResponse};
+use session_event_model::{
+    CapabilityReport, PromptContentCapabilities, ProviderAuthStatus, QueueCapability, QueueSupport,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProviderCapabilityReport {
@@ -18,6 +21,7 @@ pub struct ProviderCapabilityReport {
     pub accepts_image: bool,
     pub accepts_audio: bool,
     pub accepts_embedded_resource: bool,
+    pub auth_status: ProviderAuthStatus,
 }
 
 impl ProviderCapabilityReport {
@@ -38,6 +42,7 @@ impl ProviderCapabilityReport {
             accepts_image: advertised.prompt_capabilities.image,
             accepts_audio: advertised.prompt_capabilities.audio,
             accepts_embedded_resource: advertised.prompt_capabilities.embedded_context,
+            auth_status: ProviderAuthStatus::NotReported,
         }
     }
 
@@ -48,6 +53,36 @@ impl ProviderCapabilityReport {
         report.supports_steering |= advertises_steering(response.meta.as_ref());
         report
     }
+
+    pub(crate) fn with_auth_status(&self, auth_status: ProviderAuthStatus) -> Self {
+        let mut report = self.clone();
+        report.auth_status = auth_status;
+        report
+    }
+
+    pub(crate) fn to_session_model(&self) -> CapabilityReport {
+        CapabilityReport {
+            load: self.supports_load,
+            resume: self.supports_resume,
+            close: self.supports_close,
+            list: self.supports_list,
+            steer: self.supports_steering,
+            queue: self.router_queue.then_some(QueueSupport {
+                kind: QueueCapability::Router,
+                can_cancel: self.supports_cancel_queued,
+            }),
+            modes: self.supports_modes,
+            config_options: self.supports_config_options,
+            elicitation: self.supports_elicitation,
+            usage: self.supports_usage,
+            prompt_content: PromptContentCapabilities {
+                image: self.accepts_image,
+                audio: self.accepts_audio,
+                embedded_context: self.accepts_embedded_resource,
+            },
+            auth_status: self.auth_status.clone(),
+        }
+    }
 }
 
 fn advertises_steering(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
@@ -55,4 +90,20 @@ fn advertises_steering(meta: Option<&serde_json::Map<String, serde_json::Value>>
         .and_then(|steering| steering.get("supported"))
         .and_then(serde_json::Value::as_bool)
         == Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use session_event_model::ProviderAuthStatus;
+
+    /// Oracle: specification E13/R23 keeps connection auth status separate
+    /// from Session state and reports silence as notReported.
+    #[test]
+    fn connection_auth_status_starts_unreported() {
+        assert_eq!(
+            ProviderCapabilityReport::default().auth_status,
+            ProviderAuthStatus::NotReported
+        );
+    }
 }

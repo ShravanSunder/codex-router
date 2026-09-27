@@ -3,56 +3,7 @@
 use super::*;
 
 impl<P: InteractionPort> AgentSessionClient<P> {
-    pub async fn initialize(
-        launch: ExternalProviderLaunch,
-        interaction_port: Arc<P>,
-        event_sink: Arc<dyn SessionEventSink>,
-    ) -> Result<Self, ExternalProviderRuntimeError> {
-        Self::initialize_with_timeout_and_mcp_servers(
-            launch,
-            INITIALIZE_TIMEOUT,
-            Vec::new(),
-            interaction_port,
-            event_sink,
-        )
-        .await
-    }
-
-    pub async fn initialize_with_mcp_http(
-        launch: ExternalProviderLaunch,
-        server_name: impl Into<String>,
-        server_url: impl Into<String>,
-        interaction_port: Arc<P>,
-        event_sink: Arc<dyn SessionEventSink>,
-    ) -> Result<Self, ExternalProviderRuntimeError> {
-        Self::initialize_with_timeout_and_mcp_servers(
-            launch,
-            INITIALIZE_TIMEOUT,
-            vec![McpServer::Http(McpServerHttp::new(server_name, server_url))],
-            interaction_port,
-            event_sink,
-        )
-        .await
-    }
-
-    #[cfg(any(test, feature = "test-observation"))]
-    pub async fn initialize_with_timeout(
-        launch: ExternalProviderLaunch,
-        initialize_timeout: Duration,
-        interaction_port: Arc<P>,
-        event_sink: Arc<dyn SessionEventSink>,
-    ) -> Result<Self, ExternalProviderRuntimeError> {
-        Self::initialize_with_timeout_and_mcp_servers(
-            launch,
-            initialize_timeout,
-            Vec::new(),
-            interaction_port,
-            event_sink,
-        )
-        .await
-    }
-
-    async fn initialize_with_timeout_and_mcp_servers(
+    pub(super) async fn initialize_with_timeout_and_mcp_servers(
         launch: ExternalProviderLaunch,
         initialize_timeout: Duration,
         configured_mcp_servers: Vec<McpServer>,
@@ -79,6 +30,13 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             ProviderCapabilityReport,
         >::new()));
         let task_session_capabilities = Arc::clone(&session_capabilities);
+        let auth_status = Arc::new(tokio::sync::RwLock::new(
+            session_event_model::ProviderAuthStatus::NotReported,
+        ));
+        let task_auth_status = Arc::clone(&auth_status);
+        let callback_auth_status = Arc::clone(&auth_status);
+        let callback_session_capabilities = Arc::clone(&session_capabilities);
+        let callback_event_sink = Arc::clone(&event_sink);
         let session_settings = Arc::new(tokio::sync::RwLock::new(HashMap::<
             String,
             crate::ProviderSettingsCatalog,
@@ -91,7 +49,14 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             crate::ProviderSettingKind,
         >::new()));
         let task_settings_unresolved = Arc::clone(&settings_unresolved);
-        let task_settings_handles = ProviderSessionSettingsHandles {
+        let tool_registry = Arc::new(ProviderToolCallRegistry::default());
+        let task_tool_registry = Arc::clone(&tool_registry);
+        let todo_state = Arc::new(CursorTodoState::default());
+        let task_todo_state = Arc::clone(&todo_state);
+        let task_runtime_handles = ProviderSessionRuntimeHandles {
+            event_sink: Arc::clone(&event_sink),
+            tool_registry: Arc::clone(&tool_registry),
+            todo_state: Arc::clone(&todo_state),
             session_settings: Arc::clone(&task_session_settings),
             last_settings_catalog: Arc::clone(&task_last_settings_catalog),
             settings_unresolved: Arc::clone(&task_settings_unresolved),
@@ -170,6 +135,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             let final_interaction_port = Arc::clone(&callback_interaction_port);
             let connection = Client.builder().name("codex-router-host")
                 .with_handler(ProviderRequestSessionGuard::new(request_known_sessions))
+                .with_handler(ToolCallOwnershipHandler::new(Arc::clone(&tool_registry)))
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, connection| {
                         #[cfg(any(test, feature = "test-observation"))]
@@ -206,6 +172,16 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
+                .with_handler(ProviderAuthStatusHandler::new(
+                    callback_auth_status,
+                    callback_session_capabilities,
+                    callback_event_sink,
+                ))
+                .with_handler(ProviderCursorTodoHandler::new(
+                    tool_registry,
+                    todo_state,
+                    Arc::clone(&task_event_sink),
+                ))
                 .with_handler(ProviderRequestFallback)
                 .connect_with(
                 Lines::new(outgoing, incoming),
@@ -270,6 +246,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                         let mut admission_tasks = tokio::task::JoinSet::new();
                         let (admission_tx, mut admission_rx) = tokio::sync::mpsc::channel(32);
                         let mut pending_loads = std::collections::HashSet::<String>::new();
+                        let mut pending_closes = std::collections::HashSet::<String>::new();
                         let Some(base_capabilities) = base_capabilities else { return Ok(()); };
                         loop {
                             tokio::select! {
@@ -292,6 +269,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             if let Ok(created) = &mut result {
                                                 known_sessions.track(created.provider_session_id.clone()).await;
                                                 if let Some(report) = report {
+                                                    let report = report.with_auth_status(task_auth_status.read().await.clone());
                                                     task_session_capabilities.write().await.insert(created.provider_session_id.clone(), report);
                                                 }
                                                 if let Some(catalog) = catalog {
@@ -314,7 +292,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             });
                                             let _result = reply.send(result);
                                         }
-                                        PendingSessionAdmission::Load { provider_session_id, result, reply } => {
+                                        PendingSessionAdmission::Restore { provider_session_id, result, reply } => {
                                             pending_loads.remove(&provider_session_id);
                                             let report = result.as_ref().as_ref().ok().map(|session| {
                                                 base_capabilities.with_session_response(&session.response())
@@ -330,18 +308,32 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     &mut session_tasks,
                                                     task_shutdown.clone(),
                                                     Arc::clone(&task_frame_observation),
-                                                    task_settings_handles.clone(),
+                                                    task_runtime_handles.clone(),
                                                     #[cfg(any(test, feature = "test-observation"))] Arc::clone(&session_test_tool_calls),
                                                 )
                                             }).map(|_| ());
                                             if result.is_err() {
                                                 known_sessions.forget(&provider_session_id).await;
                                             } else if let Some(report) = report {
+                                                let report = report.with_auth_status(task_auth_status.read().await.clone());
                                                 task_session_capabilities.write().await.insert(provider_session_id.clone(), report);
                                                 if let Some(catalog) = catalog {
                                                     task_session_settings.write().await.insert(provider_session_id.clone(), catalog.clone());
                                                     *task_last_settings_catalog.write().await = Some(catalog);
                                                 }
+                                            }
+                                            let _result = reply.send(result);
+                                        }
+                                        PendingSessionAdmission::Close { provider_session_id, result, reply } => {
+                                            pending_closes.remove(&provider_session_id);
+                                            if result.is_ok() {
+                                                sessions.remove(&provider_session_id);
+                                                known_sessions.forget(&provider_session_id).await;
+                                                task_session_capabilities.write().await.remove(&provider_session_id);
+                                                task_session_settings.write().await.remove(&provider_session_id);
+                                                task_settings_unresolved.write().await.remove(&provider_session_id);
+                                                task_tool_registry.turn_ended(&provider_session_id);
+                                                task_todo_state.forget_session(&provider_session_id);
                                             }
                                             let _result = reply.send(result);
                                         }
@@ -364,7 +356,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             let pending_admission_tx = admission_tx.clone();
                                             let supports_close = base_capabilities.supports_close;
                                             let pending_frame_observation = Arc::clone(&task_frame_observation);
-                                            let pending_settings_handles = task_settings_handles.clone();
+                                            let pending_runtime_handles = task_runtime_handles.clone();
                                             #[cfg(any(test, feature = "test-observation"))]
                                             let pending_test_tool_calls = Arc::clone(&session_test_tool_calls);
                                             admission_tasks.spawn(async move {
@@ -377,56 +369,73 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     admission_tx: pending_admission_tx,
                                                     reply,
                                                     frame_observation: pending_frame_observation,
-                                                    settings_handles: pending_settings_handles,
+                                                    runtime_handles: pending_runtime_handles,
                                                     #[cfg(any(test, feature = "test-observation"))]
                                                     test_tool_calls: pending_test_tool_calls,
                                                 })
                                                 .await;
                                             });
                                         }
-                                        ProviderCommand::Load { provider_session_id, cwd, reply } => {
+                                        ProviderCommand::Restore { provider_session_id, cwd, mode, reply } => {
                                             if sessions.contains_key(&provider_session_id) || !pending_loads.insert(provider_session_id.clone()) {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
                                             } else {
                                                 known_sessions.track(provider_session_id.clone()).await;
-                                                let request = LoadSessionRequest::new(
-                                                    provider_session_id.clone(),
-                                                    &cwd,
-                                                )
-                                                .mcp_servers(session_mcp_servers.clone());
-                                                let pending_connection = connection.clone();
-                                                let pending_shutdown = task_shutdown.clone();
-                                                let pending_admission_tx = admission_tx.clone();
-                                                let pending_event_sink = Arc::clone(&task_event_sink);
+                                                let inputs = provider_session_restore::RestoreAdmissionInputs {
+                                                    connection: connection.clone(),
+                                                    provider_session_id,
+                                                    cwd,
+                                                    mode,
+                                                    mcp_servers: session_mcp_servers.clone(),
+                                                    shutdown: task_shutdown.clone(),
+                                                    event_sink: Arc::clone(&task_event_sink),
+                                                    admission_tx: admission_tx.clone(),
+                                                    reply,
+                                                };
                                                 admission_tasks.spawn(async move {
-                                                    let replay_started = tokio::select! {
-                                                        () = pending_shutdown.cancelled() => Err(ExternalProviderRuntimeError::TransportFailure),
-                                                        result = pending_event_sink.begin_history_replay(&provider_session_id) =>
-                                                            result.map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable),
-                                                    };
-                                                    let result = match replay_started {
-                                                        Ok(()) => tokio::select! {
-                                                            () = pending_shutdown.cancelled() => Err(ExternalProviderRuntimeError::TransportFailure),
-                                                            result = pending_connection
-                                                            .load_session_from(request)
-                                                            .block_task()
-                                                            .start_session() => result.map(|restored| restored.into_session()).map_err(acp_load_session_error),
-                                                        },
-                                                        Err(error) => Err(error),
-                                                    };
-                                                    publish_pending_session_admission(
-                                                        &pending_admission_tx,
-                                                        &pending_shutdown,
-                                                        PendingSessionAdmission::Load {
-                                                            provider_session_id,
-                                                            result: Box::new(result),
-                                                            reply,
-                                                        },
-                                                    ).await;
+                                                    provider_session_restore::run_restore_admission(inputs).await;
                                                 });
                                             }
                                         }
-                                        ProviderCommand::Prompt { provider_session_id, operation_id, prompt, dispatch, reply } => {
+                                        ProviderCommand::List { cwd, reply } => {
+                                            let pending_connection = connection.clone();
+                                            let pending_shutdown = task_shutdown.clone();
+                                            admission_tasks.spawn(async move {
+                                                let result = tokio::select! {
+                                                    () = pending_shutdown.cancelled() => Err(ExternalProviderRuntimeError::TransportFailure),
+                                                    result = provider_lifecycle_requests::list_provider_sessions(pending_connection, cwd) => result,
+                                                };
+                                                let _result = reply.send(result);
+                                            });
+                                        }
+                                        ProviderCommand::Close { provider_session_id, reply } => {
+                                            if !pending_closes.insert(provider_session_id.clone()) {
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
+                                                continue;
+                                            }
+                                            let pending_connection = connection.clone();
+                                            let pending_shutdown = task_shutdown.clone();
+                                            let pending_admission_tx = admission_tx.clone();
+                                            admission_tasks.spawn(async move {
+                                                let result = tokio::select! {
+                                                    () = pending_shutdown.cancelled() => Err(ExternalProviderRuntimeError::TransportFailure),
+                                                    result = provider_lifecycle_requests::close_provider_session(pending_connection, provider_session_id.clone()) => result,
+                                                };
+                                                publish_pending_session_admission(
+                                                    &pending_admission_tx,
+                                                    &pending_shutdown,
+                                                    PendingSessionAdmission::Close { provider_session_id, result, reply },
+                                                ).await;
+                                            });
+                                        }
+                                        ProviderCommand::Prompt { provider_session_id, input_id, operation_id, prompt, dispatch, reply } => {
+                                            if pending_closes.contains(&provider_session_id) {
+                                                if let Some(dispatch) = dispatch {
+                                                    let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
+                                                }
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
+                                                continue;
+                                            }
                                             if task_settings_unresolved.read().await.contains_key(&provider_session_id) {
                                                 if let Some(dispatch) = dispatch {
                                                     let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
@@ -442,7 +451,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 continue;
                                             };
                                             let turn_cancellation = operation_id.as_ref().and_then(|operation_id| active_turn_cancellation(&task_approval_contexts, &task_interaction_port, &provider_session_id, Some(operation_id)));
-                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, turn_cancellation, dispatch, reply }).await
+                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { input_id, operation_id, prompt, turn_cancellation, dispatch, reply }).await
                                                 && let ProviderSessionCommand::Prompt { dispatch: Some(dispatch), .. } = error.0
                                             {
                                                 let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
@@ -455,7 +464,11 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             };
                                             let _result = session.send(ProviderSessionCommand::Cancel { expected_operation_id, reply }).await;
                                         }
-                                        ProviderCommand::Steer { provider_session_id, prompt, reply } => {
+                                        ProviderCommand::Steer { provider_session_id, input_id, prompt, reply } => {
+                                            if pending_closes.contains(&provider_session_id) {
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
+                                                continue;
+                                            }
                                             if task_settings_unresolved.read().await.contains_key(&provider_session_id) {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::SettingsUnresolved));
                                                 continue;
@@ -464,7 +477,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                                                 continue;
                                             };
-                                            let _result = session.send(ProviderSessionCommand::Steer { prompt, reply }).await;
+                                            let _result = session.send(ProviderSessionCommand::Steer { input_id, prompt, reply }).await;
                                         }
                                         ProviderCommand::InspectSession { provider_session_id, reply } => {
                                             let Some(session) = sessions.get(&provider_session_id) else {
@@ -481,6 +494,10 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             let _result = session.send(ProviderSessionCommand::WaitIdle { reply }).await;
                                         }
                                         ProviderCommand::SetSetting { provider_session_id, kind, value, reply } => {
+                                            if pending_closes.contains(&provider_session_id) {
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
+                                                continue;
+                                            }
                                             let Some(session) = sessions.get(&provider_session_id) else {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                                                 continue;
@@ -555,6 +572,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             admission,
             base_capabilities,
             session_capabilities,
+            auth_status,
             session_settings,
             last_settings_catalog,
             settings_unresolved,

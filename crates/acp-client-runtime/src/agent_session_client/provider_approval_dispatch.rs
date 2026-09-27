@@ -4,12 +4,31 @@ use super::{
     ActiveApprovalContext, AgentSessionClient, ApprovalContextGuard, ExternalProviderPromptOutcome,
     ExternalProviderRuntimeError, ProviderPromptDispatchObservation,
 };
+use session_event_model::InputId;
 use std::sync::Arc;
 
 impl<P: crate::InteractionPort> AgentSessionClient<P> {
     pub async fn prompt_with_approval_dispatch(
         &self,
         provider_session_id: String,
+        prompt: String,
+        context: P::Context,
+        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
+    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
+        self.prompt_with_approval_dispatch_for_input(
+            provider_session_id,
+            InputId::generate(),
+            prompt,
+            context,
+            dispatch,
+        )
+        .await
+    }
+
+    pub async fn prompt_with_approval_dispatch_for_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
         prompt: String,
         context: P::Context,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
@@ -39,8 +58,9 @@ impl<P: crate::InteractionPort> AgentSessionClient<P> {
             operation_id: operation_id.clone(),
         };
         let prompt_result = self
-            .prompt_for_operation(
+            .prompt_for_operation_with_input(
                 provider_session_id,
+                input_id,
                 Some(operation_id.clone()),
                 prompt,
                 dispatch,
