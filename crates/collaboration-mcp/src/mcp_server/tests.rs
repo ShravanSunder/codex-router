@@ -1,4 +1,6 @@
-use super::{CollaborationMcpServer, conversation_create_tool_result};
+use super::{
+    CollaborationMcpServer, ConversationCreateToolRequest, conversation_create_tool_result,
+};
 use collaboration_protocol::{ConversationCreateOutcome, DeliveryReceipt, OperationId};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -462,6 +464,13 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
     });
     let create_validator = jsonschema::validator_for(&create_schema).expect("create schema");
     assert!(create_validator.is_valid(&provider_create));
+    let human = serde_json::json!({"kind":"human","humanId":"fixture-owner"});
+    let mut provider_with_human = provider_create.clone();
+    provider_with_human["createdBy"] = human.clone();
+    provider_with_human["approver"] = human;
+    assert!(create_validator.is_valid(&provider_with_human));
+    let _: ConversationCreateToolRequest =
+        serde_json::from_value(provider_with_human).expect("typed Human MCP create input");
     let mut provider_with_model = provider_create.clone();
     provider_with_model["model"] = serde_json::json!("gpt-5.6-sol");
     assert!(!create_validator.is_valid(&provider_with_model));
