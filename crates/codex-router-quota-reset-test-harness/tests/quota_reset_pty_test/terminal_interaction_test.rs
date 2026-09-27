@@ -95,8 +95,25 @@ impl TerminalDriver {
         })
     }
 
-    pub(super) const fn transcript_len(&self) -> usize {
+    pub(super) fn transcript_len(&mut self) -> usize {
+        self.drain_pending_output();
         self.transcript.len()
+    }
+
+    pub(super) fn safe_semantic_diagnostics(&mut self, start: usize) -> String {
+        self.drain_pending_output();
+        let child_running = self.child_is_running().ok();
+        let tail = self.transcript.get(start..).unwrap_or_default();
+        let visible_text = String::from_utf8_lossy(tail);
+        format!(
+            "tail_bytes={} inspecting_footer={} browse_footer={} reset_title={} eof={} child_running={:?}",
+            tail.len(),
+            visible_text.contains("esc/ctrl-r back"),
+            visible_text.contains("ctrl-r reset credits"),
+            visible_text.contains("Reset credit"),
+            self.reached_eof,
+            child_running,
+        )
     }
 
     pub(super) fn wait_for_text_after(
@@ -244,6 +261,15 @@ impl TerminalDriver {
         }
         Ok(())
     }
+
+    fn drain_pending_output(&mut self) {
+        while let Ok(event) = self.output_receiver.try_recv() {
+            match event {
+                ReaderEvent::Bytes(bytes) => self.transcript.extend(bytes),
+                ReaderEvent::Eof => self.reached_eof = true,
+            }
+        }
+    }
 }
 
 impl Drop for TerminalDriver {
@@ -260,5 +286,34 @@ impl Drop for TerminalDriver {
         if let Some(reader_thread) = self.reader_thread.take() {
             let _ = reader_thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_boundary_includes_bytes_already_queued_by_pty_reader() -> TestResult<()> {
+        let (output_sender, output_receiver) = mpsc::channel();
+        let queued_frame = b"Reset credit".to_vec();
+        output_sender.send(ReaderEvent::Bytes(queued_frame.clone()))?;
+        let mut terminal = TerminalDriver {
+            master: None,
+            writer: None,
+            child: None,
+            output_receiver,
+            reader_thread: None,
+            transcript: Vec::new(),
+            reached_eof: false,
+        };
+
+        if terminal.transcript_len() != queued_frame.len() {
+            return Err(std::io::Error::other(
+                "transcript boundary excluded bytes already queued by PTY reader",
+            )
+            .into());
+        }
+        Ok(())
     }
 }
