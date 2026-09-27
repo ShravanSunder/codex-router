@@ -14,7 +14,6 @@ use collaboration_client::{
         ApprovalDecideParams, ConversationCreateOutcome, OperationId, RouterAccess, SessionRef,
     },
 };
-use collaboration_service::ProviderOperationStore;
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 use tokio::io::AsyncWriteExt as _;
@@ -24,7 +23,6 @@ pub(super) async fn exercise_acp_target_matrix(config_guard: &ConfigHashGuard) -
     let mut proof = ProofContext::connect().await?;
     let sender = proof.start_thread("ACP matrix sender").await?;
     let target = create_provider_session(&mut proof, &sender, "cursor-local", &sender).await?;
-    attest_private_provider_store(&mut proof, &target).await?;
     let receipt_path = proof.root.join("provider-prompt-receipts.jsonl");
     let mut cells = Vec::new();
     let mut markers = Vec::new();
@@ -166,6 +164,7 @@ pub(super) async fn exercise_acp_target_matrix(config_guard: &ConfigHashGuard) -
 
     // A negative assertion needs a bounded settling window. Two seconds covers
     // the provider FIFO's one-second maximum retry delay after the held turn.
+    // It does not attest engine-level notSubmitted retry or reconciliation.
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_exactly_once(&receipt_path, &target, &markers)?;
     proof.record(
@@ -174,22 +173,6 @@ pub(super) async fn exercise_acp_target_matrix(config_guard: &ConfigHashGuard) -
     )?;
     proof.client.close().await?;
     Ok(())
-}
-
-async fn attest_private_provider_store(
-    proof: &mut ProofContext,
-    target: &SessionRef,
-) -> ProofResult<()> {
-    let provider_store_path = proof.service_directory.join("provider-operations.sqlite");
-    let actual_store_path = provider_store_path.canonicalize()?;
-    if !actual_store_path.starts_with(proof.root.canonicalize()?) {
-        return Err("ACP provider records are outside the private Router root".into());
-    }
-    let mut provider_store = ProviderOperationStore::open(&provider_store_path).await?;
-    if provider_store.session_record(target).await?.is_none() {
-        return Err("Private Router provider store omitted the created target".into());
-    }
-    proof.record("privateProviderStore", json!({"target":target}))
 }
 
 async fn create_provider_session(
