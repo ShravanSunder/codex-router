@@ -155,14 +155,23 @@ async fn idle_mode_config_unknown_and_late_tool_updates_are_projected() {
     assert_eq!(catalog.effective_settings().model.as_deref(), Some("b"));
 
     client
-        .prompt(session_id.clone(), "Run".to_owned())
+        .prompt_contents_with_approval_dispatch_for_input(
+            session_id.clone(),
+            session_event_model::InputId::generate(),
+            vec![session_event_model::PromptContent::text("Run".to_owned()).expect("text prompt")],
+            (),
+            None,
+        )
         .await
         .expect("prompt ends");
     let steering = client
-        .steer_with_input(
+        .steer_contents_with_input(
             session_id,
             session_event_model::InputId::generate(),
-            "Continue".to_owned(),
+            vec![
+                session_event_model::PromptContent::text("Continue".to_owned())
+                    .expect("text steer"),
+            ],
         )
         .await
         .expect("idle steer");

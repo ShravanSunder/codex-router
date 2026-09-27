@@ -167,7 +167,16 @@ async fn later_auth_change_publishes_capabilities_and_logged_out_status() {
         }
     };
     let (prompt_result, capabilities) = tokio::join!(
-        client.prompt(session_id.clone(), "Proceed".to_owned()),
+        client.prompt_contents_with_approval_dispatch_for_input(
+            session_id.clone(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Proceed".to_owned())
+                    .expect("text prompt")
+            ],
+            (),
+            None
+        ),
         tokio::time::timeout(std::time::Duration::from_secs(2), receive_auth_change),
     );
     let capabilities = capabilities.expect("auth notification was handled");

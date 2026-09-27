@@ -159,7 +159,13 @@ async fn cursor_question_preserves_choice_ids_and_answer_shape() {
         .expect("session opens");
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        client.prompt_with_approval_context(session_id, "Ask".to_owned(), ()),
+        client.prompt_contents_with_approval_dispatch_for_input(
+            session_id,
+            session_event_model::InputId::generate(),
+            vec![session_event_model::PromptContent::text("Ask".to_owned()).expect("text prompt")],
+            (),
+            None,
+        ),
     )
     .await
     .expect("question exchange completes")

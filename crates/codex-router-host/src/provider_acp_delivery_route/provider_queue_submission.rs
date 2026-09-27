@@ -41,15 +41,19 @@ impl ProviderAcpDeliveryRoute {
             input_id.clone(),
             &request.message,
         );
-        permit.send(ConversationPromptRequest {
-            operation_id: operation_id.clone(),
-            input_id: Some(input_id),
-            target: request.target.clone(),
-            generation: Some(binding.generation.clone()),
-            requested_by,
-            approver: record.approver,
-            prompt: request.message.clone(),
-        });
+        permit.send(
+            crate::provider_acp_message_fifo::ProviderQueuedPrompt::Message(
+                ConversationPromptRequest {
+                    operation_id: operation_id.clone(),
+                    input_id: Some(input_id),
+                    target: request.target.clone(),
+                    generation: Some(binding.generation.clone()),
+                    requested_by,
+                    approver: record.approver,
+                    prompt: request.message.clone(),
+                },
+            ),
+        );
         Ok(Self::receipt(
             DeliveryOutcome::Queued,
             Some(operation_id.clone()),

@@ -21,7 +21,10 @@ mod provider_queue_operation_registry;
 pub use provider_queue_operation_registry::{ProviderQueueCancellationError, ProviderQueuedInput};
 mod provider_model_catalog;
 mod provider_session_event_sink;
-pub use provider_acp_delivery_route::ProviderAcpDeliveryRoute;
+pub use provider_acp_delivery_route::{
+    ProviderAcpDeliveryRoute, ProviderPromptContentsError, ProviderQueueAdmissionError,
+    ProviderSteerContentsError,
+};
 mod provider_acp_scheduled_runs;
 mod provider_acp_session_loading;
 pub use external_provider_runtime::{
@@ -29,7 +32,9 @@ pub use external_provider_runtime::{
     ExternalProviderPromptOutcome, ExternalProviderRuntime, ExternalProviderRuntimeError,
 };
 mod external_provider_supervisor;
-pub use external_provider_supervisor::{ExternalProviderBinding, ExternalProviderSupervisor};
+pub use external_provider_supervisor::{
+    ExternalProviderBinding, ExternalProviderSupervisor, ProviderPromptContentsRequest,
+};
 mod host_configuration;
 mod host_replacement_activation;
 mod host_singleton_authority;

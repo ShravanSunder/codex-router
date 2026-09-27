@@ -80,7 +80,7 @@ pub(crate) enum ProviderSessionCommand<P: InteractionPort> {
     },
     Steer {
         input_id: InputId,
-        prompt: String,
+        prompt: ProviderPromptContent,
         reply: tokio::sync::oneshot::Sender<
             Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError>,
         >,
@@ -382,14 +382,14 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
 async fn steer_provider_turn<P: InteractionPort>(
     connection: &ConnectionTo<Agent>,
     session_id: &agent_client_protocol::schema::v1::SessionId,
-    prompt: String,
+    prompt: ProviderPromptContent,
     running_operation_id: Option<P::OperationId>,
 ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
     let message = UntypedMessage::new(
         "_session/steering",
         json!({
             "sessionId": session_id.to_string(),
-            "prompt": [{ "type": "text", "text": prompt }],
+            "prompt": prompt.into_blocks(),
             "_meta": { "steering": { "idleBehavior": "promptRequired" } },
         }),
     )

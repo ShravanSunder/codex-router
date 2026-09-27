@@ -1107,7 +1107,7 @@ async fn explicit_cancel_remains_responsive_while_prompt_is_active() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn permission_request_is_counted_once_and_cancelled_without_payload_retention() {
+async fn unavailable_broker_refuses_permission_once_without_payload_retention() {
     let runtime = ExternalProviderRuntime::initialize(permission_request_fixture())
         .await
         .expect("fixture initializes");
@@ -1125,14 +1125,17 @@ async fn permission_request_is_counted_once_and_cancelled_without_payload_retent
         .await
         .expect("prompt settles after permission cancellation");
     assert_eq!(outcome.stop_reason, ProviderPromptStopReason::EndTurn);
-    assert_eq!(outcome.permission_refusal_reason, None);
+    assert_eq!(
+        outcome.permission_refusal_reason,
+        Some(ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable)
+    );
     assert_eq!(
         runtime.approval_refusal_warnings(),
         vec![ExternalProviderApprovalRefusalWarning {
             endpoint: "cursor-local".to_owned(),
             provider_session_id: "fixture-session".to_owned(),
             method: "session/request_permission",
-            reason_code: ExternalProviderApprovalRefusalReason::MissingPromptContext,
+            reason_code: ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable,
         }]
     );
     assert_eq!(

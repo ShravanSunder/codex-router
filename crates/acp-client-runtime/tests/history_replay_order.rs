@@ -212,7 +212,16 @@ async fn live_update_continues_replayed_item_projection() {
     assert_eq!(catalog.effective_settings().mode.as_deref(), Some("ask"));
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        client.prompt("fixture-session".to_owned(), "Continue".to_owned()),
+        client.prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Continue".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        ),
     )
     .await
     .expect("prompt settles")
