@@ -1,7 +1,13 @@
 //! Restore one Session with or without agent history replay.
 
 use super::*;
-use agent_client_protocol::schema::v1::ResumeSessionRequest;
+use agent_client_protocol::schema::v1::{ResumeSessionRequest, SessionNotification, SessionUpdate};
+use agent_client_protocol::{Dispatch, SessionMessage};
+use futures_util::FutureExt as _;
+use session_event_model::{InputId, SessionEvent, StopReason, TurnOutcome};
+
+use crate::provider_item_projection::ProviderItemProjection;
+use crate::provider_update_kind::{is_known_update_kind, safe_update_kind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RestoreHistoryMode {
@@ -51,7 +57,11 @@ pub(super) async fn run_restore_admission<P: InteractionPort>(inputs: RestoreAdm
                 tokio::select! {
                     () = shutdown.cancelled() => Err(ExternalProviderRuntimeError::TransportFailure),
                     result = connection.load_session_from(request).block_task().start_session() =>
-                        result.map(|restored| restored.into_session()).map_err(acp_load_session_error),
+                        result.map_err(acp_load_session_error).and_then(|restored| {
+                            let mut session = restored.into_session();
+                            replay_queued_session_updates(&mut session, Arc::clone(&event_sink))?;
+                            Ok(session)
+                        }),
                 }
             }
             RestoreHistoryMode::WithoutReplay => {
@@ -75,4 +85,104 @@ pub(super) async fn run_restore_admission<P: InteractionPort>(inputs: RestoreAdm
         },
     )
     .await;
+}
+
+fn replay_queued_session_updates(
+    session: &mut ActiveSession<'static, Agent>,
+    event_sink: Arc<dyn SessionEventSink>,
+) -> Result<(), ExternalProviderRuntimeError> {
+    let session_id = session.session_id().to_string();
+    let mut projection = ProviderItemProjection::new(session_id.clone(), Arc::clone(&event_sink));
+    let mut historical_turn: Option<String> = None;
+    let mut saw_agent_output = false;
+    while let Some(update) = session.read_update().now_or_never() {
+        let update = update.map_err(provider_frame_decode_error)?;
+        let SessionMessage::SessionMessage(Dispatch::Notification(notification)) = update else {
+            continue;
+        };
+        if notification.method() != "session/update" {
+            continue;
+        }
+        let params = notification.params();
+        let kind = params
+            .get("update")
+            .and_then(|update| update.get("sessionUpdate"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(kind) = kind
+            && !is_known_update_kind(kind)
+        {
+            let source_kind = safe_update_kind(kind).unwrap_or("unrecognized");
+            let content = params
+                .get("update")
+                .and_then(|update| update.get("content"))
+                .and_then(|content| content.get("text"))
+                .and_then(serde_json::Value::as_str);
+            projection
+                .observe_unknown(source_kind, content)
+                .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+            continue;
+        }
+        let Ok(notification) = serde_json::from_value::<SessionNotification>(params.clone()) else {
+            tracing::warn!("malformed ACP replay update");
+            continue;
+        };
+        let user_message = matches!(notification.update, SessionUpdate::UserMessageChunk(_));
+        if user_message && (historical_turn.is_none() || saw_agent_output) {
+            end_historical_turn(
+                &mut historical_turn,
+                &mut projection,
+                &event_sink,
+                &session_id,
+            )?;
+            let turn_id = uuid::Uuid::now_v7().to_string();
+            event_sink
+                .publish(
+                    &session_id,
+                    SessionEvent::TurnStarted {
+                        turn_id: turn_id.clone(),
+                        input_id: InputId::generate(),
+                    },
+                )
+                .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+            historical_turn = Some(turn_id);
+            saw_agent_output = false;
+        } else if !user_message {
+            saw_agent_output = true;
+        }
+        projection
+            .observe(&notification.update)
+            .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+    }
+    end_historical_turn(
+        &mut historical_turn,
+        &mut projection,
+        &event_sink,
+        &session_id,
+    )
+}
+
+fn end_historical_turn(
+    turn_id: &mut Option<String>,
+    projection: &mut ProviderItemProjection,
+    event_sink: &Arc<dyn SessionEventSink>,
+    session_id: &str,
+) -> Result<(), ExternalProviderRuntimeError> {
+    projection
+        .finish()
+        .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+    if let Some(turn_id) = turn_id.take() {
+        event_sink
+            .publish(
+                session_id,
+                SessionEvent::TurnEnded {
+                    turn_id,
+                    outcome: TurnOutcome::Ended {
+                        stop_reason: StopReason::Unknown("replayed".to_owned()),
+                        local_cause: None,
+                    },
+                },
+            )
+            .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+    }
+    Ok(())
 }

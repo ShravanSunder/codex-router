@@ -12,6 +12,7 @@ mod provider_connection_task;
 mod provider_cursor_create_plan;
 mod provider_cursor_plan_items;
 mod provider_cursor_question;
+mod provider_form_elicitation;
 mod provider_frame_observation;
 mod provider_initialize_request;
 mod provider_lifecycle_requests;
@@ -68,6 +69,7 @@ use provider_cursor_create_plan::ProviderCursorCreatePlanHandler;
 pub(crate) use provider_cursor_plan_items::CursorPlanItems;
 use provider_cursor_plan_items::ProviderCursorTodoHandler;
 use provider_cursor_question::ProviderCursorQuestionHandler;
+use provider_form_elicitation::ProviderFormElicitationHandler;
 pub(crate) use provider_frame_observation::ProviderFrameObservation;
 use provider_initialize_request::initialize_provider_connection;
 use provider_request_fallback::{

@@ -174,6 +174,7 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             terminal_rx,
                             output_limit_tx,
                             Arc::clone(&frame_observation),
+                            Arc::clone(&runtime_handles.event_sink),
                             #[cfg(any(test, feature = "test-observation"))]
                             Arc::clone(&test_tool_calls),
                         ));
@@ -287,13 +288,25 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             runtime_handles.tool_registry.turn_started(session.session_id().0.as_ref());
                             if runtime_handles.event_sink.publish(
                                 session.session_id().0.as_ref(),
-                                SessionEvent::TurnStarted { turn_id, input_id },
+                                SessionEvent::TurnStarted { turn_id: turn_id.clone(), input_id },
                             ).is_err() {
                                 runtime_handles.tool_registry.turn_ended(session.session_id().0.as_ref());
                                 runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());
                                 let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
                                 return;
                             }
+                            if runtime_handles.event_sink.publish(
+                                session.session_id().0.as_ref(),
+                                SessionEvent::TurnEnded {
+                                    turn_id,
+                                    outcome: TurnOutcome::Lost { reason: "endNotObservable".to_owned() },
+                                },
+                            ).is_err() {
+                                let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
+                                return;
+                            }
+                            runtime_handles.tool_registry.turn_ended(session.session_id().0.as_ref());
+                            runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());
                         }
                         let _result = reply.send(result);
                     }

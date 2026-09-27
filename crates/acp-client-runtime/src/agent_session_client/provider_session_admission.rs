@@ -260,19 +260,3 @@ pub(super) fn fail_pending_session_admission<P: InteractionPort>(
         }
     }
 }
-
-pub(super) fn discard_queued_session_updates(
-    session: &mut ActiveSession<'static, Agent>,
-) -> Result<(), ExternalProviderRuntimeError> {
-    use futures_util::FutureExt as _;
-
-    loop {
-        match session.read_update().now_or_never() {
-            Some(Ok(_update)) => continue,
-            Some(Err(error)) => {
-                return Err(provider_frame_decode_error(error));
-            }
-            None => return Ok(()),
-        }
-    }
-}
