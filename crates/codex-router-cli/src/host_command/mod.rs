@@ -3,9 +3,8 @@
 use std::ffi::OsString;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(test)]
-use std::path::Path;
 use std::path::PathBuf;
+use std::path::{Component, Path};
 use std::time::Duration;
 
 use clap::Parser;
@@ -173,16 +172,19 @@ pub(crate) async fn run_host_command<W: Write + Send>(
                 .to_owned(),
         ));
     }
-    if command.require_debug_isolation
-        && (!cfg!(all(debug_assertions, not(test)))
-            || context.env_var(crate::USE_HOME_DEFAULT_ENV).is_some())
-    {
-        return Err(HostCommandError::RouterRoot(
-            "debug isolation requires a debug build without home-default mode".to_owned(),
-        ));
-    }
     let router_root = crate::router_root_or_default(command.router_root.clone())
         .map_err(|error| HostCommandError::RouterRoot(error.to_string()))?;
+    validate_router_root(&router_root)?;
+    let owner_home = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.dir);
+    let launch_mode = foreground_launch::HostLaunchMode::resolve(
+        &router_root,
+        context,
+        command.require_debug_isolation,
+        owner_home.as_deref(),
+    );
     let coordination_paths =
         HostCoordinationPaths::new(router_root.join("host.sock"), router_root.join("host.lock"));
     if command.runs_foreground() {
@@ -190,21 +192,12 @@ pub(crate) async fn run_host_command<W: Write + Send>(
         return foreground_launch::run_foreground_host(
             foreground_launch::ForegroundHostInputs {
                 router_root,
-                port: command.port.unwrap_or_else(|| {
-                    if cfg!(all(debug_assertions, not(test)))
-                        && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none()
-                    {
-                        18787
-                    } else {
-                        DEFAULT_HOST_PORT
-                    }
-                }),
-                mcp_bind: command.mcp_bind.unwrap_or_else(|| {
-                    default_mcp_bind(
-                        cfg!(all(debug_assertions, not(test)))
-                            && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none(),
-                    )
-                }),
+                launch_mode,
+                owner_home,
+                port: command.port.unwrap_or(launch_mode.default_port()),
+                mcp_bind: command
+                    .mcp_bind
+                    .unwrap_or(default_mcp_bind(launch_mode.is_isolated())),
                 provider_operation_retention_days: command.provider_operation_retention_days,
                 coordination_paths,
                 external_provider_launches: provider_launches,
@@ -327,6 +320,16 @@ fn external_provider_launches(
     Ok(launches)
 }
 
+fn validate_router_root(router_root: &Path) -> Result<(), HostCommandError> {
+    if router_root
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(HostCommandError::RouterRootParentSegment);
+    }
+    Ok(())
+}
+
 pub(crate) const fn default_mcp_bind(isolated_debug: bool) -> SocketAddr {
     if isolated_debug {
         SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 18788)
@@ -371,10 +374,20 @@ pub enum HostCommandError {
     OperationFailed(String),
     #[error(transparent)]
     DebugProfile(#[from] codex_native_integration::DebugProfileError),
+    #[error("isolated Host requires a readable debug profile at {path}: {source}")]
+    IsolatedDebugProfile {
+        path: PathBuf,
+        #[source]
+        source: codex_native_integration::DebugProfileError,
+    },
     #[error("failed resolving host router root: {0}")]
     RouterRoot(String),
+    #[error("host router root must not contain a '..' path segment")]
+    RouterRootParentSegment,
     #[error("HOME and CODEX_HOME are unavailable")]
     CodexHomeUnavailable,
+    #[error("isolated Host cannot verify the owner home from the passwd entry")]
+    OwnerHomeUnavailable,
     #[error("invalid debug app-server socket: {0}")]
     AppServerSocket(String),
     #[error("CODEX_ROUTER_DEBUG_LAUNCHCTL must be an absolute path")]
@@ -460,5 +473,13 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn router_root_parent_segment_is_a_typed_error() {
+        assert!(matches!(
+            validate_router_root(Path::new("/tmp/private/../router")),
+            Err(HostCommandError::RouterRootParentSegment)
+        ));
     }
 }
