@@ -134,6 +134,12 @@ pub enum ExternalProviderRuntimeError {
     LocalBusy,
     #[error("provider session settings need resolution before work can start")]
     SettingsUnresolved,
+    #[error("provider setting could not be applied")]
+    SettingFailed {
+        setting: crate::ProviderSettingKind,
+        value: String,
+        reason: String,
+    },
     #[error("provider does not advertise steering")]
     UnsupportedSteering,
     #[error("provider conversation operation is not active")]

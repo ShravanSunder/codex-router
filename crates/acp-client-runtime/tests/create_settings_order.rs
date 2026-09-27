@@ -81,6 +81,13 @@ else:
     assert set_model['method']=='session/set_config_option'
     assert set_model['params']['configId']=='model'
     send({'jsonrpc':'2.0','id':set_model['id'],'error':{'code':-32603,'message':'private agent detail'}})
+    if mode=='partial-set':
+        retry=read()
+        assert retry['method']=='session/set_config_option',retry
+        assert retry['params']['configId']=='model',retry
+        assert retry['params']['value']=='b',retry
+        options[1]=option('model','b',['a','b'])
+        send({'jsonrpc':'2.0','id':retry['id'],'result':{'configOptions':options}})
     prompt=read()
     assert prompt['method']=='session/prompt',prompt
     with open(receipt,'w') as output: output.write('prompt-after-accept')
@@ -305,6 +312,58 @@ async fn partial_setup_blocks_prompt_until_settings_are_accepted() {
         .await;
     client.shutdown().await;
     assert!(prompt.is_ok(), "prompt after accept: {prompt:?}");
+    assert_eq!(
+        std::fs::read_to_string(receipt).expect("prompt receipt"),
+        "prompt-after-accept"
+    );
+}
+
+/// Oracle: specification R14 lets the caller resolve a partial setup by
+/// applying a currently offered value before prompting.
+#[tokio::test]
+async fn partial_setup_can_be_resolved_by_setting_the_failed_value() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let receipt = root.path().join("resolved.txt");
+    let client = AgentSessionClient::initialize(
+        failure_fixture_launch("partial-set", &receipt),
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let created = client
+        .create_session_with_settings(
+            root.path().to_path_buf(),
+            RequestedProviderSettings {
+                mode: Some("ask".to_owned()),
+                model: Some("b".to_owned()),
+                effort: None,
+            },
+        )
+        .await;
+    let Err(acp_client_runtime::ExternalProviderRuntimeError::CreatedWithoutSettings {
+        provider_session_id,
+        ..
+    }) = created
+    else {
+        panic!("partial setup result: {created:?}")
+    };
+    let effective = client
+        .set_setting(
+            provider_session_id.clone(),
+            acp_client_runtime::ProviderSettingKind::Model,
+            "b".to_owned(),
+        )
+        .await
+        .expect("model setting applied");
+    assert_eq!(effective.mode.as_deref(), Some("ask"));
+    assert_eq!(effective.model.as_deref(), Some("b"));
+    assert!(!client.settings_unresolved(&provider_session_id).await);
+    let prompt = client
+        .prompt_with_approval_context(provider_session_id, "Proceed".to_owned(), ())
+        .await;
+    client.shutdown().await;
+    assert!(prompt.is_ok(), "prompt after setting: {prompt:?}");
     assert_eq!(
         std::fs::read_to_string(receipt).expect("prompt receipt"),
         "prompt-after-accept"

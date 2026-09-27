@@ -86,10 +86,16 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         let task_session_settings = Arc::clone(&session_settings);
         let last_settings_catalog = Arc::new(tokio::sync::RwLock::new(None));
         let task_last_settings_catalog = Arc::clone(&last_settings_catalog);
-        let settings_unresolved = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::<
+        let settings_unresolved = Arc::new(tokio::sync::RwLock::new(HashMap::<
             String,
+            crate::ProviderSettingKind,
         >::new()));
         let task_settings_unresolved = Arc::clone(&settings_unresolved);
+        let task_settings_handles = ProviderSessionSettingsHandles {
+            session_settings: Arc::clone(&task_session_settings),
+            last_settings_catalog: Arc::clone(&task_last_settings_catalog),
+            settings_unresolved: Arc::clone(&task_settings_unresolved),
+        };
         let task_event_sink = Arc::clone(&event_sink);
         #[cfg(any(test, feature = "test-observation"))]
         let permission_request_count = Arc::new(AtomicU64::new(0));
@@ -293,8 +299,13 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     task_session_settings.write().await.insert(created.provider_session_id.clone(), catalog.clone());
                                                     *task_last_settings_catalog.write().await = Some(catalog);
                                                 }
-                                                if setup_error.is_some() {
-                                                    task_settings_unresolved.write().await.insert(created.provider_session_id.clone());
+                                                let unresolved_kind = match setup_error.as_ref() {
+                                                    Some(ExternalProviderRuntimeError::InvalidSetting { setting, .. }) => Some(*setting),
+                                                    Some(ExternalProviderRuntimeError::CreatedWithoutSettings { failed, .. }) => Some(failed.kind),
+                                                    _ => None,
+                                                };
+                                                if let Some(kind) = unresolved_kind {
+                                                    task_settings_unresolved.write().await.insert(created.provider_session_id.clone(), kind);
                                                 }
                                             }
                                             let result = result.and_then(|created| match setup_error {
@@ -319,6 +330,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     &mut session_tasks,
                                                     task_shutdown.clone(),
                                                     Arc::clone(&task_frame_observation),
+                                                    task_settings_handles.clone(),
                                                     #[cfg(any(test, feature = "test-observation"))] Arc::clone(&session_test_tool_calls),
                                                 )
                                             }).map(|_| ());
@@ -352,6 +364,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             let pending_admission_tx = admission_tx.clone();
                                             let supports_close = base_capabilities.supports_close;
                                             let pending_frame_observation = Arc::clone(&task_frame_observation);
+                                            let pending_settings_handles = task_settings_handles.clone();
                                             #[cfg(any(test, feature = "test-observation"))]
                                             let pending_test_tool_calls = Arc::clone(&session_test_tool_calls);
                                             admission_tasks.spawn(async move {
@@ -364,6 +377,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     admission_tx: pending_admission_tx,
                                                     reply,
                                                     frame_observation: pending_frame_observation,
+                                                    settings_handles: pending_settings_handles,
                                                     #[cfg(any(test, feature = "test-observation"))]
                                                     test_tool_calls: pending_test_tool_calls,
                                                 })
@@ -413,7 +427,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             }
                                         }
                                         ProviderCommand::Prompt { provider_session_id, operation_id, prompt, dispatch, reply } => {
-                                            if task_settings_unresolved.read().await.contains(&provider_session_id) {
+                                            if task_settings_unresolved.read().await.contains_key(&provider_session_id) {
                                                 if let Some(dispatch) = dispatch {
                                                     let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
                                                 }
@@ -442,7 +456,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             let _result = session.send(ProviderSessionCommand::Cancel { expected_operation_id, reply }).await;
                                         }
                                         ProviderCommand::Steer { provider_session_id, prompt, reply } => {
-                                            if task_settings_unresolved.read().await.contains(&provider_session_id) {
+                                            if task_settings_unresolved.read().await.contains_key(&provider_session_id) {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::SettingsUnresolved));
                                                 continue;
                                             }
@@ -465,6 +479,13 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 continue;
                                             };
                                             let _result = session.send(ProviderSessionCommand::WaitIdle { reply }).await;
+                                        }
+                                        ProviderCommand::SetSetting { provider_session_id, kind, value, reply } => {
+                                            let Some(session) = sessions.get(&provider_session_id) else {
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
+                                                continue;
+                                            };
+                                            let _result = session.send(ProviderSessionCommand::SetSetting { kind, value, reply }).await;
                                         }
                                     }
                                 }

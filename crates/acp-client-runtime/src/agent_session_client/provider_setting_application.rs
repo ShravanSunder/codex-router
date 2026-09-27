@@ -9,7 +9,7 @@ use crate::{
     AppliedProviderSetting, ProviderSettingKind, ProviderSettingsCatalog, RequestedProviderSettings,
 };
 
-pub(super) enum SettingSetupFailure {
+pub(crate) enum SettingSetupFailure {
     Invalid {
         kind: ProviderSettingKind,
         value: String,
@@ -22,7 +22,7 @@ pub(super) enum SettingSetupFailure {
     },
 }
 
-pub(super) async fn apply_initial_settings(
+pub(crate) async fn apply_initial_settings(
     session: &ActiveSession<'_, Agent>,
     requested: &RequestedProviderSettings,
     catalog: &mut ProviderSettingsCatalog,

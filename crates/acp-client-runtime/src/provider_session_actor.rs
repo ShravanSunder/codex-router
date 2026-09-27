@@ -41,6 +41,16 @@ pub enum ProviderSessionActivity {
     Running,
 }
 
+#[derive(Clone)]
+pub(crate) struct ProviderSessionSettingsHandles {
+    pub(crate) session_settings:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::ProviderSettingsCatalog>>>,
+    pub(crate) last_settings_catalog:
+        Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
+    pub(crate) settings_unresolved:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::ProviderSettingKind>>>,
+}
+
 pub(crate) enum ProviderSessionCommand<P: InteractionPort> {
     Prompt {
         operation_id: Option<P::OperationId>,
@@ -67,6 +77,13 @@ pub(crate) enum ProviderSessionCommand<P: InteractionPort> {
     WaitIdle {
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
+    SetSetting {
+        kind: crate::ProviderSettingKind,
+        value: String,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError>,
+        >,
+    },
 }
 
 pub(crate) async fn run_provider_session<P: InteractionPort>(
@@ -74,6 +91,7 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
     mut commands: tokio::sync::mpsc::Receiver<ProviderSessionCommand<P>>,
     shutdown: CancellationToken,
     frame_observation: Arc<ProviderFrameObservation>,
+    settings_handles: ProviderSessionSettingsHandles,
     #[cfg(any(test, feature = "test-observation"))] test_tool_calls: Arc<
         std::sync::Mutex<Vec<ExternalProviderToolCall>>,
     >,
@@ -194,6 +212,9 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                             let _result = reply.send(ProviderSessionActivity::Running);
                                         }
                                         Some(ProviderSessionCommand::WaitIdle { reply }) => idle_waiters.push(reply),
+                                        Some(ProviderSessionCommand::SetSetting { reply, .. }) => {
+                                            let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
+                                        }
                                         None => return,
                                     }
                                 }
@@ -212,6 +233,15 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                     }
                     ProviderSessionCommand::WaitIdle { reply } => {
                         let _result = reply.send(Ok(()));
+                    }
+                    ProviderSessionCommand::SetSetting { kind, value, reply } => {
+                        let result = crate::provider_session_setting_update::apply_loaded_setting(
+                            &session,
+                            kind,
+                            value,
+                            &settings_handles,
+                        ).await;
+                        let _result = reply.send(result);
                     }
                 }
             }
