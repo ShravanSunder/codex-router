@@ -24,6 +24,22 @@ fn confirmed_and_lost_turns_keep_distinct_evidence() {
     );
 }
 
+#[test]
+fn accepted_steer_input_joins_an_existing_turn_with_its_own_id() {
+    let input_id = session_event_model::InputId::generate();
+    let event = session_event_model::SessionEvent::InputAccepted {
+        input_id: input_id.clone(),
+        turn_id: "turn-one".into(),
+    };
+    let encoded = serde_json::to_value(&event).expect("event JSON");
+    assert_eq!(encoded["inputId"], input_id.as_str());
+    assert_eq!(encoded["turnId"], "turn-one");
+    let decoded: session_event_model::SessionEvent =
+        serde_json::from_value(encoded).expect("event round trip");
+    assert_eq!(decoded, event);
+    assert!(session_event_model::InputId::new("").is_err());
+}
+
 // Specification E7: requiresAction implies at least one pending interaction.
 #[test]
 fn requires_action_cannot_start_with_an_empty_pending_set() {

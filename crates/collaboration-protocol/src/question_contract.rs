@@ -1,9 +1,8 @@
 //! Typed question listing and single-use responses for Router front doors.
 
-use std::collections::BTreeMap;
-
 use message_board::{Identity, SessionRef};
 use serde::{Deserialize, Serialize};
+pub use session_event_model::{QuestionAnswerValue, QuestionResponse};
 
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -69,24 +68,6 @@ pub struct QuestionRecord {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QuestionListResult {
     pub questions: Vec<QuestionRecord>,
-}
-
-#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "camelCase", deny_unknown_fields)]
-pub enum QuestionResponse {
-    Answered {
-        content: BTreeMap<String, QuestionAnswerValue>,
-    },
-    Declined,
-    Cancelled,
-}
-
-#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum QuestionAnswerValue {
-    Text(String),
-    Number(serde_json::Number),
-    Boolean(bool),
 }
 
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]

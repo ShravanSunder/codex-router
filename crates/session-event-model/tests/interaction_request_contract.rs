@@ -27,6 +27,19 @@ fn approval_options_are_ordered_unique_and_nonempty() {
     assert!(serde_json::from_value::<OfferedOptions>(json!([])).is_err());
 }
 
+#[test]
+fn question_response_actions_and_typed_values_round_trip_without_loss() {
+    for value in [
+        json!({"action":"answered","content":{"name":"Ada","count":3,"confirmed":true}}),
+        json!({"action":"declined"}),
+        json!({"action":"cancelled"}),
+    ] {
+        let response: session_event_model::QuestionResponse =
+            serde_json::from_value(value.clone()).expect("canonical question response");
+        assert_eq!(serde_json::to_value(response).expect("round trip"), value);
+    }
+}
+
 // E9, R25: pending events contain enough approval detail to render on reattach.
 #[test]
 fn approval_event_round_trip_carries_prompt_subject_and_ordered_choices() {
