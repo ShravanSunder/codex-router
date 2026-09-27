@@ -56,6 +56,41 @@ async fn approval_notice_reaches_codex_recipient() -> ProofResult<()> {
     result
 }
 
+#[tokio::test]
+#[ignore = "requires a fresh owned isolated CLI Host with scripted provider fixture"]
+async fn sequential_approval_notices_reach_codex_and_claude_recipients() -> ProofResult<()> {
+    let config_guard = ConfigHashGuard::capture()?;
+    let result = async {
+        let mut proof = ProofContext::connect().await?;
+        let mut peer = PeerFixture::start(&proof).await?;
+        let sender = proof.start_thread("Sequential approval sender").await?;
+        let codex = create_empty_conversation(&proof, &sender).await?;
+        delivery_matrix_approval::deliver_approval_notice(
+            &mut proof,
+            &sender,
+            &codex,
+            &matrix_marker("approvalNotice", "codexFocused"),
+            None,
+        )
+        .await?;
+        let peer_target = peer.target.clone();
+        delivery_matrix_approval::deliver_approval_notice(
+            &mut proof,
+            &sender,
+            &peer_target,
+            &matrix_marker("approvalNotice", "claudeFocused"),
+            Some(&mut peer),
+        )
+        .await?;
+        peer.shutdown().await?;
+        proof.client.close().await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+    config_guard.verify()?;
+    result
+}
+
 #[test]
 #[ignore = "creates a fresh private direct child of /tmp for the isolated CLI Host"]
 fn prepare_delivery_matrix_provider_fixture() -> ProofResult<()> {
@@ -233,10 +268,13 @@ fn turns_contain_input(turns: &[Value], marker: &str) -> bool {
 
 fn user_text_contains_marker(text: &str, marker: &str) -> bool {
     text.contains(marker)
-        || text
-            .split_once("\n\n")
-            .and_then(|(_, payload)| serde_json::from_str::<Value>(payload).ok())
-            .is_some_and(|notice| notice.get("requestId").and_then(Value::as_str) == Some(marker))
+        || text.split("\n\n").any(|segment| {
+            serde_json::from_str::<Value>(segment)
+                .ok()
+                .is_some_and(|notice| {
+                    notice.get("requestId").and_then(Value::as_str) == Some(marker)
+                })
+        })
 }
 
 #[test]
@@ -250,6 +288,11 @@ fn recipient_observer_finds_composite_approval_request_id_in_user_text() {
         {"type":"text","text":notice}
     ]}]})];
     assert!(turns_contain_input(&turns, request_id));
+    let peer_message = format!(
+        "{}\n\nFor replies, use Router's message_send as this Claude session.",
+        json!({"kind":"externalProviderPermission","requestId":request_id})
+    );
+    assert!(user_text_contains_marker(&peer_message, request_id));
 }
 
 async fn create_empty_conversation(

@@ -315,7 +315,7 @@ impl PeerFixture {
             let received = tokio::time::timeout_at(deadline, self.received.recv())
                 .await?
                 .ok_or("peer fixture stopped before message")?;
-            if received.contains(marker) {
+            if super::user_text_contains_marker(&received, marker) {
                 return Ok(());
             }
         }
