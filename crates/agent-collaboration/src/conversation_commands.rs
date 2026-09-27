@@ -7,11 +7,12 @@ use collaboration_client::protocol::{
 };
 use collaboration_client::{
     AcpConversation, ClientError, ControlClient, ConversationCancelInput, ConversationClient,
-    ConversationClientError, ConversationCreateInput, ConversationCreatePromptInput,
-    ConversationCreatePromptOutcome, ConversationCreateRequest, ConversationEnd, ConversationEvent,
-    ConversationLoadInput, ConversationOperationResult, ConversationPromptInput,
-    ConversationPromptRequest, ConversationStopReason, OperationEffect, OperationFailure,
-    OperationFailureKind, PublicPromptContent, operation_failure_from_client_error,
+    ConversationClientError, ConversationCreateActor, ConversationCreateInput,
+    ConversationCreatePromptInput, ConversationCreatePromptOutcome, ConversationCreateRequest,
+    ConversationEnd, ConversationEvent, ConversationLoadInput, ConversationOperationResult,
+    ConversationPromptInput, ConversationPromptRequest, ConversationStopReason, OperationEffect,
+    OperationFailure, OperationFailureKind, PublicPromptContent,
+    operation_failure_from_client_error,
 };
 use std::{
     ffi::OsString,
@@ -85,10 +86,10 @@ struct CreateArguments {
     operation_id: Option<String>,
     #[arg(long)]
     access: ConversationAccess,
-    /// Exact SessionRef JSON for this caller. Defaults to the unique active Codex, Claude Code, or Cursor harness.
+    /// SessionRef or typed Identity JSON for this creator. Defaults to the active agent Session.
     #[arg(long)]
     from: Option<String>,
-    /// Exact SessionRef JSON for the client approval authority. Defaults to this caller.
+    /// SessionRef or typed Identity JSON for the Approver. Defaults to this creator.
     #[arg(long)]
     approver: Option<String>,
     #[arg(long)]

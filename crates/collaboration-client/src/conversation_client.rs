@@ -1,4 +1,5 @@
 //! One conversation connection selected from the endpoint's advertised channel.
+use crate::conversation_create_actor::{ConversationCreateActor, codex_create_actors};
 use crate::{
     AcpConversation, ClientError, ControlClient, ConversationCreatePromptOutcome,
     PublicPromptContent,
@@ -27,9 +28,9 @@ pub struct ConversationCreateInput {
     pub endpoint: EndpointRef,
     pub working_directory: PathBuf,
     pub access: RouterAccess,
-    pub created_by: SessionRef,
+    pub created_by: ConversationCreateActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approver: Option<SessionRef>,
+    pub approver: Option<ConversationCreateActor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,8 +204,27 @@ impl ConversationClient {
         Self::validate_create_input(&input.create, timeout)?;
         let create_operation_id = input.create.operation_id.clone();
         let endpoint = input.create.endpoint.clone();
-        let requested_by = input.create.created_by.clone();
-        let approver = input.create.approver.clone();
+        let requested_by = input.create.created_by.session()?.ok_or_else(|| {
+            unsupported(
+                &endpoint,
+                "createdBy",
+                "use conversation_create, then message_send for a Human creator",
+            )
+        })?;
+        let approver = input
+            .create
+            .approver
+            .as_ref()
+            .map(|actor| {
+                actor.session()?.ok_or_else(|| {
+                    unsupported(
+                        &endpoint,
+                        "approver",
+                        "use conversation_create, then message_send for a Human Approver",
+                    )
+                })
+            })
+            .transpose()?;
         let working_directory = input.create.working_directory.clone();
         let create_client = Self::connect(directory, &endpoint).await?;
         create_client.validate_operation_id(
@@ -287,10 +307,16 @@ impl ConversationClient {
                 "create requires a positive timeout and absolute working directory",
             ));
         }
-        if input.created_by.endpoint.service_id != input.endpoint.service_id
+        if input
+            .created_by
+            .session()?
+            .is_some_and(|creator| creator.endpoint.service_id != input.endpoint.service_id)
             || input
                 .approver
                 .as_ref()
+                .map(ConversationCreateActor::session)
+                .transpose()?
+                .flatten()
                 .is_some_and(|approver| approver.endpoint.service_id != input.endpoint.service_id)
         {
             return Err(ConversationClientError::InvalidInput(
@@ -367,6 +393,7 @@ impl ConversationClient {
         let operation_id = input.operation_id.clone();
         match &mut self {
             Self::CodexAcp(acp) => {
+                let (created_by, approver) = codex_create_actors(&input)?;
                 if input.mode.is_some() {
                     return Err(unsupported(
                         &input.endpoint,
@@ -398,8 +425,8 @@ impl ConversationClient {
                         RouterAccess::WriteRestricted => "write-restricted".to_owned(),
                         RouterAccess::WorkspaceWrite => "workspace-write".to_owned(),
                     }),
-                    created_by: Some(input.created_by),
-                    approver: input.approver,
+                    created_by: Some(created_by),
+                    approver,
                     root_message_id: input.root_message_id,
                 };
                 let mut emit = |_event| Ok(());
@@ -451,8 +478,12 @@ impl ConversationClient {
                     endpoint: input.endpoint,
                     generation: input.generation,
                     working_directory,
-                    created_by: input.created_by.clone().into(),
-                    approver: input.approver.unwrap_or(input.created_by).into(),
+                    created_by: input.created_by.provider_identity()?,
+                    approver: input
+                        .approver
+                        .as_ref()
+                        .unwrap_or(&input.created_by)
+                        .provider_identity()?,
                     requested_policy: ProviderRequestedPolicy {
                         access: input.access,
                     },

@@ -1,6 +1,6 @@
 use super::{
     ConversationClient, ConversationClientError, ConversationCreateInput, ConversationTransport,
-    advertised_conversation_transport,
+    advertised_conversation_transport, codex_create_actors,
 };
 use collaboration_protocol::EndpointDescription;
 use serde_json::json;
@@ -173,6 +173,43 @@ fn conversation_create_defaults_approver_to_the_caller() {
     input.default_approver();
 
     assert_eq!(input.approver, Some(caller));
+}
+
+#[test]
+fn typed_human_create_is_provider_only_and_legacy_session_json_remains_valid() {
+    let mut input: ConversationCreateInput = serde_json::from_value(json!({
+        "operationId":collaboration_protocol::OperationId::generate(),
+        "endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"claude-local"},
+        "workingDirectory":"/tmp/project","access":"workspace-write",
+        "createdBy":{"kind":"human","humanId":"fixture-owner"},
+        "approver":{"kind":"human","humanId":"fixture-owner"}
+    }))
+    .unwrap_or_else(|error| panic!("typed Human create input: {error}"));
+    assert!(
+        ConversationClient::validate_create_input(&input, std::time::Duration::from_secs(1))
+            .is_ok()
+    );
+    assert!(matches!(
+        codex_create_actors(&input),
+        Err(ConversationClientError::UnsupportedInput { field: "createdBy", fix, .. })
+            if fix.contains("provider endpoints only")
+    ));
+    let session = json!({
+        "endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"caller"
+    });
+    input.created_by = serde_json::from_value(session.clone())
+        .unwrap_or_else(|error| panic!("legacy SessionRef create actor: {error}"));
+    assert!(matches!(
+        codex_create_actors(&input),
+        Err(ConversationClientError::UnsupportedInput { field: "approver", fix, .. })
+            if fix.contains("provider endpoints only")
+    ));
+    input.approver = Some(
+        serde_json::from_value(session)
+            .unwrap_or_else(|error| panic!("legacy SessionRef approver: {error}")),
+    );
+    assert!(codex_create_actors(&input).is_ok());
 }
 
 #[test]

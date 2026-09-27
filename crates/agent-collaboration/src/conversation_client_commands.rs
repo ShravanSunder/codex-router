@@ -108,31 +108,41 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
             Ok(value) => value,
             Err(error) => return report_create_client_error(error, &operation_id, args.json),
         };
-        let creator = match current_session_ref(&endpoint.service_id, args.from.as_deref()) {
-            Ok(value) => value,
-            Err(_) => {
-                let message = if args.from.is_some() {
-                    "invalid --from SessionRef"
-                } else {
-                    "current session identity unavailable; run agent-collaboration whoami --json or pass --from SessionRef JSON"
-                };
-                return report_conversation_failure(
-                    operation_failure_from_client_error(
-                        ClientError::Protocol(message),
-                        OperationEffect::None,
-                    ),
-                    None,
-                    args.json,
-                );
-            }
+        let creator = match args.from.as_deref() {
+            Some(value) => match serde_json::from_str::<ConversationCreateActor>(value) {
+                Ok(value) => value,
+                Err(_) => {
+                    return crate::endpoint_commands::report_failure(
+                        "invalidField",
+                        "--from must be a SessionRef or typed Identity JSON",
+                        2,
+                        args.json,
+                    );
+                }
+            },
+            None => match current_session_ref(&endpoint.service_id, None) {
+                Ok(value) => value.into(),
+                Err(_) => {
+                    return report_conversation_failure(
+                        operation_failure_from_client_error(
+                            ClientError::Protocol(
+                                "current session identity unavailable; run agent-collaboration whoami --json or pass --from SessionRef JSON",
+                            ),
+                            OperationEffect::None,
+                        ),
+                        None,
+                        args.json,
+                    );
+                }
+            },
         };
         let approver = match args.approver.as_deref() {
-            Some(value) => match serde_json::from_str(value) {
+            Some(value) => match serde_json::from_str::<ConversationCreateActor>(value) {
                 Ok(value) => Some(value),
                 Err(_) => {
                     return crate::endpoint_commands::report_failure(
                         "invalidField",
-                        "invalid --approver SessionRef",
+                        "--approver must be a SessionRef or typed Identity JSON",
                         2,
                         args.json,
                     );
@@ -328,8 +338,8 @@ pub(super) fn run_new_prompt(args: PromptArguments) -> i32 {
             endpoint,
             working_directory: cwd,
             access,
-            created_by: creator,
-            approver,
+            created_by: creator.into(),
+            approver: approver.map(Into::into),
             generation,
             model: args.model,
             mode: None,

@@ -125,12 +125,14 @@ mod acp_conversation;
 pub use acp_conversation::AcpConversation;
 mod conversation_client;
 mod conversation_contract;
+mod conversation_create_actor;
 mod conversation_operation_result;
 mod conversation_session_operations;
 pub use conversation_client::{
     ConversationCancelInput, ConversationClient, ConversationClientError, ConversationCreateInput,
     ConversationCreatePromptInput, ConversationLoadInput, ConversationPromptInput,
 };
+pub use conversation_create_actor::ConversationCreateActor;
 pub use conversation_operation_result::{
     ConversationCreatePromptOutcome, ConversationOperationResult, ConversationSettlement,
     ConversationSettlementDetail, ConversationStopReason, ProviderLoadOutput, ProviderPromptOutput,
