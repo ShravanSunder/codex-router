@@ -59,7 +59,6 @@ impl<P: InteractionPort> ProviderTurnCancellation<P> {
 }
 
 impl<P: InteractionPort> AgentSessionClient<P> {
-    #[cfg(any(test, feature = "test-observation"))]
     pub async fn cancel_active_prompt(
         &self,
         provider_session_id: String,
@@ -76,7 +75,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             .await
     }
 
-    async fn cancel_prompt(
+    pub(crate) async fn cancel_prompt(
         &self,
         provider_session_id: String,
         expected_operation_id: Option<P::OperationId>,

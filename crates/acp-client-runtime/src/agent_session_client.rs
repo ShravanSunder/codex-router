@@ -5,13 +5,16 @@ mod external_approval_dispatch;
 mod provider_acp_error_mapping;
 mod provider_approval_dispatch;
 mod provider_client_contract;
+mod provider_client_initialization;
 mod provider_client_operations;
 mod provider_connection_task;
 mod provider_frame_observation;
 mod provider_initialize_request;
+mod provider_lifecycle_requests;
 mod provider_prompt_dispatch;
 mod provider_request_fallback;
 mod provider_session_admission;
+mod provider_session_restore;
 pub(crate) mod provider_setting_application;
 
 use crate::ProviderCapabilityReport;
@@ -45,7 +48,7 @@ pub(crate) use provider_client_contract::sanitized_acp_error;
 pub use provider_client_contract::{
     ExternalProviderAdmission, ExternalProviderApprovalRefusalReason,
     ExternalProviderCreatedSession, ExternalProviderLaunch, ExternalProviderPromptOutcome,
-    ExternalProviderRuntimeError,
+    ExternalProviderRuntimeError, ProviderSessionSummary,
 };
 #[cfg(any(test, feature = "test-observation"))]
 pub use provider_client_contract::{
@@ -106,9 +109,20 @@ enum ProviderCommand<P: InteractionPort> {
             Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
         >,
     },
-    Load {
+    Restore {
         provider_session_id: String,
         cwd: PathBuf,
+        mode: provider_session_restore::RestoreHistoryMode,
+        reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
+    },
+    List {
+        cwd: Option<PathBuf>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Vec<ProviderSessionSummary>, ExternalProviderRuntimeError>,
+        >,
+    },
+    Close {
+        provider_session_id: String,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
     Prompt {
@@ -157,9 +171,14 @@ enum PendingSessionAdmission<P: InteractionPort> {
             Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
         >,
     },
-    Load {
+    Restore {
         provider_session_id: String,
         result: Box<Result<ActiveSession<'static, Agent>, ExternalProviderRuntimeError>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
+    },
+    Close {
+        provider_session_id: String,
+        result: Result<(), ExternalProviderRuntimeError>,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
 }

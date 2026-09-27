@@ -104,6 +104,14 @@ pub struct ExternalProviderCreatedSession {
     pub effective_settings: crate::EffectiveProviderSettings,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderSessionSummary {
+    pub provider_session_id: String,
+    pub cwd: PathBuf,
+    pub title: Option<String>,
+    pub updated_at: Option<String>,
+}
+
 #[cfg(any(test, feature = "test-observation"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExternalProviderPermissionOutcome {
@@ -142,6 +150,8 @@ pub enum ExternalProviderRuntimeError {
     },
     #[error("provider does not advertise steering")]
     UnsupportedSteering,
+    #[error("provider does not advertise {capability}")]
+    UnsupportedCapability { capability: &'static str },
     #[error("provider conversation operation is not active")]
     LocalNotFound,
     #[error("provider cancellation target is no longer active")]

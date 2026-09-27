@@ -195,11 +195,99 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         provider_session_id: String,
         cwd: PathBuf,
     ) -> Result<(), ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_load {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/load",
+            });
+        }
+        self.restore_session(
+            provider_session_id,
+            cwd,
+            super::provider_session_restore::RestoreHistoryMode::Replay,
+        )
+        .await
+    }
+
+    pub async fn resume_session(
+        &self,
+        provider_session_id: String,
+        cwd: PathBuf,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_resume {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/resume",
+            });
+        }
+        self.restore_session(
+            provider_session_id,
+            cwd,
+            super::provider_session_restore::RestoreHistoryMode::WithoutReplay,
+        )
+        .await
+    }
+
+    async fn restore_session(
+        &self,
+        provider_session_id: String,
+        cwd: PathBuf,
+        mode: super::provider_session_restore::RestoreHistoryMode,
+    ) -> Result<(), ExternalProviderRuntimeError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
-            .send(ProviderCommand::Load {
+            .send(ProviderCommand::Restore {
                 provider_session_id,
                 cwd,
+                mode,
+                reply,
+            })
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+        result
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+    }
+
+    pub async fn list_sessions(
+        &self,
+        cwd: Option<PathBuf>,
+    ) -> Result<Vec<super::ProviderSessionSummary>, ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_list {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/list",
+            });
+        }
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::List { cwd, reply })
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+        result
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+    }
+
+    pub async fn close_session(
+        &self,
+        provider_session_id: String,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_close {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/close",
+            });
+        }
+        if self.session_activity(provider_session_id.clone()).await?
+            == ProviderSessionActivity::Running
+        {
+            match self.cancel_active_prompt(provider_session_id.clone()).await {
+                Ok(()) | Err(ExternalProviderRuntimeError::LocalNotFound) => {}
+                Err(error) => return Err(error),
+            }
+            self.wait_session_idle(provider_session_id.clone()).await?;
+        }
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::Close {
+                provider_session_id,
                 reply,
             })
             .await
