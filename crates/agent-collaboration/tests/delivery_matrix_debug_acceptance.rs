@@ -221,10 +221,9 @@ fn turns_contain_input(turns: &[Value], marker: &str) -> bool {
                             .is_some_and(|content| {
                                 content.iter().any(|part| {
                                     part.get("type").and_then(Value::as_str) == Some("text")
-                                        && part
-                                            .get("text")
-                                            .and_then(Value::as_str)
-                                            .is_some_and(|text| text.contains(marker))
+                                        && part.get("text").and_then(Value::as_str).is_some_and(
+                                            |text| user_text_contains_marker(text, marker),
+                                        )
                                 })
                             })
                 })
@@ -232,11 +231,23 @@ fn turns_contain_input(turns: &[Value], marker: &str) -> bool {
     })
 }
 
+fn user_text_contains_marker(text: &str, marker: &str) -> bool {
+    text.contains(marker)
+        || text
+            .split_once("\n\n")
+            .and_then(|(_, payload)| serde_json::from_str::<Value>(payload).ok())
+            .is_some_and(|notice| notice.get("requestId").and_then(Value::as_str) == Some(marker))
+}
+
 #[test]
 fn recipient_observer_finds_composite_approval_request_id_in_user_text() {
     let request_id = "[\"matrix-provider-codex\",91]";
+    let notice = format!(
+        "Agent communication\nSelf-declared sender: fixture\n\n{}",
+        json!({"kind":"externalProviderPermission","requestId":request_id})
+    );
     let turns = vec![json!({"items":[{"type":"userMessage","content":[
-        {"type":"text","text":format!("Approval request {request_id}")}
+        {"type":"text","text":notice}
     ]}]})];
     assert!(turns_contain_input(&turns, request_id));
 }
