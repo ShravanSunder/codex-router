@@ -181,17 +181,17 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
         .await
         .expect("queued prompt must drain after Control prompt settles")
         .expect("second event");
-    let mut second_bytes = Vec::new();
+    let mut second_bytes = [0_u8; 6];
     second_event
-        .read_to_end(&mut second_bytes)
+        .read_exact(&mut second_bytes)
         .await
         .expect("second bytes");
     assert_eq!(first_bytes, *b"first");
-    assert_eq!(second_bytes, b"second");
+    assert_eq!(second_bytes, *b"second");
     let submitted_snapshot = collaboration_service::ProviderConversationBackend::show(
         supervisor.as_ref(),
         collaboration_protocol::ConversationOperationShowRequest {
-            operation_id: queued_operation_id,
+            operation_id: queued_operation_id.clone(),
         },
     )
     .await
@@ -200,6 +200,37 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
     assert_eq!(
         submitted_snapshot.stage,
         collaboration_protocol::ProviderOperationStage::MayHaveDispatched
+    );
+    second_event
+        .write_all(b"x")
+        .await
+        .expect("release second prompt");
+    let completed = collaboration_service::ProviderConversationBackend::wait(
+        supervisor.as_ref(),
+        collaboration_protocol::ConversationOperationWaitRequest {
+            operation_id: queued_operation_id,
+            timeout_seconds: collaboration_protocol::PositiveSeconds::try_from(2)
+                .expect("wait seconds"),
+        },
+    )
+    .await
+    .expect("drained prompt settles");
+    assert!(matches!(
+        completed.output,
+        collaboration_protocol::ConversationOperationWaitOutput::Available { .. }
+    ));
+    assert_eq!(completed.operation.queue_state, None);
+    assert_eq!(
+        completed.operation.stage,
+        collaboration_protocol::ProviderOperationStage::Terminal
+    );
+    assert_eq!(
+        completed.operation.effect,
+        collaboration_protocol::ProviderOperationEffect::Applied
+    );
+    assert_eq!(
+        completed.operation.reconciliation,
+        collaboration_protocol::ProviderReconciliationState::Confirmed
     );
 
     route.shutdown_queue().await;
