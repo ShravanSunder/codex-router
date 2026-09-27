@@ -361,6 +361,7 @@ pub enum ProviderOperationStage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConversationOperationFailureStage {
+    Discovery,
     Validation,
     Binding,
     Admission,
@@ -611,6 +612,7 @@ pub struct ConversationOperationWaitResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConversationOperationFailureKind {
+    Overloaded,
     InvalidRequest,
     InvalidSetting,
     SettingsUnresolved,
@@ -634,7 +636,8 @@ pub struct ConversationOperationFailure {
     pub stage: ConversationOperationFailureStage,
     pub effect: ProviderOperationEffect,
     pub message: NonEmptyText,
-    pub operation_id: OperationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<OperationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalid_setting: Option<InvalidProviderSetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

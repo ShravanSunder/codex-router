@@ -7,15 +7,19 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 97);
+    assert_eq!(methods.len(), 102);
     for method in [
         "conversation/create",
         "conversation/load",
+        "conversation/resume",
+        "conversation/close",
         "conversation/prompt",
         "conversation/cancel",
         "conversation/operationShow",
         "conversation/operationWait",
         "conversation/operationReconcile",
+        "conversation/settingsSet",
+        "conversation/settingsAccept",
         "automation/configure",
         "automation/status",
         "automation/events",
@@ -64,6 +68,7 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
         "endpoint/list",
         "codex/sessionList",
         "provider/sessionList",
+        "provider/sessionInspect",
         "codex/sessionInspect",
         "codex/sessionRename",
         "message/send",

@@ -534,7 +534,7 @@ impl ConversationClient {
                                 stage: ConversationOperationFailureStage::Settlement,
                                 effect,
                                 message,
-                                operation_id: operation_id.clone(),
+                                operation_id: Some(operation_id.clone()),
                                 invalid_setting: None,
                                 provider_code: None,
                                 target: None,
