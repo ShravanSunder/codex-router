@@ -123,14 +123,14 @@ pub async fn run_prompt_task(mut inputs: PromptTaskInputs) -> PromptTaskCompleti
                 cancellation_barrier: pending.blocks_next_prompt().then(|| pending.cancellation_barrier()),
                 binding:pending.into_session().ok(),terminal:(!frontend_detached).then_some(frame)},
                 Ok(Some(PromptEvent::NativeCallback(_)))=>{
-                    if !frontend_detached {let _cancel=pending.cancel().await;}
+                    let _cancel=pending.cancel().await;
                     return PromptTaskCompletion {
                 cancellation_barrier: frontend_detached.then(|| pending.cancellation_barrier()),
                 binding:None,terminal:(!frontend_detached).then(|| failure(&inputs.request_id,"Unsupported native interaction or invalid update"))};
                 },
                 Err(error)=>{
                     let message=error.to_string();
-                    if !frontend_detached {let _cancel=pending.cancel().await;}
+                    let _cancel=pending.cancel().await;
                     return PromptTaskCompletion {
                 cancellation_barrier: frontend_detached.then(|| pending.cancellation_barrier()),
                 binding:None,terminal:(!frontend_detached).then(|| failure(&inputs.request_id,&message))};

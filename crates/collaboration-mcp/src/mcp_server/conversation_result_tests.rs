@@ -18,15 +18,9 @@ fn codex_running_prompt_is_a_successful_typed_tool_result() {
         .expect("structured running outcome");
     assert_eq!(structured["kind"], "running");
     assert_eq!(structured["target"], serde_json::json!(target));
-    assert!(
-        structured["followUp"]
-            .as_str()
-            .expect("follow-up")
-            .contains("events listen --attach")
-            || structured["followUp"]
-                .as_str()
-                .expect("follow-up")
-                .contains("events listen --endpoint")
+    assert_eq!(
+        structured["followUp"],
+        "Turn continues. Follow with: agent-collaboration events listen --endpoint codex-local --session active-thread --attach; or agent-collaboration session inspect --endpoint codex-local --session active-thread --json"
     );
 
     let server = super::CollaborationMcpServer::new(

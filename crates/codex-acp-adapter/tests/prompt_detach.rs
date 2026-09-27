@@ -1,10 +1,13 @@
 #![allow(clippy::unwrap_used)]
 
 use codex_acp_adapter::{
-    AcpConnectionInputs, AcpSessionBinding, AcpStoredSessions, HeldBindingCheckout,
-    UnmaterializedBindingStore, serve_acp_connection,
+    AcpConnectionInputs, AcpSchemaCatalog, AcpSessionBinding, AcpStoredSessions,
+    HeldBindingCheckout, PromptTaskInputs, SessionSetupInputs, UnmaterializedBindingStore,
+    run_prompt_task, serve_acp_connection,
 };
-use codex_native_integration::{NativePayloadSchemas, NativeSchemaBundle};
+use codex_native_integration::{
+    NativePayloadSchemas, NativeProtocolConnection, NativeSchemaBundle,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
@@ -19,7 +22,10 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::oneshot,
 };
-use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{Message, protocol::Role},
+};
 
 #[path = "support/conversation_operation_recorder.rs"]
 mod conversation_operation_recorder;
@@ -296,6 +302,228 @@ async fn frontend_eof_detaches_active_turn_and_reconnect_is_busy_until_native_id
 
     let _finish_authorized = finish_turn_tx.send(());
     first_serving.await.unwrap().unwrap();
+    backend.await.unwrap().unwrap();
+    std::fs::remove_file(socket).unwrap();
+}
+
+#[tokio::test]
+async fn native_callback_after_prompt_command_eof_interrupts_active_turn() {
+    std::fs::create_dir_all(TEST_SCRATCH).unwrap();
+    std::fs::set_permissions(TEST_SCRATCH, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let (turn_started_tx, turn_started_rx) = oneshot::channel();
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let backend = tokio::spawn(async move {
+        let mut wire = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let resume = read_native_request(&mut wire).await;
+        assert_eq!(resume["method"], "thread/resume");
+        reply_native(
+            &mut wire,
+            &resume,
+            json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-callback-eof","cwd":"/work","status":{"type":"idle"},"turns":[]}}),
+        )
+        .await;
+        let start = read_native_request(&mut wire).await;
+        assert_eq!(start["method"], "turn/start");
+        reply_native(
+            &mut wire,
+            &start,
+            json!({"turn":{"id":"turn-callback-eof","status":"inProgress"}}),
+        )
+        .await;
+        let _sent = turn_started_tx.send(());
+        callback_rx.await.unwrap();
+        wire.send(Message::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-callback-eof","turnId":"turn-callback-eof","itemId":"message-eof","delta":"discarded after detach"}}).to_string().into())).await.unwrap();
+        wire.send(Message::Text(json!({"id":902,"method":"item/unsupported/request","params":{"threadId":"thread-callback-eof","turnId":"turn-callback-eof"}}).to_string().into())).await.unwrap();
+        let interrupt = read_native_request(&mut wire).await;
+        assert_eq!(interrupt["method"], "turn/interrupt");
+        assert_eq!(
+            interrupt["params"],
+            json!({"threadId":"thread-callback-eof","turnId":"turn-callback-eof"})
+        );
+        reply_native(
+            &mut wire,
+            &interrupt,
+            json!({"turn":{"id":"turn-callback-eof","status":"interrupted"}}),
+        )
+        .await;
+    });
+
+    let connection = NativeProtocolConnection::from_websocket(
+        WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+    );
+    let mut catalog = AcpSchemaCatalog::load().unwrap();
+    let generation: collaboration_protocol::CodexGeneration = serde_json::from_value(
+        json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
+    )
+    .unwrap();
+    let session = AcpSessionBinding::load_existing(
+        &mut catalog,
+        SessionSetupInputs {
+            operation_id: None,
+            recorder: Arc::new(AcceptingConversationRecorder),
+            connection,
+            schemas: fixture_schemas(),
+            generation,
+            params: json!({"sessionId":"thread-callback-eof","cwd":"/work","mcpServers":[]}),
+            approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+        },
+    )
+    .await
+    .map(|(session, _history)| session)
+    .unwrap();
+    let closed = tokio_util::sync::CancellationToken::new();
+    let (output, frames) = codex_acp_adapter::bounded_acp_output(closed.clone());
+    drop(frames);
+    let (commands, receiver) = tokio::sync::mpsc::channel(1);
+    let prompt = tokio::spawn(run_prompt_task(PromptTaskInputs {
+        session,
+        request_id: json!("prompt-eof"),
+        params: json!({"sessionId":"thread-callback-eof","prompt":[{"type":"text","text":"work"}]}),
+        commands: receiver,
+        output,
+        retired: tokio_util::sync::CancellationToken::new(),
+    }));
+    turn_started_rx.await.unwrap();
+
+    // This is the registry's EOF signal for the prompt actor. Closing the
+    // output carrier also ensures any update after detachment cannot reach ACP.
+    drop(commands);
+    closed.cancel();
+    let _callback_sent = callback_tx.send(());
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(3), prompt)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(completion.terminal.is_none());
+    backend.await.unwrap();
+}
+
+#[tokio::test]
+async fn native_callback_after_frontend_eof_interrupts_turn_and_finishes_actor() {
+    std::fs::create_dir_all(TEST_SCRATCH).unwrap();
+    std::fs::set_permissions(TEST_SCRATCH, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket =
+        std::env::temp_dir().join(format!("callback-after-eof-{}.sock", std::process::id()));
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let (turn_started_tx, turn_started_rx) = oneshot::channel();
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let backend = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut wire = tokio_tungstenite::accept_async(stream).await?;
+        for method in ["initialize", "initialized", "thread/resume"] {
+            let request = read_native_request(&mut wire).await;
+            assert_eq!(request["method"], method);
+            if method == "initialized" {
+                continue;
+            }
+            let result = if method == "initialize" {
+                json!({})
+            } else {
+                json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-callback","cwd":"/work","status":{"type":"idle"},"turns":[]}})
+            };
+            reply_native(&mut wire, &request, result).await;
+        }
+
+        let start = read_native_request(&mut wire).await;
+        assert_eq!(start["method"], "turn/start");
+        reply_native(
+            &mut wire,
+            &start,
+            json!({"turn":{"id":"turn-callback","status":"inProgress"}}),
+        )
+        .await;
+        let _sent = turn_started_tx.send(());
+        callback_rx.await.unwrap();
+        wire.send(Message::Text(json!({"id":901,"method":"item/unknown/request","params":{"threadId":"thread-callback","turnId":"turn-callback"}}).to_string().into())).await?;
+
+        let interrupt = read_native_request(&mut wire).await;
+        assert_eq!(interrupt["method"], "turn/interrupt");
+        assert_eq!(
+            interrupt["params"],
+            json!({"threadId":"thread-callback","turnId":"turn-callback"})
+        );
+        reply_native(
+            &mut wire,
+            &interrupt,
+            json!({"turn":{"id":"turn-callback","status":"interrupted"}}),
+        )
+        .await;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+
+    let schemas = fixture_schemas();
+    let generation: collaboration_protocol::CodexGeneration = serde_json::from_value(
+        json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
+    )
+    .unwrap();
+    let inputs = AcpConnectionInputs {
+        backend_path: socket.clone(),
+        generation,
+        schemas,
+        stored_sessions: Arc::new(EmptyCatalog),
+        approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+        holder: Arc::new(TestBindingHolder::default()),
+        recorder: Arc::new(AcceptingConversationRecorder),
+        retired: tokio_util::sync::CancellationToken::new(),
+    };
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let serving = tokio::spawn(serve_acp_connection(server, inputs));
+    let (read, mut write) = client.into_split();
+    let mut read = BufReader::new(read);
+    async fn call(
+        read: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        write: &mut tokio::net::unix::OwnedWriteHalf,
+        id: &str,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        write
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(3), read.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    let initialized = call(
+        &mut read,
+        &mut write,
+        "initialize",
+        "initialize",
+        json!({"protocolVersion":1}),
+    )
+    .await;
+    assert!(initialized.get("result").is_some());
+    let loaded = call(
+        &mut read,
+        &mut write,
+        "load",
+        "session/load",
+        json!({"sessionId":"thread-callback","cwd":"/work","mcpServers":[]}),
+    )
+    .await;
+    assert!(loaded.get("result").is_some(), "load failed: {loaded}");
+    write
+        .write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":"prompt","method":"session/prompt","params":{"sessionId":"thread-callback","prompt":[{"type":"text","text":"work"}]}})).as_bytes())
+        .await
+        .unwrap();
+    turn_started_rx.await.unwrap();
+    write.shutdown().await.unwrap();
+    drop(write);
+    drop(read);
+    let _callback_sent = callback_tx.send(());
+
+    serving.await.unwrap().unwrap();
     backend.await.unwrap().unwrap();
     std::fs::remove_file(socket).unwrap();
 }

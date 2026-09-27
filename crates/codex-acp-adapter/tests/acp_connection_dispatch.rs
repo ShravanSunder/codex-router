@@ -317,6 +317,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                         serde_json::from_str(&conflict_response).unwrap();
                     assert_eq!(conflict_response["id"], conflict_id);
                     assert_eq!(conflict_response["error"]["code"], -32600);
+                    assert_eq!(conflict_response["error"]["data"]["kind"], "busy");
                 }
             }
             let concurrent_id = format!("during-{method}");
