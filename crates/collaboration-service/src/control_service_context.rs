@@ -24,6 +24,8 @@ pub struct ServiceIdentity {
     pub(crate) provider_operations:
         Option<std::sync::Arc<tokio::sync::Mutex<crate::ProviderOperationStore>>>,
     pub(crate) provider_session_hub: Option<std::sync::Arc<dyn crate::SessionEventHub>>,
+    pub(crate) claude_code_sessions:
+        Option<std::sync::Arc<claude_code_peer_messaging::ClaudeCodeSessionRegistry>>,
     pub(crate) codex_conversation_recorder:
         Option<std::sync::Arc<crate::CodexConversationOperationRecorder>>,
     pub(crate) provider_conversations:
@@ -103,6 +105,15 @@ impl ServiceIdentity {
         hub: std::sync::Arc<dyn crate::SessionEventHub>,
     ) -> Self {
         self.provider_session_hub = Some(hub);
+        self
+    }
+
+    #[must_use]
+    pub fn with_claude_code_sessions(
+        mut self,
+        registry: std::sync::Arc<claude_code_peer_messaging::ClaudeCodeSessionRegistry>,
+    ) -> Self {
+        self.claude_code_sessions = Some(registry);
         self
     }
 
@@ -221,6 +232,7 @@ impl ServiceIdentity {
             automation: None,
             provider_operations: None,
             provider_session_hub: None,
+            claude_code_sessions: None,
             codex_conversation_recorder: None,
             provider_conversations: None,
             board: None,

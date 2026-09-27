@@ -18,6 +18,67 @@ fn live_record_fixture(process_id: u32, session_id: &str) -> Value {
 }
 
 #[test]
+fn live_sessions_lists_sanitized_current_process_and_skips_dead_pid() {
+    let root = tempfile::tempdir().expect("registry directory");
+    let process_id = std::process::id();
+    let mut live = live_record_fixture(process_id, "live-session");
+    live["messagingSocketPath"] = json!(root.path().join("secret-peer.sock"));
+    std::fs::write(
+        root.path().join(format!("{process_id}.json")),
+        live.to_string(),
+    )
+    .expect("live fixture");
+    std::fs::write(
+        root.path().join("999999.json"),
+        live_record_fixture(999_999, "dead-session").to_string(),
+    )
+    .expect("dead fixture");
+    let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+    let inventory = registry.live_sessions().expect("live sessions");
+    assert_eq!(inventory.sessions.len(), 1);
+    assert_eq!(
+        String::from(inventory.sessions[0].session_id.clone()),
+        "live-session"
+    );
+    assert_eq!(
+        inventory.sessions[0].name.as_deref(),
+        Some("Fixture session")
+    );
+    let public_json = serde_json::to_string(&inventory).expect("public inventory JSON");
+    assert!(!public_json.contains("messagingSocketPath"));
+    assert!(!public_json.contains("secret-peer.sock"));
+    assert!(!public_json.contains("peerFeatures"));
+    assert!(!public_json.contains(".key"));
+
+    let mut unsupported = live_record_fixture(process_id, "unsupported-session");
+    unsupported["peerProtocol"] = json!(2);
+    std::fs::write(
+        root.path().join(format!("{process_id}.json")),
+        unsupported.to_string(),
+    )
+    .expect("unsupported fixture");
+    let unsupported_inventory = registry.live_sessions().expect("unsupported inventory");
+    assert!(unsupported_inventory.sessions.is_empty());
+    assert_eq!(unsupported_inventory.skipped_records, 1);
+}
+
+#[test]
+fn live_sessions_counts_oversize_or_unreadable_live_records_without_failing_page() {
+    let root = tempfile::tempdir().expect("registry directory");
+    let process_id = std::process::id();
+    std::fs::write(
+        root.path().join(format!("{process_id}.json")),
+        vec![b'x'; 262_145],
+    )
+    .expect("oversize fixture");
+    let inventory = ClaudeCodeSessionRegistry::new(root.path().to_owned())
+        .live_sessions()
+        .expect("list skips oversize record");
+    assert!(inventory.sessions.is_empty());
+    assert_eq!(inventory.skipped_records, 1);
+}
+
+#[test]
 fn live_registry_entry_is_writable_only_for_supported_protocol() {
     let root = tempfile::tempdir().expect("registry directory");
     let pid = std::process::id();

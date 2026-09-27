@@ -248,6 +248,7 @@ async fn provider_inventory_reaches_picker_as_a_qualified_read_only_row() {
         "endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},
         "observedAt":"2026-09-07T00:00:00Z",
         "sessions":[{
+            "origin":"hostedProvider",
             "target":{"endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},"sessionId":"first"},
             "workingDirectory":"/repo","updatedAt":3,"state":"requiresAction",
             "approver":{"kind":"human","humanId":"owner"},
@@ -402,6 +403,7 @@ async fn unavailable_service_retains_remembered_rows_without_stale_active_claims
 async fn unavailable_service_clears_remembered_provider_state() {
     let summary: collaboration_client::protocol::ProviderSessionSummary =
         serde_json::from_value(json!({
+            "origin":"hostedProvider",
             "target":{"endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},"sessionId":"provider-one"},
             "workingDirectory":"/repo","updatedAt":3,"state":"requiresAction",
             "approver":{"kind":"human","humanId":"owner"},
@@ -427,6 +429,7 @@ async fn unavailable_service_clears_remembered_provider_state() {
 async fn local_picker_never_reuses_provider_rows() {
     let summary: collaboration_client::protocol::ProviderSessionSummary =
         serde_json::from_value(json!({
+            "origin":"hostedProvider",
             "target":{"endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},"sessionId":"shared-id"},
             "workingDirectory":"/repo","updatedAt":3,"state":"idle",
             "approver":{"kind":"human","humanId":"owner"},

@@ -239,6 +239,19 @@ impl CollaborationMcpServer {
         &self,
         Parameters(request): Parameters<NativeSessionListParams>,
     ) -> CallToolResult {
+        if String::from(request.endpoint.endpoint_id.clone()) == "claude-local" {
+            return failure(
+                ClientError::Rejected {
+                    code: -32050,
+                    data: Some(serde_json::json!({
+                        "kind": "unsupportedCapability",
+                        "stage": "discovery",
+                        "message": "Use provider_sessions_list for Claude Code sessions"
+                    })),
+                },
+                OperationEffect::None,
+            );
+        }
         let mut client = match self.connect().await {
             Ok(value) => value,
             Err(error) => return failure(error, OperationEffect::None),

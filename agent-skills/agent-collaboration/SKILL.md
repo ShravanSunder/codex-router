@@ -30,7 +30,8 @@ IF taking one of these actions, read the named help or advertised schema and ret
 
 | Action | Open | Return |
 |---|---|---|
-| Discover or inspect a conversation | `sessions --help`, `session inspect --help`, or `sessions_list` / `session_inspect` | exact target, or gap |
+| Discover or inspect a conversation | `sessions --help`, `session inspect --help`, or `sessions_list` / `session_inspect`; for Claude terminals use CLI `sessions list --endpoint claude-local --view active --source interactive` or MCP `provider_sessions_list` (`stored` is unsupported) | exact target, or gap |
+| Discover a Cursor terminal | Cursor terminals are not discoverable through Router; the caller supplies its SessionRef | exact target, or gap |
 | Continue, create, or fork | `conversation --help`, or `conversation_prompt` / `conversation_create` | SessionRef and strongest observed stage |
 | Send a message or reply | `message send --help`, or `message_send` | delivery receipt and its `outcome` (see "Sending to a session"); not completion or a reply |
 | Wait for board activity | `board thread --help`, or `board_thread_listen` / `board_thread_wait` | armed listener, batch, timeout, or gap |

@@ -66,6 +66,7 @@ pub use permission_diagnostic::{
     PermissionDiagnosticStage,
 };
 pub use provider_session_list::{
+    ClaudeCodeInteractiveOrigin, ClaudeCodeInteractiveStatus, HostedProviderOrigin,
     ProviderSessionListParams, ProviderSessionListResult, ProviderSessionState,
     ProviderSessionSummary,
 };

@@ -5,7 +5,8 @@ use super::{
     format_recency_at_ms, normalize_path, session_context_from_cwd, truncate_end,
 };
 use collaboration_client::protocol::{
-    EndpointRef, ProviderSessionState, ProviderSessionSummary, SessionRef,
+    ClaudeCodeInteractiveStatus, EndpointRef, ProviderSessionState, ProviderSessionSummary,
+    SessionRef,
 };
 use collaboration_client::session_catalog::{
     SessionHistorySource, StoredSessionRecord, read_session_conversation_history,
@@ -152,23 +153,78 @@ impl SessionPickerRecord {
         summary: &ProviderSessionSummary,
         endpoint_label: &str,
     ) -> Self {
-        let session_id = String::from(summary.target.session_id.clone());
-        let cwd = String::from(summary.working_directory.clone());
-        let updated_at_ms = summary.updated_at.saturating_mul(1_000);
-        let title = format!("{endpoint_label} · {session_id}");
+        let (
+            target,
+            working_directory,
+            updated_at,
+            provider_state,
+            name,
+            created_at,
+            runtime_status,
+        ) = match summary {
+            ProviderSessionSummary::HostedProvider {
+                target,
+                working_directory,
+                updated_at,
+                state,
+                ..
+            } => (
+                target,
+                working_directory,
+                *updated_at,
+                Some(*state),
+                None,
+                None,
+                PickerRuntimeStatus::from_provider(state),
+            ),
+            ProviderSessionSummary::ClaudeCodeInteractive {
+                target,
+                working_directory,
+                updated_at,
+                started_at,
+                name,
+                status,
+                ..
+            } => (
+                target,
+                working_directory,
+                *updated_at,
+                None,
+                name.clone(),
+                Some(*started_at),
+                match status {
+                    ClaudeCodeInteractiveStatus::Busy => PickerRuntimeStatus::Active,
+                    ClaudeCodeInteractiveStatus::Idle | ClaudeCodeInteractiveStatus::Shell => {
+                        PickerRuntimeStatus::Idle
+                    }
+                    ClaudeCodeInteractiveStatus::Waiting => PickerRuntimeStatus::Blocked,
+                    ClaudeCodeInteractiveStatus::Unreported
+                    | ClaudeCodeInteractiveStatus::Other => PickerRuntimeStatus::Unknown,
+                },
+            ),
+        };
+        let session_id = String::from(target.session_id.clone());
+        let cwd = String::from(working_directory.clone());
+        let updated_at_ms = updated_at.saturating_mul(1_000);
+        let title = name
+            .clone()
+            .unwrap_or_else(|| format!("{endpoint_label} · {session_id}"));
         let context = session_context_from_cwd(&cwd);
         Self {
-            identity: SessionPickerIdentity::HostedProvider(summary.target.clone()),
+            identity: SessionPickerIdentity::HostedProvider(target.clone()),
             endpoint_label: Some(endpoint_label.to_owned()),
-            provider_state: Some(summary.state),
+            provider_state,
             session_id,
             title: title.clone(),
             full_title: title,
-            explicit_name: None,
+            explicit_name: name,
             recency: format_recency_at_ms(Some(updated_at_ms)),
-            created: "-".to_owned(),
+            created: created_at.map_or_else(
+                || "-".to_owned(),
+                |value| format_recency_at_ms(Some(value.saturating_mul(1_000))),
+            ),
             recency_at_ms: Some(updated_at_ms),
-            created_at_ms: None,
+            created_at_ms: created_at.map(|value| value.saturating_mul(1_000)),
             branch: "-".to_owned(),
             persisted_branch: String::new(),
             context,
@@ -186,7 +242,7 @@ impl SessionPickerRecord {
             conversation_source: None,
             source: None,
             thread_source: None,
-            runtime_status: PickerRuntimeStatus::from_provider(&summary.state),
+            runtime_status,
         }
     }
 }

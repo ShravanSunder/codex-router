@@ -3,6 +3,23 @@ use collaboration_protocol::{ConversationCreateOutcome, OperationId};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[tokio::test]
+async fn native_sessions_list_routes_claude_to_provider_tool_without_changing_schema() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let request: collaboration_protocol::NativeSessionListParams = serde_json::from_value(
+        serde_json::json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+            "view":"active","scope":{"kind":"any"},"source":"interactive",
+            "pageSize":10
+        }),
+    ).expect("Claude list request");
+    let result = server.sessions_list(super::Parameters(request)).await;
+    assert_eq!(result.is_error, Some(true));
+    let content = serde_json::to_string(&result.structured_content).expect("error content");
+    assert!(content.contains("provider_sessions_list"), "{content}");
+}
+
 #[test]
 fn message_adapter_preserves_preparation_and_submission_effects() {
     let transport = || {
