@@ -332,3 +332,7 @@ mod test_support;
 #[allow(clippy::panic_in_result_fn)]
 #[path = "router_session_app_server_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
+#[path = "router_session_app_server_tui_tests.rs"]
+mod tui_tests;
