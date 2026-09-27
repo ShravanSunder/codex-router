@@ -18,6 +18,10 @@ pub enum QuestionResponse {
 #[derive(JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum QuestionAnswerValue {
+    SelectedOptions {
+        #[serde(rename = "selectedOptionIds")]
+        selected_option_ids: Vec<String>,
+    },
     Text(String),
     Number(serde_json::Number),
     Boolean(bool),

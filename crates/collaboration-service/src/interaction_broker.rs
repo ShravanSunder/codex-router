@@ -285,6 +285,7 @@ impl ServiceInteractionBroker {
                     .as_ref()
                     .and_then(|value| value.title.clone()),
                 description: None,
+                options_origin: None,
                 options: record
                     .offered_options
                     .into_iter()
@@ -314,6 +315,7 @@ impl ServiceInteractionBroker {
                 state,
                 title: Some(request.title),
                 description: request.description,
+                options_origin: Some(request.options_origin),
                 options: request.options.iter().map(typed_option_view).collect(),
             });
         }

@@ -768,6 +768,7 @@ async fn typed_approval_preserves_cursor_choices_and_returns_exact_option_id() {
         title: "Run command".into(),
         description: Some("Changes the allowlist if always allowed".into()),
         subject: None,
+        options_origin: session_event_model::OptionsOrigin::AgentOffered,
         options: OfferedOptions::new(vec![
             OfferedOption {
                 option_id: OfferedOptionId::new("allow-once").expect("ID"),
@@ -846,6 +847,46 @@ async fn typed_approval_preserves_cursor_choices_and_returns_exact_option_id() {
     );
 }
 
+#[tokio::test]
+async fn synthesized_plan_origin_is_visible_in_list_and_history() {
+    use message_board::{HumanId, Identity};
+    use session_event_model::{ApprovalSubject, OptionsOrigin};
+
+    let (broker, _generation, _directory) = fixture_broker().await;
+    let requester =
+        board_session_ref(&session(&broker.service_id, "plan-session")).expect("requester");
+    let approver = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+    };
+    let mut request = typed_approval_request("plan-synthesized");
+    request.options_origin = OptionsOrigin::RouterSynthesized;
+    request.subject = Some(ApprovalSubject::Plan {
+        tool_call_id: "tool-1".into(),
+        plan_item_id: "item-1".into(),
+    });
+    let _receiver = broker
+        .request_typed_approval(
+            requester,
+            approver,
+            request,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("pending plan approval");
+    let listed = broker.list_detailed(true).await.expect("detailed list");
+    assert_eq!(
+        listed.approvals[0].options_origin,
+        Some(OptionsOrigin::RouterSynthesized)
+    );
+    let history = broker.list_typed_approvals(true).await;
+    assert_eq!(history[0].options_origin, OptionsOrigin::RouterSynthesized);
+    assert!(matches!(
+        history[0].subject,
+        Some(ApprovalSubject::Plan { .. })
+    ));
+}
+
 // R17: old decision names are resolved only against choices the agent offered.
 #[tokio::test]
 async fn claude_choices_resolve_legacy_decisions_without_inventing_an_option() {
@@ -915,7 +956,8 @@ async fn typed_question_checks_fields_and_keeps_answer_decline_cancel_distinct()
         "requestId":request_id,"prompt":"Choose launch settings","fields":[
             {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true},
             {"kind":"boolean","fieldId":"dryRun","label":"Dry run","description":null,"required":true},
-            {"kind":"singleChoice","fieldId":"color","label":"Color","description":null,"required":true,"options":["red","blue"]}
+            {"kind":"singleChoice","fieldId":"color","label":"Color","description":null,"required":true,"options":[{"optionId":"red-id","label":"Same"},{"optionId":"blue-id","label":"Same"}]},
+            {"kind":"multiChoice","fieldId":"features","label":"Features","description":null,"required":true,"options":[{"optionId":"a","label":"First"},{"optionId":"b","label":"Second"}],"min":2,"max":2}
         ]
     })).expect("question")
     };
@@ -950,7 +992,7 @@ async fn typed_question_checks_fields_and_keeps_answer_decline_cancel_distinct()
         .expect("pending question");
     assert_eq!(broker.list_questions(true).await.len(), 1);
     let answer = QuestionResponse::Answered {
-        content: serde_json::from_value(json!({"count":3,"dryRun":true,"color":"blue"}))
+        content: serde_json::from_value(json!({"count":3,"dryRun":true,"color":{"selectedOptionIds":["blue-id"]},"features":{"selectedOptionIds":["a","b"]}}))
             .expect("typed content"),
     };
     assert!(
@@ -966,7 +1008,7 @@ async fn typed_question_checks_fields_and_keeps_answer_decline_cancel_distinct()
                 &approver,
                 QuestionResponse::Answered {
                     content: serde_json::from_value(
-                        json!({"count":"three","dryRun":true,"color":"blue"})
+                        json!({"count":"three","dryRun":true,"color":{"selectedOptionIds":["blue-id"]},"features":{"selectedOptionIds":["a","b"]}})
                     )
                     .expect("content"),
                 }
@@ -977,11 +1019,17 @@ async fn typed_question_checks_fields_and_keeps_answer_decline_cancel_distinct()
     assert_eq!(broker.list_questions(true).await.len(), 1);
     assert!(matches!(
         broker.respond_question("q-answer", &approver, QuestionResponse::Answered {
-            content: serde_json::from_value(json!({"count":3,"dryRun":true,"color":"green"})).expect("content"),
+            content: serde_json::from_value(json!({"count":3,"dryRun":true,"color":{"selectedOptionIds":["green"]},"features":{"selectedOptionIds":["a","b"]}})).expect("content"),
         }).await,
         Err(crate::interaction_broker::InteractionHistoryError::InvalidAnswer { field_id }) if field_id == "color"
     ));
     assert_eq!(broker.list_questions(true).await.len(), 1);
+    assert!(matches!(
+        broker.respond_question("q-answer", &approver, QuestionResponse::Answered {
+            content: serde_json::from_value(json!({"count":3,"dryRun":true,"color":{"selectedOptionIds":["blue-id"]},"features":{"selectedOptionIds":["a","unknown"]}})).expect("content"),
+        }).await,
+        Err(crate::interaction_broker::InteractionHistoryError::InvalidAnswer { field_id }) if field_id == "features"
+    ));
     broker
         .respond_question("q-answer", &approver, answer.clone())
         .await
