@@ -183,11 +183,11 @@ async fn text_and_resource_link_reach_agent_as_two_ordered_blocks() {
     let (_root, client, _port) = fixture_client("blocks").await;
     let result = tokio::time::timeout(
         Duration::from_secs(2),
-        client.prompt_contents_for_operation_with_input(
+        client.prompt_contents_with_approval_dispatch_for_input(
             "fixture-session".to_owned(),
             InputId::generate(),
-            None,
             text_and_link(),
+            (),
             None,
         ),
     )
@@ -228,7 +228,16 @@ async fn unsupported_image_is_rejected_before_any_acp_prompt() {
     assert_eq!(port.approval_requests.load(Ordering::SeqCst), 0);
     let follow_up = tokio::time::timeout(
         Duration::from_secs(2),
-        client.prompt("fixture-session".to_owned(), "After rejection".to_owned()),
+        client.prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("After rejection".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        ),
     )
     .await
     .expect("follow-up completes");
@@ -243,11 +252,11 @@ async fn advertised_image_reaches_agent_with_exact_data_and_mime_type() {
         PromptContent::image("image/png".to_owned(), "aGVsbG8=".to_owned(), None).expect("image");
     let result = tokio::time::timeout(
         Duration::from_secs(2),
-        client.prompt_contents_for_operation_with_input(
+        client.prompt_contents_with_approval_dispatch_for_input(
             "fixture-session".to_owned(),
             InputId::generate(),
-            None,
             vec![image],
+            (),
             None,
         ),
     )

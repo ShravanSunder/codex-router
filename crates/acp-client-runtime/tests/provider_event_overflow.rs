@@ -194,7 +194,13 @@ async fn run_fixture(
         .expect("session opens");
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        client.prompt(session_id, "Run".to_owned()),
+        client.prompt_contents_with_approval_dispatch_for_input(
+            session_id,
+            session_event_model::InputId::generate(),
+            vec![session_event_model::PromptContent::text("Run".to_owned()).expect("text prompt")],
+            (),
+            None,
+        ),
     )
     .await
     .expect("turn settles");

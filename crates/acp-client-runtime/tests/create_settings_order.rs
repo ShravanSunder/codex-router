@@ -268,7 +268,16 @@ async fn create_applies_requested_settings_before_first_prompt() {
     assert_eq!(created.effective_settings.effort.as_deref(), Some("high"));
 
     let prompt = client
-        .prompt_with_approval_context(created.provider_session_id, "Proceed".to_owned(), ())
+        .prompt_contents_with_approval_dispatch_for_input(
+            created.provider_session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Proceed".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await;
     client.shutdown().await;
     assert!(prompt.is_ok(), "prompt result: {prompt:?}");
@@ -382,7 +391,16 @@ async fn partial_setup_blocks_prompt_until_settings_are_accepted() {
     assert!(!failed.reason.contains("private agent detail"));
     assert!(client.settings_unresolved(&provider_session_id).await);
     let blocked = client
-        .prompt_with_approval_context(provider_session_id.clone(), "too early".to_owned(), ())
+        .prompt_contents_with_approval_dispatch_for_input(
+            provider_session_id.clone(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("too early".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await;
     assert!(matches!(
         blocked,
@@ -393,7 +411,16 @@ async fn partial_setup_blocks_prompt_until_settings_are_accepted() {
         .await
         .expect("caller accepts effective settings");
     let prompt = client
-        .prompt_with_approval_context(provider_session_id, "Proceed".to_owned(), ())
+        .prompt_contents_with_approval_dispatch_for_input(
+            provider_session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Proceed".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await;
     client.shutdown().await;
     assert!(prompt.is_ok(), "prompt after accept: {prompt:?}");
@@ -445,7 +472,16 @@ async fn partial_setup_can_be_resolved_by_setting_the_failed_value() {
     assert_eq!(effective.model.as_deref(), Some("b"));
     assert!(!client.settings_unresolved(&provider_session_id).await);
     let prompt = client
-        .prompt_with_approval_context(provider_session_id, "Proceed".to_owned(), ())
+        .prompt_contents_with_approval_dispatch_for_input(
+            provider_session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Proceed".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await;
     client.shutdown().await;
     assert!(prompt.is_ok(), "prompt after setting: {prompt:?}");
@@ -490,7 +526,16 @@ async fn legacy_mode_is_selected_before_prompt_when_no_mode_config_exists() {
         .expect("mode applied");
     assert_eq!(created.effective_settings.mode.as_deref(), Some("ask"));
     let prompt = client
-        .prompt_with_approval_context(created.provider_session_id, "Proceed".to_owned(), ())
+        .prompt_contents_with_approval_dispatch_for_input(
+            created.provider_session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Proceed".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await;
     client.shutdown().await;
     assert!(prompt.is_ok(), "prompt result: {prompt:?}");
@@ -544,7 +589,18 @@ async fn malformed_post_send_setting_response_gates_existing_session() {
         "setting result: {result:?}"
     );
     assert!(client.settings_unresolved(&session_id).await);
-    let blocked = client.prompt(session_id, "Must not run".to_owned()).await;
+    let blocked = client
+        .prompt_contents_with_approval_dispatch_for_input(
+            session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Must not run".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
+        .await;
     assert!(matches!(
         blocked,
         Err(acp_client_runtime::ExternalProviderRuntimeError::SettingsUnresolved)
@@ -584,7 +640,16 @@ async fn explicit_setting_rejection_does_not_gate_session() {
     );
     assert!(!client.settings_unresolved(&session_id).await);
     client
-        .prompt(session_id, "Proceed".to_owned())
+        .prompt_contents_with_approval_dispatch_for_input(
+            session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Proceed".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await
         .expect("prompt after rejection");
     client.shutdown().await;

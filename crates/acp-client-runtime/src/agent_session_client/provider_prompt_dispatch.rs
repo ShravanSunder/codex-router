@@ -5,87 +5,11 @@ use super::{
     ProviderCommand, ProviderPromptDispatchObservation,
 };
 use crate::InteractionPort;
-use crate::provider_prompt_content::{ProviderPromptContent, acp_blocks_from_prompt_content};
+use crate::provider_prompt_content::ProviderPromptContent;
 use agent_client_protocol::schema::v1::ContentBlock;
-use session_event_model::{InputId, PromptContent};
+use session_event_model::InputId;
 
 impl<P: InteractionPort> AgentSessionClient<P> {
-    pub async fn prompt(
-        &self,
-        provider_session_id: String,
-        prompt: String,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_with_input(provider_session_id, InputId::generate(), prompt)
-            .await
-    }
-
-    pub async fn prompt_with_input(
-        &self,
-        provider_session_id: String,
-        input_id: InputId,
-        prompt: String,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_for_operation_with_input(provider_session_id, input_id, None, prompt, None)
-            .await
-    }
-
-    pub async fn prompt_for_operation(
-        &self,
-        provider_session_id: String,
-        operation_id: Option<P::OperationId>,
-        prompt: String,
-        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_for_operation_with_input(
-            provider_session_id,
-            InputId::generate(),
-            operation_id,
-            prompt,
-            dispatch,
-        )
-        .await
-    }
-
-    pub async fn prompt_for_operation_with_input(
-        &self,
-        provider_session_id: String,
-        input_id: InputId,
-        operation_id: Option<P::OperationId>,
-        prompt: String,
-        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_content(
-            provider_session_id,
-            input_id,
-            operation_id,
-            vec![ContentBlock::Text(
-                agent_client_protocol::schema::v1::TextContent::new(prompt),
-            )],
-            dispatch,
-        )
-        .await
-    }
-
-    /// Submit ordered, validated Session content without exposing ACP SDK
-    /// blocks to the Host. Unsupported optional types fail before dispatch.
-    pub async fn prompt_contents_for_operation_with_input(
-        &self,
-        provider_session_id: String,
-        input_id: InputId,
-        operation_id: Option<P::OperationId>,
-        contents: Vec<PromptContent>,
-        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_content(
-            provider_session_id,
-            input_id,
-            operation_id,
-            acp_blocks_from_prompt_content(contents),
-            dispatch,
-        )
-        .await
-    }
-
     pub(crate) async fn prompt_content(
         &self,
         provider_session_id: String,

@@ -201,8 +201,13 @@ async fn prompt_and_injected_steer_publish_distinct_inputs_on_one_turn() {
         .expect("session opens");
     let prompt_input = InputId::new("prompt-input").expect("input ID");
     let steer_input = InputId::new("steer-input").expect("input ID");
-    let prompt =
-        client.prompt_with_input(session_id.clone(), prompt_input.clone(), "First".to_owned());
+    let prompt = client.prompt_contents_with_approval_dispatch_for_input(
+        session_id.clone(),
+        prompt_input.clone(),
+        vec![session_event_model::PromptContent::text("First".to_owned()).expect("text prompt")],
+        (),
+        None,
+    );
     tokio::pin!(prompt);
     let turn_started = tokio::select! {
         event = tokio::time::timeout(Duration::from_secs(2), events.recv()) => event.expect("turn starts").expect("event"),
@@ -220,7 +225,13 @@ async fn prompt_and_injected_steer_publish_distinct_inputs_on_one_turn() {
     );
 
     let steering = client
-        .steer_with_input(session_id.clone(), steer_input.clone(), "Second".to_owned())
+        .steer_contents_with_input(
+            session_id.clone(),
+            steer_input.clone(),
+            vec![
+                session_event_model::PromptContent::text("Second".to_owned()).expect("text steer"),
+            ],
+        )
         .await
         .expect("steer accepted");
     assert!(matches!(
@@ -277,7 +288,11 @@ async fn started_new_turn_uses_the_steer_input_id() {
         .expect("session opens");
     let input_id = InputId::new("new-turn-steer").expect("input ID");
     let steering = client
-        .steer_with_input(session_id, input_id.clone(), "Begin".to_owned())
+        .steer_contents_with_input(
+            session_id,
+            input_id.clone(),
+            vec![session_event_model::PromptContent::text("Begin".to_owned()).expect("text steer")],
+        )
         .await
         .expect("steer accepted");
     assert_eq!(
@@ -351,7 +366,11 @@ async fn prompt_required_preserves_steer_input_when_prompted_normally() {
         .expect("session opens");
     let input_id = InputId::new("steer-then-prompt").expect("input ID");
     let steering = client
-        .steer_with_input(session_id.clone(), input_id.clone(), "Hello".to_owned())
+        .steer_contents_with_input(
+            session_id.clone(),
+            input_id.clone(),
+            vec![session_event_model::PromptContent::text("Hello".to_owned()).expect("text steer")],
+        )
         .await
         .expect("steer response");
     assert_eq!(
@@ -359,7 +378,15 @@ async fn prompt_required_preserves_steer_input_when_prompted_normally() {
         acp_client_runtime::ProviderSteeringOutcome::PromptRequired
     );
     client
-        .prompt_with_input(session_id, input_id.clone(), "Hello".to_owned())
+        .prompt_contents_with_approval_dispatch_for_input(
+            session_id,
+            input_id.clone(),
+            vec![
+                session_event_model::PromptContent::text("Hello".to_owned()).expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await
         .expect("prompt ends");
     let started = events.recv().await.expect("turn start");
@@ -406,7 +433,15 @@ async fn text_and_thought_chunks_publish_ordered_items() {
         .await
         .expect("session opens");
     let outcome = client
-        .prompt(session_id, "Begin".to_owned())
+        .prompt_contents_with_approval_dispatch_for_input(
+            session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Begin".to_owned()).expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await
         .expect("prompt ends");
     assert_eq!(outcome.output, "Hello world");

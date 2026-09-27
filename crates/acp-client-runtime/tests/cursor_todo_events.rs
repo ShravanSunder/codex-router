@@ -181,8 +181,26 @@ async fn concurrent_cursor_todos_publish_to_their_observed_sessions() {
     let (first_result, second_result) =
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             tokio::join!(
-                client.prompt_with_approval_context(first.clone(), "One".to_owned(), ()),
-                client.prompt_with_approval_context(second.clone(), "Two".to_owned(), ())
+                client.prompt_contents_with_approval_dispatch_for_input(
+                    first.clone(),
+                    session_event_model::InputId::generate(),
+                    vec![
+                        session_event_model::PromptContent::text("One".to_owned())
+                            .expect("text prompt")
+                    ],
+                    (),
+                    None
+                ),
+                client.prompt_contents_with_approval_dispatch_for_input(
+                    second.clone(),
+                    session_event_model::InputId::generate(),
+                    vec![
+                        session_event_model::PromptContent::text("Two".to_owned())
+                            .expect("text prompt")
+                    ],
+                    (),
+                    None
+                )
             )
         })
         .await
@@ -240,7 +258,13 @@ async fn a_single_running_turn_routes_an_unobserved_cursor_todo() {
         .expect("session opens");
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        client.prompt(session_id.clone(), "Go".to_owned()),
+        client.prompt_contents_with_approval_dispatch_for_input(
+            session_id.clone(),
+            session_event_model::InputId::generate(),
+            vec![session_event_model::PromptContent::text("Go".to_owned()).expect("text prompt")],
+            (),
+            None,
+        ),
     )
     .await
     .expect("exchange completes")

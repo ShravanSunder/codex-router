@@ -1,8 +1,12 @@
 //! ACP provider message delivery, evidence, and reconciliation.
+mod provider_content_commands;
 mod provider_queue_submission;
+pub use provider_content_commands::{
+    ProviderPromptContentsError, ProviderQueueAdmissionError, ProviderSteerContentsError,
+};
 
-use crate::external_provider_supervisor::ProviderPromptDispatch;
-use crate::provider_acp_message_fifo::ProviderAcpMessageFifo;
+use crate::external_provider_supervisor::{ProviderPromptContentsRequest, ProviderPromptDispatch};
+use crate::provider_acp_message_fifo::{ProviderAcpMessageFifo, ProviderQueuedPrompt};
 use crate::provider_acp_route_claim::ProviderAcpRouteClaim;
 use crate::provider_acp_session_loading::{
     ProviderSessionLoadOutcome, ProviderSessionLoadRejection, ensure_provider_session_loaded,
@@ -18,8 +22,8 @@ use agent_automation::{
 use collaboration_protocol::{
     CodexGeneration, ConversationPromptRequest, DeliveryClientReceipt, DeliveryNextAction,
     DeliveryOutcome, DeliveryReceipt, DeliveryRejection, DeliveryRejectionReason, MessageContent,
-    MessageDelivery, OperationId, ProviderOperationEffect, ProviderOperationStage,
-    SessionReachability, SessionRef, UuidIdentity, render_message,
+    MessageDelivery, OperationId, ProviderIdentity, ProviderOperationEffect,
+    ProviderOperationStage, SessionReachability, SessionRef, UuidIdentity, render_message,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,

@@ -117,7 +117,16 @@ async fn unknown_stop_reason_preserves_both_output_chunks() {
         .await
         .expect("session opens");
     let outcome = client
-        .prompt(session_id, "Proceed".to_owned())
+        .prompt_contents_with_approval_dispatch_for_input(
+            session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Proceed".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await
         .expect("prompt ends");
     client.shutdown().await;

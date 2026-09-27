@@ -150,7 +150,15 @@ async fn run_elicitation(
         .expect("session opens");
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        client.prompt_with_approval_context(session_id, "Elicit".to_owned(), ()),
+        client.prompt_contents_with_approval_dispatch_for_input(
+            session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Elicit".to_owned()).expect("text prompt"),
+            ],
+            (),
+            None,
+        ),
     )
     .await
     .expect("elicitation exchange completes")
