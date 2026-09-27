@@ -17,6 +17,21 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             .unwrap_or_else(|| self.base_capabilities.clone())
     }
 
+    pub async fn settings_catalog(
+        &self,
+        provider_session_id: &str,
+    ) -> Option<crate::ProviderSettingsCatalog> {
+        self.session_settings
+            .read()
+            .await
+            .get(provider_session_id)
+            .cloned()
+    }
+
+    pub async fn last_settings_catalog(&self) -> Option<crate::ProviderSettingsCatalog> {
+        self.last_settings_catalog.read().await.clone()
+    }
+
     #[must_use]
     #[cfg(any(test, feature = "test-observation"))]
     pub fn permission_observation(&self) -> ExternalProviderPermissionObservation {

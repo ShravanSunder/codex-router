@@ -79,6 +79,13 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             ProviderCapabilityReport,
         >::new()));
         let task_session_capabilities = Arc::clone(&session_capabilities);
+        let session_settings = Arc::new(tokio::sync::RwLock::new(HashMap::<
+            String,
+            crate::ProviderSettingsCatalog,
+        >::new()));
+        let task_session_settings = Arc::clone(&session_settings);
+        let last_settings_catalog = Arc::new(tokio::sync::RwLock::new(None));
+        let task_last_settings_catalog = Arc::clone(&last_settings_catalog);
         let task_event_sink = Arc::clone(&event_sink);
         #[cfg(any(test, feature = "test-observation"))]
         let permission_request_count = Arc::new(AtomicU64::new(0));
@@ -264,13 +271,21 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             let report = result.as_ref().as_ref().ok().map(|registration| {
                                                 base_capabilities.with_session_response(&registration.response)
                                             });
-                                            let result = (*result).and_then(|registration| {
+                                            let catalog = result.as_ref().as_ref().ok().map(|registration| {
+                                                crate::provider_settings_catalog_codec::catalog_from_session_response(&registration.response)
+                                            });
+                                            let mut result = (*result).and_then(|registration| {
                                                 register_provider_session(registration, &mut sessions)
                                             });
-                                            if let Ok(created) = &result {
+                                            if let Ok(created) = &mut result {
                                                 known_sessions.track(created.provider_session_id.clone()).await;
                                                 if let Some(report) = report {
                                                     task_session_capabilities.write().await.insert(created.provider_session_id.clone(), report);
+                                                }
+                                                if let Some(catalog) = catalog {
+                                                    created.effective_settings = catalog.effective_settings();
+                                                    task_session_settings.write().await.insert(created.provider_session_id.clone(), catalog.clone());
+                                                    *task_last_settings_catalog.write().await = Some(catalog);
                                                 }
                                             }
                                             let _result = reply.send(result);
@@ -279,6 +294,9 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             pending_loads.remove(&provider_session_id);
                                             let report = result.as_ref().as_ref().ok().map(|session| {
                                                 base_capabilities.with_session_response(&session.response())
+                                            });
+                                            let catalog = result.as_ref().as_ref().ok().map(|session| {
+                                                crate::provider_settings_catalog_codec::catalog_from_session_response(&session.response())
                                             });
                                             let result = (*result).and_then(|mut session| {
                                                 discard_queued_session_updates(&mut session)?;
@@ -295,6 +313,10 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 known_sessions.forget(&provider_session_id).await;
                                             } else if let Some(report) = report {
                                                 task_session_capabilities.write().await.insert(provider_session_id.clone(), report);
+                                                if let Some(catalog) = catalog {
+                                                    task_session_settings.write().await.insert(provider_session_id.clone(), catalog.clone());
+                                                    *task_last_settings_catalog.write().await = Some(catalog);
+                                                }
                                             }
                                             let _result = reply.send(result);
                                         }
@@ -484,6 +506,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             admission,
             base_capabilities,
             session_capabilities,
+            session_settings,
+            last_settings_catalog,
             shutdown,
             retirement,
             task: tokio::sync::Mutex::new(Some(task)),

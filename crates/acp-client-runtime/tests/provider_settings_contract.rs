@@ -15,9 +15,9 @@ fn provider_create_settings_have_typed_request_and_result() {
         effort: Some("high".to_owned()),
     };
     let effective = EffectiveProviderSettings {
-        mode: requested.mode.clone(),
-        model: requested.model.clone(),
-        effort: requested.effort.clone(),
+        mode: requested.mode,
+        model: requested.model,
+        effort: requested.effort,
     };
     let created = ExternalProviderCreatedSession {
         provider_session_id: "session-a".to_owned(),
