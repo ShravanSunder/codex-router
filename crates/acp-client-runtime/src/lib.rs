@@ -71,7 +71,7 @@ pub use provider_session_settings::{
     ProviderSettingChoice, ProviderSettingKind, ProviderSettingsCatalog, RequestedProviderSettings,
 };
 pub use session_event_sink::{
-    EventSinkOverflow, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,
+    EventSinkClosed, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,
 };
 
 #[cfg(feature = "test-observation")]

@@ -8,7 +8,19 @@ use agent_client_protocol::schema::v1::{
 };
 use session_event_model::{SessionEvent, SessionItem, SessionItemKind, ToolCallStatus};
 
-use crate::{EventSinkOverflow, SessionEventSink, agent_session_client::MAX_PROMPT_OUTPUT_BYTES};
+use crate::{EventSinkClosed, SessionEventSink, agent_session_client::MAX_PROMPT_OUTPUT_BYTES};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ItemProjectionError {
+    OutputLimit,
+    SinkClosed,
+}
+
+impl From<EventSinkClosed> for ItemProjectionError {
+    fn from(_: EventSinkClosed) -> Self {
+        Self::SinkClosed
+    }
+}
 
 struct ActiveTextItem {
     item: SessionItem,
@@ -36,7 +48,13 @@ impl ProviderItemProjection {
         }
     }
 
-    pub(crate) fn observe(&mut self, update: &SessionUpdate) -> Result<(), EventSinkOverflow> {
+    fn emit(&self, event: SessionEvent) -> Result<(), ItemProjectionError> {
+        self.event_sink
+            .publish(&self.session_id, event)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn observe(&mut self, update: &SessionUpdate) -> Result<(), ItemProjectionError> {
         match update {
             SessionUpdate::UserMessageChunk(chunk) => {
                 self.observe_text(chunk, SessionItemKind::UserMessage)
@@ -87,7 +105,7 @@ impl ProviderItemProjection {
         &mut self,
         chunk: &ContentChunk,
         kind: SessionItemKind,
-    ) -> Result<(), EventSinkOverflow> {
+    ) -> Result<(), ItemProjectionError> {
         let ContentBlock::Text(text) = &chunk.content else {
             self.finish_text()?;
             return Ok(());
@@ -103,22 +121,18 @@ impl ProviderItemProjection {
         if let Some(active) = &mut self.active_text {
             let prior = active.item.text.as_deref().unwrap_or_default();
             if prior.len().saturating_add(text.text.len()) > MAX_PROMPT_OUTPUT_BYTES {
-                return Err(EventSinkOverflow);
+                return Err(ItemProjectionError::OutputLimit);
             }
             active
                 .item
                 .text
                 .get_or_insert_with(String::new)
                 .push_str(&text.text);
-            self.event_sink.publish(
-                &self.session_id,
-                SessionEvent::ItemUpdated {
-                    item: active.item.clone(),
-                },
-            )
+            let updated_item = active.item.clone();
+            self.emit(SessionEvent::ItemUpdated { item: updated_item })
         } else {
             if text.text.len() > MAX_PROMPT_OUTPUT_BYTES {
-                return Err(EventSinkOverflow);
+                return Err(ItemProjectionError::OutputLimit);
             }
             let item = SessionItem {
                 item_id: message_id
@@ -128,28 +142,22 @@ impl ProviderItemProjection {
                 kind,
                 text: Some(text.text.clone()),
             };
-            self.event_sink.publish(
-                &self.session_id,
-                SessionEvent::ItemStarted { item: item.clone() },
-            )?;
+            self.emit(SessionEvent::ItemStarted { item: item.clone() })?;
             self.active_text = Some(ActiveTextItem { item, message_id });
             Ok(())
         }
     }
 
-    pub(crate) fn finish_text(&mut self) -> Result<(), EventSinkOverflow> {
+    pub(crate) fn finish_text(&mut self) -> Result<(), ItemProjectionError> {
         if let Some(active) = self.active_text.take() {
-            self.event_sink.publish(
-                &self.session_id,
-                SessionEvent::ItemCompleted {
-                    item_id: active.item.item_id,
-                },
-            )?;
+            self.emit(SessionEvent::ItemCompleted {
+                item_id: active.item.item_id,
+            })?;
         }
         Ok(())
     }
 
-    fn observe_tool_call(&mut self, tool_call: &ToolCall) -> Result<(), EventSinkOverflow> {
+    fn observe_tool_call(&mut self, tool_call: &ToolCall) -> Result<(), ItemProjectionError> {
         let item_id = tool_call.tool_call_id.0.to_string();
         let item = SessionItem {
             item_id: item_id.clone(),
@@ -166,17 +174,14 @@ impl ProviderItemProjection {
         if !existed {
             self.tool_order.push(item_id);
         }
-        self.event_sink.publish(
-            &self.session_id,
-            if existed {
-                SessionEvent::ItemUpdated { item }
-            } else {
-                SessionEvent::ItemStarted { item }
-            },
-        )
+        self.emit(if existed {
+            SessionEvent::ItemUpdated { item }
+        } else {
+            SessionEvent::ItemStarted { item }
+        })
     }
 
-    fn observe_tool_update(&mut self, update: &ToolCallUpdate) -> Result<(), EventSinkOverflow> {
+    fn observe_tool_update(&mut self, update: &ToolCallUpdate) -> Result<(), ItemProjectionError> {
         let item_id = update.tool_call_id.0.to_string();
         let existed = self.tool_items.contains_key(&item_id);
         let item = self
@@ -209,20 +214,17 @@ impl ProviderItemProjection {
         if !existed {
             self.tool_order.push(item_id);
         }
-        self.event_sink.publish(
-            &self.session_id,
-            if existed {
-                SessionEvent::ItemUpdated { item }
-            } else {
-                SessionEvent::ItemStarted { item }
-            },
-        )
+        self.emit(if existed {
+            SessionEvent::ItemUpdated { item }
+        } else {
+            SessionEvent::ItemStarted { item }
+        })
     }
 
     fn observe_plan(
         &mut self,
         plan: &agent_client_protocol::schema::v1::Plan,
-    ) -> Result<(), EventSinkOverflow> {
+    ) -> Result<(), ItemProjectionError> {
         let text = plan
             .entries
             .iter()
@@ -239,29 +241,22 @@ impl ProviderItemProjection {
             text: Some(text),
         };
         self.plan_item = Some(item.clone());
-        self.event_sink.publish(
-            &self.session_id,
-            if existed {
-                SessionEvent::ItemUpdated { item }
-            } else {
-                SessionEvent::ItemStarted { item }
-            },
-        )
+        self.emit(if existed {
+            SessionEvent::ItemUpdated { item }
+        } else {
+            SessionEvent::ItemStarted { item }
+        })
     }
 
-    pub(crate) fn finish(&mut self) -> Result<(), EventSinkOverflow> {
+    pub(crate) fn finish(&mut self) -> Result<(), ItemProjectionError> {
         self.finish_text()?;
-        for item_id in self.tool_order.drain(..) {
-            self.event_sink
-                .publish(&self.session_id, SessionEvent::ItemCompleted { item_id })?;
+        for item_id in std::mem::take(&mut self.tool_order) {
+            self.emit(SessionEvent::ItemCompleted { item_id })?;
         }
         if let Some(plan) = self.plan_item.take() {
-            self.event_sink.publish(
-                &self.session_id,
-                SessionEvent::ItemCompleted {
-                    item_id: plan.item_id,
-                },
-            )?;
+            self.emit(SessionEvent::ItemCompleted {
+                item_id: plan.item_id,
+            })?;
         }
         Ok(())
     }
@@ -270,11 +265,11 @@ impl ProviderItemProjection {
         &mut self,
         source_kind: &str,
         content: Option<&str>,
-    ) -> Result<(), EventSinkOverflow> {
+    ) -> Result<(), ItemProjectionError> {
         self.finish_text()?;
         let text = content.unwrap_or("Unrecognized agent update");
         if text.len() > MAX_PROMPT_OUTPUT_BYTES {
-            return Err(EventSinkOverflow);
+            return Err(ItemProjectionError::OutputLimit);
         }
         let item = SessionItem {
             item_id: uuid::Uuid::now_v7().to_string(),
@@ -283,38 +278,30 @@ impl ProviderItemProjection {
             },
             text: Some(text.to_owned()),
         };
-        self.event_sink.publish(
-            &self.session_id,
-            SessionEvent::ItemStarted { item: item.clone() },
-        )?;
-        self.event_sink.publish(
-            &self.session_id,
-            SessionEvent::ItemCompleted {
-                item_id: item.item_id,
-            },
-        )
+        self.emit(SessionEvent::ItemStarted { item: item.clone() })?;
+        self.emit(SessionEvent::ItemCompleted {
+            item_id: item.item_id,
+        })
     }
 
-    fn emit_once(&mut self, kind: SessionItemKind, text: String) -> Result<(), EventSinkOverflow> {
+    fn emit_once(
+        &mut self,
+        kind: SessionItemKind,
+        text: String,
+    ) -> Result<(), ItemProjectionError> {
         self.finish_text()?;
         if text.len() > MAX_PROMPT_OUTPUT_BYTES {
-            return Err(EventSinkOverflow);
+            return Err(ItemProjectionError::OutputLimit);
         }
         let item = SessionItem {
             item_id: uuid::Uuid::now_v7().to_string(),
             kind,
             text: Some(text),
         };
-        self.event_sink.publish(
-            &self.session_id,
-            SessionEvent::ItemStarted { item: item.clone() },
-        )?;
-        self.event_sink.publish(
-            &self.session_id,
-            SessionEvent::ItemCompleted {
-                item_id: item.item_id,
-            },
-        )
+        self.emit(SessionEvent::ItemStarted { item: item.clone() })?;
+        self.emit(SessionEvent::ItemCompleted {
+            item_id: item.item_id,
+        })
     }
 }
 

@@ -16,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     ActiveApprovalContext,
-    approval_turn_cancellation::cancel_turn_after_event_overflow,
     provider_cursor_plan_items::{CursorPlanDefinition, CursorPlanItems, CursorTodo},
 };
 use crate::{
@@ -41,6 +40,8 @@ pub(super) struct ProviderCursorCreatePlanHandler<P: InteractionPort> {
     event_sink: Arc<dyn SessionEventSink>,
     approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
     interaction_port: Arc<P>,
+    shutdown: CancellationToken,
+    sink_closed: CancellationToken,
 }
 
 impl<P: InteractionPort> ProviderCursorCreatePlanHandler<P> {
@@ -50,6 +51,8 @@ impl<P: InteractionPort> ProviderCursorCreatePlanHandler<P> {
         event_sink: Arc<dyn SessionEventSink>,
         approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
         interaction_port: Arc<P>,
+        shutdown: CancellationToken,
+        sink_closed: CancellationToken,
     ) -> Self {
         Self {
             tool_registry,
@@ -57,6 +60,8 @@ impl<P: InteractionPort> ProviderCursorCreatePlanHandler<P> {
             event_sink,
             approval_contexts,
             interaction_port,
+            shutdown,
+            sink_closed,
         }
     }
 
@@ -175,18 +180,8 @@ impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderCursorCreatePlanH
             SessionEvent::ItemStarted { item }
         };
         if self.event_sink.publish(&session_id, event).is_err() {
-            tracing::error!("provider Session event sink overflow on Cursor plan");
-            if let Err(error) = cancel_turn_after_event_overflow(
-                &self.tool_registry,
-                &self.approval_contexts,
-                &self.interaction_port,
-                &connection,
-                &session_id,
-            )
-            .await
-            {
-                tracing::warn!(?error, "failed to cancel Turn after Cursor plan overflow");
-            }
+            self.sink_closed.cancel();
+            self.shutdown.cancel();
             responder.respond(json!({"outcome":"cancelled"}))?;
             return Ok(Handled::Yes);
         }

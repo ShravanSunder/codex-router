@@ -11,7 +11,7 @@ use std::{
 };
 
 use acp_client_runtime::{
-    AgentSessionClient, ApprovalPortOutcome, EventSinkOverflow, ExternalProviderLaunch,
+    AgentSessionClient, ApprovalPortOutcome, EventSinkClosed, ExternalProviderLaunch,
     HistoryReplayFuture, InteractionFuture, InteractionPort, ProviderPersistenceTarget,
     ProviderPromptDispatchObservation, RefusedApprovalOffer, SessionEventSink,
 };
@@ -122,7 +122,7 @@ impl SessionEventSink for CountingEventSink {
         self.0.fetch_add(1, Ordering::Relaxed);
         Box::pin(async { Ok(()) })
     }
-    fn publish(&self, _session_id: &str, _event: SessionEvent) -> Result<(), EventSinkOverflow> {
+    fn publish(&self, _session_id: &str, _event: SessionEvent) -> Result<(), EventSinkClosed> {
         Ok(())
     }
 }

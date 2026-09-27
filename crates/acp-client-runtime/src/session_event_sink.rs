@@ -4,8 +4,9 @@ use std::{future::Future, pin::Pin};
 
 use session_event_model::SessionEvent;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EventSinkOverflow;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("session event consumer closed")]
+pub struct EventSinkClosed;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("session history replay could not begin")]
@@ -18,13 +19,13 @@ pub trait SessionEventSink: Send + Sync + 'static {
     /// Reset hub history before the agent can publish replayed updates.
     fn begin_history_replay(&self, session_id: &str) -> HistoryReplayFuture<'_>;
 
-    /// Return promptly; a full downstream channel is reported, never waited on.
-    fn publish(&self, session_id: &str, event: SessionEvent) -> Result<(), EventSinkOverflow>;
+    /// Return promptly; failure means the event consumer has closed.
+    fn publish(&self, session_id: &str, event: SessionEvent) -> Result<(), EventSinkClosed>;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EventSinkOverflow, SessionEventSink};
+    use super::{EventSinkClosed, SessionEventSink};
     use session_event_model::SessionEvent;
 
     struct ReplaySink;
@@ -34,11 +35,7 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
-        fn publish(
-            &self,
-            _session_id: &str,
-            _event: SessionEvent,
-        ) -> Result<(), EventSinkOverflow> {
+        fn publish(&self, _session_id: &str, _event: SessionEvent) -> Result<(), EventSinkClosed> {
             Ok(())
         }
     }
