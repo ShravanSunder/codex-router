@@ -53,26 +53,36 @@ fn rpc_error(id: Value, code: i32, message: &'static str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
 
-fn selected_endpoint(method: &str, params: &Value, sessions: &BTreeMap<String, String>) -> String {
+fn selected_endpoint(
+    method: &str,
+    params: &Value,
+    sessions: &BTreeMap<String, String>,
+) -> Option<String> {
     if matches!(method, "session/new" | "session/list") {
-        return params
-            .pointer("/_meta/router/endpoint")
-            .and_then(Value::as_str)
-            .unwrap_or("codex-local")
-            .to_owned();
+        return Some(
+            params
+                .pointer("/_meta/router/endpoint")
+                .and_then(Value::as_str)
+                .unwrap_or("codex-local")
+                .to_owned(),
+        );
     }
     if let Some(endpoint) = params
         .pointer("/_meta/router/sessionRef/endpoint/endpointId")
         .and_then(Value::as_str)
     {
-        return endpoint.to_owned();
+        return Some(endpoint.to_owned());
     }
-    params
+    let known = params
         .get("sessionId")
         .and_then(Value::as_str)
         .and_then(|session_id| sessions.get(session_id))
-        .cloned()
-        .unwrap_or_else(|| "codex-local".into())
+        .cloned();
+    if known.is_some() || matches!(method, "session/load" | "session/resume") {
+        known
+    } else {
+        Some("codex-local".into())
+    }
 }
 
 pub async fn serve_acp_router_connection<
@@ -168,7 +178,7 @@ pub async fn serve_acp_router_connection<
                     let Some(id) = frame.get("id").cloned() else {
                         if negotiation.is_initialized() && method == "session/cancel" {
                             let endpoint = selected_endpoint(method, &params, &session_routes);
-                            if let Some(route) = route_inputs.get(&endpoint) {
+                            if let Some(route) = endpoint.as_ref().and_then(|endpoint| route_inputs.get(endpoint)) {
                                 route.send((*frame).clone()).await?;
                             }
                         }
@@ -248,7 +258,10 @@ pub async fn serve_acp_router_connection<
                         connection.output.send(rpc_error(id, -32600, "ACP initialization required")).await?;
                         continue;
                     }
-                    let endpoint = selected_endpoint(method, &params, &session_routes);
+                    let Some(endpoint) = selected_endpoint(method, &params, &session_routes) else {
+                        connection.output.send(rpc_error(id, -32602, "ACP Session endpoint unknown; include _meta.router.sessionRef")).await?;
+                        continue;
+                    };
                     let Some(route) = route_inputs.get(&endpoint) else {
                         connection.output.send(rpc_error(id, -32602, "ACP endpoint unavailable")).await?;
                         continue;

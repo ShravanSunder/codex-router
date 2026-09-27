@@ -3,9 +3,74 @@ use codex_acp_adapter::{
     serve_acp_router_connection,
 };
 use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 struct ScriptedProviderRoute;
+
+struct ScriptedCodexRoute {
+    load_calls: Arc<AtomicUsize>,
+}
+
+impl AcpSessionRoute for ScriptedCodexRoute {
+    fn endpoint_id(&self) -> &str {
+        "codex-local"
+    }
+
+    fn run(
+        self: Box<Self>,
+        mut router: AcpRouterChannels,
+        _: AcpConnectionContext,
+    ) -> AcpRouteFuture {
+        Box::pin(async move {
+            while let Some(frame) = router.input.recv().await {
+                if frame.get("method") == Some(&json!("session/load")) {
+                    self.load_calls.fetch_add(1, Ordering::SeqCst);
+                    router
+                        .output
+                        .send(json!({"jsonrpc":"2.0","id":frame.get("id"),
+                        "result":{"sessionId":"wrong-codex-route"}}))
+                        .await?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::panic_in_result_fn)]
+async fn unknown_bare_session_load_does_not_default_to_codex_route()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (client, server) = tokio::net::UnixStream::pair()?;
+    let load_calls = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn(serve_acp_router_connection(
+        server,
+        vec![
+            Box::new(ScriptedCodexRoute {
+                load_calls: Arc::clone(&load_calls),
+            }),
+            Box::new(ScriptedProviderRoute),
+        ],
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1}}\n").await?;
+    let initialized: Value =
+        serde_json::from_str(&lines.next_line().await?.ok_or("initialize response")?)?;
+    assert_eq!(initialized["id"], 1);
+    writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/load\",\"params\":{\"sessionId\":\"unknown-provider-session\",\"cwd\":\"/tmp\",\"mcpServers\":[]}}\n").await?;
+    let rejected: Value = serde_json::from_str(&lines.next_line().await?.ok_or("load response")?)?;
+    assert_eq!(rejected["id"], 2);
+    assert_eq!(rejected["error"]["code"], -32602);
+    assert_eq!(load_calls.load(Ordering::SeqCst), 0);
+    writer.shutdown().await?;
+    task.await??;
+    Ok(())
+}
 
 impl AcpSessionRoute for ScriptedProviderRoute {
     fn endpoint_id(&self) -> &str {

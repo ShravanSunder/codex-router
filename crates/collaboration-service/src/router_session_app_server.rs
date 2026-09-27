@@ -5,6 +5,7 @@ use crate::{
     SessionSteerOutcome, SessionTargetCommand, SetSessionSettingCommand, SteerSessionCommand,
     app_server_event_forwarding::{AppServerEventForwarding, historical_turns},
     app_server_model_catalog::{ProviderModelEntry, render_model_list},
+    pending_snapshot_interactions::pending_snapshot_requests,
     private_socket_listener::PrivateSocketListener,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -149,22 +150,6 @@ pub enum AppServerConnectionError {
     Json(#[from] serde_json::Error),
     #[error("session event hub unavailable")]
     HubUnavailable,
-}
-
-fn pending_snapshot_requests(snapshot: &[HubEvent]) -> HashSet<String> {
-    let mut pending = HashSet::new();
-    for event in snapshot {
-        match &event.event {
-            SessionEvent::InteractionRequested { interaction } => {
-                pending.insert(interaction.request_id().to_owned());
-            }
-            SessionEvent::InteractionResolved { request_id } => {
-                pending.remove(request_id);
-            }
-            _ => {}
-        }
-    }
-    pending
 }
 
 pub async fn serve_router_session_app_server_connection(

@@ -1,6 +1,7 @@
 //! Projects shared provider Session events onto one ACP client connection.
 use crate::{
     SessionEventHub,
+    pending_snapshot_interactions::pending_snapshot_requests,
     provider_acp_session_route::{failure, response},
 };
 use message_board::SessionRef;
@@ -229,6 +230,7 @@ impl ProviderSessionObservers {
         }
         let attachment = self.events.attach(session.clone()).await.map_err(|_| ())?;
         let report = capabilities_from_snapshot(&attachment.snapshot).ok_or(())?;
+        let pending_requests = pending_snapshot_requests(&attachment.snapshot);
         if self.attached.insert(session.clone()) {
             let (turn_sender, turn_receiver) = watch::channel(None);
             self.observed_turns.insert(session.clone(), turn_receiver);
@@ -238,7 +240,9 @@ impl ProviderSessionObservers {
             let mut item_text = HashMap::new();
             let mut active_turn = None;
             for event in &attachment.snapshot {
-                if let SessionEvent::InteractionRequested { interaction } = &event.event {
+                if let SessionEvent::InteractionRequested { interaction } = &event.event
+                    && pending_requests.contains(interaction.request_id())
+                {
                     self.interaction_sender
                         .send((session.clone(), interaction.clone()))
                         .await
@@ -288,9 +292,11 @@ impl ProviderSessionObservers {
                         };
                         item_text.clear();
                         active_turn = None;
+                        let pending_requests = pending_snapshot_requests(&replacement.snapshot);
                         for historical in &replacement.snapshot {
                             if let SessionEvent::InteractionRequested { interaction } =
                                 &historical.event
+                                && pending_requests.contains(interaction.request_id())
                                 && interaction_sender
                                     .send((session.clone(), interaction.clone()))
                                     .await

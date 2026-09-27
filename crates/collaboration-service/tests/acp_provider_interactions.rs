@@ -90,6 +90,9 @@ fn approval(request_id: &str) -> Result<ApprovalRequest, Box<dyn std::error::Err
     })
 }
 
+#[path = "support/acp_provider_interactions_remediation.rs"]
+mod remediation;
+
 #[tokio::test]
 #[allow(clippy::panic_in_result_fn)]
 async fn only_the_approver_receives_and_decides_exact_provider_options() -> TestResult {

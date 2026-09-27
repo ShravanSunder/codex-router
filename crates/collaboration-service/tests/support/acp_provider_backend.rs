@@ -25,6 +25,7 @@ pub(crate) struct ScriptedProviderBackend {
     pub(crate) queued_by: Mutex<Vec<Identity>>,
     pub(crate) state: Mutex<SessionState>,
     pub(crate) history_available: std::sync::atomic::AtomicBool,
+    pub(crate) snapshot_events: Mutex<Vec<HubEvent>>,
     pub(crate) events: broadcast::Sender<HubEvent>,
 }
 
@@ -51,6 +52,7 @@ impl ScriptedProviderBackend {
             queued_by: Mutex::new(Vec::new()),
             state: Mutex::new(SessionState::Idle),
             history_available: std::sync::atomic::AtomicBool::new(false),
+            snapshot_events: Mutex::new(Vec::new()),
             events,
         })
     }
@@ -191,6 +193,11 @@ impl SessionEventHub for ScriptedProviderBackend {
         let history_available = self
             .history_available
             .load(std::sync::atomic::Ordering::SeqCst);
+        let snapshot_events = self
+            .snapshot_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         Box::pin(async move {
             if !exists {
                 return Err(SessionEventHubError::SessionNotFound);
@@ -229,6 +236,7 @@ impl SessionEventHub for ScriptedProviderBackend {
                         input_id: session_event_model::InputId::generate(),
                     },
                 }))
+                .chain(snapshot_events)
                 .collect(),
                 receiver,
                 epoch: 0,

@@ -16,7 +16,7 @@ use codex_acp_adapter::{
 use message_board::{Identity, SessionEndpointRef, SessionRef};
 use serde_json::{Value, json};
 use session_event_model::session_profile_codec::ProfileElement;
-use session_event_model::{CapabilityReport, SessionEvent, SessionState};
+use session_event_model::{CapabilityReport, PendingInteraction, SessionEvent, SessionState};
 
 use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 use tokio::{sync::mpsc, task::JoinSet};
@@ -26,6 +26,29 @@ pub struct ProviderAcpSessionRoute {
     commands: Arc<dyn SessionCommandPort>,
     events: Arc<dyn SessionEventHub>,
     interaction_broker: Option<Arc<ServiceInteractionBroker>>,
+}
+
+struct PendingAcpInteraction {
+    session: SessionRef,
+    interaction: PendingInteraction,
+}
+
+fn interaction_error_kind(error: &crate::InteractionHistoryError) -> &'static str {
+    match error {
+        crate::InteractionHistoryError::PersistentChoiceNotAcknowledged { .. } => {
+            "persistentChoiceNotAcknowledged"
+        }
+        crate::InteractionHistoryError::WrongActor => "wrongActor",
+        crate::InteractionHistoryError::AlreadySettled
+        | crate::InteractionHistoryError::NotPending => "notPending",
+        crate::InteractionHistoryError::OptionNotOffered { .. }
+        | crate::InteractionHistoryError::InvalidOptionId => "invalidOption",
+        crate::InteractionHistoryError::InvalidAnswer { .. }
+        | crate::InteractionHistoryError::InvalidQuestion => "invalidAnswer",
+        crate::InteractionHistoryError::AlreadyExists
+        | crate::InteractionHistoryError::SelfApprover
+        | crate::InteractionHistoryError::Unavailable => "unavailable",
+    }
 }
 
 impl ProviderAcpSessionRoute {
@@ -202,8 +225,7 @@ async fn serve_provider_sessions(
     let mut schema = AcpSchemaCatalog::load().map_err(io::Error::other)?;
     let mut prompts = JoinSet::<()>::new();
     let (interaction_sender, mut interaction_receiver) = mpsc::channel(64);
-    let mut pending_interactions =
-        HashMap::<String, session_event_model::PendingInteraction>::new();
+    let mut pending_interactions = HashMap::<String, PendingAcpInteraction>::new();
     let mut observers = ProviderSessionObservers::new(
         Arc::clone(&route.events),
         router.output.clone(),
@@ -231,7 +253,10 @@ async fn serve_provider_sessions(
                     && let Some(OutboundInteraction { request_id, frame, pending }) =
                         present_interaction(&session, interaction, actor, supports_question_form)
                     && !pending_interactions.contains_key(&request_id) {
-                    pending_interactions.insert(request_id, pending);
+                    pending_interactions.insert(request_id, PendingAcpInteraction {
+                        session,
+                        interaction: pending,
+                    });
                     router.output.send(frame).await?;
                 }
                 continue;
@@ -246,11 +271,62 @@ async fn serve_provider_sessions(
                 id.as_ref(),
                 actor.as_ref(),
                 route.interaction_broker.as_ref(),
-            ) && let Some(interaction) = id
+            ) && let Some(pending) = id
                 .as_str()
                 .and_then(|request_id| pending_interactions.remove(request_id))
             {
-                let _decision = apply_interaction_reply(broker, actor, &interaction, &frame).await;
+                let request_id = pending.interaction.request_id();
+                if frame.get("error").is_some_and(|error| !error.is_null()) {
+                    tracing::warn!(
+                        request_id,
+                        error_kind = "clientRejectedServerRequest",
+                        "provider ACP client rejected interaction request"
+                    );
+                    continue;
+                }
+                if let Err(error) =
+                    apply_interaction_reply(broker, actor, &pending.interaction, &frame).await
+                {
+                    tracing::warn!(
+                        request_id,
+                        error_kind = interaction_error_kind(&error),
+                        "provider ACP interaction decision rejected"
+                    );
+                    let still_pending = match &pending.interaction {
+                        PendingInteraction::Approval { .. } => broker
+                            .list_typed_approvals(true)
+                            .await
+                            .iter()
+                            .any(|record| record.request_id == request_id),
+                        PendingInteraction::Question { .. } => broker
+                            .list_questions(true)
+                            .await
+                            .iter()
+                            .any(|record| record.request_id() == request_id),
+                    };
+                    if still_pending
+                        && let Some(mut outbound) = present_interaction(
+                            &pending.session,
+                            pending.interaction,
+                            actor,
+                            supports_question_form,
+                        )
+                    {
+                        let fresh_id =
+                            format!("{}:retry:{}", outbound.request_id, uuid::Uuid::now_v7());
+                        if let Some(object) = outbound.frame.as_object_mut() {
+                            object.insert("id".into(), json!(fresh_id));
+                        }
+                        pending_interactions.insert(
+                            fresh_id,
+                            PendingAcpInteraction {
+                                session: pending.session,
+                                interaction: outbound.pending,
+                            },
+                        );
+                        router.output.send(outbound.frame).await?;
+                    }
+                }
             }
             continue;
         }
@@ -407,6 +483,16 @@ async fn serve_provider_sessions(
                     parse_prompt_content(&params),
                 ) {
                     (Ok(session), Ok(content)) => {
+                        if matches!(
+                            route.events.state(session.clone()).await,
+                            Ok(SessionState::Running | SessionState::RequiresAction { .. })
+                        ) {
+                            router
+                                .output
+                                .send(command_failure(id, CommandFailure::Busy))
+                                .await?;
+                            continue;
+                        }
                         let attachment = route.events.attach(session.clone()).await;
                         match attachment {
                             Err(_) => failure(id, -32002, "Session not found"),

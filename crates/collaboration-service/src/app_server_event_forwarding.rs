@@ -521,15 +521,15 @@ impl AppServerEventForwarding {
             .await
             .iter()
             .any(|record| record.request_id == request.request_id);
+        if !still_pending {
+            return Vec::new();
+        }
         let error = json!({"method":"error","params":{
             "threadId":thread_id,"turnId":turn_id,
-            "willRetry":still_pending,
+            "willRetry":true,
             "error":{"message":format!("Decision for approval {} was rejected; choose again", request.request_id),
                 "codexErrorInfo":null}
         }});
-        if !still_pending {
-            return vec![error];
-        }
         let new_id = format!(
             "router:approval:{}:{}:retry:{}",
             session.session_id.as_str(),
@@ -571,15 +571,15 @@ impl AppServerEventForwarding {
             .await
             .iter()
             .any(|record| record.request_id() == request.request_id);
+        if !still_pending {
+            return Vec::new();
+        }
         let error = json!({"method":"error","params":{
             "threadId":thread_id,"turnId":turn_id,
-            "willRetry":still_pending,
+            "willRetry":true,
             "error":{"message":format!("Answer to question {} was rejected; choose again", request.request_id),
                 "codexErrorInfo":null}
         }});
-        if !still_pending {
-            return vec![error];
-        }
         let new_id = format!(
             "router:question:{}:{}:retry:{}",
             session.session_id.as_str(),

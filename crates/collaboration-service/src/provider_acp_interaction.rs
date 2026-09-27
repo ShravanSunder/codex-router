@@ -66,7 +66,15 @@ pub(crate) fn present_interaction(
                         ApprovalScope::Persistent { where_stored } => Some(where_stored.as_str()),
                         _ => None,
                     };
-                    json!({"optionId":option.option_id.as_str(),"name":option.label,"kind":kind,
+                    let name = if persistent_target.is_some() {
+                        format!(
+                            "{} — requires acknowledgement; use CLI/MCP with acknowledgePersistent",
+                            option.label
+                        )
+                    } else {
+                        option.label.clone()
+                    };
+                    json!({"optionId":option.option_id.as_str(),"name":name,"kind":kind,
                     "_meta":{"sessionProfile":{"choice":encode_choice_metadata(&option.choice)},
                         "router":{"persistentTarget":persistent_target}}})
                 })

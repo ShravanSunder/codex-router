@@ -19,6 +19,7 @@ pub use native_channel_relay::{
 mod native_generation_gate;
 pub use native_generation_gate::{NativeAdmission, NativeGenerationGate};
 mod native_relay_listener;
+mod pending_snapshot_interactions;
 mod private_socket_listener;
 pub use native_relay_listener::NativeRelayListener;
 mod conversation_operation_projection;
