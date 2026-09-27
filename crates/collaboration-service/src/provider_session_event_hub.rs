@@ -226,6 +226,17 @@ impl ProviderSessionEventHub {
             sequence: history.next_sequence,
             event: SessionEvent::ResyncRequired { replay_epoch },
         });
+        // Resume has no transcript replay, but the client publishes its fresh
+        // current settings before this Host invalidation. Carry that state
+        // event into the new epoch ahead of capabilities and Idle.
+        let current_settings = history
+            .events
+            .iter()
+            .rev()
+            .find_map(|item| match &item.event {
+                SessionEvent::SettingsChanged { settings } => Some(settings.clone()),
+                _ => None,
+            });
         let (sender, _) = broadcast::channel(self.subscriber_capacity);
         history.sender = sender;
         history.events.clear();
@@ -233,6 +244,13 @@ impl ProviderSessionEventHub {
         history.turn_running = false;
         history.state = SessionState::Idle;
         history.next_sequence = 1;
+        if let Some(settings) = current_settings {
+            history.events.push(HubEvent {
+                sequence: 1,
+                event: SessionEvent::SettingsChanged { settings },
+            });
+            history.next_sequence = 2;
+        }
         history.replay_epoch = replay_epoch;
         Ok(replay_epoch)
     }

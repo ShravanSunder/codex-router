@@ -199,6 +199,10 @@ async fn prompt_and_injected_steer_publish_distinct_inputs_on_one_turn() {
         .create_session(root.path().to_path_buf())
         .await
         .expect("session opens");
+    assert!(matches!(
+        events.recv().await,
+        Some(SessionEvent::SettingsChanged { .. })
+    ));
     let prompt_input = InputId::new("prompt-input").expect("input ID");
     let steer_input = InputId::new("steer-input").expect("input ID");
     let prompt = client.prompt_contents_with_approval_dispatch_for_input(
@@ -286,6 +290,10 @@ async fn started_new_turn_uses_the_steer_input_id() {
         .create_session(root.path().to_path_buf())
         .await
         .expect("session opens");
+    assert!(matches!(
+        events.recv().await,
+        Some(SessionEvent::SettingsChanged { .. })
+    ));
     let input_id = InputId::new("new-turn-steer").expect("input ID");
     let steering = client
         .steer_contents_with_input(
@@ -364,6 +372,10 @@ async fn prompt_required_preserves_steer_input_when_prompted_normally() {
         .create_session(root.path().to_path_buf())
         .await
         .expect("session opens");
+    assert!(matches!(
+        events.recv().await,
+        Some(SessionEvent::SettingsChanged { .. })
+    ));
     let input_id = InputId::new("steer-then-prompt").expect("input ID");
     let steering = client
         .steer_contents_with_input(

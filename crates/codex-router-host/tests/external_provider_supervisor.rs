@@ -136,7 +136,7 @@ def option(id,current,values):
 request=read()
 assert request['method']=='initialize'
 send({'jsonrpc':'2.0','id':request['id'],'result':{
-    'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'close':{}}},
+    'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{} if mode=='invalid_no_close' else {'close':{}}},
     'agentInfo':{'name':'supervisor-settings','version':'1'}}})
 request=read()
 assert request['method']=='session/new'
@@ -165,7 +165,7 @@ sys.stdin.read()
 #[cfg(unix)]
 #[tokio::test]
 async fn provider_create_projects_effective_partial_and_invalid_settings() -> TestResult {
-    for mode in ["success", "partial", "invalid"] {
+    for mode in ["success", "partial", "invalid", "invalid_no_close"] {
         let root = tempfile::tempdir()?;
         let provider_endpoint = endpoint("cursor-local")?;
         let creator = actor(provider_endpoint.clone(), "creator")?;
@@ -193,8 +193,15 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
             backend
                 .create(ConversationCreateRequest {
                     settings: Some(ProviderRequestedSettings {
-                        mode: Some(if mode == "invalid" { "wrong" } else { "ask" }.to_owned()),
-                        model: (mode != "invalid").then(|| "b".to_owned()),
+                        mode: Some(
+                            if mode.starts_with("invalid") {
+                                "wrong"
+                            } else {
+                                "ask"
+                            }
+                            .to_owned(),
+                        ),
+                        model: (!mode.starts_with("invalid")).then(|| "b".to_owned()),
                         effort: None,
                     }),
                     operation_id: operation_id.clone(),
@@ -297,8 +304,8 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                 ensure_eq!(accepted.target, target);
                 ensure_eq!(accepted.effective_settings.mode.as_deref(), Some("ask"));
             }
-            "invalid" => {
-                let failure = wait(&backend, operation_id)
+            "invalid" | "invalid_no_close" => {
+                let failure = wait(&backend, operation_id.clone())
                     .await
                     .expect_err("invalid setting");
                 ensure_eq!(
@@ -310,9 +317,27 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                     .ok_or("missing invalid-setting detail")?;
                 ensure_eq!(detail.value, "wrong");
                 ensure_eq!(detail.advertised, vec!["auto".to_owned(), "ask".to_owned()]);
-                ensure_eq!(
-                    detail.session_disposition,
+                let expected_disposition = if mode == "invalid" {
                     collaboration_protocol::InvalidSettingSessionDisposition::Closed
+                } else {
+                    collaboration_protocol::InvalidSettingSessionDisposition::RemainsCreated
+                };
+                ensure_eq!(detail.session_disposition, expected_disposition);
+                let target = failure.target.ok_or("invalid setting target missing")?;
+                let shown = operation(
+                    backend
+                        .show(ConversationOperationShowRequest {
+                            operation_id: operation_id.clone(),
+                        })
+                        .await,
+                )?;
+                ensure_eq!(shown.target.as_ref(), Some(&target));
+                let mut store =
+                    ProviderOperationStore::open(&root.path().join("provider-operations.sqlite"))
+                        .await?;
+                ensure_eq!(
+                    store.session_record(&target).await?.is_some(),
+                    mode == "invalid_no_close"
                 );
             }
             _ => return Err("unknown fixture case".into()),

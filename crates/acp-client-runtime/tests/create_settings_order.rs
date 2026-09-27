@@ -171,6 +171,20 @@ send({'jsonrpc':'2.0','id':request['id'],'result':'bad-shape'})
 sys.stdin.read()
 "#;
 
+const CLOSED_SETTINGS_SINK_FIXTURE: &str = r#"
+import json,sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,
+    'agentCapabilities':{},'agentInfo':{'name':'closed-settings-sink','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})
+sys.stdin.read()
+"#;
+
 struct NoopInteractionPort;
 impl InteractionPort for NoopInteractionPort {
     type Context = ();
@@ -228,12 +242,71 @@ impl SessionEventSink for NoopEventSink {
     }
 }
 
+#[derive(Default)]
+struct SettingsEventSink(std::sync::Mutex<Vec<session_event_model::SessionSettings>>);
+
+impl SessionEventSink for SettingsEventSink {
+    fn begin_history_replay(&self, _session_id: &str) -> HistoryReplayFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkClosed> {
+        if let SessionEvent::SettingsChanged { settings } = event {
+            self.0.lock().expect("settings events").push(settings);
+        }
+        Ok(())
+    }
+}
+
+struct ClosedSettingsSink;
+impl SessionEventSink for ClosedSettingsSink {
+    fn begin_history_replay(&self, _session_id: &str) -> HistoryReplayFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkClosed> {
+        if matches!(event, SessionEvent::SettingsChanged { .. }) {
+            Err(EventSinkClosed)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn closed_settings_sink_aborts_create_with_typed_error() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let client = AgentSessionClient::initialize(
+        ExternalProviderLaunch {
+            executable: PathBuf::from("python3"),
+            arguments: vec![
+                "-u".to_owned(),
+                "-c".to_owned(),
+                CLOSED_SETTINGS_SINK_FIXTURE.to_owned(),
+            ],
+            environment: Vec::new(),
+            persistence_target: ProviderPersistenceTarget::Unspecified,
+        },
+        Arc::new(NoopInteractionPort),
+        Arc::new(ClosedSettingsSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let result = client.create_session(root.path().to_path_buf()).await;
+    assert!(matches!(
+        result,
+        Err(acp_client_runtime::ExternalProviderRuntimeError::SinkClosed)
+    ));
+    client.shutdown().await;
+}
+
 /// Oracle: specification R14 requires mode, model and effort to be applied
 /// after session/new and before the first prompt, re-reading options each time.
 #[tokio::test]
 async fn create_applies_requested_settings_before_first_prompt() {
     let root = tempfile::tempdir().expect("fixture root");
     let receipt = root.path().join("exchange.json");
+    let sink = Arc::new(SettingsEventSink::default());
     let client = AgentSessionClient::initialize(
         ExternalProviderLaunch {
             executable: PathBuf::from("python3"),
@@ -247,7 +320,7 @@ async fn create_applies_requested_settings_before_first_prompt() {
             persistence_target: ProviderPersistenceTarget::Unspecified,
         },
         Arc::new(NoopInteractionPort),
-        Arc::new(NoopEventSink),
+        sink.clone(),
     )
     .await
     .expect("fixture initializes");
@@ -266,6 +339,13 @@ async fn create_applies_requested_settings_before_first_prompt() {
     assert_eq!(created.effective_settings.mode.as_deref(), Some("ask"));
     assert_eq!(created.effective_settings.model.as_deref(), Some("b"));
     assert_eq!(created.effective_settings.effort.as_deref(), Some("high"));
+    {
+        let settings = sink.0.lock().expect("settings events");
+        assert_eq!(settings.len(), 1);
+        assert_eq!(settings[0].mode.as_deref(), Some("ask"));
+        assert_eq!(settings[0].model.as_deref(), Some("b"));
+        assert_eq!(settings[0].effort.as_deref(), Some("high"));
+    }
 
     let prompt = client
         .prompt_contents_with_approval_dispatch_for_input(
@@ -436,10 +516,11 @@ async fn partial_setup_blocks_prompt_until_settings_are_accepted() {
 async fn partial_setup_can_be_resolved_by_setting_the_failed_value() {
     let root = tempfile::tempdir().expect("fixture root");
     let receipt = root.path().join("resolved.txt");
+    let sink = Arc::new(SettingsEventSink::default());
     let client = AgentSessionClient::initialize(
         failure_fixture_launch("partial-set", &receipt),
         Arc::new(NoopInteractionPort),
-        Arc::new(NoopEventSink),
+        sink.clone(),
     )
     .await
     .expect("fixture initializes");
@@ -470,6 +551,13 @@ async fn partial_setup_can_be_resolved_by_setting_the_failed_value() {
         .expect("model setting applied");
     assert_eq!(effective.mode.as_deref(), Some("ask"));
     assert_eq!(effective.model.as_deref(), Some("b"));
+    {
+        let settings = sink.0.lock().expect("settings events");
+        assert_eq!(settings.len(), 2, "create and set_setting each publish");
+        assert_eq!(settings[0].mode.as_deref(), Some("ask"));
+        assert_eq!(settings[0].model.as_deref(), Some("a"));
+        assert_eq!(settings[1].model.as_deref(), Some("b"));
+    }
     assert!(!client.settings_unresolved(&provider_session_id).await);
     let prompt = client
         .prompt_contents_with_approval_dispatch_for_input(

@@ -519,19 +519,34 @@ impl SupervisorInner {
                 } else {
                     ProviderReconciliationState::Confirmed
                 };
-                let _ = self
-                    .store
-                    .lock()
-                    .await
-                    .record_terminal(
-                        &operation_id,
-                        operation_failure.effect,
-                        reconciliation,
-                        None,
-                        now_ms(),
-                    )
-                    .await;
-                Err(operation_failure)
+                let mut store = self.store.lock().await;
+                let target = operation_failure.target.clone();
+                let target_record_failed =
+                    if operation_failure.effect == ProviderOperationEffect::Applied {
+                        match target.as_ref() {
+                            Some(target) => store
+                                .record_target(&operation_id, target, now_ms())
+                                .await
+                                .is_err(),
+                            None => false,
+                        }
+                    } else {
+                        false
+                    };
+                if target_record_failed {
+                    Err(applied_storage_failure(operation_id.clone(), target))
+                } else {
+                    let _ = store
+                        .record_terminal(
+                            &operation_id,
+                            operation_failure.effect,
+                            reconciliation,
+                            None,
+                            now_ms(),
+                        )
+                        .await;
+                    Err(operation_failure)
+                }
             }
             ProviderOperationCompletion::FailureWithSession {
                 failure,

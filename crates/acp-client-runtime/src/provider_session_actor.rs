@@ -380,6 +380,10 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             value,
                             &runtime_handles,
                         ).await;
+                        if matches!(result, Err(ExternalProviderRuntimeError::SinkClosed)) {
+                            runtime_handles.sink_closed.cancel();
+                            shutdown.cancel();
+                        }
                         let _result = reply.send(result);
                     }
                 }
