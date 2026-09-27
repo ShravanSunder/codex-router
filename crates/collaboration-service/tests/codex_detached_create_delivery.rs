@@ -259,7 +259,7 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
     {
         return Err(format!("detached create target not recorded: {waited}").into());
     }
-    holder.drain_create_tasks().await;
+    holder.drain_host_tasks().await;
     if !holder.contains("detached-thread") {
         return Err("detached create lost its empty native binding".into());
     }
