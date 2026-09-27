@@ -173,17 +173,18 @@ pub(super) async fn handle_app_server_thread_request(
                         .find(|current| current.session == summary.session)
                         .ok_or(ThreadMethodError::NotFound)?;
                 }
-                let attachment = events
-                    .attach(summary.session.clone())
-                    .await
-                    .map_err(|error| match error {
-                        SessionEventHubError::SessionNotFound => ThreadMethodError::NotFound,
-                        SessionEventHubError::Unavailable => ThreadMethodError::Unavailable,
-                    })?;
                 let mut result = thread_start_response(&summary);
-                if params.get("excludeTurns").and_then(Value::as_bool) != Some(true)
-                    && let Some(thread) = result.get_mut("thread").and_then(Value::as_object_mut)
-                {
+                if params.get("excludeTurns").and_then(Value::as_bool) != Some(true) {
+                    let attachment = events.attach(summary.session.clone()).await.map_err(
+                        |error| match error {
+                            SessionEventHubError::SessionNotFound => ThreadMethodError::NotFound,
+                            SessionEventHubError::Unavailable => ThreadMethodError::Unavailable,
+                        },
+                    )?;
+                    let thread = result
+                        .get_mut("thread")
+                        .and_then(Value::as_object_mut)
+                        .ok_or(ThreadMethodError::Unavailable)?;
                     thread.insert(
                         "turns".into(),
                         json!(historical_turns(&summary.session, &attachment.snapshot)),

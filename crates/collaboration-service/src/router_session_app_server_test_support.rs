@@ -9,7 +9,10 @@ use message_board::{Identity, SessionEndpointRef, SessionRef};
 use session_event_model::{SessionEvent, SessionState, StopReason, TurnOutcome};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use tokio::sync::{Notify, broadcast};
 
@@ -29,6 +32,10 @@ pub(super) struct ScriptedSessionBackend {
     pub(super) events: broadcast::Sender<crate::HubEvent>,
     pub(super) history: Mutex<Vec<crate::HubEvent>>,
     pub(super) effective_model: Mutex<Option<String>>,
+    pub(super) attachment_count: AtomicUsize,
+    pub(super) attachment_created: Notify,
+    pub(super) prompt_gate: Mutex<Option<Arc<Notify>>>,
+    pub(super) prompt_submitted: Notify,
 }
 
 impl ScriptedSessionBackend {
@@ -59,6 +66,10 @@ impl ScriptedSessionBackend {
             events,
             history: Mutex::new(Vec::new()),
             effective_model: Mutex::new(None),
+            attachment_count: AtomicUsize::new(0),
+            attachment_created: Notify::new(),
+            prompt_gate: Mutex::new(None),
+            prompt_submitted: Notify::new(),
         }))
     }
 
@@ -108,6 +119,7 @@ impl SessionCommandPort for ScriptedSessionBackend {
     }
     fn prompt(&self, command: PromptSessionCommand) -> CommandFuture<'_, SessionTurnHandle> {
         let input_id = command.input_id.clone();
+        let gate = self.prompt_gate.lock().expect("test lock").clone();
         self.prompt_commands
             .lock()
             .expect("test lock")
@@ -123,7 +135,11 @@ impl SessionCommandPort for ScriptedSessionBackend {
                 input_id,
             },
         });
-        Box::pin(async {
+        self.prompt_submitted.notify_one();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             Ok(SessionTurnHandle {
                 turn_id: "turn-1".into(),
             })
@@ -177,6 +193,8 @@ impl SessionCommandPort for ScriptedSessionBackend {
 
 impl SessionEventHub for ScriptedSessionBackend {
     fn attach(&self, _: SessionRef) -> HubFuture<'_, SessionEventAttachment> {
+        self.attachment_count.fetch_add(1, Ordering::Relaxed);
+        self.attachment_created.notify_one();
         let receiver = self.events.subscribe();
         let snapshot = self.history.lock().expect("test lock").clone();
         Box::pin(async move {

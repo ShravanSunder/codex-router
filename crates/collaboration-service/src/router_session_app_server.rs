@@ -1,8 +1,9 @@
 //! Codex app-server protocol transport for Router-owned provider sessions.
 use crate::{
     CommandContent, CreateSessionCommand, HubEvent, HubSessionSummary, PromptSessionCommand,
-    SessionCommandPort, SessionEventHub, SessionEventHubError, SessionSettingsCommand,
-    SessionSteerOutcome, SessionTargetCommand, SetSessionSettingCommand, SteerSessionCommand,
+    SessionCommandPort, SessionEventAttachment, SessionEventHub, SessionEventHubError,
+    SessionSettingsCommand, SessionSteerOutcome, SessionTargetCommand, SetSessionSettingCommand,
+    SteerSessionCommand,
     app_server_event_forwarding::{AppServerEventForwarding, historical_turns},
     app_server_model_catalog::{ProviderModelEntry, render_model_list},
     pending_snapshot_interactions::pending_snapshot_requests,
@@ -13,7 +14,7 @@ use message_board::{Identity, SessionEndpointRef, SessionRef};
 use serde_json::{Value, json};
 use session_event_model::SessionEvent;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -21,7 +22,7 @@ use std::{
 use tokio::{
     net::UnixStream,
     sync::{Semaphore, mpsc, watch},
-    task::JoinSet,
+    task::{AbortHandle, JoinSet},
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
@@ -150,6 +151,14 @@ pub enum AppServerConnectionError {
     Json(#[from] serde_json::Error),
     #[error("session event hub unavailable")]
     HubUnavailable,
+    #[error("app-server request worker unavailable")]
+    RequestWorkerUnavailable,
+}
+
+struct HandledAppServerRequest {
+    method: String,
+    response: Value,
+    resume_attachment: Option<(SessionRef, SessionEventAttachment)>,
 }
 
 pub async fn serve_router_session_app_server_connection(
@@ -159,18 +168,88 @@ pub async fn serve_router_session_app_server_connection(
     let mut websocket = accept_async(stream).await?;
     let (event_sender, mut event_receiver) =
         mpsc::channel::<(SessionRef, Result<HubEvent, ()>)>(64);
+    let (response_sender, mut response_receiver) =
+        mpsc::channel::<Result<HandledAppServerRequest, AppServerConnectionError>>(32);
     let mut event_tasks = JoinSet::new();
+    let mut request_tasks = JoinSet::new();
     let mut attached_sessions = HashSet::new();
+    let mut subscriptions = HashMap::<SessionRef, AbortHandle>::new();
     let mut forwarding =
         AppServerEventForwarding::new(context.actor.clone(), context.interaction_broker.clone());
     loop {
         let frame = tokio::select! {
             incoming = websocket.next() => incoming,
-            forwarded = event_receiver.recv(), if !event_tasks.is_empty() => {
+            completed = event_tasks.join_next(), if !event_tasks.is_empty() => {
+                let _completed = completed;
+                continue;
+            }
+            completed = request_tasks.join_next(), if !request_tasks.is_empty() => {
+                let _completed = completed;
+                continue;
+            }
+            handled = response_receiver.recv() => {
+                let Some(handled) = handled else { break; };
+                let mut handled = handled?;
+                websocket.send(Message::Text(handled.response.to_string().into())).await?;
+                if matches!(handled.method.as_str(), "thread/start" | "thread/read" | "thread/resume")
+                    && handled.response.get("result").is_some()
+                    && let Some(thread_id) = handled.response.pointer("/result/thread/id").and_then(Value::as_str)
+                {
+                    let session = if let Some((session, _)) = &handled.resume_attachment {
+                        Some(session.clone())
+                    } else {
+                        context.events.sessions(context.endpoint.clone()).await
+                            .map_err(|_| AppServerConnectionError::HubUnavailable)?
+                            .into_iter()
+                            .find(|summary| thread_alias(&summary.session) == thread_id)
+                            .map(|summary| summary.session)
+                    };
+                    if let Some(session) = session
+                        && attached_sessions.insert(session.clone())
+                    {
+                        let attachment = if let Some((_, attachment)) = handled.resume_attachment.take() {
+                            attachment
+                        } else {
+                            context.events.attach(session.clone()).await
+                                .map_err(|_| AppServerConnectionError::HubUnavailable)?
+                        };
+                        let subscription = attach_session_events(
+                            session.clone(), attachment, &mut forwarding, &mut websocket,
+                            &event_sender, &mut event_tasks,
+                        ).await?;
+                        subscriptions.insert(session, subscription);
+                    }
+                }
+                continue;
+            }
+            forwarded = event_receiver.recv(), if !attached_sessions.is_empty() => {
                 let Some((session, event)) = forwarded else { break; };
-                let Ok(event) = event else { break; };
-                for notification in forwarding.project(&session, &event) {
-                    websocket.send(Message::Text(notification.to_string().into())).await?;
+                if event.as_ref().map_or(true, |event| matches!(&event.event, SessionEvent::ResyncRequired { .. })) {
+                    if let Some(subscription) = subscriptions.remove(&session) {
+                        subscription.abort();
+                    }
+                    attached_sessions.remove(&session);
+                    for notification in forwarding.reset_session(&session) {
+                        websocket.send(Message::Text(notification.to_string().into())).await?;
+                    }
+                    match context.events.attach(session.clone()).await {
+                        Ok(attachment) => {
+                            let subscription = attach_session_events(
+                                session.clone(), attachment, &mut forwarding, &mut websocket,
+                                &event_sender, &mut event_tasks,
+                            ).await?;
+                            attached_sessions.insert(session.clone());
+                            subscriptions.insert(session, subscription);
+                        }
+                        Err(error) => {
+                            tracing::warn!(session_id = session.session_id.as_str(), error_kind = ?error,
+                                "provider TUI Session reattach unavailable");
+                        }
+                    }
+                } else if let Ok(event) = event {
+                    for notification in forwarding.project(&session, &event) {
+                        websocket.send(Message::Text(notification.to_string().into())).await?;
+                    }
                 }
                 continue;
             }
@@ -194,131 +273,192 @@ pub async fn serve_router_session_app_server_connection(
             }
             continue;
         }
-        let Some(id) = request.get("id").cloned() else {
+        if request.get("id").is_none() {
             continue;
-        };
-        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-        let response = if matches!(
-            method,
-            "thread/start"
-                | "thread/list"
-                | "thread/read"
-                | "thread/resume"
-                | "turn/start"
-                | "turn/steer"
-                | "turn/interrupt"
-        ) {
-            let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-            let catalog = context.model_catalog.borrow().clone();
-            let result = if method.starts_with("thread/") {
-                handle_app_server_thread_request(
-                    method,
-                    params,
-                    Arc::clone(&context.commands),
-                    Arc::clone(&context.events),
-                    context.endpoint.clone(),
-                    context.actor.clone(),
-                    &catalog,
-                )
-                .await
-            } else {
-                handle_app_server_turn_request(
-                    method,
-                    params,
-                    Arc::clone(&context.commands),
-                    Arc::clone(&context.events),
-                    context.endpoint.clone(),
-                    context.actor.clone(),
-                    &catalog,
-                )
-                .await
-            };
-            match result {
-                Ok(result) => json!({"id":id,"result":result}),
-                Err(error) => {
-                    let code = match error {
-                        ThreadMethodError::InvalidParams
-                        | ThreadMethodError::WorkingDirectoryRequired
-                        | ThreadMethodError::ImageUnreadable
-                        | ThreadMethodError::ImageTooLarge
-                        | ThreadMethodError::PromptTooLarge
-                        | ThreadMethodError::ImageUnsupportedType => -32602,
-                        ThreadMethodError::NotFound => -32002,
-                        ThreadMethodError::Unavailable => -32000,
-                    };
-                    json!({"id":id,"error":{"code":code,"message":error.to_string()}})
-                }
-            }
+        }
+        let request_context = Arc::clone(&context);
+        let response_sender = response_sender.clone();
+        request_tasks.spawn(async move {
+            let result = handle_app_server_rpc(request_context, request).await;
+            let _sent = response_sender.send(result).await;
+        });
+    }
+    event_tasks.abort_all();
+    request_tasks.abort_all();
+    while event_tasks.join_next().await.is_some() {}
+    while request_tasks.join_next().await.is_some() {}
+    Ok(())
+}
+
+async fn handle_app_server_rpc(
+    context: Arc<RouterSessionAppServerContext>,
+    request: Value,
+) -> Result<HandledAppServerRequest, AppServerConnectionError> {
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let catalog = context.model_catalog.borrow().clone();
+    let mut response = if matches!(
+        method.as_str(),
+        "thread/start"
+            | "thread/list"
+            | "thread/read"
+            | "thread/resume"
+            | "turn/start"
+            | "turn/steer"
+            | "turn/interrupt"
+    ) {
+        let mut params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+        // The connection owns the resume snapshot and its receiver.
+        if method == "thread/resume"
+            && let Some(object) = params.as_object_mut()
+        {
+            object.insert("excludeTurns".into(), Value::Bool(true));
+        }
+        let result = if method.starts_with("thread/") {
+            handle_app_server_thread_request(
+                &method,
+                params,
+                Arc::clone(&context.commands),
+                Arc::clone(&context.events),
+                context.endpoint.clone(),
+                context.actor.clone(),
+                &catalog,
+            )
+            .await
         } else {
+            handle_app_server_turn_request(
+                &method,
+                params,
+                Arc::clone(&context.commands),
+                Arc::clone(&context.events),
+                context.endpoint.clone(),
+                context.actor.clone(),
+                &catalog,
+            )
+            .await
+        };
+        match result {
+            Ok(result) => json!({"id":id,"result":result}),
+            Err(error) => {
+                let code = match error {
+                    ThreadMethodError::InvalidParams
+                    | ThreadMethodError::WorkingDirectoryRequired
+                    | ThreadMethodError::ImageUnreadable
+                    | ThreadMethodError::ImageTooLarge
+                    | ThreadMethodError::PromptTooLarge
+                    | ThreadMethodError::ImageUnsupportedType => -32602,
+                    ThreadMethodError::NotFound => -32002,
+                    ThreadMethodError::Unavailable => -32000,
+                };
+                json!({"id":id,"error":{"code":code,"message":error.to_string()}})
+            }
+        }
+    } else if method == "config/read" {
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        let trust_lookup = context.project_trust.clone();
+        tokio::task::spawn_blocking(move || {
             handle_app_server_request(
                 id,
-                method,
-                request.get("params").unwrap_or(&Value::Null),
-                &context.model_catalog.borrow(),
-                context.project_trust.as_deref(),
+                "config/read",
+                &params,
+                &catalog,
+                trust_lookup.as_deref(),
             )
-        };
-        websocket
-            .send(Message::Text(response.to_string().into()))
-            .await?;
-        if matches!(method, "thread/start" | "thread/read" | "thread/resume")
-            && response.get("result").is_some()
-            && let Some(thread_id) = response
-                .pointer("/result/thread/id")
-                .and_then(Value::as_str)
+        })
+        .await
+        .map_err(|_| AppServerConnectionError::RequestWorkerUnavailable)?
+    } else {
+        handle_app_server_request(
+            id,
+            &method,
+            request.get("params").unwrap_or(&Value::Null),
+            &catalog,
+            context.project_trust.as_deref(),
+        )
+    };
+    let mut resume_attachment = None;
+    if method == "thread/resume"
+        && response.get("result").is_some()
+        && let Some(thread_id) = response
+            .pointer("/result/thread/id")
+            .and_then(Value::as_str)
+        && let Some(session) = context
+            .events
+            .sessions(context.endpoint.clone())
+            .await
+            .map_err(|_| AppServerConnectionError::HubUnavailable)?
+            .into_iter()
+            .find(|summary| thread_alias(&summary.session) == thread_id)
+            .map(|summary| summary.session)
+    {
+        let attachment = context
+            .events
+            .attach(session.clone())
+            .await
+            .map_err(|_| AppServerConnectionError::HubUnavailable)?;
+        if request
+            .pointer("/params/excludeTurns")
+            .and_then(Value::as_bool)
+            != Some(true)
         {
-            let session = context
-                .events
-                .sessions(context.endpoint.clone())
-                .await
-                .map_err(|_| AppServerConnectionError::HubUnavailable)?
-                .into_iter()
-                .find(|summary| thread_alias(&summary.session) == thread_id)
-                .map(|summary| summary.session);
-            if let Some(session) = session
-                && attached_sessions.insert(session.clone())
-            {
-                let attachment = context
-                    .events
-                    .attach(session.clone())
-                    .await
-                    .map_err(|_| AppServerConnectionError::HubUnavailable)?;
-                let pending_requests = pending_snapshot_requests(&attachment.snapshot);
-                for event in attachment.snapshot {
-                    let request_still_pending = matches!(
-                        &event.event,
-                        SessionEvent::InteractionRequested { interaction }
-                            if pending_requests.contains(interaction.request_id())
-                    );
-                    for notification in forwarding.project(&session, &event) {
-                        if request_still_pending {
-                            websocket
-                                .send(Message::Text(notification.to_string().into()))
-                                .await?;
-                        }
-                    }
-                }
-                let mut receiver = attachment.receiver;
-                let sender = event_sender.clone();
-                event_tasks.spawn(async move {
-                    loop {
-                        let event = match receiver.recv().await {
-                            Ok(event) => Ok(event),
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Err(()),
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        };
-                        let lost_events = event.is_err();
-                        if sender.send((session.clone(), event)).await.is_err() || lost_events {
-                            break;
-                        }
-                    }
-                });
+            let thread = response
+                .pointer_mut("/result/thread")
+                .and_then(Value::as_object_mut)
+                .ok_or(AppServerConnectionError::RequestWorkerUnavailable)?;
+            thread.insert(
+                "turns".into(),
+                json!(historical_turns(&session, &attachment.snapshot)),
+            );
+        }
+        resume_attachment = Some((session, attachment));
+    }
+    Ok(HandledAppServerRequest {
+        method,
+        response,
+        resume_attachment,
+    })
+}
+
+async fn attach_session_events(
+    session: SessionRef,
+    attachment: SessionEventAttachment,
+    forwarding: &mut AppServerEventForwarding,
+    websocket: &mut tokio_tungstenite::WebSocketStream<UnixStream>,
+    event_sender: &mpsc::Sender<(SessionRef, Result<HubEvent, ()>)>,
+    event_tasks: &mut JoinSet<()>,
+) -> Result<AbortHandle, AppServerConnectionError> {
+    let pending_requests = pending_snapshot_requests(&attachment.snapshot);
+    for event in attachment.snapshot {
+        let request_still_pending = matches!(
+            &event.event,
+            SessionEvent::InteractionRequested { interaction }
+                if pending_requests.contains(interaction.request_id())
+        );
+        for notification in forwarding.project(&session, &event) {
+            if request_still_pending {
+                websocket
+                    .send(Message::Text(notification.to_string().into()))
+                    .await?;
             }
         }
     }
-    event_tasks.abort_all();
-    while event_tasks.join_next().await.is_some() {}
-    Ok(())
+    let mut receiver = attachment.receiver;
+    let sender = event_sender.clone();
+    Ok(event_tasks.spawn(async move {
+        loop {
+            let event = receiver.recv().await.map_err(|_| ());
+            let needs_reattach = event.as_ref().map_or(true, |event| {
+                matches!(&event.event, SessionEvent::ResyncRequired { .. })
+            });
+            if sender.send((session.clone(), event)).await.is_err() || needs_reattach {
+                break;
+            }
+        }
+    }))
 }
 
 #[path = "router_session_app_server_methods.rs"]
