@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderSessionLoadOutcome {
     Ready,
+    UnsupportedLoad,
     MissingRecord,
     LiveElsewhere,
     Rejected {
@@ -64,6 +65,13 @@ pub(crate) async fn ensure_provider_session_loaded(
         }
         Ok(ProviderSessionActivity::NotLoaded) => {}
         Err(error) => return unavailable(error.to_string()),
+    }
+    if !runtime
+        .capability_report(&provider_session_id)
+        .await
+        .supports_load
+    {
+        return ProviderSessionLoadOutcome::UnsupportedLoad;
     }
     let record = match store.lock().await.session_record(target).await {
         Ok(Some(record)) => record,

@@ -1,13 +1,15 @@
 //! One provider session's prompt, cancellation, and steering actor.
 #[cfg(test)]
 use crate::external_provider_runtime::ExternalProviderToolCall;
+use crate::external_provider_runtime::ProviderTurnCancellation;
 use crate::external_provider_runtime::{
     ExternalProviderPromptOutcome, ExternalProviderRuntimeError, ProviderFrameObservation,
     acp_operation_error,
 };
+use crate::provider_prompt_content::ProviderPromptContent;
 use crate::provider_prompt_observation::read_bounded_prompt;
 use agent_client_protocol::schema::v1::{CancelNotification, PromptRequest};
-use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, UntypedMessage};
+use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, JsonRpcMessage, UntypedMessage};
 use collaboration_protocol::OperationId;
 use serde_json::json;
 use std::sync::Arc;
@@ -22,6 +24,8 @@ pub enum ProviderSteeringOutcome {
         running_operation_id: Option<OperationId>,
     },
     PromptRequired,
+    StartedNewTurn,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,7 +44,8 @@ pub enum ProviderSessionActivity {
 pub(crate) enum ProviderSessionCommand {
     Prompt {
         operation_id: Option<OperationId>,
-        prompt: String,
+        prompt: ProviderPromptContent,
+        turn_cancellation: Option<ProviderTurnCancellation>,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>,
@@ -83,19 +88,27 @@ pub(crate) async fn run_provider_session(
             command = commands.recv() => {
                 let Some(command) = command else { break; };
                 match command {
-                    ProviderSessionCommand::Prompt { operation_id, prompt, dispatch, reply } => {
+                    ProviderSessionCommand::Prompt { operation_id, prompt, turn_cancellation, dispatch, reply } => {
                         let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
                         let prompt_request = PromptRequest::new(
                             session.session_id().clone(),
-                            vec![prompt.into()],
+                            prompt.into_blocks(),
                         );
+                        let prompt_request = match prompt_request.to_untyped_message() {
+                            Ok(request) => request,
+                            Err(error) => {
+                                if let Some(dispatch) = dispatch {
+                                    let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
+                                }
+                                let _result = reply.send(Err(acp_operation_error(error)));
+                                continue;
+                            }
+                        };
                         if let Err(error) = session
                             .connection()
                             .send_request(prompt_request)
                             .on_receiving_result(async move |result| {
-                                let _result = terminal_tx.send(
-                                    result.map(|response| response.stop_reason),
-                                );
+                                let _result = terminal_tx.send(result);
                                 Ok(())
                             })
                         {
@@ -134,8 +147,14 @@ pub(crate) async fn run_provider_session(
                                 limit_notice = output_limit_rx.recv(), if !output_limit_cancelled => {
                                     if limit_notice.is_some() {
                                         output_limit_cancelled = true;
+                                        if let Some(turn_cancellation) = &turn_cancellation {
+                                            turn_cancellation.mark_cancelling();
+                                        }
                                         let _result = provider_connection
                                             .send_notification(CancelNotification::new(provider_session_id.clone()));
+                                        if let Some(turn_cancellation) = &turn_cancellation {
+                                            turn_cancellation.settle_pending_approvals().await;
+                                        }
                                     }
                                 }
                                 result = &mut prompt_result => {
@@ -251,7 +270,9 @@ async fn steer_provider_turn(
         Some("injected") => Ok(ProviderSteeringOutcome::Injected {
             running_operation_id,
         }),
+        Some("startedNewTurn") => Ok(ProviderSteeringOutcome::StartedNewTurn),
         Some("promptRequired") => Ok(ProviderSteeringOutcome::PromptRequired),
+        Some("failed") => Ok(ProviderSteeringOutcome::Failed),
         _ => Err(ExternalProviderRuntimeError::Operation(
             "provider returned an invalid steering result".to_owned(),
         )),

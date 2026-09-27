@@ -1,15 +1,16 @@
 //! Provider route claims from catalog availability, loaded actors, and session records.
 use crate::{ExternalProviderSupervisor, ProviderSessionActivity};
-use collaboration_protocol::{EndpointAvailability, SessionRef, UuidIdentity};
+use collaboration_protocol::{EndpointAvailability, EndpointRef, SessionRef, UuidIdentity};
 use collaboration_service::{
     EndpointDirectory, ProviderConversationBackend, ProviderOperationStore, RouteClaim,
     RouteUnavailableReason,
 };
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use tokio::sync::Mutex;
 
 pub(crate) struct ProviderAcpRouteClaim {
     service_id: UuidIdentity,
+    provider_endpoints: HashSet<EndpointRef>,
     directory: EndpointDirectory,
     supervisor: Arc<ExternalProviderSupervisor>,
     store: Arc<Mutex<ProviderOperationStore>>,
@@ -18,12 +19,14 @@ pub(crate) struct ProviderAcpRouteClaim {
 impl ProviderAcpRouteClaim {
     pub(crate) fn new(
         service_id: UuidIdentity,
+        provider_endpoints: HashSet<EndpointRef>,
         directory: EndpointDirectory,
         supervisor: Arc<ExternalProviderSupervisor>,
         store: Arc<Mutex<ProviderOperationStore>>,
     ) -> Self {
         Self {
             service_id,
+            provider_endpoints,
             directory,
             supervisor,
             store,
@@ -31,12 +34,7 @@ impl ProviderAcpRouteClaim {
     }
 
     pub(crate) async fn claim(&self, target: &SessionRef) -> RouteClaim {
-        if target.endpoint.service_id != self.service_id
-            || !matches!(
-                String::from(target.endpoint.endpoint_id.clone()).as_str(),
-                "claude-local" | "cursor-local"
-            )
-        {
+        if !self.serves(target) {
             return RouteClaim::NotMine;
         }
         let endpoint = self
@@ -112,6 +110,11 @@ impl ProviderAcpRouteClaim {
             ),
         }
     }
+
+    pub(crate) fn serves(&self, target: &SessionRef) -> bool {
+        target.endpoint.service_id == self.service_id
+            && self.provider_endpoints.contains(&target.endpoint)
+    }
 }
 
 fn unavailable(reason: &str, fix: &str, retryable: bool) -> RouteClaim {
@@ -170,7 +173,13 @@ mod tests {
         let supervisor = Arc::new(
             ExternalProviderSupervisor::new(Vec::new(), Arc::clone(&store)).expect("supervisor"),
         );
-        let claim = ProviderAcpRouteClaim::new(service_id, directory, supervisor, store);
+        let claim = ProviderAcpRouteClaim::new(
+            service_id,
+            std::iter::once(endpoint.clone()).collect(),
+            directory,
+            supervisor,
+            store,
+        );
         let target = SessionRef {
             endpoint,
             session_id: SessionId::try_from("fixture-session".to_owned()).expect("session ID"),
@@ -182,5 +191,16 @@ mod tests {
             matches!(result, RouteClaim::Unavailable { retryable: false, reason }
             if reason.reason == "disabled in providers.json" && reason.fix.contains("enable Claude"))
         );
+        let codex_target = SessionRef {
+            endpoint: EndpointRef {
+                service_id: target.endpoint.service_id.clone(),
+                endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("endpoint ID"),
+            },
+            session_id: target.session_id,
+        };
+        assert!(matches!(
+            claim.claim(&codex_target).await,
+            RouteClaim::NotMine
+        ));
     }
 }

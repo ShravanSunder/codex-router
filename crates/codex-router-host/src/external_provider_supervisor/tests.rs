@@ -2,8 +2,8 @@ use super::*;
 use crate::ExternalProviderLaunch;
 use collaboration_protocol::{
     CodexGeneration, ConversationCreateRequest, ConversationPromptRequest, EndpointId,
-    GenerationNumber, MessageContent, MessageText, ProviderBindingId, ProviderCapabilities,
-    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    GenerationNumber, MessageContent, MessageText, PositiveSeconds, ProviderBindingId,
+    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy, ProviderRuntimeIdentity,
     ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId, UuidIdentity,
 };
@@ -373,6 +373,95 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
 }
 
 #[tokio::test]
+async fn provider_retirement_settles_queued_input_without_resubmission() {
+    // Specification R5: queued Inputs of a lost Session become notSubmitted
+    // with providerRetired and are never sent to a successor connection.
+    let root = tempfile::tempdir().expect("temporary root");
+    let runtime = ExternalProviderRuntime::initialize(pending_prompt_fixture())
+        .await
+        .expect("fixture initializes");
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
+    let store = Arc::new(Mutex::new(
+        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("operation store"),
+    ));
+    let backend = Arc::new(
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: binding(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor"),
+    );
+    let target = SessionRef {
+        endpoint: endpoint(),
+        session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
+    };
+    assert_eq!(
+        backend
+            .submit_delivery_prompt(ConversationPromptRequest {
+                operation_id: OperationId::generate(),
+                target: target.clone(),
+                generation: Some(generation()),
+                requested_by: requester(),
+                approver: requester(),
+                prompt: MessageContent::Router {
+                    text: MessageText::try_from("active".to_owned()).expect("message"),
+                },
+            })
+            .await
+            .expect("active prompt"),
+        provider_delivery_submission::ProviderPromptDispatch::Submitted
+    );
+    let queue = crate::provider_acp_message_fifo::ProviderAcpMessageFifo::new(
+        Arc::clone(&backend),
+        Arc::clone(&store),
+        Arc::new(NoLivePeer),
+    );
+    let queued_id = OperationId::generate();
+    let permit = queue.reserve(&target).expect("queue capacity");
+    backend
+        .queued_operation_registry()
+        .record_queued(queued_id.clone(), target.clone(), binding());
+    permit.send(ConversationPromptRequest {
+        operation_id: queued_id.clone(),
+        target,
+        generation: Some(generation()),
+        requested_by: requester(),
+        approver: requester(),
+        prompt: MessageContent::Router {
+            text: MessageText::try_from("queued".to_owned()).expect("message"),
+        },
+    });
+    backend
+        .runtime_for(&endpoint())
+        .expect("provider runtime")
+        .shutdown()
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), queue.wait_for_workers())
+        .await
+        .expect("queued operation worker settles after provider retirement");
+    let snapshot = backend
+        .queued_operation_registry()
+        .snapshot(&queued_id)
+        .expect("queued operation snapshot")
+        .expect("queued operation exists");
+    assert!(matches!(
+        snapshot.queue_state,
+        Some(collaboration_protocol::ConversationOperationQueueState::NotSubmitted { reason })
+            if reason == "providerRetired"
+    ));
+    queue.shutdown().await;
+    backend.shutdown().await.expect("supervisor shutdown");
+}
+
+#[tokio::test]
 async fn concurrent_admission_precedes_reconcile_live_state_check() {
     let root = tempfile::tempdir().expect("temporary root");
     let runtime = ExternalProviderRuntime::initialize(create_fixture())
@@ -473,6 +562,221 @@ fn typed_runtime_failure_mapping_never_classifies_provider_text() {
         let failure = runtime_failure(operation_id.clone(), None, error);
         assert_eq!(failure.effect, ProviderOperationEffect::None);
     }
+}
+
+#[test]
+fn acp_error_codes_project_to_existing_public_failure_kinds() {
+    // ACP v1 error-codes.mdx and Specification R7 classify by code. PR 1
+    // preserves the existing public failure-kind enum and providerCode.
+    for (error, expected_kind, code) in [
+        (
+            ExternalProviderRuntimeError::AuthenticationRequired { code: -32000 },
+            ConversationOperationFailureKind::AuthenticationRequired,
+            -32000,
+        ),
+        (
+            ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002 },
+            ConversationOperationFailureKind::ProviderSessionNotFound,
+            -32002,
+        ),
+        (
+            ExternalProviderRuntimeError::ResourceNotFound { code: -32002 },
+            ConversationOperationFailureKind::NotFound,
+            -32002,
+        ),
+        (
+            ExternalProviderRuntimeError::UnsupportedMethod { code: -32601 },
+            ConversationOperationFailureKind::UnsupportedCapability,
+            -32601,
+        ),
+        (
+            ExternalProviderRuntimeError::InvalidParams { code: -32602 },
+            ConversationOperationFailureKind::InvalidRequest,
+            -32602,
+        ),
+        (
+            ExternalProviderRuntimeError::RequestCancelled { code: -32800 },
+            ConversationOperationFailureKind::ProviderRejected,
+            -32800,
+        ),
+        (
+            ExternalProviderRuntimeError::ProviderRejected { code: -32603 },
+            ConversationOperationFailureKind::ProviderRejected,
+            -32603,
+        ),
+    ] {
+        let failure = runtime_failure(OperationId::generate(), None, error);
+        assert_eq!(failure.kind, expected_kind, "code {code}");
+        assert_eq!(failure.provider_code, Some(code), "code {code}");
+    }
+}
+
+#[tokio::test]
+async fn provider_error_code_fixtures_project_without_agent_text() {
+    // ACP v1 error-codes.mdx and Specification R7: each code is classified
+    // from a real ACP response, with the agent's message/data kept private.
+    for (code, expected_kind) in [
+        (
+            -32000,
+            ConversationOperationFailureKind::AuthenticationRequired,
+        ),
+        (-32002, ConversationOperationFailureKind::NotFound),
+        (
+            -32601,
+            ConversationOperationFailureKind::UnsupportedCapability,
+        ),
+        (-32602, ConversationOperationFailureKind::InvalidRequest),
+        (-32800, ConversationOperationFailureKind::ProviderRejected),
+        (-32603, ConversationOperationFailureKind::ProviderRejected),
+    ] {
+        let fixture = crate::external_provider_runtime::acp_scripted_fixture::AcpFixtureScript::new()
+            .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+            .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "error-fixture", "version": "1"}}))
+            .expect_request("create", "session/new", serde_json::json!({}))
+            .respond("create", serde_json::json!({"sessionId": "fixture-session"}))
+            .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId": "fixture-session"}))
+            .respond_error("prompt", code)
+            .launch();
+        let runtime = ExternalProviderRuntime::initialize(fixture)
+            .await
+            .expect("fixture initializes");
+        runtime
+            .create_session(PathBuf::from("/tmp"))
+            .await
+            .expect("session created");
+        let error = runtime
+            .prompt("fixture-session".to_owned(), "continue".to_owned())
+            .await
+            .expect_err("agent rejected prompt");
+        let failure = runtime_failure(OperationId::generate(), None, error);
+        assert_eq!(failure.kind, expected_kind, "code {code}");
+        assert_eq!(failure.provider_code, Some(i64::from(code)), "code {code}");
+        let diagnostic = String::from(failure.message);
+        assert!(!diagnostic.contains("private provider text"), "code {code}");
+        assert!(!diagnostic.contains("secret sentinel"), "code {code}");
+        runtime.shutdown().await;
+    }
+}
+
+#[test]
+fn lost_provider_prompt_has_terminal_unknown_effect_and_sanitized_reason() {
+    // A prompt dispatched before connection loss cannot be retried safely.
+    // Specification E4 and R5 require a terminal lost projection in PR 1.
+    let failure = prompt_runtime_failure(
+        OperationId::generate(),
+        None,
+        ExternalProviderRuntimeError::TransportFailure,
+    );
+    assert_eq!(
+        failure.kind,
+        ConversationOperationFailureKind::OutcomeUnknown
+    );
+    assert_eq!(failure.effect, ProviderOperationEffect::Unknown);
+    assert_eq!(
+        String::from(failure.message),
+        "provider connection lost before the agent ended the turn (providerRetired)"
+    );
+}
+
+#[test]
+fn unsupported_prompt_content_is_a_validation_failure_without_provider_effect() {
+    // ACP v1 initialization.mdx:202-217 makes optional prompt content
+    // conditional on advertised capabilities.
+    for (content_type, expected_message) in [
+        ("image", "unsupportedContent{image}"),
+        ("audio", "unsupportedContent{audio}"),
+        ("embeddedResource", "unsupportedContent{embeddedResource}"),
+    ] {
+        let failure = runtime_failure(
+            OperationId::generate(),
+            None,
+            ExternalProviderRuntimeError::UnsupportedContent { content_type },
+        );
+        assert_eq!(
+            failure.kind,
+            ConversationOperationFailureKind::UnsupportedCapability
+        );
+        assert_eq!(failure.stage, ConversationOperationFailureStage::Validation);
+        assert_eq!(failure.effect, ProviderOperationEffect::None);
+        assert_eq!(String::from(failure.message), expected_message);
+    }
+}
+
+#[tokio::test]
+async fn unknown_agent_stop_reason_projects_applied_unknown_settlement() {
+    // ACP v1 prompt-turn.mdx:369-390 defines the recognized stop reasons.
+    // R4 preserves an unknown value until E4 has a typed unknown reason.
+    let fixture = crate::external_provider_runtime::acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "unknown-stop-fixture", "version": "1"}}))
+        .expect_request("create", "session/new", serde_json::json!({}))
+        .respond("create", serde_json::json!({"sessionId": "fixture-session"}))
+        .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId": "fixture-session"}))
+        .respond("prompt", serde_json::json!({"stopReason": "future_reason"}))
+        .launch();
+    let root = tempfile::tempdir().expect("temporary root");
+    let runtime = ExternalProviderRuntime::initialize(fixture)
+        .await
+        .expect("fixture initializes");
+    runtime
+        .create_session(root.path().to_owned())
+        .await
+        .expect("session created");
+    let store = Arc::new(Mutex::new(
+        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("operation store"),
+    ));
+    let backend = ExternalProviderSupervisor::new(
+        vec![ExternalProviderBinding {
+            identity: binding(),
+            runtime,
+        }],
+        store,
+    )
+    .expect("supervisor");
+    let operation_id = OperationId::generate();
+    assert_eq!(
+        backend
+            .submit_delivery_prompt(ConversationPromptRequest {
+                operation_id: operation_id.clone(),
+                target: SessionRef {
+                    endpoint: endpoint(),
+                    session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
+                },
+                generation: Some(generation()),
+                requested_by: requester(),
+                approver: requester(),
+                prompt: MessageContent::Router {
+                    text: MessageText::try_from("continue".to_owned()).expect("message"),
+                },
+            })
+            .await
+            .expect("prompt submitted"),
+        provider_delivery_submission::ProviderPromptDispatch::Submitted
+    );
+    let failure = backend
+        .wait(ConversationOperationWaitRequest {
+            operation_id: operation_id.clone(),
+            timeout_seconds: PositiveSeconds::try_from(5).expect("timeout"),
+        })
+        .await
+        .expect_err("unknown stop reason is a terminal failure projection");
+    assert_eq!(
+        failure.kind,
+        ConversationOperationFailureKind::OutcomeUnknown
+    );
+    assert_eq!(failure.effect, ProviderOperationEffect::Applied);
+    assert_eq!(
+        String::from(failure.message),
+        "agent ended the turn with an unrecognized stop reason (future_reason)"
+    );
+    let operation = backend
+        .show(ConversationOperationShowRequest { operation_id })
+        .await
+        .expect("terminal operation");
+    assert_eq!(operation.stage, ProviderOperationStage::Terminal);
+    backend.shutdown().await.expect("supervisor shutdown");
 }
 
 #[test]

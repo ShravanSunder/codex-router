@@ -1,27 +1,45 @@
 //! Host-owned ACP provider process admission and connection lifetime.
 
 #[cfg(test)]
+pub(crate) mod acp_scripted_fixture;
+#[cfg(test)]
 mod approval_dispatch_tests;
 mod approval_presentation;
+mod approval_turn_cancellation;
 mod external_approval_dispatch;
 mod external_permission_options;
+mod provider_acp_error_mapping;
 mod provider_approval_dispatch;
+mod provider_initialize_request;
+mod provider_prompt_dispatch;
+mod provider_request_fallback;
 
+use crate::provider_capability_report::ProviderCapabilityReport;
+use crate::provider_prompt_content::ProviderPromptContent;
 use crate::provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
     ProviderSteeringOutcome, run_provider_session,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 #[cfg(test)]
 use agent_client_protocol::schema::v1::ToolKind;
 use agent_client_protocol::schema::v1::{
-    LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, RequestPermissionRequest,
+    LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, NewSessionResponse,
+    RequestPermissionRequest,
 };
-use agent_client_protocol::schema::{ProtocolVersion, v1::InitializeRequest};
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines,
 };
+pub(crate) use approval_turn_cancellation::ProviderTurnCancellation;
+use approval_turn_cancellation::{ActiveApprovalContext, active_turn_cancellation};
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
 use external_approval_dispatch::spawn_external_approval_dispatch;
+use provider_acp_error_mapping::acp_load_session_error;
+pub(crate) use provider_acp_error_mapping::acp_operation_error;
+use provider_initialize_request::initialize_provider_connection;
+use provider_request_fallback::{
+    ProviderKnownSessions, ProviderRequestFallback, ProviderRequestSessionGuard,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -255,7 +273,7 @@ pub struct ExternalProviderApprovalContext {
 }
 
 struct ApprovalContextGuard {
-    contexts: Arc<std::sync::Mutex<HashMap<String, ExternalProviderApprovalContext>>>,
+    contexts: Arc<std::sync::Mutex<HashMap<String, ActiveApprovalContext>>>,
     provider_session_id: String,
     operation_id: OperationId,
 }
@@ -265,7 +283,7 @@ impl Drop for ApprovalContextGuard {
         if let Ok(mut contexts) = self.contexts.lock()
             && contexts
                 .get(&self.provider_session_id)
-                .is_some_and(|context| context.operation_id == self.operation_id)
+                .is_some_and(|context| context.approval.operation_id == self.operation_id)
         {
             contexts.remove(&self.provider_session_id);
         }
@@ -294,6 +312,14 @@ pub enum ExternalProviderRuntimeError {
     AuthenticationRequired { code: i64 },
     #[error("provider session was not found (ACP code {code})")]
     ProviderSessionNotFound { code: i64 },
+    #[error("provider resource was not found (ACP code {code})")]
+    ResourceNotFound { code: i64 },
+    #[error("provider ACP method is unsupported (ACP code {code})")]
+    UnsupportedMethod { code: i64 },
+    #[error("provider ACP parameters are invalid (ACP code {code})")]
+    InvalidParams { code: i64 },
+    #[error("provider ACP request was cancelled (ACP code {code})")]
+    RequestCancelled { code: i64 },
     #[error("provider rejected the ACP operation (ACP code {code})")]
     ProviderRejected { code: i64 },
     #[error("provider operation response was unavailable")]
@@ -306,22 +332,12 @@ pub enum ExternalProviderRuntimeError {
     FrameLimitExceeded,
     #[error("provider ACP message could not be decoded or classified")]
     FrameDecodeFailure,
+    #[error("unsupportedContent{{{content_type}}}")]
+    UnsupportedContent { content_type: &'static str },
+    #[error("agent ended the turn with an unrecognized stop reason{suffix}")]
+    UnknownStopReason { suffix: String },
     #[error("provider ACP operation failed: {0}")]
     Operation(String),
-}
-
-pub(crate) fn acp_operation_error(
-    error: agent_client_protocol::Error,
-) -> ExternalProviderRuntimeError {
-    use agent_client_protocol::schema::v1::ErrorCode;
-    let code = i64::from(i32::from(error.code));
-    match error.code {
-        ErrorCode::AuthRequired => ExternalProviderRuntimeError::AuthenticationRequired { code },
-        ErrorCode::ResourceNotFound => {
-            ExternalProviderRuntimeError::ProviderSessionNotFound { code }
-        }
-        _ => ExternalProviderRuntimeError::ProviderRejected { code },
-    }
 }
 
 pub(crate) fn sanitized_initialization_error(error: &agent_client_protocol::Error) -> String {
@@ -361,7 +377,7 @@ enum ProviderCommand {
     Prompt {
         provider_session_id: String,
         operation_id: Option<OperationId>,
-        prompt: String,
+        prompt: ProviderPromptContent,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>,
@@ -391,7 +407,7 @@ enum ProviderCommand {
 
 enum PendingSessionAdmission {
     Create {
-        result: Result<ProviderSessionRegistration, ExternalProviderRuntimeError>,
+        result: Box<Result<ProviderSessionRegistration, ExternalProviderRuntimeError>>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
         >,
@@ -406,6 +422,7 @@ enum PendingSessionAdmission {
 struct ProviderSessionRegistration {
     provider_session_id: String,
     commands: tokio::sync::mpsc::Sender<ProviderSessionCommand>,
+    response: NewSessionResponse,
 }
 
 #[derive(Debug, Default)]
@@ -437,6 +454,8 @@ impl ProviderFrameObservation {
 /// Owns the provider process and ACP connection independently of caller tasks.
 pub struct ExternalProviderRuntime {
     admission: ExternalProviderAdmission,
+    base_capabilities: ProviderCapabilityReport,
+    session_capabilities: Arc<tokio::sync::RwLock<HashMap<String, ProviderCapabilityReport>>>,
     shutdown: CancellationToken,
     retirement: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
@@ -450,7 +469,7 @@ pub struct ExternalProviderRuntime {
     approval_broker: Arc<
         tokio::sync::RwLock<Option<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>>,
     >,
-    approval_contexts: Arc<std::sync::Mutex<HashMap<String, ExternalProviderApprovalContext>>>,
+    approval_contexts: Arc<std::sync::Mutex<HashMap<String, ActiveApprovalContext>>>,
     permission_refusal_reasons:
         Arc<std::sync::Mutex<HashMap<OperationId, ExternalProviderApprovalRefusalReason>>>,
     endpoint_id: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -517,6 +536,11 @@ impl ExternalProviderRuntime {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (admission_settled_tx, admission_settled_rx) = tokio::sync::oneshot::channel();
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(32);
+        let session_capabilities = Arc::new(tokio::sync::RwLock::new(HashMap::<
+            String,
+            ProviderCapabilityReport,
+        >::new()));
+        let task_session_capabilities = Arc::clone(&session_capabilities);
         #[cfg(test)]
         let permission_request_count = Arc::new(AtomicU64::new(0));
         #[cfg(test)]
@@ -529,11 +553,15 @@ impl ExternalProviderRuntime {
             None::<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>,
         ));
         let callback_approval_broker = Arc::clone(&approval_broker);
+        let task_approval_broker = Arc::clone(&approval_broker);
         let approval_contexts = Arc::new(std::sync::Mutex::new(HashMap::<
             String,
-            ExternalProviderApprovalContext,
+            ActiveApprovalContext,
         >::new()));
         let callback_approval_contexts = Arc::clone(&approval_contexts);
+        let task_approval_contexts = Arc::clone(&approval_contexts);
+        let known_sessions = ProviderKnownSessions::default();
+        let request_known_sessions = known_sessions.clone();
         let permission_refusal_reasons = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let callback_permission_refusal_reasons = Arc::clone(&permission_refusal_reasons);
         let endpoint_id = Arc::new(tokio::sync::RwLock::new(None::<String>));
@@ -586,7 +614,9 @@ impl ExternalProviderRuntime {
                     "provider stdout closed",
                 ))
             }));
+            let final_approval_broker = Arc::clone(&callback_approval_broker);
             let connection = Client.builder().name("codex-router-host")
+                .with_handler(ProviderRequestSessionGuard::new(request_known_sessions))
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, connection| {
                         #[cfg(test)]
@@ -631,7 +661,7 @@ impl ExternalProviderRuntime {
                                 && let Ok(mut refusals) =
                                     callback_permission_refusal_reasons.lock()
                             {
-                                refusals.insert(context.operation_id.clone(), reason);
+                                refusals.insert(context.approval.operation_id.clone(), reason);
                             }
                         }
                         spawn_external_approval_dispatch(
@@ -646,6 +676,7 @@ impl ExternalProviderRuntime {
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
+                .with_handler(ProviderRequestFallback)
                 .connect_with(
                 Lines::new(outgoing, incoming),
                 async move |connection| {
@@ -654,13 +685,12 @@ impl ExternalProviderRuntime {
                         () = task_shutdown.cancelled() => {
                             return Ok(());
                         }
-                        response = connection
-                            .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                            .block_task() => response,
+                        response = initialize_provider_connection(&connection) => response,
                     };
                     let admission = match initialized {
                         Ok(response) if response.protocol_version == ProtocolVersion::V1 => {
-                            Ok(ExternalProviderAdmission {
+                            let capability_report = ProviderCapabilityReport::from_initialize(&response);
+                            Ok((ExternalProviderAdmission {
                                 runtime_name: response
                                     .agent_info
                                     .as_ref()
@@ -679,7 +709,7 @@ impl ExternalProviderRuntime {
                                     .and_then(|steering| steering.get("supported"))
                                     .and_then(serde_json::Value::as_bool)
                                     == Some(true),
-                            })
+                            }, capability_report))
                         }
                         Ok(response) => Err(ExternalProviderRuntimeError::UnsupportedProtocol {
                             actual: response.protocol_version,
@@ -693,12 +723,13 @@ impl ExternalProviderRuntime {
                     let admitted = admission.is_ok();
                     let session_mcp_servers = if matches!(
                         &admission,
-                        Ok(admission) if admission.supports_mcp_http
+                        Ok((admission, _)) if admission.supports_mcp_http
                     ) {
                         configured_mcp_servers
                     } else {
                         Vec::new()
                     };
+                    let base_capabilities = admission.as_ref().ok().map(|(_, report)| report.clone());
                     let _result = ready_tx.send(admission);
                     let _result = admission_settled_tx.send(());
                     if admitted {
@@ -710,6 +741,7 @@ impl ExternalProviderRuntime {
                         let mut admission_tasks = tokio::task::JoinSet::new();
                         let (admission_tx, mut admission_rx) = tokio::sync::mpsc::channel(32);
                         let mut pending_loads = std::collections::HashSet::<String>::new();
+                        let Some(base_capabilities) = base_capabilities else { return Ok(()); };
                         loop {
                             tokio::select! {
                                 () = task_shutdown.cancelled() => break,
@@ -717,13 +749,25 @@ impl ExternalProviderRuntime {
                                     let Some(completion) = completion else { continue; };
                                     match completion {
                                         PendingSessionAdmission::Create { result, reply } => {
-                                            let result = result.and_then(|registration| {
+                                            let report = result.as_ref().as_ref().ok().map(|registration| {
+                                                base_capabilities.with_session_response(&registration.response)
+                                            });
+                                            let result = (*result).and_then(|registration| {
                                                 register_provider_session(registration, &mut sessions)
                                             });
+                                            if let Ok(created) = &result {
+                                                known_sessions.track(created.provider_session_id.clone()).await;
+                                                if let Some(report) = report {
+                                                    task_session_capabilities.write().await.insert(created.provider_session_id.clone(), report);
+                                                }
+                                            }
                                             let _result = reply.send(result);
                                         }
                                         PendingSessionAdmission::Load { provider_session_id, result, reply } => {
                                             pending_loads.remove(&provider_session_id);
+                                            let report = result.as_ref().as_ref().ok().map(|session| {
+                                                base_capabilities.with_session_response(&session.response())
+                                            });
                                             let result = (*result).and_then(|mut session| {
                                                 discard_queued_session_updates(&mut session)?;
                                                 register_static_provider_session(
@@ -735,6 +779,11 @@ impl ExternalProviderRuntime {
                                                     #[cfg(test)] Arc::clone(&session_test_tool_calls),
                                                 )
                                             }).map(|_| ());
+                                            if result.is_err() {
+                                                known_sessions.forget(&provider_session_id).await;
+                                            } else if let Some(report) = report {
+                                                task_session_capabilities.write().await.insert(provider_session_id.clone(), report);
+                                            }
                                             let _result = reply.send(result);
                                         }
                                     }
@@ -774,6 +823,7 @@ impl ExternalProviderRuntime {
                                             if sessions.contains_key(&provider_session_id) || !pending_loads.insert(provider_session_id.clone()) {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
                                             } else {
+                                                known_sessions.track(provider_session_id.clone()).await;
                                                 let request = LoadSessionRequest::new(
                                                     provider_session_id.clone(),
                                                     &cwd,
@@ -788,7 +838,7 @@ impl ExternalProviderRuntime {
                                                         result = pending_connection
                                                         .load_session_from(request)
                                                         .block_task()
-                                                        .start_session() => result.map(|restored| restored.into_session()).map_err(acp_operation_error),
+                                                        .start_session() => result.map(|restored| restored.into_session()).map_err(acp_load_session_error),
                                                     };
                                                     publish_pending_session_admission(
                                                         &pending_admission_tx,
@@ -810,7 +860,8 @@ impl ExternalProviderRuntime {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                                                 continue;
                                             };
-                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, dispatch, reply }).await
+                                            let turn_cancellation = operation_id.as_ref().and_then(|operation_id| active_turn_cancellation(&task_approval_contexts, &task_approval_broker, &provider_session_id, Some(operation_id)));
+                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, turn_cancellation, dispatch, reply }).await
                                                 && let ProviderSessionCommand::Prompt { dispatch: Some(dispatch), .. } = error.0
                                             {
                                                 let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
@@ -881,6 +932,7 @@ impl ExternalProviderRuntime {
                 },
             };
             connection_retirement.cancel();
+            approval_turn_cancellation::cancel_on_provider_loss(&final_approval_broker).await;
             #[cfg(unix)]
             if !child_exited
                 && let Some(process_id) = rustix::process::Pid::from_raw(child.id().cast_signed())
@@ -895,28 +947,31 @@ impl ExternalProviderRuntime {
             let _result = stderr_task.await;
         });
 
-        let admission = match tokio::time::timeout(initialize_timeout, ready_rx).await {
-            Ok(Ok(Ok(admission))) => admission,
-            Ok(Ok(Err(error))) => {
-                shutdown.cancel();
-                let _result = task.await;
-                return Err(error);
-            }
-            Ok(Err(_)) => {
-                shutdown.cancel();
-                let _result = task.await;
-                return Err(ExternalProviderRuntimeError::Initialize(
-                    "provider connection closed before initialization".to_owned(),
-                ));
-            }
-            Err(_) => {
-                shutdown.cancel();
-                let _result = task.await;
-                return Err(ExternalProviderRuntimeError::InitializeTimeout);
-            }
-        };
+        let (admission, base_capabilities) =
+            match tokio::time::timeout(initialize_timeout, ready_rx).await {
+                Ok(Ok(Ok(admission))) => admission,
+                Ok(Ok(Err(error))) => {
+                    shutdown.cancel();
+                    let _result = task.await;
+                    return Err(error);
+                }
+                Ok(Err(_)) => {
+                    shutdown.cancel();
+                    let _result = task.await;
+                    return Err(ExternalProviderRuntimeError::Initialize(
+                        "provider connection closed before initialization".to_owned(),
+                    ));
+                }
+                Err(_) => {
+                    shutdown.cancel();
+                    let _result = task.await;
+                    return Err(ExternalProviderRuntimeError::InitializeTimeout);
+                }
+            };
         Ok(Self {
             admission,
+            base_capabilities,
+            session_capabilities,
             shutdown,
             retirement,
             task: tokio::sync::Mutex::new(Some(task)),
@@ -941,6 +996,18 @@ impl ExternalProviderRuntime {
     #[must_use]
     pub fn admission(&self) -> &ExternalProviderAdmission {
         &self.admission
+    }
+
+    pub(crate) async fn capability_report(
+        &self,
+        provider_session_id: &str,
+    ) -> ProviderCapabilityReport {
+        self.session_capabilities
+            .read()
+            .await
+            .get(provider_session_id)
+            .cloned()
+            .unwrap_or_else(|| self.base_capabilities.clone())
     }
 
     #[must_use]
@@ -1040,15 +1107,6 @@ impl ExternalProviderRuntime {
             .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
     }
 
-    pub async fn prompt(
-        &self,
-        provider_session_id: String,
-        prompt: String,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_for_operation(provider_session_id, None, prompt, None)
-            .await
-    }
-
     pub async fn steer_session(
         &self,
         provider_session_id: String,
@@ -1103,82 +1161,6 @@ impl ExternalProviderRuntime {
         result
             .await
             .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
-    }
-
-    async fn prompt_for_operation(
-        &self,
-        provider_session_id: String,
-        operation_id: Option<OperationId>,
-        prompt: String,
-        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        let (reply, result) = tokio::sync::oneshot::channel();
-        self.commands
-            .send(ProviderCommand::Prompt {
-                provider_session_id,
-                operation_id,
-                prompt,
-                dispatch,
-                reply,
-            })
-            .await
-            .map_err(|error| {
-                if let ProviderCommand::Prompt {
-                    dispatch: Some(dispatch),
-                    ..
-                } = error.0
-                {
-                    let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
-                }
-                self.prompt_transport_failure()
-            })?;
-        result.await.map_err(|_| self.prompt_transport_failure())?
-    }
-
-    fn prompt_transport_failure(&self) -> ExternalProviderRuntimeError {
-        if self.frame_observation.limit_was_exceeded() {
-            ExternalProviderRuntimeError::FrameLimitExceeded
-        } else {
-            ExternalProviderRuntimeError::TransportFailure
-        }
-    }
-
-    #[cfg(test)]
-    pub async fn cancel_active_prompt(
-        &self,
-        provider_session_id: String,
-    ) -> Result<(), ExternalProviderRuntimeError> {
-        self.cancel_prompt(provider_session_id, None).await
-    }
-
-    pub async fn cancel_prompt_operation(
-        &self,
-        provider_session_id: String,
-        expected_operation_id: OperationId,
-    ) -> Result<(), ExternalProviderRuntimeError> {
-        self.cancel_prompt(provider_session_id, Some(expected_operation_id))
-            .await
-    }
-
-    async fn cancel_prompt(
-        &self,
-        provider_session_id: String,
-        expected_operation_id: Option<OperationId>,
-    ) -> Result<(), ExternalProviderRuntimeError> {
-        let (reply, result) = tokio::sync::oneshot::channel();
-        self.commands
-            .send(ProviderCommand::Cancel {
-                provider_session_id,
-                expected_operation_id,
-                reply,
-            })
-            .await
-            .map_err(|_| {
-                ExternalProviderRuntimeError::Operation("provider runtime closed".to_owned())
-            })?;
-        result.await.map_err(|_| {
-            ExternalProviderRuntimeError::Operation("provider runtime closed".to_owned())
-        })?
     }
 
     pub async fn shutdown(&self) {
@@ -1268,6 +1250,7 @@ async fn run_create_admission(
                 .send(ProviderSessionRegistration {
                     provider_session_id,
                     commands,
+                    response: session.response(),
                 })
                 .map_err(|_| agent_client_protocol::Error::internal_error())?;
             run_provider_session(
@@ -1295,7 +1278,10 @@ async fn run_create_admission(
     publish_pending_session_admission(
         &admission_tx,
         &shutdown,
-        PendingSessionAdmission::Create { result, reply },
+        PendingSessionAdmission::Create {
+            result: Box::new(result),
+            reply,
+        },
     )
     .await;
     if registered {
