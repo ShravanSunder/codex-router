@@ -25,6 +25,7 @@ const MAX_SESSION_QUEUES: usize = 1024;
 const SETTLEMENT_WAIT_SECONDS: u32 = 10;
 const MIN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+const PROVIDER_RETIRED_REASON: &str = "providerRetired";
 
 pub(crate) struct ProviderAcpMessageFifo {
     supervisor: Arc<ExternalProviderSupervisor>,
@@ -100,6 +101,17 @@ impl ProviderAcpMessageFifo {
             let _result = worker.await;
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_workers(&self) {
+        let workers = match self.workers.lock() {
+            Ok(mut workers) => std::mem::take(&mut *workers),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+        for worker in workers {
+            worker.await.expect("provider queue worker completes");
+        }
+    }
 }
 
 impl Drop for ProviderAcpMessageFifo {
@@ -138,7 +150,7 @@ async fn run_provider_message_fifo(
                 &supervisor,
                 &operation_id,
                 &mut receiver,
-                "provider retired before queued prompt submission",
+                PROVIDER_RETIRED_REASON,
             );
             return;
         };
@@ -161,7 +173,7 @@ async fn run_provider_message_fifo(
                     &supervisor,
                     &operation_id,
                     &mut receiver,
-                    "provider retired before queued prompt submission",
+                    PROVIDER_RETIRED_REASON,
                 );
                 return;
             }
@@ -172,13 +184,19 @@ async fn run_provider_message_fifo(
                         return;
                     },
                     () = retirement.cancelled() => {
-                        drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "provider retired before queued prompt submission");
+                        drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, PROVIDER_RETIRED_REASON);
                         return;
                     },
                     outcome = ensure_provider_session_loaded(&supervisor, &store, ownership.as_ref(), &target) => outcome,
                 };
                 match load_outcome {
                     ProviderSessionLoadOutcome::Ready => loaded = true,
+                    ProviderSessionLoadOutcome::UnsupportedLoad => {
+                        supervisor
+                            .queued_operation_registry()
+                            .mark_not_submitted(&operation_id, "unsupported: load");
+                        break;
+                    }
                     ProviderSessionLoadOutcome::MissingRecord => {
                         supervisor.queued_operation_registry().mark_not_submitted(
                             &operation_id,
@@ -212,7 +230,7 @@ async fn run_provider_message_fifo(
                     return;
                 },
                 () = retirement.cancelled() => {
-                    drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "provider retired before queued prompt submission");
+                    drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, PROVIDER_RETIRED_REASON);
                     return;
                 },
                 idle = runtime.wait_session_idle(String::from(target.session_id.clone())) => idle,
@@ -223,7 +241,7 @@ async fn run_provider_message_fifo(
                         &supervisor,
                         &operation_id,
                         &mut receiver,
-                        "provider retired or Router shut down before queued prompt submission",
+                        interrupted_queue_reason(&shutdown, &retirement),
                     );
                     return;
                 }
@@ -236,7 +254,7 @@ async fn run_provider_message_fifo(
                     return;
                 },
                 () = retirement.cancelled() => {
-                    drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "provider retired before queued prompt submission");
+                    drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, PROVIDER_RETIRED_REASON);
                     return;
                 },
                 submitted = supervisor.submit_delivery_prompt(request.clone()) => submitted,
@@ -266,7 +284,7 @@ async fn run_provider_message_fifo(
                     &supervisor,
                     &operation_id,
                     &mut receiver,
-                    "provider retired or Router shut down before queued prompt submission",
+                    interrupted_queue_reason(&shutdown, &retirement),
                 );
                 return;
             }
@@ -285,7 +303,7 @@ async fn run_provider_message_fifo(
                     return;
                 },
                 () = retirement.cancelled() => {
-                    mark_remaining_not_submitted(&supervisor, &mut receiver, "provider retired before queued prompt settlement");
+                    mark_remaining_not_submitted(&supervisor, &mut receiver, PROVIDER_RETIRED_REASON);
                     return;
                 },
                 result = supervisor.wait(ConversationOperationWaitRequest {
@@ -313,13 +331,26 @@ async fn run_provider_message_fifo(
                         mark_remaining_not_submitted(
                             &supervisor,
                             &mut receiver,
-                            "provider retired or Router shut down before queued prompt settlement",
+                            interrupted_queue_reason(&shutdown, &retirement),
                         );
                         return;
                     }
                 }
             }
         }
+    }
+}
+
+fn interrupted_queue_reason(
+    shutdown: &CancellationToken,
+    retirement: &CancellationToken,
+) -> &'static str {
+    if retirement.is_cancelled() {
+        PROVIDER_RETIRED_REASON
+    } else if shutdown.is_cancelled() {
+        "Router shutdown before queued prompt submission"
+    } else {
+        "provider queue stopped before queued prompt submission"
     }
 }
 

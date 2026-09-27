@@ -1,10 +1,15 @@
 //! Host-owned admission and settlement for external ACP provider operations.
 
+mod provider_operation_failure;
+use provider_operation_failure::{admission_failure, prompt_runtime_failure, runtime_failure};
+
+use crate::ExternalProviderRuntime;
+#[cfg(test)]
+use crate::ExternalProviderRuntimeError;
 use crate::provider_operation_settlement::{
     ProviderOperationCompletion, effective_settings, optional_message_text, provider_session_record,
 };
 use crate::provider_queue_operation_registry::ProviderQueueOperationRegistry;
-use crate::{ExternalProviderRuntime, ExternalProviderRuntimeError};
 use collaboration_protocol::{
     ConversationAdmissionState, ConversationBindingIdentity, ConversationCancelRequest,
     ConversationCreateRequest, ConversationLoadRequest, ConversationOperationFailure,
@@ -749,11 +754,13 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                                     Some(completion_target),
                                 )),
                             },
-                            Err(error) => ProviderOperationCompletion::Failure(runtime_failure(
-                                operation_id,
-                                Some(completion_target),
-                                error,
-                            )),
+                            Err(error) => {
+                                ProviderOperationCompletion::Failure(prompt_runtime_failure(
+                                    operation_id,
+                                    Some(completion_target),
+                                    error,
+                                ))
+                            }
                         }
                     });
                     Ok(admitted_submission(snapshot))
@@ -1044,110 +1051,6 @@ fn admitted_submission(
         admission: ConversationAdmissionState::Admitted,
         operation,
     }
-}
-
-fn runtime_failure(
-    operation_id: OperationId,
-    target: Option<SessionRef>,
-    error: ExternalProviderRuntimeError,
-) -> ConversationOperationFailure {
-    match error {
-        ExternalProviderRuntimeError::LocalBusy => failure(
-            ConversationOperationFailureKind::Busy,
-            ConversationOperationFailureStage::Validation,
-            ProviderOperationEffect::None,
-            "provider conversation already has active work",
-            operation_id,
-            target,
-        ),
-        ExternalProviderRuntimeError::LocalNotFound
-        | ExternalProviderRuntimeError::LocalCancelTargetMismatch => failure(
-            ConversationOperationFailureKind::NotFound,
-            ConversationOperationFailureStage::Validation,
-            ProviderOperationEffect::None,
-            "provider conversation operation is not active",
-            operation_id,
-            target,
-        ),
-        ExternalProviderRuntimeError::AuthenticationRequired { code } => {
-            failure_with_provider_code(
-                ConversationOperationFailureKind::AuthenticationRequired,
-                ConversationOperationFailureStage::Binding,
-                ProviderOperationEffect::None,
-                "provider authentication is required",
-                operation_id,
-                target,
-                Some(code),
-            )
-        }
-        ExternalProviderRuntimeError::ProviderSessionNotFound { code } => {
-            failure_with_provider_code(
-                ConversationOperationFailureKind::ProviderSessionNotFound,
-                ConversationOperationFailureStage::Binding,
-                ProviderOperationEffect::None,
-                "this session never started a turn and did not survive the provider restart; create a new conversation",
-                operation_id,
-                target,
-                Some(code),
-            )
-        }
-        ExternalProviderRuntimeError::ProviderRejected { code } => failure_with_provider_code(
-            ConversationOperationFailureKind::ProviderRejected,
-            ConversationOperationFailureStage::Settlement,
-            ProviderOperationEffect::Unknown,
-            "provider rejected the operation after dispatch",
-            operation_id,
-            target,
-            Some(code),
-        ),
-        ExternalProviderRuntimeError::PromptOutputLimitExceeded => failure(
-            ConversationOperationFailureKind::OutcomeUnknown,
-            ConversationOperationFailureStage::Settlement,
-            ProviderOperationEffect::Unknown,
-            "provider prompt output exceeded the retained output limit; cancellation was requested and settled",
-            operation_id,
-            target,
-        ),
-        ExternalProviderRuntimeError::FrameLimitExceeded => failure(
-            ConversationOperationFailureKind::OutcomeUnknown,
-            ConversationOperationFailureStage::Settlement,
-            ProviderOperationEffect::Unknown,
-            "provider frame exceeded the configured transport limit",
-            operation_id,
-            target,
-        ),
-        ExternalProviderRuntimeError::FrameDecodeFailure => failure(
-            ConversationOperationFailureKind::OutcomeUnknown,
-            ConversationOperationFailureStage::Settlement,
-            ProviderOperationEffect::Unknown,
-            "provider frame could not be decoded or classified",
-            operation_id,
-            target,
-        ),
-        _ => failure(
-            ConversationOperationFailureKind::OutcomeUnknown,
-            ConversationOperationFailureStage::Settlement,
-            ProviderOperationEffect::Unknown,
-            "provider operation response was not available after dispatch",
-            operation_id,
-            target,
-        ),
-    }
-}
-
-fn admission_failure(
-    operation_id: OperationId,
-    message: &'static str,
-    target: Option<SessionRef>,
-) -> ConversationOperationFailure {
-    failure(
-        ConversationOperationFailureKind::Unavailable,
-        ConversationOperationFailureStage::Admission,
-        ProviderOperationEffect::None,
-        message,
-        operation_id,
-        target,
-    )
 }
 
 fn unavailable_failure(

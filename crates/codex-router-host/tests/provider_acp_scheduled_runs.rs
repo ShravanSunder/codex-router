@@ -256,6 +256,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
         .expect("endpoint publication");
     let route = Arc::new(ProviderAcpDeliveryRoute::new(
         service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
         directory,
         Arc::clone(&supervisor),
         Arc::clone(&store),
@@ -448,6 +449,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     );
     let restarted_route = Arc::new(ProviderAcpDeliveryRoute::new(
         service_id,
+        std::iter::once(target.endpoint.clone()).collect(),
         EndpointDirectory::new(target.endpoint.service_id.clone()),
         Arc::clone(&restarted_supervisor),
         store,

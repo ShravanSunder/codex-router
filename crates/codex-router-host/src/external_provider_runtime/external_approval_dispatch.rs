@@ -1,7 +1,7 @@
 //! Connection-task ownership and lifecycle for provider permission requests.
 
 use super::{
-    ExternalProviderApprovalContext,
+    ActiveApprovalContext, ExternalProviderApprovalContext,
     approval_presentation::approval_presentation,
     external_permission_options::{
         ExternalPermissionOptionMapping, map_external_permission_options,
@@ -24,7 +24,7 @@ pub(super) fn spawn_external_approval_dispatch(
     responder: Responder<RequestPermissionResponse>,
     connection: ConnectionTo<Agent>,
     broker: Option<Arc<ServiceApprovalBroker>>,
-    context: Option<ExternalProviderApprovalContext>,
+    context: Option<ActiveApprovalContext>,
     #[cfg(test)] permission_outcome: Arc<std::sync::atomic::AtomicU8>,
 ) -> Result<(), Error> {
     let request_cancellation = responder.cancellation();
@@ -33,7 +33,8 @@ pub(super) fn spawn_external_approval_dispatch(
             (Some(broker), Some(context)) => {
                 handle_contextual_permission_request(
                     &broker,
-                    context,
+                    context.approval,
+                    context.cancelling,
                     request,
                     request_cancellation,
                 )
@@ -57,6 +58,7 @@ pub(super) fn spawn_external_approval_dispatch(
 async fn handle_contextual_permission_request(
     broker: &ServiceApprovalBroker,
     context: ExternalProviderApprovalContext,
+    turn_cancellation: CancellationToken,
     request: RequestPermissionRequest,
     request_cancellation: agent_client_protocol::RequestCancellation,
 ) -> RequestPermissionOutcome {
@@ -67,26 +69,27 @@ async fn handle_contextual_permission_request(
         binding_generation: context.binding_generation.clone(),
         method: "session/request_permission",
     };
-    let options = match map_external_permission_options(request.options) {
-        ExternalPermissionOptionMapping::Mapped(options) => options,
-        ExternalPermissionOptionMapping::Refused { reason, options } => {
-            if let Err(error) = broker
-                .record_external_refusal(ExternalApprovalRefusal {
-                    requester: context.requester,
-                    approver: context.approver,
-                    generation: context.binding_generation,
-                    operation_metadata,
-                    offered_options: options,
-                    presentation: Some(presentation),
-                    reason: reason.to_owned(),
-                })
-                .await
-            {
-                tracing::error!(%error, "failed to record refused provider permission request");
-            }
-            return RequestPermissionOutcome::Cancelled;
-        }
+    let (options, refusal_reason) = match map_external_permission_options(request.options) {
+        ExternalPermissionOptionMapping::Mapped(options) => (options, None),
+        ExternalPermissionOptionMapping::Refused { reason, options } => (options, Some(reason)),
     };
+    if let Some(reason) = refusal_reason {
+        if let Err(error) = broker
+            .record_external_refusal(ExternalApprovalRefusal {
+                requester: context.requester,
+                approver: context.approver,
+                generation: context.binding_generation,
+                operation_metadata,
+                offered_options: options,
+                presentation: Some(presentation),
+                reason: reason.to_owned(),
+            })
+            .await
+        {
+            tracing::error!(%error, "failed to record refused provider permission request");
+        }
+        return RequestPermissionOutcome::Cancelled;
+    }
 
     let cancellation = CancellationToken::new();
     let broker_request = broker.request_external(ExternalApprovalRequest {
@@ -95,6 +98,7 @@ async fn handle_contextual_permission_request(
         generation: context.binding_generation,
         retirement: context.binding_retirement,
         cancellation: cancellation.clone(),
+        turn_cancellation: turn_cancellation.clone(),
         operation_metadata,
         presentation: Some(presentation),
         options,

@@ -160,10 +160,20 @@ async fn steering_injects_during_prompt_and_returns_prompt_required_when_idle() 
         .await
         .expect("prompt dispatch notification")
         .expect("prompt was sent before settlement");
-    tokio::time::timeout(Duration::from_secs(2), listener.accept())
-        .await
-        .expect("prompt observed before steer")
-        .expect("prompt notification");
+    // Read the notice to EOF instead of dropping the accepted stream: an early
+    // close makes the fixture's `sendall` fail with EPIPE, which kills the
+    // provider and surfaces as a spurious steering TransportFailure.
+    let prompt_notice = tokio::time::timeout(Duration::from_secs(2), async {
+        let (mut stream, _address) = listener.accept().await.expect("prompt notification");
+        let mut notice = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut notice)
+            .await
+            .expect("prompt notice payload");
+        notice
+    })
+    .await
+    .expect("prompt observed before steer");
+    assert_eq!(prompt_notice, b"prompt");
     assert_eq!(
         runtime
             .session_activity("fixture-session".to_owned())
@@ -425,9 +435,70 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     let reason = acp_operation_error(missing);
     assert!(matches!(
         &reason,
-        ExternalProviderRuntimeError::ProviderSessionNotFound { code } if *code == -32002
+        ExternalProviderRuntimeError::ResourceNotFound { code } if *code == -32002
     ));
     assert!(!reason.to_string().contains("private"));
+}
+
+#[test]
+fn acp_error_code_table_uses_typed_safe_outcomes() {
+    // ACP v1 error-codes.mdx maps JSON-RPC codes independently of agent text.
+    // Specification R7 specializes -32002 only for session/load.
+    for (code, expected_diagnostic) in [
+        (
+            -32000,
+            "provider authentication is required (ACP code -32000)",
+        ),
+        (-32002, "provider resource was not found (ACP code -32002)"),
+        (
+            -32601,
+            "provider ACP method is unsupported (ACP code -32601)",
+        ),
+        (
+            -32602,
+            "provider ACP parameters are invalid (ACP code -32602)",
+        ),
+        (
+            -32800,
+            "provider ACP request was cancelled (ACP code -32800)",
+        ),
+        (
+            -32603,
+            "provider rejected the ACP operation (ACP code -32603)",
+        ),
+    ] {
+        let mut provider = agent_client_protocol::Error::new(code, "private provider text");
+        provider.data = Some(serde_json::json!({"privateText": "secret sentinel"}));
+        let diagnostic = acp_operation_error(provider).to_string();
+        assert_eq!(diagnostic, expected_diagnostic, "code {code}");
+        assert!(!diagnostic.contains("private"));
+        assert!(!diagnostic.contains("secret sentinel"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resource_not_found_from_session_load_is_session_not_found() {
+    // ACP v1 error-codes.mdx: -32002 is a missing resource. R7 specializes
+    // it only where the method contract names the resource as the Session.
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": true}, "agentInfo": {"name": "missing-load-fixture", "version": "1"}}))
+        .expect_request("load", "session/load", serde_json::json!({"sessionId": "missing-session"}))
+        .respond_error("load", -32002)
+        .launch();
+    let runtime = ExternalProviderRuntime::initialize(fixture)
+        .await
+        .expect("fixture initializes");
+    let error = runtime
+        .load_session("missing-session".to_owned(), PathBuf::from("/tmp"))
+        .await
+        .expect_err("missing session");
+    assert!(matches!(
+        error,
+        ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002 }
+    ));
+    runtime.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -530,6 +601,208 @@ async fn stable_v1_initialize_admits_runtime_and_capabilities() {
         }
     );
 
+    runtime.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialize_advertises_exact_supported_client_capabilities() {
+    // ACP v1 initialization.mdx:28-54 requires protocolVersion and the
+    // supported capabilities; omitted capabilities are unsupported (lines
+    // 100-115). R6 requires name/version and no fs, terminal or elicitation.
+    let root = tempfile::tempdir().expect("fixture root");
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_exact_request(
+            "initialize",
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {"auth": {"terminal": false}},
+                "clientInfo": {"name": "codex-router", "version": env!("CARGO_PKG_VERSION")}
+            }),
+        )
+        .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "initialize-fixture", "version": "1"}}))
+        .record_diagnostics(root.path().join("fixture-diagnostics.txt"))
+        .launch();
+    let runtime = ExternalProviderRuntime::initialize_with_timeout(fixture, Duration::from_secs(2))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "initialize failed: {error}; wire diff: {}",
+                std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
+                    .unwrap_or_default()
+            )
+        });
+    runtime.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn capability_report_uses_initialize_and_session_advertisements() {
+    // ACP v1 initialization.mdx:100-115 and session-setup.mdx:52-85:
+    // omitted features are unsupported; Session responses add modes/options.
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request(
+            "initialize",
+            "initialize",
+            serde_json::json!({"protocolVersion": 1}),
+        )
+        .respond(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "agentCapabilities": {
+                    "loadSession": true,
+                    "sessionCapabilities": {"list": {}, "resume": {}, "close": {}},
+                    "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true}
+                },
+                "agentInfo": {"name": "capability-fixture", "version": "1"}
+            }),
+        )
+        .expect_request("create", "session/new", serde_json::json!({}))
+        .respond(
+            "create",
+            serde_json::json!({
+                "sessionId": "fixture-session",
+                "modes": {"currentModeId": "ask", "availableModes": [{"id": "ask", "name": "Ask"}]},
+                "configOptions": [],
+                "_meta": {"steering": {"supported": true}}
+            }),
+        )
+        .launch();
+    let runtime = ExternalProviderRuntime::initialize(fixture)
+        .await
+        .expect("fixture initializes");
+    let before = runtime.capability_report("fixture-session").await;
+    assert!(before.supports_load);
+    assert!(before.supports_resume);
+    assert!(before.supports_close);
+    assert!(before.supports_list);
+    assert!(before.router_queue);
+    assert!(before.supports_cancel_queued);
+    assert!(before.accepts_image);
+    assert!(!before.accepts_audio);
+    assert!(before.accepts_embedded_resource);
+    assert!(!before.supports_steering);
+    assert!(!before.supports_modes);
+    assert!(!before.supports_config_options);
+    assert!(!before.supports_elicitation);
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session created");
+    let after = runtime.capability_report("fixture-session").await;
+    assert!(after.supports_steering);
+    assert!(after.supports_modes);
+    assert!(after.supports_config_options);
+    runtime.shutdown().await;
+}
+
+#[test]
+fn prompt_content_gate_matches_advertised_optional_types() {
+    // ACP v1 initialization.mdx:202-217: text and resource links are baseline;
+    // image, audio and embedded resources require promptCapabilities.
+    use crate::provider_capability_report::ProviderCapabilityReport;
+    use crate::provider_prompt_content::ProviderPromptContent;
+    use agent_client_protocol::schema::v1::ContentBlock;
+
+    let examples = [
+        ("text", serde_json::json!({"type": "text", "text": "hello"})),
+        (
+            "resourceLink",
+            serde_json::json!({"type": "resource_link", "name": "reference", "uri": "file:///tmp/reference"}),
+        ),
+        (
+            "image",
+            serde_json::json!({"type": "image", "mimeType": "image/png", "data": "AA=="}),
+        ),
+        (
+            "audio",
+            serde_json::json!({"type": "audio", "mimeType": "audio/wav", "data": "AA=="}),
+        ),
+        (
+            "embeddedResource",
+            serde_json::json!({"type": "resource", "resource": {"uri": "file:///tmp/reference", "text": "content"}}),
+        ),
+    ];
+    for advertised_mask in 0_u8..8 {
+        let report = ProviderCapabilityReport {
+            accepts_image: advertised_mask & 1 != 0,
+            accepts_audio: advertised_mask & 2 != 0,
+            accepts_embedded_resource: advertised_mask & 4 != 0,
+            ..ProviderCapabilityReport::default()
+        };
+        for (content_type, wire_block) in &examples {
+            let block: ContentBlock =
+                serde_json::from_value(wire_block.clone()).expect("ACP content example");
+            let result = ProviderPromptContent::new(vec![block], &report);
+            let accepted = match *content_type {
+                "text" | "resourceLink" => true,
+                "image" => report.accepts_image,
+                "audio" => report.accepts_audio,
+                "embeddedResource" => report.accepts_embedded_resource,
+                _ => false,
+            };
+            if accepted {
+                assert!(result.is_ok(), "{content_type} mask {advertised_mask}");
+            } else {
+                assert_eq!(
+                    result
+                        .expect_err("unadvertised content is rejected")
+                        .to_string(),
+                    format!("unsupportedContent{{{content_type}}}")
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn text_prompt_reaches_agent_without_optional_prompt_capabilities() {
+    // ACP v1 initialization.mdx:202-217 requires text and resource links as
+    // baseline prompt content even when promptCapabilities is omitted.
+    let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+        .expect_request(
+            "initialize",
+            "initialize",
+            serde_json::json!({"protocolVersion": 1}),
+        )
+        .respond(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "agentCapabilities": {},
+                "agentInfo": {"name": "text-only-fixture", "version": "1"}
+            }),
+        )
+        .expect_request("create", "session/new", serde_json::json!({}))
+        .respond(
+            "create",
+            serde_json::json!({"sessionId": "text-only-session"}),
+        )
+        .expect_request(
+            "prompt",
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": "text-only-session",
+                "prompt": [{"type": "text", "text": "baseline text"}]
+            }),
+        )
+        .respond("prompt", serde_json::json!({"stopReason": "end_turn"}))
+        .launch();
+    let runtime = ExternalProviderRuntime::initialize(fixture)
+        .await
+        .expect("fixture initializes");
+    let session_id = runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session created");
+    let outcome = runtime
+        .prompt(session_id, "baseline text".to_owned())
+        .await
+        .expect("baseline text prompt completes");
+    assert_eq!(outcome.stop_reason, ProviderPromptStopReason::EndTurn);
     runtime.shutdown().await;
 }
 
@@ -1028,7 +1301,7 @@ async fn overlapping_prompt_cannot_replace_context_and_dropped_waiter_cleans_it(
             .lock()
             .expect("approval contexts")
             .get("fixture-session")
-            .map(|context| String::from(context.operation_id.clone())),
+            .map(|context| String::from(context.approval.operation_id.clone())),
         Some(first_operation.to_owned())
     );
     drop(first);
