@@ -47,12 +47,7 @@ impl CodexProjectTrustLookup for CodexHomeProjectTrust {
         let fallback = cwd.to_string_lossy().into_owned();
         let config = match fs::read_to_string(self.codex_home.join("config.toml")) {
             Ok(config) => config,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return ProjectTrustAnswer::Untrusted {
-                    trust_target: fallback,
-                    explicitly_untrusted: false,
-                };
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => {
                 return ProjectTrustAnswer::ConfigUnavailable {
                     reason: error.kind().to_string(),

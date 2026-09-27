@@ -19,15 +19,28 @@ pub enum OwnerIdentityError {
     Invalid,
 }
 
-pub(crate) async fn resolve_owner_human_id(
-    override_id: Option<HumanId>,
-) -> Result<HumanId, OwnerIdentityError> {
-    resolve_with_command(
+pub(crate) async fn resolve_face_owner_human_id(override_id: Option<HumanId>) -> Option<HumanId> {
+    resolve_face_owner_with_command(
         override_id,
         Path::new(OWNER_LOOKUP_COMMAND),
         OWNER_LOOKUP_TIMEOUT,
     )
     .await
+}
+
+async fn resolve_face_owner_with_command(
+    override_id: Option<HumanId>,
+    command_path: &Path,
+    timeout: Duration,
+) -> Option<HumanId> {
+    match resolve_with_command(override_id, command_path, timeout).await {
+        Ok(owner) => Some(owner),
+        Err(error) => {
+            tracing::error!(error_kind = ?error,
+                "provider faces unavailable: owner identity lookup failed");
+            None
+        }
+    }
 }
 
 async fn resolve_with_command(
@@ -61,6 +74,17 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn failed_owner_lookup_disables_only_provider_faces() {
+        let directory = tempfile::tempdir().expect("test directory");
+        let missing = directory.path().join("missing-id");
+        assert!(
+            resolve_face_owner_with_command(None, &missing, Duration::from_secs(1))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     #[allow(clippy::panic_in_result_fn)]
     async fn owner_lookup_uses_command_result_and_override_skips_lookup()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -69,7 +93,7 @@ mod tests {
         std::fs::write(&command_path, "#!/bin/sh\nprintf 'owner-name\\n'\n")?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&command_path, std::fs::Permissions::from_mode(0o700))?;
-        let resolved = resolve_with_command(None, &command_path, Duration::from_secs(1)).await?;
+        let resolved = resolve_with_command(None, &command_path, Duration::from_secs(5)).await?;
         assert_eq!(resolved.as_str(), "owner-name");
 
         let override_id = HumanId::try_from("chosen-owner".to_owned())?;
@@ -100,7 +124,7 @@ mod tests {
         std::fs::write(&command_path, "#!/bin/sh\nprintf 'first\\nsecond\\n'\n")?;
         std::fs::set_permissions(&command_path, std::fs::Permissions::from_mode(0o700))?;
         assert!(matches!(
-            resolve_with_command(None, &command_path, Duration::from_secs(1)).await,
+            resolve_with_command(None, &command_path, Duration::from_secs(5)).await,
             Err(OwnerIdentityError::Invalid)
         ));
         std::fs::write(&command_path, "#!/bin/sh\nsleep 1\n")?;

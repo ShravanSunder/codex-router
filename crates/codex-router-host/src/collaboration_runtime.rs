@@ -90,7 +90,7 @@ pub struct BackendSchemaEvidence<'a> {
     pub export: &'a codex_native_integration::NativeSchemaExport,
 }
 pub struct CollaborationRuntime {
-    owner_human_id: message_board::HumanId,
+    owner_human_id: Option<message_board::HumanId>,
     board_store: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
     provider_store:
         Option<std::sync::Arc<tokio::sync::Mutex<collaboration_service::ProviderOperationStore>>>,
@@ -185,10 +185,7 @@ impl CollaborationRuntime {
         provider_launches: Vec<crate::ExternalProviderStartup>,
         relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
     ) -> io::Result<Self> {
-        let owner_human_id =
-            crate::owner_identity_resolution::resolve_owner_human_id(inputs.owner_human_id.clone())
-                .await
-                .map_err(io::Error::other)?;
+        let mut owner_human_id = inputs.owner_human_id.clone();
         let service_id = load_service_identity(&inputs.directory)?;
         let service_epoch = new_service_uuid()?;
         let native_digest = if let Some(export) = &inputs.native_schema {
@@ -436,11 +433,23 @@ impl CollaborationRuntime {
         )?
         .with_connection_budget(permits);
         let mut provider_app_servers = Vec::new();
-        if let (Some(supervisor), Some(delivery), Some(hub), Some(store)) = (
+        if !provider_face_endpoints.is_empty() && external_provider_supervisor.is_some() {
+            owner_human_id =
+                crate::owner_identity_resolution::resolve_face_owner_human_id(owner_human_id).await;
+        }
+        if external_provider_supervisor.is_some()
+            && provider_delivery_route.is_some()
+            && provider_session_hub.is_some()
+            && provider_store.is_some()
+        {
+            acp = acp.with_interaction_broker(std::sync::Arc::clone(&approval_broker));
+        }
+        if let (Some(supervisor), Some(delivery), Some(hub), Some(store), Some(owner_human_id)) = (
             &external_provider_supervisor,
             &provider_delivery_route,
             &provider_session_hub,
             &provider_store,
+            owner_human_id.as_ref(),
         ) {
             let commands: std::sync::Arc<dyn collaboration_service::SessionCommandPort> =
                 std::sync::Arc::new(crate::HostSessionCommandPort::new(
@@ -496,7 +505,6 @@ impl CollaborationRuntime {
                     )?,
                 );
             }
-            acp = acp.with_interaction_broker(std::sync::Arc::clone(&approval_broker));
         }
         let publication = publication.with_acp_listener()?;
         if let Some(settings) = settings_backend
@@ -590,8 +598,8 @@ impl CollaborationRuntime {
     }
 
     #[must_use]
-    pub fn owner_human_id(&self) -> &message_board::HumanId {
-        &self.owner_human_id
+    pub fn owner_human_id(&self) -> Option<&message_board::HumanId> {
+        self.owner_human_id.as_ref()
     }
 
     #[must_use]

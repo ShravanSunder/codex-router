@@ -4,6 +4,28 @@ use collaboration_protocol::{EndpointAvailability, ObservationTimestamp};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 #[tokio::test]
+async fn host_without_provider_faces_does_not_require_owner_lookup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    let runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
+        directory: root.path().to_owned(),
+        codex_home: root.path().to_owned(),
+        backend_socket: root.path().join("backend.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        native_schema: None,
+        peer_registry_directory: None,
+        owner_human_id: None,
+    })
+    .await?;
+    if runtime.owner_human_id().is_some() {
+        return Err("Host resolved a provider face owner without provider faces".into());
+    }
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn post_bind_manifest_failure_releases_mcp_port() {
     let root = tempfile::tempdir().expect("temporary runtime root");
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
@@ -55,7 +77,10 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
     let mut runtime = CollaborationRuntime::start(inputs())
         .await
         .unwrap_or_else(|e| panic!("start: {e}"));
-    assert_eq!(runtime.owner_human_id().as_str(), "test-owner");
+    assert_eq!(
+        runtime.owner_human_id().map(message_board::HumanId::as_str),
+        Some("test-owner")
+    );
     assert!(root.join("provider-operations.sqlite").is_file());
     let manifest: collaboration_protocol::ServiceManifest = serde_json::from_slice(
         &std::fs::read(root.join("service.json")).unwrap_or_else(|e| panic!("manifest read: {e}")),

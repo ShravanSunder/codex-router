@@ -559,13 +559,24 @@ async fn web_socket_streams_turn_start_and_interrupt_from_hub()
             .into(),
         ))
         .await?;
-    let start_reply: Value =
-        serde_json::from_str(client.next().await.ok_or("turn reply")??.to_text()?)?;
+    let first: Value = serde_json::from_str(
+        timeout(Duration::from_secs(1), client.next())
+            .await?
+            .ok_or("turn frame")??
+            .to_text()?,
+    )?;
+    let second: Value = serde_json::from_str(
+        timeout(Duration::from_secs(1), client.next())
+            .await?
+            .ok_or("turn frame")??
+            .to_text()?,
+    )?;
+    let [start_reply, started_notification] = if first.get("id") == Some(&json!(2)) {
+        [first, second]
+    } else {
+        [second, first]
+    };
     assert_eq!(start_reply["result"]["turn"]["status"], "inProgress");
-    let started_notification = timeout(Duration::from_secs(1), client.next())
-        .await?
-        .ok_or("turn/started missing")??;
-    let started_notification: Value = serde_json::from_str(started_notification.to_text()?)?;
     assert_eq!(started_notification["method"], "turn/started");
     assert_eq!(started_notification["params"]["turn"]["id"], "turn-1");
 
@@ -577,13 +588,24 @@ async fn web_socket_streams_turn_start_and_interrupt_from_hub()
             .into(),
         ))
         .await?;
-    let interrupted: Value =
-        serde_json::from_str(client.next().await.ok_or("interrupt reply")??.to_text()?)?;
+    let first: Value = serde_json::from_str(
+        timeout(Duration::from_secs(1), client.next())
+            .await?
+            .ok_or("interrupt frame")??
+            .to_text()?,
+    )?;
+    let second: Value = serde_json::from_str(
+        timeout(Duration::from_secs(1), client.next())
+            .await?
+            .ok_or("interrupt frame")??
+            .to_text()?,
+    )?;
+    let [interrupted, completed_notification] = if first.get("id") == Some(&json!(3)) {
+        [first, second]
+    } else {
+        [second, first]
+    };
     assert_eq!(interrupted["result"], json!({}));
-    let completed_notification = timeout(Duration::from_secs(1), client.next())
-        .await?
-        .ok_or("turn/completed missing")??;
-    let completed_notification: Value = serde_json::from_str(completed_notification.to_text()?)?;
     assert_eq!(completed_notification["method"], "turn/completed");
     assert_eq!(
         completed_notification["params"]["turn"]["status"],

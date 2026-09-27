@@ -36,7 +36,7 @@ async fn resume_running_turn_uses_one_snapshot_and_receives_later_deltas()
         HubEvent {
             sequence: 1,
             event: SessionEvent::TurnStarted {
-                turn_id: "running-turn".into(),
+                turn_id: "turn-1".into(),
                 input_id: session_event_model::InputId::generate(),
             },
         },
@@ -72,10 +72,7 @@ async fn resume_running_turn_uses_one_snapshot_and_receives_later_deltas()
         ))
         .await?;
     let resumed: Value = serde_json::from_str(client.next().await.ok_or("resume")??.to_text()?)?;
-    assert_eq!(
-        resumed["result"]["thread"]["turns"][0]["id"],
-        "running-turn"
-    );
+    assert_eq!(resumed["result"]["thread"]["turns"][0]["id"], "turn-1");
     assert_eq!(
         resumed["result"]["thread"]["turns"][0]["status"],
         "inProgress"
@@ -95,6 +92,52 @@ async fn resume_running_turn_uses_one_snapshot_and_receives_later_deltas()
     )?;
     assert_eq!(delta["method"], "item/agentMessage/delta");
     assert_eq!(delta["params"]["delta"], " second");
+    client
+        .send(Message::Text(
+            json!({"id":2,"method":"turn/steer","params":{
+                "threadId":backend.session.session_id.as_str(),
+                "expectedTurnId":"turn-1",
+                "input":[{"type":"text","text":"more"}]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let steered: Value = serde_json::from_str(
+        timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("turn/steer")??
+            .to_text()?,
+    )?;
+    assert_eq!(steered["id"], 2);
+    assert_eq!(steered["result"]["turnId"], "turn-1");
+    client
+        .send(Message::Text(
+            json!({"id":3,"method":"turn/interrupt","params":{
+                "threadId":backend.session.session_id.as_str(),"turnId":"turn-1"
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let first: Value = serde_json::from_str(
+        timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("interrupt frame")??
+            .to_text()?,
+    )?;
+    let second: Value = serde_json::from_str(
+        timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("interrupt frame")??
+            .to_text()?,
+    )?;
+    assert!([&first, &second].iter().any(|frame| frame["id"] == 3));
+    assert!(
+        [&first, &second]
+            .iter()
+            .any(|frame| frame["method"] == "turn/completed")
+    );
     client.close(None).await?;
     server.await?;
     Ok(())

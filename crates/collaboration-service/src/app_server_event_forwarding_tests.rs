@@ -155,6 +155,74 @@ fn snapshot_includes_the_running_turn_and_its_latest_items()
     Ok(())
 }
 
+#[test]
+fn plan_item_projects_only_one_plan_surface() -> Result<(), Box<dyn std::error::Error>> {
+    let session: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"claude-local"},
+        "sessionId":"provider-1"
+    }))?;
+    let actor: Identity = serde_json::from_value(json!({"kind":"human","humanId":"owner"}))?;
+    let mut projector = AppServerEventForwarding::new(actor, None);
+    projector.project(
+        &session,
+        &HubEvent {
+            sequence: 1,
+            event: SessionEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+                input_id: session_event_model::InputId::generate(),
+            },
+        },
+    );
+    let plan = |text: &str| SessionItem {
+        item_id: "plan-1".into(),
+        kind: SessionItemKind::Plan,
+        text: Some(text.into()),
+    };
+    let started = projector.project(
+        &session,
+        &HubEvent {
+            sequence: 2,
+            event: SessionEvent::ItemStarted {
+                item: plan("Inspect"),
+            },
+        },
+    );
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0]["method"], "turn/plan/updated");
+    let unchanged = projector.project(
+        &session,
+        &HubEvent {
+            sequence: 3,
+            event: SessionEvent::ItemUpdated {
+                item: plan("Inspect"),
+            },
+        },
+    );
+    assert!(unchanged.is_empty());
+    let updated = projector.project(
+        &session,
+        &HubEvent {
+            sequence: 4,
+            event: SessionEvent::ItemUpdated {
+                item: plan("Inspect then edit"),
+            },
+        },
+    );
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0]["method"], "turn/plan/updated");
+    let completed = projector.project(
+        &session,
+        &HubEvent {
+            sequence: 5,
+            event: SessionEvent::ItemCompleted {
+                item_id: "plan-1".into(),
+            },
+        },
+    );
+    assert!(completed.is_empty());
+    Ok(())
+}
+
 /// Oracle: Codex 0.157.1 app-server-protocol v2/item.rs:1327-1336,
 /// 1405-1414,1427-1433 and protocol/common.rs:1936-1946.
 #[test]

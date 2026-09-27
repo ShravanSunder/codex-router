@@ -57,6 +57,18 @@ pub(super) fn handle_app_server_request(
                     };
                     (json!({trust_target:{"trust_level":"untrusted"}}), layers)
                 }
+                codex_native_integration::ProjectTrustAnswer::Untrusted {
+                    trust_target,
+                    explicitly_untrusted: false,
+                } => {
+                    let layers = if trust_target == cwd.to_string_lossy() {
+                        json!([])
+                    } else {
+                        json!([{"name":{"type":"project","dotCodexFolder":format!("{trust_target}/.codex")},
+                            "disabledReason":format!("To load project-local config, hooks, and exec policies, add {trust_target} as a trusted project in Codex user config.toml.")}])
+                    };
+                    (json!({}), layers)
+                }
                 _ => (json!({}), json!([])),
             };
             Some(json!({"config":{"projects":projects},"origins":{},"layers":layers}))

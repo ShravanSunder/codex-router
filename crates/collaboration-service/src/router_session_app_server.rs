@@ -470,6 +470,10 @@ use methods::{
 
 #[cfg(test)]
 #[allow(clippy::panic_in_result_fn)]
+#[path = "router_session_app_server_blocking_tests.rs"]
+mod blocking_tests;
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
 #[path = "router_session_app_server_cwd_tests.rs"]
 mod cwd_tests;
 #[cfg(test)]

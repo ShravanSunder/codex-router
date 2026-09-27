@@ -208,6 +208,37 @@ fn repository_root_trust_is_visible_to_remote_tui() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+/// Oracle: pinned Codex tui/src/config_update.rs:294-375. Without a saved
+/// decision the remote TUI must still receive the repository trust target.
+#[test]
+fn untrusted_repository_root_remains_the_remote_trust_target()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("codex-home");
+    let repo = directory.path().join("repo");
+    let cwd = repo.join("child");
+    std::fs::create_dir_all(&cwd)?;
+    std::fs::create_dir(repo.join(".git"))?;
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    std::fs::create_dir(&home)?;
+    let lookup = codex_native_integration::CodexHomeProjectTrust::new(home);
+    let response = handle_app_server_request(
+        json!(1),
+        "config/read",
+        &json!({"includeLayers":true,"cwd":cwd}),
+        &[],
+        Some(&lookup),
+    );
+    let reason = response["result"]["layers"][0]["disabledReason"]
+        .as_str()
+        .ok_or("missing root trust target")?;
+    assert!(reason.contains(&format!(
+        ", add {} as a trusted project in ",
+        repo.display()
+    )));
+    Ok(())
+}
+
 /// Oracle: pinned Codex tui/src/app_server_session.rs:2172-2181 omits cwd
 /// when --cd was absent. The face returns a typed instruction to relaunch.
 #[tokio::test]

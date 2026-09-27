@@ -212,6 +212,13 @@ impl AppServerEventForwarding {
                     (session.clone(), item.item_id.clone()),
                     translated.thread_item.clone(),
                 );
+                if matches!(&item.kind, session_event_model::SessionItemKind::Plan) {
+                    return if previous.as_ref() == Some(&translated.thread_item) {
+                        Vec::new()
+                    } else {
+                        translated.notification.into_iter().collect()
+                    };
+                }
                 let mut frames = if matches!(event.event, SessionEvent::ItemStarted { .. }) {
                     vec![json!({"method":"item/started","params":{
                         "threadId":thread_id,"turnId":turn_id,"item":translated.thread_item,
@@ -280,6 +287,9 @@ impl AppServerEventForwarding {
                 let Some(item) = self.items.remove(&(session.clone(), item_id.clone())) else {
                     return Vec::new();
                 };
+                if item.get("type").and_then(Value::as_str) == Some("plan") {
+                    return Vec::new();
+                }
                 let Some(turn_id) = self.turn_ids.get(session) else {
                     return Vec::new();
                 };
