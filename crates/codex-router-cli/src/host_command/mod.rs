@@ -173,16 +173,18 @@ pub(crate) async fn run_host_command<W: Write + Send>(
                 .to_owned(),
         ));
     }
-    if command.require_debug_isolation
-        && (!cfg!(all(debug_assertions, not(test)))
-            || context.env_var(crate::USE_HOME_DEFAULT_ENV).is_some())
-    {
-        return Err(HostCommandError::RouterRoot(
-            "debug isolation requires a debug build without home-default mode".to_owned(),
-        ));
-    }
     let router_root = crate::router_root_or_default(command.router_root.clone())
         .map_err(|error| HostCommandError::RouterRoot(error.to_string()))?;
+    let owner_home = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.dir);
+    let launch_mode = foreground_launch::HostLaunchMode::resolve(
+        &router_root,
+        context,
+        command.require_debug_isolation,
+        owner_home.as_deref(),
+    );
     let coordination_paths =
         HostCoordinationPaths::new(router_root.join("host.sock"), router_root.join("host.lock"));
     if command.runs_foreground() {
@@ -190,22 +192,12 @@ pub(crate) async fn run_host_command<W: Write + Send>(
         return foreground_launch::run_foreground_host(
             foreground_launch::ForegroundHostInputs {
                 router_root,
-                require_debug_isolation: command.require_debug_isolation,
-                port: command.port.unwrap_or_else(|| {
-                    if cfg!(all(debug_assertions, not(test)))
-                        && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none()
-                    {
-                        18787
-                    } else {
-                        DEFAULT_HOST_PORT
-                    }
-                }),
-                mcp_bind: command.mcp_bind.unwrap_or_else(|| {
-                    default_mcp_bind(
-                        cfg!(all(debug_assertions, not(test)))
-                            && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none(),
-                    )
-                }),
+                launch_mode,
+                owner_home,
+                port: command.port.unwrap_or(launch_mode.default_port()),
+                mcp_bind: command
+                    .mcp_bind
+                    .unwrap_or(default_mcp_bind(launch_mode.is_isolated())),
                 provider_operation_retention_days: command.provider_operation_retention_days,
                 coordination_paths,
                 external_provider_launches: provider_launches,
@@ -378,12 +370,12 @@ pub enum HostCommandError {
         #[source]
         source: codex_native_integration::DebugProfileError,
     },
-    #[error("isolated Host launch requires a debug build")]
-    IsolatedDebugBuildRequired,
     #[error("failed resolving host router root: {0}")]
     RouterRoot(String),
     #[error("HOME and CODEX_HOME are unavailable")]
     CodexHomeUnavailable,
+    #[error("isolated Host cannot verify the owner home from the passwd entry")]
+    OwnerHomeUnavailable,
     #[error("invalid debug app-server socket: {0}")]
     AppServerSocket(String),
     #[error("CODEX_ROUTER_DEBUG_LAUNCHCTL must be an absolute path")]

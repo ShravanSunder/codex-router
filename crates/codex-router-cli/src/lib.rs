@@ -66,6 +66,7 @@ const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 #[cfg(all(debug_assertions, not(test)))]
 const DEBUG_ROUTER_ROOT_ENV: &str = "CODEX_ROUTER_DEBUG_ROUTER_ROOT";
 const DEBUG_APP_SERVER_SOCKET_ENV: &str = "CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET";
+#[cfg(all(debug_assertions, not(test)))]
 const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
 const DEFAULT_DEBUG_ROUTER_ROOT_DIR: &str = ".codex-router-debug";
 

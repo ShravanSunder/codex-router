@@ -4,8 +4,8 @@ use std::ffi::OsString;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
-use std::path::Path;
 use std::path::PathBuf;
+use std::path::{Component, Path};
 use std::sync::Arc;
 
 use codex_native_integration::AppServerCommandSpec;
@@ -39,7 +39,8 @@ impl PreExecTelemetry for HostPreExecTelemetry {
 
 pub(super) struct ForegroundHostInputs {
     pub router_root: PathBuf,
-    pub require_debug_isolation: bool,
+    pub launch_mode: HostLaunchMode,
+    pub owner_home: Option<PathBuf>,
     pub port: u16,
     pub mcp_bind: SocketAddr,
     pub provider_operation_retention_days: std::num::NonZeroU32,
@@ -54,7 +55,8 @@ pub(super) async fn run_foreground_host(
 ) -> Result<(), HostCommandError> {
     let ForegroundHostInputs {
         router_root,
-        require_debug_isolation,
+        launch_mode,
+        owner_home,
         port,
         mcp_bind,
         provider_operation_retention_days,
@@ -63,27 +65,21 @@ pub(super) async fn run_foreground_host(
     } = inputs;
     let launch_started_at = std::time::Instant::now();
     let codex_home = resolve_codex_home(context)?;
-    let isolated_debug = is_isolated_host(&router_root, context, require_debug_isolation);
+    let isolated_debug = launch_mode.is_isolated();
     let debug_profile = if isolated_debug {
         let path = codex_home.join("codex-router-debug.config.toml");
         let profile = codex_native_integration::DebugCodexProfile::read(&codex_home, port)
             .map_err(|source| HostCommandError::IsolatedDebugProfile { path, source })?;
-        if !cfg!(all(debug_assertions, not(test))) {
-            return Err(HostCommandError::IsolatedDebugBuildRequired);
-        }
         Some(profile)
     } else {
         None
     };
     if isolated_debug {
-        let home = context
-            .env_var("HOME")
-            .ok_or(HostCommandError::CodexHomeUnavailable)?;
-        codex_native_integration::validate_debug_directory(
-            &router_root,
-            &PathBuf::from(home).join(".codex-router"),
-        )
-        .map_err(|message| HostCommandError::RouterRoot(message.to_owned()))?;
+        let protected_root = owner_home
+            .ok_or(HostCommandError::OwnerHomeUnavailable)?
+            .join(".codex-router");
+        codex_native_integration::validate_debug_directory(&router_root, &protected_root)
+            .map_err(|message| HostCommandError::RouterRoot(message.to_owned()))?;
     }
     let codex_paths = CodexPaths::from_codex_home(codex_home.clone());
     let app_server_socket =
@@ -103,13 +99,7 @@ pub(super) async fn run_foreground_host(
     // Validate the native destination before touching state or launch policy.
     tokio::fs::create_dir_all(&router_root).await?;
     codex_router_host::record_debug_readiness_timing("routerRootReady", launch_started_at);
-    if !isolated_debug {
-        let started_at = std::time::Instant::now();
-        DesktopLaunchPolicyCommand::new(launchctl_executable(context)?)
-            .apply()
-            .await?;
-        codex_router_host::record_debug_readiness_timing("launchctlPolicy", started_at);
-    }
+    apply_launch_policy(launch_mode, context).await?;
     let inherited_marker = std::env::var_os(codex_router_host::inherited_lock_environment());
     let instance = match inherited_marker.as_deref() {
         Some(marker) => HostInstance::acquire_inherited(coordination_paths.clone(), marker),
@@ -165,6 +155,7 @@ pub(super) async fn run_foreground_host(
         mcp_bind,
         provider_operation_retention_days,
         &external_provider_launches,
+        launch_mode,
     );
     let provider_startups = super::provider_launch_configuration::configured_provider_startups(
         &router_root,
@@ -201,19 +192,66 @@ pub(super) async fn run_foreground_host(
     Ok(())
 }
 
-fn is_isolated_host(
-    router_root: &Path,
-    context: &CliContext,
-    require_debug_isolation: bool,
-) -> bool {
-    if require_debug_isolation {
-        return true;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HostLaunchMode {
+    OwnerProduction,
+    IsolatedDebug,
+}
+
+impl HostLaunchMode {
+    pub(super) fn resolve(
+        router_root: &Path,
+        context: &CliContext,
+        require_debug_isolation: bool,
+        owner_home: Option<&Path>,
+    ) -> Self {
+        let Some(owner_home) = owner_home else {
+            return Self::IsolatedDebug;
+        };
+        let Some(environment_home) = context.env_var("HOME") else {
+            return Self::IsolatedDebug;
+        };
+        if require_debug_isolation
+            || normalized_path(Path::new(environment_home)) != normalized_path(owner_home)
+            || normalized_path(router_root) != normalized_path(&owner_home.join(".codex-router"))
+        {
+            Self::IsolatedDebug
+        } else {
+            Self::OwnerProduction
+        }
     }
-    let Some(home) = context.env_var("HOME") else {
-        return true;
+
+    pub(super) const fn is_isolated(self) -> bool {
+        matches!(self, Self::IsolatedDebug)
+    }
+
+    pub(super) const fn default_port(self) -> u16 {
+        match self {
+            Self::OwnerProduction => super::DEFAULT_HOST_PORT,
+            Self::IsolatedDebug => 18787,
+        }
+    }
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
     };
-    let home = Path::new(home);
-    router_root != home.join(".codex-router")
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn host_replacement_command(
@@ -223,6 +261,7 @@ fn host_replacement_command(
     mcp_bind: SocketAddr,
     provider_operation_retention_days: std::num::NonZeroU32,
     external_provider_launches: &[codex_router_host::ExternalProviderLaunchBinding],
+    launch_mode: HostLaunchMode,
 ) -> ChildCommandSpec {
     let mut arguments = vec![
         OsString::from("host"),
@@ -235,6 +274,9 @@ fn host_replacement_command(
         OsString::from("--provider-operation-retention-days"),
         OsString::from(provider_operation_retention_days.to_string()),
     ];
+    if launch_mode.is_isolated() {
+        arguments.push(OsString::from("--require-debug-isolation"));
+    }
     for binding in external_provider_launches {
         let (executable_flag, argument_flag) = binding.command_flags();
         arguments.push(OsString::from(executable_flag));
@@ -263,6 +305,20 @@ fn launchctl_executable(context: &CliContext) -> Result<PathBuf, HostCommandErro
     Ok(PathBuf::from("/bin/launchctl"))
 }
 
+async fn apply_launch_policy(
+    launch_mode: HostLaunchMode,
+    context: &CliContext,
+) -> Result<(), HostCommandError> {
+    if launch_mode == HostLaunchMode::OwnerProduction {
+        let started_at = std::time::Instant::now();
+        DesktopLaunchPolicyCommand::new(launchctl_executable(context)?)
+            .apply()
+            .await?;
+        codex_router_host::record_debug_readiness_timing("launchctlPolicy", started_at);
+    }
+    Ok(())
+}
+
 fn resolve_codex_home(context: &CliContext) -> Result<PathBuf, HostCommandError> {
     if let Some(codex_home) = context.env_var("CODEX_HOME") {
         return Ok(PathBuf::from(codex_home));
@@ -275,25 +331,75 @@ fn resolve_codex_home(context: &CliContext) -> Result<PathBuf, HostCommandError>
 
 #[cfg(test)]
 mod tests {
-    use super::{host_replacement_command, is_isolated_host};
+    use super::{HostLaunchMode, apply_launch_policy, host_replacement_command};
     use crate::CliContext;
     use codex_router_host::ChildCommandSpec;
     use std::{ffi::OsString, net::SocketAddr, path::PathBuf};
 
     #[test]
-    fn only_private_router_root_or_explicit_flag_selects_isolation() {
+    fn forged_home_and_private_root_select_isolation() {
         let context = CliContext::new(vec![
             ("HOME".to_owned(), "/tmp/fixture-owner".to_owned()),
             ("CODEX_ROUTER_USE_HOME_DEFAULT".to_owned(), "1".to_owned()),
         ]);
         let owner_root = PathBuf::from("/tmp/fixture-owner/.codex-router");
-        assert!(!is_isolated_host(&owner_root, &context, false));
-        assert!(is_isolated_host(
-            &PathBuf::from("/tmp/fixture-owner/private-router"),
-            &context,
-            false,
-        ));
-        assert!(is_isolated_host(&owner_root, &context, true));
+        let owner_home = PathBuf::from("/Users/actual-owner");
+        assert_eq!(
+            HostLaunchMode::resolve(&owner_root, &context, false, Some(&owner_home)),
+            HostLaunchMode::IsolatedDebug
+        );
+        assert_eq!(
+            HostLaunchMode::resolve(
+                &PathBuf::from("/tmp/fixture-owner/private-router"),
+                &context,
+                false,
+                Some(&owner_home),
+            ),
+            HostLaunchMode::IsolatedDebug
+        );
+        assert_eq!(
+            HostLaunchMode::resolve(&owner_root, &context, true, Some(&owner_home)),
+            HostLaunchMode::IsolatedDebug
+        );
+        assert_eq!(
+            HostLaunchMode::resolve(&owner_root, &context, false, None),
+            HostLaunchMode::IsolatedDebug
+        );
+        let owner_context = CliContext::new(vec![
+            ("HOME".to_owned(), owner_home.to_string_lossy().into_owned()),
+            ("CODEX_HOME".to_owned(), "/tmp/custom-codex-home".to_owned()),
+        ]);
+        let owner_root = owner_home.join(".codex-router");
+        assert_eq!(
+            HostLaunchMode::resolve(&owner_root, &owner_context, false, Some(&owner_home)),
+            HostLaunchMode::OwnerProduction,
+        );
+        assert_eq!(HostLaunchMode::OwnerProduction.default_port(), 8787);
+        assert_eq!(HostLaunchMode::IsolatedDebug.default_port(), 18787);
+    }
+
+    #[tokio::test]
+    async fn owner_mode_calls_launchctl_while_isolated_mode_skips_it() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let fake_launchctl = directory.path().join("launchctl");
+        std::fs::write(&fake_launchctl, "#!/bin/sh\nexit 1\n").expect("fixture executable");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_launchctl, std::fs::Permissions::from_mode(0o700))
+            .expect("executable permission");
+        let context = CliContext::new(vec![(
+            "CODEX_ROUTER_DEBUG_LAUNCHCTL".to_owned(),
+            fake_launchctl.to_string_lossy().into_owned(),
+        )]);
+        assert!(
+            apply_launch_policy(HostLaunchMode::OwnerProduction, &context)
+                .await
+                .is_err()
+        );
+        assert!(
+            apply_launch_policy(HostLaunchMode::IsolatedDebug, &context)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
@@ -309,6 +415,7 @@ mod tests {
                 mcp_bind,
                 std::num::NonZeroU32::new(60).expect("positive"),
                 &[],
+                HostLaunchMode::OwnerProduction,
             ),
             ChildCommandSpec::new(executable).with_arguments([
                 OsString::from("host"),
@@ -341,6 +448,7 @@ mod tests {
             mcp_bind,
             std::num::NonZeroU32::new(60).expect("positive"),
             &[provider],
+            HostLaunchMode::OwnerProduction,
         );
         assert_eq!(
             command,
@@ -358,6 +466,34 @@ mod tests {
                 OsString::from("/tmp/agent"),
                 OsString::from("--cursor-acp-arguments"),
                 OsString::from("acp"),
+            ])
+        );
+    }
+
+    #[test]
+    fn replacement_command_carries_resolved_isolation() {
+        let command = host_replacement_command(
+            PathBuf::from("/tmp/codex-router"),
+            PathBuf::from("/tmp/private-router"),
+            18787,
+            SocketAddr::from(([127, 0, 0, 1], 18788)),
+            std::num::NonZeroU32::new(60).expect("positive"),
+            &[],
+            HostLaunchMode::IsolatedDebug,
+        );
+        assert_eq!(
+            command,
+            ChildCommandSpec::new(PathBuf::from("/tmp/codex-router")).with_arguments([
+                OsString::from("host"),
+                OsString::from("--router-root"),
+                OsString::from("/tmp/private-router"),
+                OsString::from("--port"),
+                OsString::from("18787"),
+                OsString::from("--mcp-bind"),
+                OsString::from("127.0.0.1:18788"),
+                OsString::from("--provider-operation-retention-days"),
+                OsString::from("60"),
+                OsString::from("--require-debug-isolation"),
             ])
         );
     }
