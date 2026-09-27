@@ -8,14 +8,17 @@ use crate::{
     ScheduledRunRoute, ScheduledRunSubmission, SettlementEvidence, StopRequestOutcome,
 };
 use agent_automation::{NativeEffectEvidence, PreparationEffect, RouteEffectEvidence};
+use codex_acp_adapter::{HeldBindingCheckout, UnmaterializedBindingStore};
 use codex_native_integration::{NativeOperation, NativeProtocolConnection};
 use collaboration_protocol::{
-    DestinationPreparation, EndpointRef, ScheduleFailureKind, SessionRef,
+    DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason, DestinationPreparation,
+    EndpointRef, ScheduleFailureKind, SessionRef,
 };
 use serde_json::{Value, json};
 
 pub struct CodexAppServerScheduledRuns {
     backend: NativeControlBackend,
+    holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
 }
 
 fn native_effects_into_automation(
@@ -32,8 +35,11 @@ fn native_effects_into_automation(
 
 impl CodexAppServerScheduledRuns {
     #[must_use]
-    pub fn new(backend: NativeControlBackend) -> Self {
-        Self { backend }
+    pub fn new(
+        backend: NativeControlBackend,
+        holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
+    ) -> Self {
+        Self { backend, holder }
     }
 
     async fn prepare_native(
@@ -379,6 +385,31 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
     ) -> DeliveryFuture<'a, PreparedTarget> {
         let target = target.clone();
         Box::pin(async move {
+            if self
+                .holder
+                .contains(&String::from(target.session_id.clone()))
+            {
+                let admission = self
+                    .backend
+                    .gate
+                    .acquire()
+                    .map_err(|_| DeliveryContractError::ClientOperation)?;
+                let mut effects = crate::native_thread_preparation::initial_automation_effects(
+                    &DestinationPreparation::Existing {
+                        target: target.clone(),
+                        cwd: String::new(),
+                    },
+                );
+                effects.generation = Some(admission.generation().clone());
+                let evidence = RouteEffectEvidence::CodexAppServer(effects);
+                if matches!(
+                    sink.record(evidence.clone()).await?,
+                    RunEvidenceDisposition::AdmissionRefused
+                ) {
+                    return Err(DeliveryContractError::EvidencePersistence);
+                }
+                return Ok(PreparedTarget { target, evidence });
+            }
             self.prepare_native(
                 DestinationPreparation::Existing {
                     target,
@@ -424,7 +455,54 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, RunSubmission> {
         Box::pin(async move {
-            crate::scheduled_native_dispatch::dispatch(&self.backend, run, sink).await
+            let session_id = String::from(run.target.session_id.clone());
+            match self.holder.checkout(&session_id) {
+                HeldBindingCheckout::Ready(mut binding) => {
+                    let mut cleanup =
+                        crate::codex_app_server_delivery_route::HeldBindingCleanup::new(
+                            &self.holder,
+                            &session_id,
+                        );
+                    let stale_generation = {
+                        let admission = self
+                            .backend
+                            .gate
+                            .acquire()
+                            .map_err(|_| DeliveryContractError::ClientOperation)?;
+                        binding.generation() != admission.generation()
+                    };
+                    if stale_generation {
+                        cleanup.finish();
+                        return Ok(RunSubmission::Rejected(DeliveryRejection {
+                            reason: DeliveryRejectionReason::StaleGeneration,
+                            next_action: DeliveryNextAction::InspectTarget,
+                            client_code: None,
+                            detail: Some(
+                                "Held scheduled target belongs to an old generation".into(),
+                            ),
+                        }));
+                    }
+                    let result = crate::scheduled_native_dispatch::dispatch(
+                        &self.backend,
+                        run,
+                        sink,
+                        Some(binding.connection_mut()),
+                    )
+                    .await;
+                    match &result {
+                        Ok(RunSubmission::NotStartedBusy | RunSubmission::Rejected(_)) => {
+                            self.holder.restore(*binding);
+                            cleanup.disarm();
+                        }
+                        _ => cleanup.finish(),
+                    }
+                    result
+                }
+                HeldBindingCheckout::Busy => Ok(RunSubmission::NotStartedBusy),
+                HeldBindingCheckout::Missing => {
+                    crate::scheduled_native_dispatch::dispatch(&self.backend, run, sink, None).await
+                }
+            }
         })
     }
 
@@ -599,11 +677,14 @@ mod tests {
             agent_automation::OperationId::generate().as_str()
         ));
         gate.activate(generation.clone(), missing_socket, Some(schemas))?;
-        let route = CodexAppServerScheduledRuns::new(NativeControlBackend {
-            endpoint: target.endpoint.clone(),
-            gate,
-            codex_home: std::env::temp_dir(),
-        });
+        let route = CodexAppServerScheduledRuns::new(
+            NativeControlBackend {
+                endpoint: target.endpoint.clone(),
+                gate,
+                codex_home: std::env::temp_dir(),
+            },
+            std::sync::Arc::new(crate::UnmaterializedThreadHolder::new()),
+        );
         let recorded = serde_json::from_value(json!({
             "kind":"codexAppServer","target":target,"generation":generation,
             "clientUserMessageId":"run-correlation","nativeTurnId":"worker-turn",

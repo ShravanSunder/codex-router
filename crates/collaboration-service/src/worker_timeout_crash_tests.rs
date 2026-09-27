@@ -434,7 +434,10 @@ fn fixture_worker(
     };
     Ok(ScheduledRunWorker {
         store,
-        execution: Arc::new(crate::CodexAppServerScheduledRuns::new(backend.clone())),
+        execution: Arc::new(crate::CodexAppServerScheduledRuns::new(
+            backend.clone(),
+            Arc::new(crate::UnmaterializedThreadHolder::new()),
+        )),
         backend: Some(backend),
         configuration: crate::AutomationConfigurationHandle::default(),
     })

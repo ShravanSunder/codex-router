@@ -185,23 +185,23 @@ impl CodexAppServerDeliveryRoute {
     }
 }
 
-struct HeldBindingCleanup<'a> {
+pub(crate) struct HeldBindingCleanup<'a> {
     holder: &'a crate::UnmaterializedThreadHolder,
     session_id: String,
     active: bool,
 }
 impl<'a> HeldBindingCleanup<'a> {
-    fn new(holder: &'a crate::UnmaterializedThreadHolder, session_id: &str) -> Self {
+    pub(crate) fn new(holder: &'a crate::UnmaterializedThreadHolder, session_id: &str) -> Self {
         Self {
             holder,
             session_id: session_id.into(),
             active: true,
         }
     }
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.active = false;
     }
-    fn finish(&mut self) {
+    pub(crate) fn finish(&mut self) {
         self.holder.finish(&self.session_id);
         self.disarm();
     }
@@ -217,7 +217,10 @@ impl Drop for HeldBindingCleanup<'_> {
 impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
     fn scheduled_runs(&self) -> Option<std::sync::Arc<dyn crate::ScheduledRunRoute>> {
         Some(std::sync::Arc::new(
-            crate::CodexAppServerScheduledRuns::new(self.backend.clone()),
+            crate::CodexAppServerScheduledRuns::new(
+                self.backend.clone(),
+                std::sync::Arc::clone(&self.holder),
+            ),
         ))
     }
 
