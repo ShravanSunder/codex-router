@@ -57,6 +57,7 @@ fn selected_endpoint(
     method: &str,
     params: &Value,
     sessions: &BTreeMap<String, String>,
+    routes: &BTreeMap<String, AcpOutputSender>,
 ) -> Option<String> {
     if matches!(method, "session/new" | "session/list") {
         return Some(
@@ -78,8 +79,14 @@ fn selected_endpoint(
         .and_then(Value::as_str)
         .and_then(|session_id| sessions.get(session_id))
         .cloned();
-    if known.is_some() || matches!(method, "session/load" | "session/resume") {
+    if known.is_some() {
         known
+    } else if matches!(method, "session/load" | "session/resume") {
+        // A single route can validate its own stored Session. With multiple
+        // endpoints, a bare unknown ID has no safe routing authority.
+        (routes.len() == 1)
+            .then(|| routes.keys().next().cloned())
+            .flatten()
     } else {
         Some("codex-local".into())
     }
@@ -177,7 +184,7 @@ pub async fn serve_acp_router_connection<
                     let params = frame.get("params").cloned().unwrap_or_else(|| json!({}));
                     let Some(id) = frame.get("id").cloned() else {
                         if negotiation.is_initialized() && method == "session/cancel" {
-                            let endpoint = selected_endpoint(method, &params, &session_routes);
+                            let endpoint = selected_endpoint(method, &params, &session_routes, &route_inputs);
                             if let Some(route) = endpoint.as_ref().and_then(|endpoint| route_inputs.get(endpoint)) {
                                 route.send((*frame).clone()).await?;
                             }
@@ -258,7 +265,7 @@ pub async fn serve_acp_router_connection<
                         connection.output.send(rpc_error(id, -32600, "ACP initialization required")).await?;
                         continue;
                     }
-                    let Some(endpoint) = selected_endpoint(method, &params, &session_routes) else {
+                    let Some(endpoint) = selected_endpoint(method, &params, &session_routes, &route_inputs) else {
                         connection.output.send(rpc_error(id, -32602, "ACP Session endpoint unknown; include _meta.router.sessionRef")).await?;
                         continue;
                     };

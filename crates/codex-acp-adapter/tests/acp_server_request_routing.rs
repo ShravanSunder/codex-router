@@ -72,6 +72,31 @@ async fn unknown_bare_session_load_does_not_default_to_codex_route()
     Ok(())
 }
 
+#[tokio::test]
+#[allow(clippy::panic_in_result_fn)]
+async fn single_native_route_can_validate_a_bare_stored_session_load()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (client, server) = tokio::net::UnixStream::pair()?;
+    let load_calls = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn(serve_acp_router_connection(
+        server,
+        vec![Box::new(ScriptedCodexRoute {
+            load_calls: Arc::clone(&load_calls),
+        })],
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1}}\n").await?;
+    let _: Value = serde_json::from_str(&lines.next_line().await?.ok_or("initialize")?)?;
+    writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/load\",\"params\":{\"sessionId\":\"stored-native-session\",\"cwd\":\"/tmp\",\"mcpServers\":[]}}\n").await?;
+    let loaded: Value = serde_json::from_str(&lines.next_line().await?.ok_or("load")?)?;
+    assert_eq!(loaded["result"]["sessionId"], "wrong-codex-route");
+    assert_eq!(load_calls.load(Ordering::SeqCst), 1);
+    writer.shutdown().await?;
+    task.await??;
+    Ok(())
+}
+
 impl AcpSessionRoute for ScriptedProviderRoute {
     fn endpoint_id(&self) -> &str {
         "claude-local"
