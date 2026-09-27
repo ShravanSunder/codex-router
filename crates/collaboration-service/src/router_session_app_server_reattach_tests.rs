@@ -5,10 +5,9 @@ use std::{os::unix::fs::PermissionsExt, sync::Arc};
 use tokio::net::UnixListener;
 use tokio_tungstenite::client_async;
 
-/// A missed terminal event must settle the TUI after a same-epoch resync.
+/// A missed terminal event must settle the TUI after broadcast lag.
 #[tokio::test]
-async fn resync_replays_missed_item_and_turn_completion() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn lag_replays_missed_item_and_turn_completion() -> Result<(), Box<dyn std::error::Error>> {
     use session_event_model::{InputId, SessionItem, SessionItemKind, StopReason, TurnOutcome};
     use tokio::time::{Duration, timeout};
 
@@ -75,6 +74,11 @@ async fn resync_replays_missed_item_and_turn_completion() -> Result<(), Box<dyn 
             .to_text()?,
     )?;
     assert_eq!(reply["id"], 1);
+    timeout(
+        Duration::from_secs(2),
+        backend.attachment_created.notified(),
+    )
+    .await?;
     backend.history.lock().expect("test lock").extend([
         HubEvent {
             sequence: 3,
@@ -93,10 +97,16 @@ async fn resync_replays_missed_item_and_turn_completion() -> Result<(), Box<dyn 
             },
         },
     ]);
-    backend.events.send(HubEvent {
-        sequence: 5,
-        event: SessionEvent::ResyncRequired { replay_epoch: 0 },
-    })?;
+    // The receiver holds 16 events. Publishing 18 without yielding forces a
+    // Lagged result while the completed Turn exists only in the new snapshot.
+    for sequence in 5..=22 {
+        backend.events.send(HubEvent {
+            sequence,
+            event: SessionEvent::StateChanged {
+                state: session_event_model::SessionState::Idle,
+            },
+        })?;
+    }
     let completed_item: Value = serde_json::from_str(
         timeout(Duration::from_secs(2), client.next())
             .await?
@@ -112,6 +122,12 @@ async fn resync_replays_missed_item_and_turn_completion() -> Result<(), Box<dyn 
     assert_eq!(completed_item["method"], "item/completed");
     assert_eq!(completed_turn["method"], "turn/completed");
     assert_eq!(completed_turn["params"]["turn"]["status"], "completed");
+    assert_eq!(
+        backend
+            .attachment_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
     client.close(None).await?;
     server.await?;
     Ok(())
