@@ -18,6 +18,7 @@ pub enum NativeReply {
     Result(Value),
     NotificationThenResult { notification: Value, result: Value },
     Reject,
+    RejectWith { code: i64, message: &'static str },
     Disconnect,
 }
 pub struct NativeStep {
@@ -152,6 +153,9 @@ pub async fn exercise(
                 }
                 NativeReply::Reject => {
                     json!({"id":request.get("id").ok_or("missing request ID")?,"error":{"code":-32602,"message":"Fixture rejection"}})
+                }
+                NativeReply::RejectWith { code, message } => {
+                    json!({"id":request.get("id").ok_or("missing request ID")?,"error":{"code":code,"message":message}})
                 }
                 NativeReply::Disconnect => {
                     requests.push(request);
