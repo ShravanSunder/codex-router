@@ -275,3 +275,7 @@ impl<P: InteractionPort> Drop for AgentSessionClient<P> {
         self.shutdown.cancel();
     }
 }
+
+#[cfg(test)]
+#[path = "provider_prompt_order_tests.rs"]
+mod provider_prompt_order_tests;

@@ -6,6 +6,7 @@ use crate::{
 use std::{io, path::PathBuf};
 
 pub(super) struct CollaborationLifecycle {
+    owner_human_id: Option<message_board::HumanId>,
     directory: PathBuf,
     codex_home: PathBuf,
     backend_socket: PathBuf,
@@ -30,6 +31,7 @@ impl CollaborationLifecycle {
             return Ok(None);
         };
         let mut owner = Self {
+            owner_human_id: config.owner_human_id().cloned(),
             directory: directory.to_owned(),
             codex_home: config
                 .collaboration_codex_home()
@@ -92,6 +94,7 @@ impl CollaborationLifecycle {
                         mcp_bind: self.mcp_bind,
                         native_schema: export.clone(),
                         peer_registry_directory: None,
+                        owner_human_id: self.owner_human_id.clone(),
                     },
                     self.external_provider_startups.clone(),
                     self.router_executable_relation.clone(),

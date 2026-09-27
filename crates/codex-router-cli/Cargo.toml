@@ -29,6 +29,7 @@ codex-router-selection = { path = "../codex-router-selection", version = "0.1.4"
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4" }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4" }
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14" }
+message-board = { path = "../message-board", version = "0.1.20" }
 clap.workspace = true
 comfy-table.workspace = true
 crossterm.workspace = true

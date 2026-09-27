@@ -61,6 +61,7 @@ pub(crate) enum RouterAction {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HostCommand {
+    owner_human_id: Option<message_board::HumanId>,
     action: Option<HostAction>,
     router_root: Option<PathBuf>,
     port: Option<u16>,
@@ -78,7 +79,13 @@ impl HostCommand {
         let mut argv = vec![OsString::from("host")];
         argv.extend(arguments);
         let parsed = ClapHostCommand::try_parse_from(argv).map_err(|error| error.to_string())?;
+        let owner_human_id = parsed
+            .owner_human_id
+            .map(message_board::HumanId::try_from)
+            .transpose()
+            .map_err(|error| error.to_string())?;
         Ok(Self {
+            owner_human_id,
             action: parsed.action,
             router_root: parsed.router_root,
             port: parsed.port,
@@ -120,6 +127,8 @@ impl HostCommand {
 #[derive(Debug, Parser)]
 #[command(name = "host", disable_help_subcommand = true)]
 struct ClapHostCommand {
+    #[arg(long, global = true)]
+    owner_human_id: Option<String>,
     #[command(subcommand)]
     action: Option<HostAction>,
     #[arg(long, global = true)]
@@ -191,6 +200,7 @@ pub(crate) async fn run_host_command<W: Write + Send>(
         let provider_launches = external_provider_launches(&command)?;
         return foreground_launch::run_foreground_host(
             foreground_launch::ForegroundHostInputs {
+                owner_human_id: command.owner_human_id.clone(),
                 router_root,
                 launch_mode,
                 owner_home,
@@ -472,6 +482,26 @@ mod tests {
                 OsString::from("0"),
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn owner_human_id_override_is_validated_at_cli_boundary() {
+        let command = HostCommand::parse(vec![
+            OsString::from("--owner-human-id"),
+            OsString::from("chosen-owner"),
+        ])
+        .expect("valid owner id");
+        assert_eq!(
+            command
+                .owner_human_id
+                .as_ref()
+                .map(message_board::HumanId::as_str),
+            Some("chosen-owner")
+        );
+        assert!(
+            HostCommand::parse(vec![OsString::from("--owner-human-id"), OsString::from("")])
+                .is_err()
         );
     }
 
