@@ -182,13 +182,14 @@ enum ProviderCommand<P: InteractionPort> {
 enum PendingSessionAdmission<P: InteractionPort> {
     Create {
         result: Box<Result<ProviderSessionRegistration<P>, ExternalProviderRuntimeError>>,
+        activation: tokio::sync::oneshot::Sender<()>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
         >,
     },
     Restore {
         provider_session_id: String,
-        result: Box<Result<ActiveSession<'static, Agent>, ExternalProviderRuntimeError>>,
+        result: Box<Result<RestoredProviderSession, ExternalProviderRuntimeError>>,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
     Close {
@@ -204,6 +205,12 @@ struct ProviderSessionRegistration<P: InteractionPort> {
     response: NewSessionResponse,
     settings_catalog: crate::ProviderSettingsCatalog,
     setup_error: Option<ExternalProviderRuntimeError>,
+}
+
+struct RestoredProviderSession {
+    session: ActiveSession<'static, Agent>,
+    item_projection: Option<crate::provider_item_projection::ProviderItemProjection>,
+    settings_catalog: crate::ProviderSettingsCatalog,
 }
 
 /// Owns the provider process and ACP connection independently of caller tasks.

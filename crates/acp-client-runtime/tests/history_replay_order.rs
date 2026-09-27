@@ -54,6 +54,34 @@ send({'jsonrpc':'2.0','id':request['id'],'result':{}})
 sys.stdin.read()
 "#;
 
+const REPLAY_LIVE_TOOL_FIXTURE: &str = r#"
+import json,sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,
+    'agentCapabilities':{'loadSession':True},
+    'agentInfo':{'name':'replay-live-tool-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/load'
+send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session',
+    'update':{'sessionUpdate':'tool_call','toolCallId':'replayed-tool',
+              'title':'Old tool','kind':'execute','status':'pending'}}})
+send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session',
+    'update':{'sessionUpdate':'current_mode_update','currentModeId':'ask'}}})
+send({'jsonrpc':'2.0','id':request['id'],'result':{
+    'modes':{'currentModeId':'auto','availableModes':[
+        {'id':'auto','name':'Auto'},{'id':'ask','name':'Ask'}]}}})
+prompt=read()
+assert prompt['method']=='session/prompt'
+send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session',
+    'update':{'sessionUpdate':'tool_call_update','toolCallId':'replayed-tool',
+              'title':'Tool finished','status':'completed'}}})
+send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+
 struct TestInteractionPort;
 
 impl InteractionPort for TestInteractionPort {
@@ -144,6 +172,72 @@ fn fixture_launch(marker: &std::path::Path) -> ExternalProviderLaunch {
         environment: Vec::new(),
         persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
     }
+}
+
+/// A live update after load addresses the Item established by replay, rather
+/// than starting a second Item with the same provider tool-call ID.
+#[tokio::test]
+async fn live_update_continues_replayed_item_projection() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let marker = root.path().join("reset-finished");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let client = AgentSessionClient::initialize(
+        ExternalProviderLaunch {
+            executable: PathBuf::from("python3"),
+            arguments: vec![
+                "-u".to_owned(),
+                "-c".to_owned(),
+                REPLAY_LIVE_TOOL_FIXTURE.to_owned(),
+            ],
+            environment: Vec::new(),
+            persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
+        },
+        Arc::new(TestInteractionPort),
+        Arc::new(ReplaySink {
+            marker,
+            fail: false,
+            events: Some(Arc::clone(&events)),
+        }),
+    )
+    .await
+    .expect("fixture initializes");
+    client
+        .load_session("fixture-session".to_owned(), root.path().to_path_buf())
+        .await
+        .expect("history loads");
+    let catalog = client
+        .settings_catalog("fixture-session")
+        .await
+        .expect("loaded catalog");
+    assert_eq!(catalog.effective_settings().mode.as_deref(), Some("ask"));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.prompt("fixture-session".to_owned(), "Continue".to_owned()),
+    )
+    .await
+    .expect("prompt settles")
+    .expect("prompt succeeds");
+    client.shutdown().await;
+    let events = events.lock().expect("events");
+    let relevant = events
+        .iter()
+        .filter(|event| match event {
+            SessionEvent::ItemStarted { item } | SessionEvent::ItemUpdated { item } => {
+                item.item_id == "replayed-tool"
+            }
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(
+            relevant.as_slice(),
+            [
+                SessionEvent::ItemStarted { .. },
+                SessionEvent::ItemUpdated { .. }
+            ]
+        ),
+        "replayed tool events: {relevant:?}"
+    );
 }
 
 /// Oracle: ACP v1 session/load replays updates before its response

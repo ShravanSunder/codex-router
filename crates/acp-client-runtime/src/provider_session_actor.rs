@@ -10,8 +10,9 @@ use crate::agent_session_client::{
     acp_operation_error,
 };
 use crate::provider_connection_activity::ProviderConnectionActivity;
+use crate::provider_item_projection::ProviderItemProjection;
 use crate::provider_prompt_content::ProviderPromptContent;
-use crate::provider_prompt_observation::read_bounded_prompt;
+use crate::provider_prompt_observation::{observe_idle_session_update, read_bounded_prompt};
 use agent_client_protocol::schema::v1::{CancelNotification, PromptRequest};
 use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, JsonRpcMessage, UntypedMessage};
 use serde_json::json;
@@ -52,6 +53,9 @@ pub(crate) struct ProviderSessionRuntimeHandles {
     pub(crate) todo_state: Arc<CursorPlanItems>,
     pub(crate) session_settings:
         Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::ProviderSettingsCatalog>>>,
+    pub(crate) session_capabilities: Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, crate::ProviderCapabilityReport>>,
+    >,
     pub(crate) last_settings_catalog:
         Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
     pub(crate) settings_unresolved:
@@ -101,16 +105,28 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
     shutdown: CancellationToken,
     frame_observation: Arc<ProviderFrameObservation>,
     runtime_handles: ProviderSessionRuntimeHandles,
+    initial_projection: Option<ProviderItemProjection>,
     #[cfg(any(test, feature = "test-observation"))] test_tool_calls: Arc<
         std::sync::Mutex<Vec<ExternalProviderToolCall>>,
     >,
 ) {
+    let mut item_projection = initial_projection.unwrap_or_else(|| {
+        ProviderItemProjection::new(
+            session.session_id().to_string(),
+            Arc::clone(&runtime_handles.event_sink),
+        )
+    });
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
             update = session.read_update() => {
                 let Ok(update) = update else { break; };
-                if reject_unhandled_session_request(update).await.is_err() {
+                if observe_idle_session_update(
+                    update,
+                    &mut item_projection,
+                    &runtime_handles,
+                    session.session_id().0.as_ref(),
+                ).await.is_err() {
                     break;
                 }
             }
@@ -174,7 +190,8 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             terminal_rx,
                             output_limit_tx,
                             Arc::clone(&frame_observation),
-                            Arc::clone(&runtime_handles.event_sink),
+                            &mut item_projection,
+                            &runtime_handles,
                             #[cfg(any(test, feature = "test-observation"))]
                             Arc::clone(&test_tool_calls),
                         ));
@@ -336,27 +353,6 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                 }
             }
         }
-    }
-}
-
-async fn reject_unhandled_session_request(
-    message: agent_client_protocol::SessionMessage,
-) -> Result<(), agent_client_protocol::Error> {
-    match message {
-        agent_client_protocol::SessionMessage::SessionMessage(dispatch) => {
-            agent_client_protocol::util::MatchDispatch::new(dispatch)
-                .otherwise(|message| async move {
-                    match message {
-                        agent_client_protocol::Dispatch::Request(_, responder) => responder
-                            .respond_with_error(agent_client_protocol::Error::method_not_found()),
-                        agent_client_protocol::Dispatch::Notification(_)
-                        | agent_client_protocol::Dispatch::Response(_, _) => Ok(()),
-                    }
-                })
-                .await
-        }
-        agent_client_protocol::SessionMessage::StopReason(_) => Ok(()),
-        _ => Ok(()),
     }
 }
 
