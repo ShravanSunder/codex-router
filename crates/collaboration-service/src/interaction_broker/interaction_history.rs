@@ -6,8 +6,11 @@ use std::{
     path::PathBuf,
 };
 
-use collaboration_protocol::QuestionAnswerValue;
 pub use collaboration_protocol::QuestionResponse;
+use collaboration_protocol::{
+    CodexGeneration, OperationId, ProviderIdentity, QuestionAnswerValue,
+    SessionRef as ProtocolSessionRef,
+};
 use message_board::{Identity, SessionRef};
 use serde::{Deserialize, Serialize};
 use session_event_model::{
@@ -24,6 +27,8 @@ pub enum InteractionHistoryRecord {
         approver: Identity,
         request: ApprovalRequest,
         state: InteractionHistoryState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        legacy_metadata: Option<Box<LegacyApprovalMetadata>>,
     },
     Question {
         requester: SessionRef,
@@ -36,6 +41,17 @@ pub enum InteractionHistoryRecord {
         approver: Identity,
         refusal: RefusedTypedApproval,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyApprovalMetadata {
+    pub operation_id: OperationId,
+    pub target: ProtocolSessionRef,
+    pub generation: CodexGeneration,
+    pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<ProviderIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -100,9 +116,16 @@ impl InteractionHistoryRecord {
                 approver,
                 request,
                 state,
+                legacy_metadata,
             } => {
                 if request.request_id.is_empty()
                     || matches!(approver, Identity::Session { session } if session == requester)
+                    || legacy_metadata.as_ref().is_some_and(|metadata| {
+                        !matches!(approver, Identity::Session { .. })
+                            || serde_json::to_value(requester).ok()
+                                != serde_json::to_value(&metadata.target).ok()
+                            || chrono::DateTime::parse_from_rfc3339(&metadata.expires_at).is_err()
+                    })
                 {
                     return false;
                 }
@@ -409,6 +432,7 @@ impl InteractionHistoryStore {
         approver: Identity,
         request: ApprovalRequest,
         reason: &str,
+        legacy_metadata: Option<Box<LegacyApprovalMetadata>>,
     ) -> Result<(), InteractionHistoryError> {
         let record = InteractionHistoryRecord::Approval {
             requester,
@@ -417,6 +441,7 @@ impl InteractionHistoryStore {
             state: InteractionHistoryState::Cancelled {
                 reason: reason.to_owned().into(),
             },
+            legacy_metadata,
         };
         if !record.is_valid_stored_value() {
             return Err(InteractionHistoryError::Unavailable);

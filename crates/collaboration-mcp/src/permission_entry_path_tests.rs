@@ -45,14 +45,45 @@ struct ApprovalFixture {
     publication: ManifestPublication,
 }
 
+struct AcceptedTypedNoticeDelivery;
+
+impl collaboration_service::SessionMessageDelivery for AcceptedTypedNoticeDelivery {
+    fn deliver<'a>(
+        &'a self,
+        _: collaboration_service::DeliveryRequest,
+        _: &'a dyn collaboration_service::AttemptEvidenceSink,
+    ) -> collaboration_service::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
+        Box::pin(async {
+            Ok(collaboration_protocol::DeliveryReceipt {
+                outcome: collaboration_protocol::DeliveryOutcome::Started,
+                reachability: Some(collaboration_protocol::SessionReachability::CodexAppServer),
+                client: None,
+            })
+        })
+    }
+
+    fn reconcile_attempt(
+        &self,
+        _: collaboration_service::AttemptReconciliationContext,
+    ) -> collaboration_service::DeliveryFuture<'_, collaboration_service::AttemptReconciliation>
+    {
+        Box::pin(async { Ok(collaboration_service::AttemptReconciliation::StillUnknown) })
+    }
+}
+
 impl ApprovalFixture {
     async fn start(delivery_count: usize) -> Self {
-        Self::start_with_dropped_decision_reply(delivery_count, false).await
+        Self::start_with_dropped_decision_reply(delivery_count, false, false).await
+    }
+
+    async fn start_typed() -> Self {
+        Self::start_with_dropped_decision_reply(0, false, true).await
     }
 
     async fn start_with_dropped_decision_reply(
         delivery_count: usize,
         drop_decision_reply: bool,
+        typed_notice: bool,
     ) -> Self {
         let directory = tempfile::tempdir_in("/tmp").expect("private service directory");
         #[cfg(unix)]
@@ -130,10 +161,15 @@ impl ApprovalFixture {
                 native_backend.clone(),
                 Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
             ));
+        let delivery: Arc<dyn collaboration_service::SessionMessageDelivery> = if typed_notice {
+            Arc::new(AcceptedTypedNoticeDelivery)
+        } else {
+            Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
+                route,
+            ]))
+        };
         broker
-            .install_session_delivery(Arc::new(collaboration_service::SessionDeliveryRouter::new(
-                vec![route],
-            )))
+            .install_session_delivery(delivery)
             .expect("delivery injection");
         broker
             .register_route(ApprovalRoute {
@@ -482,7 +518,7 @@ async fn run_cli_decision(directory: &Path, request_id: &str, actor: &SessionRef
 
 #[tokio::test]
 async fn cli_decision_response_loss_after_real_broker_effect_is_unknown_without_replay() {
-    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true).await;
+    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true, false).await;
     let request = fixture.begin_permission_request("cli-response-loss").await;
     let pending = fixture.pending_record().await;
     fixture.await_delivery(0).await;
@@ -623,6 +659,111 @@ async fn mcp_call(
     serde_json::from_str(payload).unwrap_or_else(|error| {
         panic!("MCP response JSON: {error}; status={status}; body={body:?}")
     })
+}
+
+#[tokio::test]
+async fn provider_session_approval_uses_legacy_default_list_and_safe_decision() {
+    let fixture = ApprovalFixture::start_typed().await;
+    let requester: message_board::SessionRef =
+        serde_json::from_value(serde_json::to_value(&fixture.requester).expect("requester JSON"))
+            .expect("board requester");
+    let approver: message_board::SessionRef =
+        serde_json::from_value(serde_json::to_value(&fixture.approver).expect("approver JSON"))
+            .expect("board approver");
+    let request = serde_json::from_value(json!({
+        "requestId":"provider-legacy-approval", "title":"Run command",
+        "options":[
+            {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}},
+            {"optionId":"allow-always","label":"Always allow","choice":{"effect":"allow","scope":{"persistent":{"where_stored":"provider settings"}}}}
+        ]
+    })).expect("provider approval");
+    let receiver = fixture
+        .broker
+        .request_typed_approval(
+            requester,
+            message_board::Identity::Session { session: approver },
+            request,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            Some(collaboration_service::TypedApprovalLegacyContext {
+                operation_id: collaboration_protocol::OperationId::generate(),
+                target: fixture.requester.clone(),
+                generation: fixture.generation.clone(),
+                requested_by: fixture.requester.clone().into(),
+            }),
+        )
+        .await
+        .expect("provider approval pending");
+    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
+        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
+        service_directory: fixture.service_directory().to_owned(),
+        allowed_origins: vec!["http://localhost".to_owned()],
+    })
+    .await
+    .expect("MCP listener");
+    let client = reqwest::Client::new();
+    let initialize = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .json(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"provider-approval-fixture","version":"1"}
+            }}),
+        )
+        .send()
+        .await
+        .expect("initialize");
+    let session_id = initialize
+        .headers()
+        .get("mcp-session-id")
+        .cloned()
+        .expect("MCP session");
+    let _ = initialize.text().await.expect("initialize body");
+    let initialized = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id.clone())
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .expect("initialized");
+    assert!(initialized.status().is_success());
+    let listed = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        2,
+        "approval_list",
+        json!({"pending":true}),
+    )
+    .await;
+    let row = &listed["result"]["structuredContent"]["approvals"][0];
+    assert_eq!(row["requestId"], "provider-legacy-approval");
+    assert_eq!(row["approver"], json!(fixture.approver));
+    assert_eq!(row["generation"], json!(fixture.generation));
+    assert!(row["expiresAt"].is_string());
+    assert!(row["operation"]["target"].is_object());
+    assert!(row.get("optionsOrigin").is_none());
+    let decided = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        3,
+        "approval_decide",
+        json!({"requestId":"provider-legacy-approval",
+            "decision":"allow","actor":fixture.approver}),
+    )
+    .await;
+    assert_eq!(decided["result"]["isError"], false);
+    assert_eq!(decided["result"]["structuredContent"]["state"], "decided");
+    assert!(matches!(receiver.await.expect("agent resolution"),
+        collaboration_service::TypedApprovalResolution::Selected(selected)
+            if selected.option_id.as_str() == "allow-once"));
+    listener.shutdown().await.expect("MCP shutdown");
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -869,7 +1010,7 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
 #[tokio::test]
 async fn initialized_http_decision_response_loss_after_real_broker_effect_is_unknown_without_replay()
  {
-    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true).await;
+    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true, false).await;
     let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
         bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
         service_directory: fixture.service_directory().to_owned(),

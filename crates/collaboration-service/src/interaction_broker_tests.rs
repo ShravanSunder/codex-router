@@ -3,7 +3,10 @@ use collaboration_protocol::{CodexGeneration, EndpointId, EndpointRef};
 
 struct FakeApprovalDelivery(DeliveryOutcome);
 
-struct CapturingInteractionDelivery(Arc<Mutex<Vec<crate::DeliveryRequest>>>);
+struct CapturingInteractionDelivery {
+    notices: Arc<Mutex<Vec<crate::DeliveryRequest>>>,
+    delivered: Arc<tokio::sync::Notify>,
+}
 
 impl crate::SessionMessageDelivery for CapturingInteractionDelivery {
     fn deliver<'a>(
@@ -12,7 +15,8 @@ impl crate::SessionMessageDelivery for CapturingInteractionDelivery {
         _: &'a dyn crate::AttemptEvidenceSink,
     ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
         Box::pin(async move {
-            self.0.lock().await.push(request);
+            self.notices.lock().await.push(request);
+            self.delivered.notify_one();
             Ok(collaboration_protocol::DeliveryReceipt {
                 outcome: DeliveryOutcome::Started,
                 reachability: Some(collaboration_protocol::SessionReachability::CodexAppServer),
@@ -37,8 +41,12 @@ async fn typed_approval_and_question_notify_their_session_approver() {
     let approver =
         board_session_ref(&session(&broker.service_id, "approver-session")).expect("approver");
     let notices = Arc::new(Mutex::new(Vec::new()));
+    let delivered = Arc::new(tokio::sync::Notify::new());
     broker
-        .install_session_delivery(Arc::new(CapturingInteractionDelivery(Arc::clone(&notices))))
+        .install_session_delivery(Arc::new(CapturingInteractionDelivery {
+            notices: Arc::clone(&notices),
+            delivered: Arc::clone(&delivered),
+        }))
         .expect("delivery route");
     let approver_identity = message_board::Identity::Session {
         session: approver.clone(),
@@ -50,6 +58,7 @@ async fn typed_approval_and_question_notify_their_session_approver() {
             typed_approval_request("approval-1"),
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
         .expect("approval pending");
@@ -63,6 +72,17 @@ async fn typed_approval_and_question_notify_their_session_approver() {
         .request_question(requester.clone(), approver_identity, question, None)
         .await
         .expect("question pending");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let notified = delivered.notified();
+            if notices.lock().await.len() == 2 {
+                break;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("both notices delivered");
     let notices = notices.lock().await;
     assert_eq!(notices.len(), 2);
     for notice in notices.iter() {
@@ -93,6 +113,225 @@ async fn typed_approval_and_question_notify_their_session_approver() {
             .contains("externalProviderQuestion")
     );
     assert!(question_body.to_string().contains("question answer"));
+}
+
+#[tokio::test]
+async fn provider_session_approval_legacy_projection_survives_restart_without_dual_write() {
+    let (broker, generation, directory) = fixture_broker().await;
+    let requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let approver =
+        board_session_ref(&session(&broker.service_id, "approver-session")).expect("approver");
+    broker
+        .install_session_delivery(Arc::new(CapturingInteractionDelivery {
+            notices: Arc::new(Mutex::new(Vec::new())),
+            delivered: Arc::new(tokio::sync::Notify::new()),
+        }))
+        .expect("notice route");
+    let target = session(&broker.service_id, "provider-session");
+    let prompting_requester = session(&broker.service_id, "prompting-session");
+    let receiver = broker
+        .request_typed_approval(
+            requester,
+            message_board::Identity::Session { session: approver },
+            typed_approval_request("projected-approval"),
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+            Some(crate::interaction_broker::TypedApprovalLegacyContext {
+                operation_id: collaboration_protocol::OperationId::generate(),
+                target: target.clone(),
+                generation: generation.clone(),
+                requested_by: prompting_requester.clone().into(),
+            }),
+        )
+        .await
+        .expect("pending approval");
+    let pending = broker.list(true).await.approvals;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].generation, generation);
+    assert_eq!(pending[0].operation["target"], json!(target));
+    assert_eq!(pending[0].requester, prompting_requester);
+    assert!(!directory.join("approval-history.json").exists());
+    assert_eq!(
+        broker
+            .list_detailed(true)
+            .await
+            .expect("detailed list")
+            .approvals
+            .len(),
+        1
+    );
+    drop(receiver);
+    drop(broker);
+    let service_id = target.endpoint.service_id.clone();
+    let gate = crate::NativeGenerationGate::default();
+    let endpoint = target.endpoint.clone();
+    let reloaded = ServiceInteractionBroker::load(
+        service_id,
+        NativeControlBackend {
+            endpoint,
+            gate,
+            codex_home: directory.clone(),
+        },
+        directory.join("approval-routes.json"),
+    )
+    .await
+    .expect("reload broker");
+    assert!(reloaded.list(true).await.approvals.is_empty());
+    let history = reloaded.list(false).await.approvals;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].request_id, "projected-approval");
+    assert_eq!(history[0].reason.as_deref(), Some("hostRestarted"));
+    assert_eq!(history[0].operation["target"], json!(target));
+    assert_eq!(history[0].requester, prompting_requester);
+    assert_eq!(
+        reloaded
+            .list_detailed(false)
+            .await
+            .expect("detailed list")
+            .approvals
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn human_and_old_provider_approval_rows_stay_detailed_only() {
+    let (broker, generation, directory) = fixture_broker().await;
+    let target = session(&broker.service_id, "provider-session");
+    let requester = board_session_ref(&target).expect("provider requester");
+    let approver =
+        board_session_ref(&session(&broker.service_id, "approver-session")).expect("approver");
+    broker
+        .install_session_delivery(Arc::new(CapturingInteractionDelivery {
+            notices: Arc::new(Mutex::new(Vec::new())),
+            delivered: Arc::new(tokio::sync::Notify::new()),
+        }))
+        .expect("notice route");
+    for (request_id, requested_by) in [
+        (
+            "human-requester",
+            collaboration_protocol::ProviderIdentity::Human {
+                human_id: "owner".to_owned().try_into().expect("human ID"),
+            },
+        ),
+        ("old-row", target.clone().into()),
+    ] {
+        broker
+            .request_typed_approval(
+                requester.clone(),
+                message_board::Identity::Session {
+                    session: approver.clone(),
+                },
+                typed_approval_request(request_id),
+                tokio_util::sync::CancellationToken::new(),
+                tokio_util::sync::CancellationToken::new(),
+                Some(crate::interaction_broker::TypedApprovalLegacyContext {
+                    operation_id: collaboration_protocol::OperationId::generate(),
+                    target: target.clone(),
+                    generation: generation.clone(),
+                    requested_by,
+                }),
+            )
+            .await
+            .expect("pending approval");
+    }
+    assert_eq!(broker.list(true).await.approvals.len(), 1);
+    assert_eq!(
+        broker
+            .list_detailed(true)
+            .await
+            .expect("detailed list")
+            .approvals
+            .len(),
+        2
+    );
+    drop(broker);
+    let history_path = directory.join("interaction-history.json");
+    let mut stored: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(&history_path)
+            .await
+            .expect("stored history"),
+    )
+    .expect("history JSON");
+    stored["old-row"]["legacy_metadata"]
+        .as_object_mut()
+        .expect("legacy metadata")
+        .remove("requestedBy");
+    tokio::fs::write(
+        &history_path,
+        serde_json::to_vec(&stored).expect("history bytes"),
+    )
+    .await
+    .expect("older history row");
+    let reloaded = ServiceInteractionBroker::load(
+        target.endpoint.service_id.clone(),
+        NativeControlBackend {
+            endpoint: target.endpoint,
+            gate: crate::NativeGenerationGate::default(),
+            codex_home: directory.clone(),
+        },
+        directory.join("approval-routes.json"),
+    )
+    .await
+    .expect("reload older history");
+    assert!(reloaded.list(false).await.approvals.is_empty());
+    assert_eq!(
+        reloaded
+            .list_detailed(false)
+            .await
+            .expect("detailed list")
+            .approvals
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn unreachable_approver_cancellation_keeps_its_typed_state_in_both_lists() {
+    let (broker, generation, _) = fixture_broker().await;
+    let requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let approver =
+        board_session_ref(&session(&broker.service_id, "approver-session")).expect("approver");
+    broker
+        .install_session_delivery(Arc::new(CapturingInteractionDelivery {
+            notices: Arc::new(Mutex::new(Vec::new())),
+            delivered: Arc::new(tokio::sync::Notify::new()),
+        }))
+        .expect("notice route");
+    let _receiver = broker
+        .request_typed_approval(
+            requester,
+            message_board::Identity::Session { session: approver },
+            typed_approval_request("unreachable-approver"),
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+            Some(crate::interaction_broker::TypedApprovalLegacyContext {
+                operation_id: collaboration_protocol::OperationId::generate(),
+                target: session(&broker.service_id, "provider-session"),
+                generation,
+                requested_by: session(&broker.service_id, "provider-session").into(),
+            }),
+        )
+        .await
+        .expect("pending approval");
+    broker
+        .cancel_typed_approval("unreachable-approver", "approverUnreachable")
+        .await
+        .expect("cancel unreachable");
+    let legacy = broker.list(false).await.approvals;
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(legacy[0].state, ApprovalState::ApproverUnreachable);
+    assert_eq!(legacy[0].reason.as_deref(), Some("approverUnreachable"));
+    let detailed = broker
+        .list_detailed(false)
+        .await
+        .expect("detailed list")
+        .approvals;
+    assert_eq!(detailed.len(), 1);
+    assert_eq!(detailed[0].state, ApprovalState::ApproverUnreachable);
+    assert_eq!(detailed[0].reason.as_deref(), Some("approverUnreachable"));
 }
 
 impl crate::SessionMessageDelivery for FakeApprovalDelivery {
@@ -179,6 +418,40 @@ fn typed_approval_request(request_id: &str) -> session_event_model::ApprovalRequ
         ]
     }))
     .expect("typed approval request")
+}
+
+#[test]
+fn legacy_presentation_maps_only_fields_retained_by_typed_subjects() {
+    let tool: session_event_model::ApprovalRequest = serde_json::from_value(json!({
+        "requestId":"tool","title":"Run command",
+        "subject":{"type":"tool_call","toolCall":{"toolCallId":"tool-1","kind":"execute","title":"Shell"}},
+        "options":[{"optionId":"allow","label":"Allow","choice":{"effect":"allow","scope":"once"}}]
+    })).expect("tool approval");
+    let tool_presentation = super::legacy_presentation_from_typed(&tool);
+    assert_eq!(tool_presentation.title.as_deref(), Some("Run command"));
+    assert_eq!(tool_presentation.kind.as_deref(), Some("execute"));
+    assert!(tool_presentation.tool_name.is_none());
+    assert!(tool_presentation.permission_details.is_empty());
+    let command: session_event_model::ApprovalRequest = serde_json::from_value(json!({
+        "requestId":"command","title":"Run command",
+        "subject":{"type":"command","command":"echo hello","cwd":"/tmp/project"},
+        "options":[{"optionId":"allow","label":"Allow","choice":{"effect":"allow","scope":"once"}}]
+    }))
+    .expect("command approval");
+    let command_presentation = super::legacy_presentation_from_typed(&command);
+    assert_eq!(
+        command_presentation.arguments,
+        vec![
+            collaboration_protocol::ApprovalArgument {
+                name: "command".into(),
+                value: "echo hello".into()
+            },
+            collaboration_protocol::ApprovalArgument {
+                name: "cwd".into(),
+                value: "/tmp/project".into()
+            },
+        ]
+    );
 }
 
 fn select_typed(option_id: &str) -> crate::interaction_broker::TypedInteractionDecision {
@@ -662,6 +935,7 @@ async fn populated_old_approval_reader_survives_human_interaction_history() {
             typed_approval_request("human-approval-1"),
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
         .expect("record new interaction");
@@ -735,6 +1009,7 @@ async fn typed_interaction_rejects_self_approver_and_corrupt_stored_rows() {
                 typed_approval_request("self-request"),
                 tokio_util::sync::CancellationToken::new(),
                 tokio_util::sync::CancellationToken::new(),
+                None
             )
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::SelfApprover)
@@ -772,6 +1047,7 @@ async fn typed_approval_rejects_foreign_service_participants_without_pending_his
                 typed_approval_request("foreign-service"),
                 tokio_util::sync::CancellationToken::new(),
                 tokio_util::sync::CancellationToken::new(),
+                None
             )
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::Unavailable)
@@ -790,6 +1066,7 @@ async fn typed_approval_rejects_foreign_service_participants_without_pending_his
                 typed_approval_request("foreign-approver"),
                 tokio_util::sync::CancellationToken::new(),
                 tokio_util::sync::CancellationToken::new(),
+                None
             )
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::Unavailable)
@@ -945,6 +1222,7 @@ async fn typed_approval_preserves_cursor_choices_and_returns_exact_option_id() {
             request,
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
         .expect("pending approval");
@@ -1022,6 +1300,7 @@ async fn synthesized_plan_origin_is_visible_in_list_and_history() {
             request,
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
         .expect("pending plan approval");
@@ -1063,6 +1342,7 @@ async fn claude_choices_resolve_legacy_decisions_without_inventing_an_option() {
             request,
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
         .expect("pending request");
@@ -1375,6 +1655,7 @@ async fn restart_cancels_populated_pending_interaction_history() {
             typed_approval_request("restart-approval"),
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
         .expect("approval");

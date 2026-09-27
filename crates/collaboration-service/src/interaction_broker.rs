@@ -10,9 +10,9 @@ use codex_acp_adapter::{
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalDetailedListResult,
     ApprovalDetailedRecord, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionEffect,
-    ApprovalOptionScope, ApprovalOptionView, ApprovalOptionViewScope, ApprovalRequestRecord,
-    ApprovalState, DeliveryOutcome, EndpointRef, MessageContent, MessageDelivery, SessionRef,
-    UuidIdentity,
+    ApprovalOptionScope, ApprovalOptionView, ApprovalOptionViewScope, ApprovalPresentation,
+    ApprovalRequestRecord, ApprovalState, DeliveryOutcome, EndpointRef, MessageContent,
+    MessageDelivery, OperationId, SessionRef, UuidIdentity,
 };
 use serde_json::Value;
 #[cfg(test)]
@@ -26,13 +26,21 @@ use std::{
 use tokio::sync::{Mutex, oneshot};
 
 mod interaction_history;
+mod legacy_provider_projection;
 mod native_approval;
 mod typed_interaction_notice;
 mod typed_interactions;
 use interaction_history::InteractionHistoryStore;
 pub use interaction_history::{
     InteractionHistoryError, InteractionHistoryRecord, InteractionHistoryState,
-    QuestionHistoryState, QuestionResponse, RefusedApprovalOption, RefusedTypedApproval,
+    LegacyApprovalMetadata, QuestionHistoryState, QuestionResponse, RefusedApprovalOption,
+    RefusedTypedApproval,
+};
+#[cfg(test)]
+use legacy_provider_projection::legacy_presentation_from_typed;
+use legacy_provider_projection::{
+    legacy_choice_from_typed, legacy_option_view, project_typed_legacy_approval,
+    typed_cancel_approval_state, typed_option_view,
 };
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -175,18 +183,39 @@ struct TypedPendingApproval {
     turn_cancellation: tokio_util::sync::CancellationToken,
     retirement: tokio_util::sync::CancellationToken,
     requester: message_board::SessionRef,
+    notice_task: NoticeTask,
+}
+
+#[derive(Default)]
+struct NoticeTask(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for NoticeTask {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
 }
 
 struct PendingQuestion {
     completion: oneshot::Sender<QuestionResponse>,
     requester: message_board::SessionRef,
     retirement: Option<tokio_util::sync::CancellationToken>,
+    notice_task: NoticeTask,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedApprovalSelection {
     pub option_id: session_event_model::OfferedOptionId,
     pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypedApprovalLegacyContext {
+    pub operation_id: OperationId,
+    pub target: SessionRef,
+    pub generation: collaboration_protocol::CodexGeneration,
+    pub requested_by: collaboration_protocol::ProviderIdentity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -307,6 +336,13 @@ impl ServiceInteractionBroker {
 
     pub async fn list(&self, pending_only: bool) -> ApprovalListResult {
         let mut approvals = self.history.lock().await.clone();
+        approvals.extend(
+            self.interaction_history
+                .list_approvals(pending_only)
+                .await
+                .into_iter()
+                .filter_map(project_typed_legacy_approval),
+        );
         if pending_only {
             approvals.retain(|record| record.state == ApprovalState::PendingClientDecision);
         }
@@ -317,7 +353,10 @@ impl ServiceInteractionBroker {
         &self,
         pending_only: bool,
     ) -> Result<ApprovalDetailedListResult, ApprovalDecisionError> {
-        let legacy = self.list(pending_only).await.approvals;
+        let mut legacy = self.history.lock().await.clone();
+        if pending_only {
+            legacy.retain(|record| record.state == ApprovalState::PendingClientDecision);
+        }
         let typed = self.interaction_history.list_approvals(pending_only).await;
         let mut approvals = Vec::with_capacity(legacy.len() + typed.len());
         for record in legacy {
@@ -346,6 +385,7 @@ impl ServiceInteractionBroker {
                 approver,
                 request,
                 state,
+                ..
             } = record
             else {
                 if let InteractionHistoryRecord::RefusedApproval {
@@ -380,12 +420,7 @@ impl ServiceInteractionBroker {
                 InteractionHistoryState::Pending => (ApprovalState::PendingClientDecision, None),
                 InteractionHistoryState::Decided { .. } => (ApprovalState::Decided, None),
                 InteractionHistoryState::Cancelled { reason } => {
-                    let state = if reason == session_event_model::InteractionCancelReason::TimedOut
-                    {
-                        ApprovalState::TimedOut
-                    } else {
-                        ApprovalState::Cancelled
-                    };
+                    let state = typed_cancel_approval_state(&reason);
                     (state, Some(reason.as_str().to_owned()))
                 }
             };
@@ -606,88 +641,6 @@ fn board_identity(session: &SessionRef) -> Result<message_board::Identity, Appro
     })
 }
 
-fn typed_option_view(option: &session_event_model::OfferedOption) -> ApprovalOptionView {
-    use session_event_model::{ApprovalEffect, ApprovalScope};
-    let effect = match option.choice.effect {
-        ApprovalEffect::Allow => ApprovalOptionEffect::Allow,
-        ApprovalEffect::Decline => ApprovalOptionEffect::Decline,
-        ApprovalEffect::Abort => ApprovalOptionEffect::Abort,
-    };
-    let (scope, persistent_target) = match &option.choice.scope {
-        ApprovalScope::Once => (ApprovalOptionViewScope::Once, None),
-        ApprovalScope::Session => (ApprovalOptionViewScope::Session, None),
-        ApprovalScope::Persistent { where_stored } => (
-            ApprovalOptionViewScope::Persistent,
-            Some(where_stored.as_str().to_owned()),
-        ),
-    };
-    ApprovalOptionView {
-        option_id: option.option_id.as_str().to_owned(),
-        label: option.label.clone(),
-        effect,
-        scope,
-        persistent_target,
-    }
-}
-
-fn legacy_option_view(option: ApprovalOfferedOption) -> Option<ApprovalOptionView> {
-    let (effect, scope) = match option.scope {
-        ApprovalOptionScope::AllowOnce => {
-            (ApprovalOptionEffect::Allow, ApprovalOptionViewScope::Once)
-        }
-        ApprovalOptionScope::AllowForSession => (
-            ApprovalOptionEffect::Allow,
-            ApprovalOptionViewScope::Session,
-        ),
-        ApprovalOptionScope::RejectOnce => {
-            (ApprovalOptionEffect::Decline, ApprovalOptionViewScope::Once)
-        }
-        ApprovalOptionScope::AllowAlways
-        | ApprovalOptionScope::RejectAlways
-        | ApprovalOptionScope::Unsupported { .. } => return None,
-    };
-    Some(ApprovalOptionView {
-        label: option.label.unwrap_or_else(|| option.option_id.clone()),
-        option_id: option.option_id,
-        effect,
-        scope,
-        persistent_target: None,
-    })
-}
-
-fn legacy_choice_from_typed(
-    request: &session_event_model::ApprovalRequest,
-    decision: ApprovalDecision,
-) -> Result<String, ApprovalDecisionError> {
-    use session_event_model::{ApprovalEffect, ApprovalScope};
-
-    request
-        .options
-        .iter()
-        .find(|option| match decision {
-            ApprovalDecision::Allow => {
-                option.choice.effect == ApprovalEffect::Allow
-                    && matches!(&option.choice.scope, ApprovalScope::Once)
-            }
-            ApprovalDecision::AllowForSession => {
-                option.choice.effect == ApprovalEffect::Allow
-                    && matches!(&option.choice.scope, ApprovalScope::Session)
-            }
-            ApprovalDecision::Deny => {
-                option.choice.effect == ApprovalEffect::Decline
-                    && matches!(&option.choice.scope, ApprovalScope::Once)
-            }
-        })
-        .map(|option| option.option_id.as_str().to_owned())
-        .ok_or_else(|| ApprovalDecisionError::OptionNotOffered {
-            offered: request
-                .options
-                .iter()
-                .map(|option| option.option_id.as_str().to_owned())
-                .collect(),
-        })
-}
-
 impl ServiceInteractionBroker {
     pub async fn decide(
         &self,
@@ -848,37 +801,46 @@ impl ServiceInteractionBroker {
         approver: SessionRef,
         text: String,
     ) -> Result<(), ApprovalBrokerError> {
-        let request = DeliveryRequest {
-            target: approver,
-            message: MessageContent::Agent {
-                sender: requester,
-                text: text
-                    .try_into()
-                    .map_err(|_| ApprovalBrokerError::Unavailable)?,
-            },
-            mode: MessageDelivery::Auto,
-            precondition: DeliveryPrecondition::Unpinned,
-            correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
-            attempt: agent_automation::AttemptId::generate(),
-        };
         let delivery = self
             .session_delivery
             .get()
             .ok_or(ApprovalBrokerError::Unavailable)?;
-        let receipt = delivery
-            .deliver(request, &UnstoredAttemptEvidenceSink)
-            .await
-            .map_err(|_| ApprovalBrokerError::Unavailable)?;
-        match receipt.outcome {
-            DeliveryOutcome::Started
-            | DeliveryOutcome::Steered
-            | DeliveryOutcome::StartedOrSteered
-            | DeliveryOutcome::Queued
-            | DeliveryOutcome::PeerMessageWritten
-            | DeliveryOutcome::Unknown => Ok(()),
-            DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
-                Err(ApprovalBrokerError::RouteUnavailable)
-            }
+        deliver_message_via(delivery.as_ref(), requester, approver, text).await
+    }
+}
+
+async fn deliver_message_via(
+    delivery: &dyn SessionMessageDelivery,
+    requester: SessionRef,
+    approver: SessionRef,
+    text: String,
+) -> Result<(), ApprovalBrokerError> {
+    let request = DeliveryRequest {
+        target: approver,
+        message: MessageContent::Agent {
+            sender: requester,
+            text: text
+                .try_into()
+                .map_err(|_| ApprovalBrokerError::Unavailable)?,
+        },
+        mode: MessageDelivery::Auto,
+        precondition: DeliveryPrecondition::Unpinned,
+        correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
+        attempt: agent_automation::AttemptId::generate(),
+    };
+    let receipt = delivery
+        .deliver(request, &UnstoredAttemptEvidenceSink)
+        .await
+        .map_err(|_| ApprovalBrokerError::Unavailable)?;
+    match receipt.outcome {
+        DeliveryOutcome::Started
+        | DeliveryOutcome::Steered
+        | DeliveryOutcome::StartedOrSteered
+        | DeliveryOutcome::Queued
+        | DeliveryOutcome::PeerMessageWritten
+        | DeliveryOutcome::Unknown => Ok(()),
+        DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
+            Err(ApprovalBrokerError::RouteUnavailable)
         }
     }
 }

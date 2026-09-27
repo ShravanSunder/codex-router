@@ -204,6 +204,7 @@ impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderCursorQuestionHan
             .collect::<Vec<_>>();
         let port = Arc::clone(&self.interaction_port);
         let request_cancellation = responder.cancellation();
+        let response_guard = context.responses.track();
         connection.spawn(async move {
             let agent_cancellation = CancellationToken::new();
             let answer = port.request_question(
@@ -221,7 +222,9 @@ impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderCursorQuestionHan
                 }
                 response = &mut answer => response,
             };
-            responder.respond(cursor_answer(response, &field_order))
+            let queued = responder.respond(cursor_answer(response, &field_order));
+            drop(response_guard);
+            queued
         })?;
         Ok(Handled::Yes)
     }
