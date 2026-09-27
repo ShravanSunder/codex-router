@@ -14,6 +14,7 @@ use collaboration_client::{
         ApprovalDecideParams, ConversationCreateOutcome, OperationId, RouterAccess, SessionRef,
     },
 };
+use collaboration_service::ProviderOperationStore;
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 use tokio::io::AsyncWriteExt as _;
@@ -23,6 +24,7 @@ pub(super) async fn exercise_acp_target_matrix(config_guard: &ConfigHashGuard) -
     let mut proof = ProofContext::connect().await?;
     let sender = proof.start_thread("ACP matrix sender").await?;
     let target = create_provider_session(&mut proof, &sender, "cursor-local", &sender).await?;
+    attest_private_provider_store(&mut proof, &target).await?;
     let receipt_path = proof.root.join("provider-prompt-receipts.jsonl");
     let mut cells = Vec::new();
     let mut markers = Vec::new();
@@ -162,6 +164,9 @@ pub(super) async fn exercise_acp_target_matrix(config_guard: &ConfigHashGuard) -
         &busy_marker,
     )?;
 
+    // A negative assertion needs a bounded settling window. Two seconds covers
+    // the provider FIFO's one-second maximum retry delay after the held turn.
+    tokio::time::sleep(Duration::from_secs(2)).await;
     assert_exactly_once(&receipt_path, &target, &markers)?;
     proof.record(
         "providerAcpDeliveryMatrix",
@@ -169,6 +174,22 @@ pub(super) async fn exercise_acp_target_matrix(config_guard: &ConfigHashGuard) -
     )?;
     proof.client.close().await?;
     Ok(())
+}
+
+async fn attest_private_provider_store(
+    proof: &mut ProofContext,
+    target: &SessionRef,
+) -> ProofResult<()> {
+    let provider_store_path = proof.service_directory.join("provider-operations.sqlite");
+    let actual_store_path = provider_store_path.canonicalize()?;
+    if !actual_store_path.starts_with(proof.root.canonicalize()?) {
+        return Err("ACP provider records are outside the private Router root".into());
+    }
+    let mut provider_store = ProviderOperationStore::open(&provider_store_path).await?;
+    if provider_store.session_record(target).await?.is_none() {
+        return Err("Private Router provider store omitted the created target".into());
+    }
+    proof.record("privateProviderStore", json!({"target":target}))
 }
 
 async fn create_provider_session(
@@ -348,6 +369,14 @@ async fn observe_single_prompt(
 }
 
 fn assert_exactly_once(path: &Path, target: &SessionRef, markers: &[String]) -> ProofResult<()> {
+    let prompt_frames = std::fs::read_to_string(path)?.lines().count();
+    if prompt_frames != super::ACP_TARGET_EXPECTED_PROMPTS {
+        return Err(format!(
+            "ACP recipient recorded {prompt_frames} prompts; expected {}",
+            super::ACP_TARGET_EXPECTED_PROMPTS
+        )
+        .into());
+    }
     for marker in markers {
         let count = prompt_count(path, target, marker)?;
         if count != 1 {
@@ -398,6 +427,57 @@ fn recipient_log_counts_prompt_frames_and_rejects_duplicate_delivery() -> ProofR
         || assert_exactly_once(log.path(), &target, &[marker.to_owned()]).is_ok()
     {
         return Err("Duplicate prompt frames were not rejected".into());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn scripted_recipient_records_a_duplicate_after_its_last_expected_prompt() -> ProofResult<()>
+{
+    use std::process::Stdio;
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("workspace crates directory missing")?
+        .join("codex-router-host/src/external_provider_runtime/acp_scripted_fixture.py");
+    let log = tempfile::NamedTempFile::new()?;
+    let steps = json!([{"action":"expect_request","requestName":"last",
+        "method":"session/prompt","params":{"sessionId":"matrix-acp-target"},
+        "recordPath":log.path()}]);
+    let mut fixture_process = tokio::process::Command::new("python3")
+        .arg("-u")
+        .arg(fixture)
+        .arg(steps.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let frame = json!({"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{
+        "sessionId":"matrix-acp-target","prompt":[{"type":"text","text":"LAST_MARKER"}]
+    }});
+    let mut input = fixture_process
+        .stdin
+        .take()
+        .ok_or("fixture stdin missing")?;
+    input
+        .write_all(format!("{frame}\n{frame}\n").as_bytes())
+        .await?;
+    drop(input);
+    let output = fixture_process.wait_with_output().await?;
+    if !output.status.success() {
+        return Err(format!(
+            "scripted recipient failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let target: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"cursor-local"},
+        "sessionId":"matrix-acp-target"
+    }))?;
+    if prompt_count(log.path(), &target, "LAST_MARKER")? != 2
+        || assert_exactly_once(log.path(), &target, &["LAST_MARKER".to_owned()]).is_ok()
+    {
+        return Err("Post-script duplicate was not recorded".into());
     }
     Ok(())
 }

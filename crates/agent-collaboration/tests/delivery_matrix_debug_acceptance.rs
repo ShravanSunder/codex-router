@@ -30,6 +30,8 @@ use proof_context::{ProofContext, ProofResult};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+const ACP_TARGET_EXPECTED_PROMPTS: usize = 9;
+
 #[tokio::test]
 #[ignore = "requires an owned isolated CLI Host with scripted provider fixture"]
 async fn delivery_matrix_reaches_codex_and_fixture_claude_peer() -> ProofResult<()> {

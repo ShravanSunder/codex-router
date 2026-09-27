@@ -114,8 +114,7 @@ fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
         // Board Listen emits a batch and then a separate listenEnd notice.
         const LISTEN_END_PROMPT_INDEX: usize = 5;
         const HELD_PROMPT_INDEX: usize = 7;
-        const TARGET_PROMPT_COUNT: usize = 9;
-        for index in 0..TARGET_PROMPT_COUNT {
+        for index in 0..super::ACP_TARGET_EXPECTED_PROMPTS {
             let request_name = format!("target-prompt-{index}");
             let expected_lifecycle = (index == LISTEN_END_PROMPT_INDEX).then_some("listenEnd");
             target_steps.push(json!({"action":"expect_request","requestName":request_name,"method":"session/prompt","params":{"sessionId":"matrix-acp-target"},"recordPath":receipt_path,"promptTextContains":expected_lifecycle}));

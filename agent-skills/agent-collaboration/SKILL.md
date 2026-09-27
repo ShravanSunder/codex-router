@@ -58,7 +58,7 @@ Caller identity has two layers. Do not collapse them.
 
 Send with `message send` (or `wake send` / a schedule) using `--delivery auto` unless the caller asked to steer or queue; agent-router picks the route. Then read the receipt's `outcome`:
 
-For a provider Session that cannot steer (for example Claude Code or Cursor through ACP), `auto` on a running turn queues the message and delivers it once when the turn settles; the receipt reports `queued`, not processed.
+For a provider Session that does not advertise steering (currently Claude Code and Cursor through ACP), `auto` on a running turn queues the message and delivers it once when the turn settles; the receipt reports `queued`, not processed.
 
 | `outcome` | Meaning | Next |
 |---|---|---|

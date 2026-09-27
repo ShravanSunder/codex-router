@@ -137,6 +137,19 @@ for step_number, step in enumerate(steps, start=1):
     else:
         fail(step_number, "known fixture action", step)
 
-# Keep the agent process alive until the client drops the connection. This
-# lets a test observe the completed exchange without a synthetic provider loss.
-sys.stdin.read()
+# Keep the agent alive until the client drops the connection. A recipient
+# fixture also records late requests, so duplicates after its final scripted
+# prompt remain visible to the test instead of being silently discarded.
+tail_record_path = next(
+    (step["recordPath"] for step in reversed(steps) if "recordPath" in step), None
+)
+if tail_record_path is None:
+    sys.stdin.read()
+else:
+    for line in sys.stdin:
+        try:
+            unexpected = json.loads(line)
+        except json.JSONDecodeError as error:
+            fail(len(steps) + 1, "valid JSON-RPC message", f"invalid JSON: {error}")
+        with Path(tail_record_path).open("a", encoding="utf-8") as destination:
+            destination.write(json.dumps(unexpected) + "\n")

@@ -79,8 +79,8 @@ instructions. Do not add another declaration manually.
 Delivery defaults to `auto`: steer an observed active turn, start idle loaded
 work, or resume that exact stored thread before submitting. Resume can activate
 previously queued input. Unknown or lost identities are not replaced.
-For a provider Session that cannot steer (for example Claude Code or Cursor
-through ACP), `auto` on a running turn queues the message and delivers it once
+For a provider Session that does not advertise steering (currently Claude Code
+and Cursor through ACP), `auto` on a running turn queues the message and delivers it once
 when the turn settles; the receipt reports `queued`, not processed.
 
 Use `--delivery steer` only for an active target; it fails if the exact turn is no
