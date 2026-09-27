@@ -165,8 +165,8 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
     );
 
     let question: QuestionRequest = serde_json::from_value(json!({
-        "requestId":"question-1","prompt":"Choose count","fields":[
-            {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true}
+        "requestId":"question-1","prompt":"Choose readiness","fields":[
+            {"kind":"boolean","fieldId":"ready","label":"Ready","description":null,"required":true}
         ]
     }))?;
     let answer = broker
@@ -190,12 +190,12 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
         serde_json::from_str(client.next().await.ok_or("question form")??.to_text()?)?;
     assert_eq!(form["method"], "mcpServer/elicitation/request");
     assert_eq!(
-        form["params"]["requestedSchema"]["properties"]["count"]["type"],
-        "number"
+        form["params"]["requestedSchema"]["properties"]["ready"]["type"],
+        "boolean"
     );
     client
         .send(Message::Text(
-            json!({"id":form["id"],"result":{"action":"accept","content":{"count":3}}})
+            json!({"id":form["id"],"result":{"action":"accept","content":{"ready":true}}})
                 .to_string()
                 .into(),
         ))
@@ -204,7 +204,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
     assert_eq!(
         response,
         QuestionResponse::Answered {
-            content: serde_json::from_value(json!({"count":3}))?
+            content: serde_json::from_value(json!({"ready":true}))?
         }
     );
     let choice: QuestionRequest = serde_json::from_value(json!({
@@ -495,6 +495,28 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
     )?;
     assert_eq!(other_notice["method"], "item/started");
     assert_eq!(other_notice["params"]["item"]["type"], "agentMessage");
+    let other_delta: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), other_client.next())
+            .await?
+            .ok_or("read-only delta")??
+            .to_text()?,
+    )?;
+    assert_eq!(other_delta["method"], "item/agentMessage/delta");
+    assert_eq!(
+        other_delta["params"]["itemId"],
+        other_notice["params"]["item"]["id"]
+    );
+    let other_completed: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), other_client.next())
+            .await?
+            .ok_or("read-only completion")??
+            .to_text()?,
+    )?;
+    assert_eq!(other_completed["method"], "item/completed");
+    assert_eq!(
+        other_completed["params"]["item"]["id"],
+        other_notice["params"]["item"]["id"]
+    );
     let owner_prompt: Value = serde_json::from_str(
         client
             .next()

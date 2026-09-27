@@ -353,6 +353,10 @@ mod cwd_tests;
 mod model_tests;
 #[cfg(test)]
 #[allow(clippy::panic_in_result_fn)]
+#[path = "router_session_app_server_multichoice_tui_tests.rs"]
+mod multichoice_tui_tests;
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
 #[path = "router_session_app_server_reattach_tests.rs"]
 mod reattach_tests;
 #[cfg(test)]

@@ -44,6 +44,49 @@ fn context() -> InteractionDisplayContext<'static> {
     }
 }
 
+/// Oracle: pinned Codex 0.157.1 tui/bottom_pane/mcp_server_elicitation.rs:617-619.
+#[test]
+fn multi_choice_question_is_read_only_when_tui_cannot_render_it() {
+    let request: QuestionRequest = serde_json::from_value(json!({
+        "requestId":"multi-1","prompt":"Pick items","fields":[
+            {"kind":"multiChoice","fieldId":"items","label":"Items","description":null,
+             "required":true,"min":1,"max":2,"options":[
+                {"optionId":"first","label":"First"},
+                {"optionId":"second","label":"Second"}
+             ]}
+        ]
+    }))
+    .expect("question");
+    let approver = identity("owner");
+    let QuestionPresentation::ReadOnly { summary } =
+        translate_question_request(&request, &approver, &approver, context())
+    else {
+        panic!("expected unsupported-here notice");
+    };
+    assert_eq!(summary["id"], "multi-1");
+    assert!(
+        summary["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("unsupportedHere"))
+    );
+    let number_request: QuestionRequest = serde_json::from_value(json!({
+        "requestId":"number-1","prompt":"Choose count","fields":[
+            {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true}
+        ]
+    }))
+    .expect("number question");
+    let QuestionPresentation::ReadOnly { summary } =
+        translate_question_request(&number_request, &approver, &approver, context())
+    else {
+        panic!("number question must be unsupported here");
+    };
+    assert!(
+        summary["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("unsupportedHere"))
+    );
+}
+
 /// Oracle: Codex item.rs:66-85,1549-1627. availableDecisions is exactly
 /// the mapped offered set plus cancel; the selected agent option ID survives.
 #[test]
@@ -282,12 +325,6 @@ fn question_form_keeps_typed_fields_and_distinct_outcomes() {
                 description: Some("Display name".into()),
                 required: true,
             },
-            QuestionField::Number {
-                field_id: "count".into(),
-                label: "Count".into(),
-                description: None,
-                required: true,
-            },
             QuestionField::Boolean {
                 field_id: "enabled".into(),
                 label: "Enabled".into(),
@@ -320,14 +357,9 @@ fn question_form_keeps_typed_fields_and_distinct_outcomes() {
     let schema = &params["requestedSchema"];
     assert_eq!(schema["properties"]["name"]["type"], "string");
     assert_eq!(schema["properties"]["name"]["title"], "Name");
-    assert_eq!(schema["properties"]["count"]["type"], "number");
     assert_eq!(schema["properties"]["enabled"]["type"], "boolean");
     assert_eq!(schema["properties"]["mode"]["oneOf"][1]["const"], "fast");
-    assert_eq!(schema["required"], json!(["name", "count", "mode"]));
-    assert_eq!(
-        map_question_form_reply(&request, &json!({"action":"accept","content":{"count":2}})),
-        Ok(QuestionReply::Answered(json!({"count":2})))
-    );
+    assert_eq!(schema["required"], json!(["name", "mode"]));
     assert_eq!(
         map_question_form_reply(&request, &json!({"action":"decline"})),
         Ok(QuestionReply::Declined)

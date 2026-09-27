@@ -428,6 +428,17 @@ pub fn translate_question_request(
                 "text":format!("Question pending: {}",request.prompt)}),
         };
     }
+    if request.fields.iter().any(|field| {
+        matches!(
+            field,
+            QuestionField::Number { .. } | QuestionField::MultiChoice { .. }
+        )
+    }) {
+        return QuestionPresentation::ReadOnly {
+            summary: json!({"type":"agentMessage","id":request.request_id,
+                "text":format!("Question pending (unsupportedHere): {}. Answer with `agent-collaboration question answer` or another front door.",request.prompt)}),
+        };
+    }
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for field in request.fields.iter() {
@@ -487,8 +498,8 @@ pub fn translate_question_request(
                 field_id,
                 required,
                 json!({"type":"array","title":label,"description":description,
-                    "uniqueItems":true,"minItems":min,"maxItems":max,
-                    "items":{"type":"string","oneOf":options.iter().map(|option|
+                    "minItems":min,"maxItems":max,
+                    "items":{"oneOf":options.iter().map(|option|
                         json!({"const":option.option_id,"title":option.label})).collect::<Vec<_>>()}}),
             ),
         };

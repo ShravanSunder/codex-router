@@ -44,6 +44,33 @@ fn render_turn_event(session: &SessionRef, event: &HubEvent) -> Option<Value> {
     }))
 }
 
+fn read_only_interaction_frames(thread_id: &str, turn_id: &str, item: Value) -> Vec<Value> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let delta = item
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    vec![
+        json!({"method":"item/started","params":{
+            "threadId":thread_id,"turnId":turn_id,"item":item,
+            "startedAtMs":now
+        }}),
+        json!({"method":"item/agentMessage/delta","params":{
+            "threadId":thread_id,"turnId":turn_id,"itemId":item_id,"delta":delta
+        }}),
+        json!({"method":"item/completed","params":{
+            "threadId":thread_id,"turnId":turn_id,"item":item,
+            "completedAtMs":now
+        }}),
+    ]
+}
+
 pub(crate) fn historical_turns(session: &SessionRef, snapshot: &[HubEvent]) -> Vec<Value> {
     let mut items = Vec::<SessionItem>::new();
     let mut item_positions = HashMap::<String, usize>::new();
@@ -236,11 +263,11 @@ impl AppServerEventForwarding {
                     format!("Question pending: {}", request.prompt),
                 ),
             };
-            return vec![json!({"method":"item/started","params":{
-                "threadId":thread_id,"turnId":turn_id,
-                "item":{"type":"agentMessage","id":item_id,"text":text},
-                "startedAtMs":chrono::Utc::now().timestamp_millis()
-            }})];
+            return read_only_interaction_frames(
+                thread_id,
+                turn_id,
+                json!({"type":"agentMessage","id":item_id,"text":text}),
+            );
         }
         let actor = &self.actor;
         match interaction {
@@ -269,10 +296,7 @@ impl AppServerEventForwarding {
                         vec![frame]
                     }
                     ApprovalPresentation::ReadOnly { summary } => {
-                        vec![json!({"method":"item/started","params":{
-                            "threadId":thread_id,"turnId":turn_id,"item":summary,
-                            "startedAtMs":chrono::Utc::now().timestamp_millis()
-                        }})]
+                        read_only_interaction_frames(thread_id, turn_id, summary)
                     }
                 }
             }
@@ -297,10 +321,7 @@ impl AppServerEventForwarding {
                         vec![frame]
                     }
                     QuestionPresentation::ReadOnly { summary } => {
-                        vec![json!({"method":"item/started","params":{
-                            "threadId":thread_id,"turnId":turn_id,"item":summary,
-                            "startedAtMs":chrono::Utc::now().timestamp_millis()
-                        }})]
+                        read_only_interaction_frames(thread_id, turn_id, summary)
                     }
                 }
             }
@@ -314,6 +335,18 @@ impl AppServerEventForwarding {
         let Some(pending) = self.pending.remove(id) else {
             return Vec::new();
         };
+        if reply.get("error").is_some_and(|error| !error.is_null()) {
+            let request_id = match &pending {
+                PendingAppServerInteraction::Approval { request, .. } => &request.request_id,
+                PendingAppServerInteraction::Question { request, .. } => &request.request_id,
+            };
+            tracing::warn!(
+                request_id,
+                error_kind = "clientRejectedServerRequest",
+                "provider TUI could not render interaction request"
+            );
+            return Vec::new();
+        }
         let Some(broker) = self.broker.clone() else {
             return Vec::new();
         };
