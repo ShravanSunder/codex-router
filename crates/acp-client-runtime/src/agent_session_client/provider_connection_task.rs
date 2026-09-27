@@ -60,6 +60,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             tool_registry: Arc::clone(&tool_registry),
             todo_state: Arc::clone(&todo_state),
             session_settings: Arc::clone(&task_session_settings),
+            session_capabilities: Arc::clone(&task_session_capabilities),
             last_settings_catalog: Arc::clone(&task_last_settings_catalog),
             settings_unresolved: Arc::clone(&task_settings_unresolved),
         };
@@ -288,7 +289,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                 completion = admission_rx.recv() => {
                                     let Some(completion) = completion else { continue; };
                                     match completion {
-                                        PendingSessionAdmission::Create { result, reply } => {
+                                        PendingSessionAdmission::Create { result, activation, reply } => {
                                             let report = result.as_ref().as_ref().ok().map(|registration| {
                                                 base_capabilities.with_session_response(&registration.response)
                                             });
@@ -324,6 +325,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 Some(error) => Err(error),
                                                 None => Ok(created),
                                             });
+                                            let _result = activation.send(());
                                             let _result = reply.send(result);
                                         }
                                         PendingSessionAdmission::Restore { provider_session_id, result, reply } => {

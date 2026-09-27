@@ -1,5 +1,4 @@
 //! Bounded ACP prompt output and settlement observation.
-use crate::SessionEventSink;
 use crate::agent_session_client::{
     ExternalProviderPromptOutcome, ExternalProviderRuntimeError, MAX_PROMPT_OUTPUT_BYTES,
     ProviderFrameObservation, acp_operation_error, provider_frame_decode_error,
@@ -10,6 +9,8 @@ use crate::agent_session_client::{
 };
 use crate::provider_item_projection::ProviderItemProjection;
 use crate::provider_prompt_result_codec::{decode_prompt_result, decode_typed_stop_reason};
+use crate::provider_session_actor::ProviderSessionRuntimeHandles;
+use crate::provider_settings_catalog_codec::replace_catalog_config_options;
 use crate::provider_update_kind::{
     has_unknown_informational_value, is_known_update_kind, is_session_update_notification,
     safe_update_kind, session_update_kind,
@@ -18,10 +19,17 @@ use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, SessionNotification, SessionUpdate, StopReason,
 };
 use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::{ActiveSession, Agent, SessionMessage};
+use agent_client_protocol::{ActiveSession, Agent, Dispatch, Error, SessionMessage};
+use session_event_model::SessionEvent;
 use std::collections::HashSet;
 #[cfg(any(test, feature = "test-observation"))]
 use std::{collections::HashMap, sync::Arc};
+
+struct SessionUpdateContext<'a> {
+    item_projection: &'a mut ProviderItemProjection,
+    runtime_handles: &'a ProviderSessionRuntimeHandles,
+    session_id: &'a str,
+}
 
 pub(crate) async fn read_bounded_prompt(
     session: &mut ActiveSession<'_, Agent>,
@@ -30,16 +38,16 @@ pub(crate) async fn read_bounded_prompt(
     >,
     output_limit_tx: tokio::sync::mpsc::UnboundedSender<()>,
     frame_observation: std::sync::Arc<ProviderFrameObservation>,
-    event_sink: std::sync::Arc<dyn SessionEventSink>,
+    item_projection: &mut ProviderItemProjection,
+    runtime_handles: &ProviderSessionRuntimeHandles,
     #[cfg(any(test, feature = "test-observation"))] test_tool_calls: Arc<
         std::sync::Mutex<Vec<ExternalProviderToolCall>>,
     >,
 ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
     use futures_util::FutureExt as _;
 
+    let session_id = session.session_id().to_string();
     let mut output = String::new();
-    let mut item_projection =
-        ProviderItemProjection::new(session.session_id().to_string(), event_sink);
     let mut unknown_update_kinds = HashSet::<String>::new();
     #[cfg(any(test, feature = "test-observation"))]
     let mut tool_calls = HashMap::<String, ExternalProviderToolCall>::new();
@@ -54,7 +62,7 @@ pub(crate) async fn read_bounded_prompt(
                     &mut output,
                     &mut output_limit_tx,
                     &mut unknown_update_kinds,
-                    &mut item_projection,
+                    &mut SessionUpdateContext { item_projection, runtime_handles, session_id: &session_id },
                     #[cfg(any(test, feature = "test-observation"))] &mut tool_calls,
                     #[cfg(any(test, feature = "test-observation"))] &test_tool_calls,
                 ).await? {
@@ -83,7 +91,7 @@ pub(crate) async fn read_bounded_prompt(
                         &mut output,
                         &mut output_limit_tx,
                         &mut unknown_update_kinds,
-                        &mut item_projection,
+                        &mut SessionUpdateContext { item_projection, runtime_handles, session_id: &session_id },
                         #[cfg(any(test, feature = "test-observation"))] &mut tool_calls,
                         #[cfg(any(test, feature = "test-observation"))] &test_tool_calls,
                     ).await?;
@@ -109,12 +117,123 @@ pub(crate) async fn read_bounded_prompt(
     })
 }
 
+/// The Session actor calls this while idle. Notifications still update the
+/// same projection that the next prompt will use; only requests are refused.
+pub(crate) async fn observe_idle_session_update(
+    message: SessionMessage,
+    item_projection: &mut ProviderItemProjection,
+    runtime_handles: &ProviderSessionRuntimeHandles,
+    session_id: &str,
+) -> Result<(), Error> {
+    let SessionMessage::SessionMessage(dispatch) = message else {
+        return Ok(());
+    };
+    match dispatch {
+        Dispatch::Request(_, responder) => responder.respond_with_error(Error::method_not_found()),
+        Dispatch::Notification(notification) if notification.method() == "session/update" => {
+            let params = notification.params();
+            let update = params.get("update");
+            let kind = update
+                .and_then(|update| update.get("sessionUpdate"))
+                .and_then(serde_json::Value::as_str);
+            let unknown = kind.is_some_and(|kind| !is_known_update_kind(kind))
+                || has_unknown_informational_value(&Dispatch::Notification(notification.clone()));
+            if unknown {
+                let source_kind = kind.and_then(safe_update_kind).unwrap_or("unrecognized");
+                let content = update
+                    .and_then(|update| update.get("content"))
+                    .and_then(|content| content.get("text"))
+                    .and_then(serde_json::Value::as_str);
+                item_projection
+                    .observe_unknown(source_kind, content)
+                    .map_err(|_| Error::internal_error())?;
+                return Ok(());
+            }
+            let parsed = serde_json::from_value::<SessionNotification>(params.clone());
+            let Ok(parsed) = parsed else {
+                tracing::warn!("malformed idle ACP session update");
+                return Ok(());
+            };
+            update_live_settings(&parsed.update, runtime_handles, session_id)
+                .await
+                .map_err(|_| Error::internal_error())?;
+            item_projection
+                .observe(&parsed.update)
+                .map_err(|_| Error::internal_error())
+        }
+        Dispatch::Notification(_) | Dispatch::Response(_, _) => Ok(()),
+    }
+}
+
+async fn update_live_settings(
+    update: &SessionUpdate,
+    handles: &ProviderSessionRuntimeHandles,
+    session_id: &str,
+) -> Result<(), crate::EventSinkOverflow> {
+    let (catalog, capability_change) = match update {
+        SessionUpdate::CurrentModeUpdate(mode) => {
+            let mut catalogs = handles.session_settings.write().await;
+            let catalog = catalogs.entry(session_id.to_owned()).or_default();
+            let current_mode = mode.current_mode_id.0.to_string();
+            catalog.current_mode = Some(current_mode.clone());
+            if let Some(option) = catalog
+                .config_options
+                .iter_mut()
+                .find(|option| option.category == Some(crate::ProviderSettingKind::Mode))
+            {
+                option.current_value = crate::ProviderConfigValue::Select(current_mode);
+            }
+            (Some(catalog.clone()), Some(true))
+        }
+        SessionUpdate::ConfigOptionUpdate(config) => {
+            let mut catalogs = handles.session_settings.write().await;
+            let catalog = catalogs.entry(session_id.to_owned()).or_default();
+            replace_catalog_config_options(catalog, &config.config_options);
+            if let Some(mode) = catalog.config_option(crate::ProviderSettingKind::Mode)
+                && let crate::ProviderConfigValue::Select(value) = &mode.current_value
+            {
+                catalog.current_mode = Some(value.clone());
+            }
+            (Some(catalog.clone()), Some(false))
+        }
+        _ => (None, None),
+    };
+    if let Some(catalog) = catalog {
+        *handles.last_settings_catalog.write().await = Some(catalog);
+    }
+    if let Some(modes_update) = capability_change {
+        let changed = {
+            let mut reports = handles.session_capabilities.write().await;
+            reports.get_mut(session_id).and_then(|report| {
+                let flag = if modes_update {
+                    &mut report.supports_modes
+                } else {
+                    &mut report.supports_config_options
+                };
+                if *flag {
+                    None
+                } else {
+                    *flag = true;
+                    Some(report.to_session_model())
+                }
+            })
+        };
+        if let Some(capabilities) = changed {
+            handles.event_sink.publish(
+                session_id,
+                SessionEvent::CapabilitiesChanged { capabilities },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 async fn record_prompt_update(
     update: SessionMessage,
     output: &mut String,
     output_limit_tx: &mut Option<tokio::sync::mpsc::UnboundedSender<()>>,
     unknown_update_kinds: &mut HashSet<String>,
-    item_projection: &mut ProviderItemProjection,
+    session_context: &mut SessionUpdateContext<'_>,
     #[cfg(any(test, feature = "test-observation"))] tool_calls: &mut HashMap<
         String,
         ExternalProviderToolCall,
@@ -146,7 +265,8 @@ async fn record_prompt_update(
                         .and_then(serde_json::Value::as_str),
                     _ => None,
                 };
-                if item_projection
+                if session_context
+                    .item_projection
                     .observe_unknown(diagnostic_kind, content)
                     .is_err()
                     && let Some(limit_tx) = output_limit_tx.take()
@@ -157,7 +277,21 @@ async fn record_prompt_update(
             }
             let handled = MatchDispatch::new(dispatch)
                 .if_notification(async |notification: SessionNotification| {
-                    if item_projection.observe(&notification.update).is_err()
+                    if update_live_settings(
+                        &notification.update,
+                        session_context.runtime_handles,
+                        session_context.session_id,
+                    )
+                    .await
+                    .is_err()
+                        && let Some(limit_tx) = output_limit_tx.take()
+                    {
+                        let _result = limit_tx.send(());
+                    }
+                    if session_context
+                        .item_projection
+                        .observe(&notification.update)
+                        .is_err()
                         && let Some(limit_tx) = output_limit_tx.take()
                     {
                         let _result = limit_tx.send(());

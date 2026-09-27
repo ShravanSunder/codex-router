@@ -182,6 +182,7 @@ enum ProviderCommand<P: InteractionPort> {
 enum PendingSessionAdmission<P: InteractionPort> {
     Create {
         result: Box<Result<ProviderSessionRegistration<P>, ExternalProviderRuntimeError>>,
+        activation: tokio::sync::oneshot::Sender<()>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
         >,

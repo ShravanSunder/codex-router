@@ -90,6 +90,7 @@ pub(super) async fn run_create_admission<P: InteractionPort>(inputs: CreateAdmis
     let (registration_tx, mut registration_rx) = tokio::sync::oneshot::channel::<
         Result<ProviderSessionRegistration<P>, ExternalProviderRuntimeError>,
     >();
+    let (activation_tx, activation_rx) = tokio::sync::oneshot::channel();
     let session_shutdown = shutdown.clone();
     let session_frame_observation = Arc::clone(&frame_observation);
     let session_future = connection
@@ -188,6 +189,9 @@ pub(super) async fn run_create_admission<P: InteractionPort>(inputs: CreateAdmis
                     setup_error,
                 }))
                 .map_err(|_| agent_client_protocol::Error::internal_error())?;
+            activation_rx
+                .await
+                .map_err(|_| agent_client_protocol::Error::internal_error())?;
             run_provider_session(
                 session,
                 command_rx,
@@ -220,6 +224,7 @@ pub(super) async fn run_create_admission<P: InteractionPort>(inputs: CreateAdmis
         &shutdown,
         PendingSessionAdmission::Create {
             result: Box::new(result),
+            activation: activation_tx,
             reply,
         },
     )
