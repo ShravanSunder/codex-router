@@ -30,6 +30,7 @@ pub struct HubSessionSummary {
     pub preview: String,
     pub name: Option<String>,
     pub model: Option<String>,
+    pub mode: Option<String>,
     pub state: SessionState,
 }
 

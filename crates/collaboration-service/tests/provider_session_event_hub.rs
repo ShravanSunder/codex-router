@@ -7,8 +7,8 @@ use collaboration_service::{
 };
 use message_board::SessionRef;
 use session_event_model::{
-    PendingInteraction, SessionEvent, SessionItem, SessionItemKind, SessionState, StopReason,
-    TurnOutcome,
+    ConfigValue, ConfigValueState, PendingInteraction, SessionEvent, SessionItem, SessionItemKind,
+    SessionSettings, SessionState, StopReason, TurnOutcome,
 };
 use tokio::sync::Mutex;
 
@@ -246,10 +246,47 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
     );
     ensure_eq!(cold[0].state, SessionState::Unloaded);
     ensure_eq!(cold[0].preview, "");
-    ensure!(cold[0].name.is_none() && cold[0].model.is_none());
+    ensure!(cold[0].name.is_none() && cold[0].model.is_none() && cold[0].mode.is_none());
     let mut cold_attachment = hub.attach(target.clone()).await?;
     ensure!(cold_attachment.snapshot.is_empty());
     ensure_eq!(hub.state(target.clone()).await?, SessionState::Unloaded);
+
+    hub.publish(
+        target.clone(),
+        SessionEvent::SettingsChanged {
+            settings: SessionSettings {
+                mode: Some("default".into()),
+                model: Some("model-a".into()),
+                effort: None,
+                config: vec![ConfigValue {
+                    id: "thinking".into(),
+                    value: ConfigValueState::Boolean(false),
+                }],
+            },
+        },
+    )
+    .await?;
+    let created = hub.sessions(target.endpoint.clone()).await?;
+    ensure_eq!(created[0].model.as_deref(), Some("model-a"));
+    ensure_eq!(created[0].mode.as_deref(), Some("default"));
+    hub.publish(
+        target.clone(),
+        SessionEvent::SettingsChanged {
+            settings: SessionSettings {
+                mode: Some("ask".into()),
+                model: Some("model-b".into()),
+                effort: Some("high".into()),
+                config: vec![ConfigValue {
+                    id: "thinking".into(),
+                    value: ConfigValueState::Boolean(true),
+                }],
+            },
+        },
+    )
+    .await?;
+    let updated = hub.sessions(target.endpoint.clone()).await?;
+    ensure_eq!(updated[0].model.as_deref(), Some("model-b"));
+    ensure_eq!(updated[0].mode.as_deref(), Some("ask"));
 
     hub.publish(
         target.clone(),
@@ -259,18 +296,27 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
         },
     )
     .await?;
-    ensure_eq!(
-        receive_hub_event(&mut cold_attachment.receiver)
-            .await?
-            .sequence,
-        1
-    );
+    let mut observed = Vec::new();
+    for _ in 0..3 {
+        observed.push(
+            receive_hub_event(&mut cold_attachment.receiver)
+                .await?
+                .sequence,
+        );
+    }
+    ensure_eq!(observed, vec![1, 2, 3]);
     let live = hub.sessions(target.endpoint.clone()).await?;
     ensure_eq!(live[0].state, SessionState::Running);
     ensure_eq!(
         live[0].approver,
-        message_board::Identity::Session { session: target }
+        message_board::Identity::Session {
+            session: target.clone()
+        }
     );
+    hub.begin_history_unavailable(target.clone()).await?;
+    let resumed = hub.sessions(target.endpoint.clone()).await?;
+    ensure_eq!(resumed[0].model.as_deref(), Some("model-b"));
+    ensure_eq!(resumed[0].mode.as_deref(), Some("ask"));
     drop(hub);
     let restarted_store =
         ProviderOperationStore::open(&root.path().join("operations.sqlite")).await?;
@@ -280,6 +326,7 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
         .await?;
     ensure_eq!(restarted.len(), 1);
     ensure_eq!(restarted[0].state, SessionState::Unloaded);
+    ensure!(restarted[0].model.is_none() && restarted[0].mode.is_none());
     ensure_eq!(restarted[0].approver, live[0].approver);
     Ok(())
 }
