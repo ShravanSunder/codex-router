@@ -1226,6 +1226,7 @@ async fn populated_old_approval_reader_survives_human_interaction_history() {
             requester,
             human.clone(),
             typed_approval_request("human-approval-1"),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("record new interaction");
@@ -1295,6 +1296,7 @@ async fn typed_interaction_rejects_self_approver_and_corrupt_stored_rows() {
                 requester.clone(),
                 Identity::Session { session: requester },
                 typed_approval_request("self-request"),
+                tokio_util::sync::CancellationToken::new(),
             )
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::SelfApprover)
@@ -1359,7 +1361,12 @@ async fn typed_approval_preserves_cursor_choices_and_returns_exact_option_id() {
         .expect("options"),
     };
     let receiver = broker
-        .request_typed_approval(requester, approver.clone(), request)
+        .request_typed_approval(
+            requester,
+            approver.clone(),
+            request,
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .expect("pending approval");
     let listed = broker.list_typed_approvals(true).await;
@@ -1427,7 +1434,12 @@ async fn claude_choices_resolve_legacy_decisions_without_inventing_an_option() {
     }))
     .expect("Claude choices");
     let receiver = broker
-        .request_typed_approval(requester, actor.clone(), request)
+        .request_typed_approval(
+            requester,
+            actor.clone(),
+            request,
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .expect("pending request");
     let params = |decision| ApprovalDecideParams {
@@ -1700,6 +1712,7 @@ async fn restart_cancels_populated_pending_interaction_history() {
             requester.clone(),
             approver.clone(),
             typed_approval_request("restart-approval"),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("approval");

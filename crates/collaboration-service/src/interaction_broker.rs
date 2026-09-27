@@ -247,11 +247,17 @@ pub struct ServiceApprovalBroker {
     history_path: PathBuf,
     history: Arc<Mutex<Vec<ApprovalRequestRecord>>>,
     interaction_history: InteractionHistoryStore,
-    typed_pending_approvals:
-        Mutex<BTreeMap<String, oneshot::Sender<session_event_model::OfferedOptionId>>>,
+    typed_pending_approvals: Mutex<BTreeMap<String, TypedPendingApproval>>,
     pending_questions: Mutex<BTreeMap<String, oneshot::Sender<QuestionResponse>>>,
     #[cfg(test)]
     external_after_record: Mutex<Option<ExternalAdmissionPause>>,
+    #[cfg(test)]
+    typed_after_record: Mutex<Option<ExternalAdmissionPause>>,
+}
+
+struct TypedPendingApproval {
+    completion: oneshot::Sender<session_event_model::OfferedOptionId>,
+    turn_cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl ServiceApprovalBroker {
@@ -296,6 +302,8 @@ impl ServiceApprovalBroker {
             pending_questions: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             external_after_record: Mutex::new(None),
+            #[cfg(test)]
+            typed_after_record: Mutex::new(None),
         }))
     }
 
@@ -395,12 +403,19 @@ impl ServiceApprovalBroker {
         requester: message_board::SessionRef,
         approver: message_board::Identity,
         request: session_event_model::ApprovalRequest,
+        turn_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<oneshot::Receiver<session_event_model::OfferedOptionId>, InteractionHistoryError>
     {
         let request_id = request.request_id.clone();
         let mut pending = self.typed_pending_approvals.lock().await;
         if pending.contains_key(&request_id) {
             return Err(InteractionHistoryError::AlreadyExists);
+        }
+        if turn_cancellation.is_cancelled() {
+            self.interaction_history
+                .record_cancelled_approval(requester, approver, request, "turnCancelled")
+                .await?;
+            return Err(InteractionHistoryError::NotPending);
         }
         self.interaction_history
             .record(InteractionHistoryRecord::Approval {
@@ -410,8 +425,32 @@ impl ServiceApprovalBroker {
                 state: InteractionHistoryState::Pending,
             })
             .await?;
+        #[cfg(test)]
+        if let Some(pause) = self.typed_after_record.lock().await.take() {
+            let _ = pause.recorded.send(());
+            let _ = pause.resume.await;
+        }
+        if turn_cancellation.is_cancelled() {
+            self.interaction_history
+                .cancel_approval(&request_id, "turnCancelled")
+                .await?;
+            return Err(InteractionHistoryError::NotPending);
+        }
         let (sender, receiver) = oneshot::channel();
-        pending.insert(request_id, sender);
+        pending.insert(
+            request_id.clone(),
+            TypedPendingApproval {
+                completion: sender,
+                turn_cancellation: turn_cancellation.clone(),
+            },
+        );
+        if turn_cancellation.is_cancelled() {
+            self.interaction_history
+                .cancel_approval(&request_id, "turnCancelled")
+                .await?;
+            pending.remove(&request_id);
+            return Err(InteractionHistoryError::NotPending);
+        }
         Ok(receiver)
     }
 
@@ -495,6 +534,22 @@ impl ServiceApprovalBroker {
         Ok(cancelled.len())
     }
 
+    pub async fn cancel_typed_approvals(
+        &self,
+        requester: &message_board::SessionRef,
+        reason: &str,
+    ) -> Result<usize, InteractionHistoryError> {
+        let mut pending = self.typed_pending_approvals.lock().await;
+        let cancelled = self
+            .interaction_history
+            .cancel_approvals(requester, reason)
+            .await?;
+        for request_id in &cancelled {
+            pending.remove(request_id);
+        }
+        Ok(cancelled.len())
+    }
+
     pub async fn cancel_question(
         &self,
         request_id: &str,
@@ -529,6 +584,15 @@ impl ServiceApprovalBroker {
         acknowledge_persistent: bool,
     ) -> Result<session_event_model::OfferedOptionId, InteractionHistoryError> {
         let mut pending = self.typed_pending_approvals.lock().await;
+        if let Some(approval) = pending.get(request_id)
+            && approval.turn_cancellation.is_cancelled()
+        {
+            self.interaction_history
+                .cancel_approval(request_id, "turnCancelled")
+                .await?;
+            pending.remove(request_id);
+            return Err(InteractionHistoryError::NotPending);
+        }
         if !pending.contains_key(request_id) {
             if let Some(InteractionHistoryRecord::Approval { state, .. }) =
                 self.interaction_history.interaction(request_id).await
@@ -546,6 +610,7 @@ impl ServiceApprovalBroker {
             .remove(request_id)
             .ok_or(InteractionHistoryError::NotPending)?;
         sender
+            .completion
             .send(selected.clone())
             .map_err(|_| InteractionHistoryError::Unavailable)?;
         Ok(selected)
