@@ -176,6 +176,18 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
             vec![(binding(provider_endpoint.clone(), "cursor")?, runtime)],
         )
         .await?;
+        let mut models = backend
+            .provider_model_catalog(&provider_endpoint)
+            .ok_or("provider model watch missing")?;
+        let default_models = models.borrow().clone();
+        ensure_eq!(
+            default_models.as_slice(),
+            &[collaboration_service::ProviderModelEntry::try_new(
+                "provider-default".into(),
+                "provider default".into(),
+                "The provider selects its default model".into(),
+            )?]
+        );
         let operation_id = OperationId::generate();
         operation(
             backend
@@ -189,8 +201,8 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                     endpoint: provider_endpoint.clone(),
                     generation: Some(generation()?),
                     working_directory: working_directory()?,
-                    created_by: creator.clone(),
-                    approver: creator.clone(),
+                    created_by: (creator.clone()).into(),
+                    approver: (creator.clone()).into(),
                     requested_policy: policy(),
                 })
                 .await,
@@ -211,6 +223,24 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                 };
                 ensure_eq!(effective_settings.mode.as_deref(), Some("ask"));
                 ensure_eq!(effective_settings.model.as_deref(), Some("b"));
+                tokio::time::timeout(std::time::Duration::from_secs(2), models.changed()).await??;
+                ensure_eq!(models.borrow().len(), 2);
+                let advertised_models = models.borrow().clone();
+                ensure_eq!(
+                    advertised_models.as_slice(),
+                    &[
+                        collaboration_service::ProviderModelEntry::try_new(
+                            "a".into(),
+                            "a".into(),
+                            "Advertised by the provider".into()
+                        )?,
+                        collaboration_service::ProviderModelEntry::try_new(
+                            "b".into(),
+                            "b".into(),
+                            "Advertised by the provider".into()
+                        )?,
+                    ]
+                );
                 let inspected = backend
                     .inspect_session(ProviderSessionInspectRequest { target })
                     .await
@@ -250,7 +280,7 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                 let denied = backend
                     .settings_set(ProviderSettingsSetRequest {
                         target: target.clone(),
-                        actor: wrong_actor,
+                        actor: (wrong_actor).into(),
                         setting: ProviderSettingName::Model,
                         value: "b".into(),
                     })
@@ -260,7 +290,7 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                 let accepted = backend
                     .settings_accept(ProviderSettingsAcceptRequest {
                         target: target.clone(),
-                        actor: creator.clone(),
+                        actor: (creator.clone()).into(),
                     })
                     .await
                     .map_err(|error| error.message)?;
@@ -687,8 +717,8 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
         endpoint: endpoint.clone(),
         generation: Some(generation()?),
         working_directory: working_directory()?,
-        created_by: requester.clone(),
-        approver: requester.clone(),
+        created_by: (requester.clone()).into(),
+        approver: (requester.clone()).into(),
         requested_policy: policy(),
     };
     let detached_create = backend.create(create_request.clone());
@@ -709,8 +739,8 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
         .session_record(&target)
         .await?
         .ok_or("created session record missing")?;
-    ensure_eq!(session_record.created_by, requester);
-    ensure_eq!(session_record.approver, requester);
+    ensure_eq!(session_record.created_by, requester.clone().into());
+    ensure_eq!(session_record.approver, requester.clone().into());
     stored.close().await?;
 
     let prompt_operation_id = OperationId::generate();
@@ -721,8 +751,8 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 operation_id: prompt_operation_id.clone(),
                 target: target.clone(),
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester.clone(),
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("hold".to_owned())?,
                 },
@@ -740,8 +770,8 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 target_operation_id: prompt_operation_id.clone(),
                 target: target.clone(),
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester.clone(),
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
             })
             .await,
     )?;
@@ -773,8 +803,8 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 target_operation_id: prompt_operation_id,
                 target,
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester.clone(),
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
             })
             .await,
     )?;
@@ -808,8 +838,8 @@ async fn supervisor_shutdown_joins_runtime_and_settles_held_work() -> TestResult
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -829,8 +859,8 @@ async fn supervisor_shutdown_joins_runtime_and_settles_held_work() -> TestResult
                 operation_id: prompt_id.clone(),
                 target,
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester,
+                requested_by: (requester.clone()).into(),
+                approver: (requester).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("hold".to_owned())?,
                 },
@@ -878,8 +908,8 @@ async fn supervisor_shutdown_drains_saturated_load_completions_and_preserves_unk
                     target: actor(provider_endpoint.clone(), &format!("held-load-{index}"))?,
                     generation: Some(generation()?),
                     working_directory: working_directory()?,
-                    requested_by: requester.clone(),
-                    approver: requester.clone(),
+                    requested_by: (requester.clone()).into(),
+                    approver: (requester.clone()).into(),
                     requested_policy: policy(),
                 })
                 .await,
@@ -941,8 +971,8 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: approver.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (approver.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -963,8 +993,8 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
                 operation_id: prompt_operation_id.clone(),
                 target,
                 generation: Some(generation()?),
-                requested_by: requester,
-                approver: approver.clone(),
+                requested_by: (requester).into(),
+                approver: (approver.clone()).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("request permission".to_owned())?,
                 },
@@ -1059,8 +1089,8 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: approver.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (approver.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1080,8 +1110,8 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
                 operation_id: prompt_operation_id.clone(),
                 target,
                 generation: Some(generation()?),
-                requested_by: requester,
-                approver: approver.clone(),
+                requested_by: (requester).into(),
+                approver: (approver.clone()).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("request permission".to_owned())?,
                 },
@@ -1177,8 +1207,8 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
                 target: target.clone(),
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                requested_by: requester.clone(),
-                approver: requester.clone(),
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1196,8 +1226,8 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
         .session_record(&target)
         .await?
         .ok_or("loaded session record missing")?;
-    ensure_eq!(session_record.created_by, requester);
-    ensure_eq!(session_record.approver, requester);
+    ensure_eq!(session_record.created_by, requester.clone().into());
+    ensure_eq!(session_record.approver, requester.into());
     stored.close().await?;
     Ok(())
 }
@@ -1223,8 +1253,8 @@ async fn resume_and_close_are_durable_operations_and_resume_requires_advertiseme
             target: target.clone(),
             generation: Some(generation()?),
             working_directory: working_directory()?,
-            requested_by: requester.clone(),
-            approver: requester.clone(),
+            requested_by: (requester.clone()).into(),
+            approver: (requester.clone()).into(),
             requested_policy: policy(),
         })
         .await;
@@ -1250,8 +1280,8 @@ async fn resume_and_close_are_durable_operations_and_resume_requires_advertiseme
                 target: target.clone(),
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                requested_by: requester.clone(),
-                approver: requester.clone(),
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1273,8 +1303,8 @@ async fn resume_and_close_are_durable_operations_and_resume_requires_advertiseme
                 operation_id: close_id.clone(),
                 target: target.clone(),
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester,
+                requested_by: (requester.clone()).into(),
+                approver: (requester).into(),
             })
             .await,
     )?;
@@ -1313,8 +1343,8 @@ sys.stdin.readline()
                 endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester,
+                created_by: (requester.clone()).into(),
+                approver: (requester).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1373,8 +1403,8 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
                 endpoint: provider_endpoint.clone(),
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1395,8 +1425,8 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
                 endpoint: provider_endpoint.clone(),
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1411,8 +1441,8 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester,
+                created_by: (requester.clone()).into(),
+                approver: (requester).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1453,8 +1483,8 @@ async fn prompt_authentication_required_is_no_effect_and_fresh_prompt_retains_fi
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1473,8 +1503,8 @@ async fn prompt_authentication_required_is_no_effect_and_fresh_prompt_retains_fi
         operation_id,
         target: target.clone(),
         generation: Some(generation().expect("generation")),
-        requested_by: requester.clone(),
-        approver: requester.clone(),
+        requested_by: (requester.clone()).into(),
+        approver: (requester.clone()).into(),
         prompt: MessageContent::HumanUser {
             text: MessageText::try_from("continue".to_owned()).expect("prompt"),
         },
@@ -1532,8 +1562,8 @@ async fn provider_prompt_error_text_cannot_become_a_local_no_effect_rejection() 
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1553,8 +1583,8 @@ async fn provider_prompt_error_text_cannot_become_a_local_no_effect_rejection() 
                 operation_id: prompt_id.clone(),
                 target,
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester,
+                requested_by: (requester.clone()).into(),
+                approver: (requester).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("continue".to_owned())?,
                 },

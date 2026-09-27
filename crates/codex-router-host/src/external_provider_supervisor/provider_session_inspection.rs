@@ -37,10 +37,8 @@ pub(super) async fn inspect(
     if let Some(catalog) = &catalog {
         supervisor
             .inner
-            .settings_catalogs
-            .lock()
-            .await
-            .insert(target.clone(), catalog.clone());
+            .record_settings_catalog(target.clone(), catalog.clone())
+            .await;
     }
     let catalog = match catalog {
         Some(catalog) => Some(catalog),

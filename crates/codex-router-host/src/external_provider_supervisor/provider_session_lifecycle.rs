@@ -75,10 +75,8 @@ pub(super) fn resume(
                                 observed.model = effective.model;
                                 observed.effort = effective.effort;
                                 completion_inner
-                                    .settings_catalogs
-                                    .lock()
-                                    .await
-                                    .insert(completion_target.clone(), catalog);
+                                    .record_settings_catalog(completion_target.clone(), catalog)
+                                    .await;
                             }
                             ProviderOperationCompletion::Success {
                                 settlement: ConversationOperationSettlement::Resumed {

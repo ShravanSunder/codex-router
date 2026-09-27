@@ -48,8 +48,8 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -81,8 +81,8 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
             operation_id: first_operation_id,
             target: target.clone(),
             generation: Some(binding.generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("first".to_owned()).expect("prompt"),
             },
@@ -270,8 +270,8 @@ async fn permanent_queued_load_failure_is_inspectable_and_does_not_stop_fifo() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -398,8 +398,8 @@ async fn failed_queued_prompt_advances_to_the_next_accepted_item() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -421,8 +421,8 @@ async fn failed_queued_prompt_advances_to_the_next_accepted_item() {
             operation_id: collaboration_protocol::OperationId::generate(),
             target: target.clone(),
             generation: Some(binding.generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("active prompt".to_owned()).expect("prompt"),
             },
@@ -594,8 +594,8 @@ async fn provider_retirement_marks_queued_items_not_submitted() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -625,8 +625,8 @@ async fn provider_retirement_marks_queued_items_not_submitted() {
             operation_id: collaboration_protocol::OperationId::generate(),
             target: target.clone(),
             generation: Some(binding.generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("active".to_owned()).expect("prompt"),
             },

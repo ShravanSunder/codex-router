@@ -9,11 +9,11 @@ use std::{
 };
 
 use acp_client_runtime::{
-    EventSinkOverflow, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,
+    EventSinkClosed, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,
 };
 use collaboration_service::ProviderSessionEventHub;
 use message_board::{SessionEndpointRef, SessionId, SessionRef};
-use session_event_model::SessionEvent;
+use session_event_model::{SessionEvent, SessionItemKind};
 use tokio::{
     sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
@@ -43,6 +43,7 @@ pub(crate) struct HubSessionEventSink {
     backlog: Arc<AtomicUsize>,
     backlog_warned: StdMutex<HashSet<String>>,
     not_publishing: Arc<StdMutex<HashSet<String>>>,
+    catalog_refresh: StdMutex<Option<mpsc::UnboundedSender<String>>>,
 }
 
 impl HubSessionEventSink {
@@ -103,6 +104,7 @@ impl HubSessionEventSink {
             backlog,
             backlog_warned: StdMutex::new(HashSet::new()),
             not_publishing,
+            catalog_refresh: StdMutex::new(None),
         }
     }
 
@@ -115,14 +117,14 @@ impl HubSessionEventSink {
         })
     }
 
-    fn enqueue(&self, session_id: &str, command: HubCommand) -> Result<(), EventSinkOverflow> {
+    fn enqueue(&self, session_id: &str, command: HubCommand) -> Result<(), EventSinkClosed> {
         if self
             .not_publishing
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(session_id)
         {
-            return Err(EventSinkOverflow);
+            return Err(EventSinkClosed);
         }
         self.backlog.fetch_add(1, Ordering::Relaxed);
         let sent = self
@@ -138,7 +140,7 @@ impl HubSessionEventSink {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(session_id.to_owned());
             tracing::error!(session_id, "provider Session event consumer is unavailable");
-            return Err(EventSinkOverflow);
+            return Err(EventSinkClosed);
         }
         if self.backlog.load(Ordering::Relaxed) > 10_000
             && self
@@ -153,6 +155,10 @@ impl HubSessionEventSink {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), HistoryReplayUnavailable> {
+        self.catalog_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         self.sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -161,6 +167,13 @@ impl HubSessionEventSink {
             consumer.await.map_err(|_| HistoryReplayUnavailable)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn install_catalog_refresh(&self, sender: mpsc::UnboundedSender<String>) {
+        *self
+            .catalog_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
     }
 
     pub(crate) async fn begin_history_unavailable(
@@ -200,9 +213,25 @@ impl SessionEventSink for HubSessionEventSink {
         })
     }
 
-    fn publish(&self, session_id: &str, event: SessionEvent) -> Result<(), EventSinkOverflow> {
-        let session = self.session(session_id).map_err(|_| EventSinkOverflow)?;
-        self.enqueue(session_id, HubCommand::Publish { session, event })
+    fn publish(&self, session_id: &str, event: SessionEvent) -> Result<(), EventSinkClosed> {
+        let changes_config = matches!(
+            &event,
+            SessionEvent::ItemStarted { item }
+                | SessionEvent::ItemUpdated { item }
+                if matches!(item.kind, SessionItemKind::ConfigChange)
+        );
+        let session = self.session(session_id).map_err(|_| EventSinkClosed)?;
+        self.enqueue(session_id, HubCommand::Publish { session, event })?;
+        if changes_config
+            && let Some(sender) = self
+                .catalog_refresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+        {
+            let _ = sender.send(session_id.to_owned());
+        }
+        Ok(())
     }
 }
 
@@ -293,8 +322,8 @@ mod tests {
         let request_task = tokio::spawn({
             let port = Arc::clone(&port);
             let context = crate::ExternalProviderApprovalContext {
-                requester: approver.clone(),
-                approver: approver.clone(),
+                requester: (approver.clone()).into(),
+                approver: (approver.clone()).into(),
                 target,
                 operation_id: OperationId::generate(),
                 binding_generation: CodexGeneration {
@@ -357,8 +386,8 @@ mod tests {
         let question_task = tokio::spawn({
             let port = Arc::clone(&port);
             let context = crate::ExternalProviderApprovalContext {
-                requester: approver.clone(),
-                approver: approver.clone(),
+                requester: (approver.clone()).into(),
+                approver: (approver.clone()).into(),
                 target: question_target,
                 operation_id: OperationId::generate(),
                 binding_generation: CodexGeneration {
@@ -479,5 +508,41 @@ mod tests {
             &attached.snapshot[0].event,
             SessionEvent::TurnStarted { turn_id, .. } if turn_id == "replayed-turn"
         ));
+    }
+
+    #[tokio::test]
+    async fn idle_config_change_notifies_provider_catalog_worker() {
+        let root = tempfile::tempdir().expect("temporary store");
+        let store = ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("provider store");
+        let hub = Arc::new(ProviderSessionEventHub::new(Arc::new(Mutex::new(store))));
+        let endpoint = SessionEndpointRef {
+            service_id: ServiceId::try_from("00000000-0000-4000-8000-000000000001".to_owned())
+                .expect("service"),
+            endpoint_id: EndpointId::try_from("fixture-provider".to_owned()).expect("endpoint"),
+        };
+        let sink = HubSessionEventSink::new(hub, endpoint);
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        sink.install_catalog_refresh(sender);
+        sink.publish(
+            "session-one",
+            SessionEvent::ItemStarted {
+                item: session_event_model::SessionItem {
+                    item_id: "config-1".into(),
+                    kind: SessionItemKind::ConfigChange,
+                    text: Some("model options updated".into()),
+                },
+            },
+        )
+        .expect("publish config update");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+                .await
+                .expect("catalog notification")
+                .as_deref(),
+            Some("session-one")
+        );
+        sink.shutdown().await.expect("drain");
     }
 }

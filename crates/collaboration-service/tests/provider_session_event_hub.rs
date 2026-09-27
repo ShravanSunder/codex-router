@@ -229,8 +229,8 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: stored_target.clone(),
-            approver: stored_target,
+            created_by: stored_target.clone().into(),
+            approver: stored_target.into(),
             updated_at_ms: 3_000,
         })
         .await?;
@@ -281,6 +281,40 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
     ensure_eq!(restarted.len(), 1);
     ensure_eq!(restarted[0].state, SessionState::Unloaded);
     ensure_eq!(restarted[0].approver, live[0].approver);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sessions_inventory_preserves_human_approver_after_restart() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("operations.sqlite");
+    let mut store = ProviderOperationStore::open(&path).await?;
+    let target = session()?;
+    let stored_target: collaboration_protocol::SessionRef =
+        serde_json::from_value(serde_json::to_value(&target)?)?;
+    let human: collaboration_protocol::ProviderIdentity =
+        serde_json::from_value(serde_json::json!({"humanId":"owner"}))?;
+    store
+        .record_session(&ProviderSessionRecord {
+            target: stored_target,
+            working_directory: ProviderWorkingDirectory::try_from(
+                root.path().display().to_string(),
+            )?,
+            requested_policy: ProviderRequestedPolicy {
+                access: RouterAccess::WriteRestricted,
+            },
+            created_by: human.clone(),
+            approver: human,
+            updated_at_ms: 3_000,
+        })
+        .await?;
+    store.close().await?;
+    let reopened = ProviderOperationStore::open(&path).await?;
+    let hub = ProviderSessionEventHub::new(Arc::new(Mutex::new(reopened)));
+    let rows = hub.sessions(target.endpoint).await?;
+    ensure_eq!(rows.len(), 1);
+    ensure!(matches!(&rows[0].approver,
+        message_board::Identity::Human { human_id } if human_id.as_str() == "owner"));
     Ok(())
 }
 

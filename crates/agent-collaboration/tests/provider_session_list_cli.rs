@@ -47,8 +47,8 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: creator.clone(),
-            approver: creator,
+            created_by: creator.clone().into(),
+            approver: creator.into(),
             updated_at_ms: 3_000,
         })
         .await

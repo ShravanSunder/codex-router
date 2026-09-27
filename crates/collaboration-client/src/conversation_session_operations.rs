@@ -83,8 +83,8 @@ impl ConversationClient {
                     target: target.clone(),
                     generation: input.generation,
                     working_directory,
-                    requested_by: input.requested_by.clone(),
-                    approver: input.approver.unwrap_or(input.requested_by),
+                    requested_by: input.requested_by.clone().into(),
+                    approver: input.approver.unwrap_or(input.requested_by).into(),
                     requested_policy: ProviderRequestedPolicy {
                         access: input.access,
                     },
@@ -207,8 +207,8 @@ impl ConversationClient {
                     input_id: None,
                     target: target.clone(),
                     generation: input.generation,
-                    requested_by: input.requested_by.clone(),
-                    approver: input.approver.unwrap_or(input.requested_by),
+                    requested_by: input.requested_by.clone().into(),
+                    approver: input.approver.unwrap_or(input.requested_by).into(),
                     prompt: input.message.into(),
                 };
                 let wait_seconds = provider_wait_seconds(timeout)?;
@@ -260,8 +260,8 @@ impl ConversationClient {
                     target_operation_id: input.target_operation_id,
                     target: input.target,
                     generation: input.generation,
-                    requested_by: input.requested_by.clone(),
-                    approver: input.approver.unwrap_or(input.requested_by),
+                    requested_by: input.requested_by.clone().into(),
+                    approver: input.approver.unwrap_or(input.requested_by).into(),
                 })
                 .await?),
         }

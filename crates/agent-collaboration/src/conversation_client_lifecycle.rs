@@ -3,7 +3,7 @@
 use super::*;
 use collaboration_client::protocol::{
     ConversationCloseRequest, ConversationOperationWaitRequest, ConversationResumeRequest,
-    PositiveSeconds, ProviderRequestedPolicy, ProviderWorkingDirectory,
+    PositiveSeconds, ProviderIdentity, ProviderRequestedPolicy, ProviderWorkingDirectory,
 };
 
 pub(crate) fn run_resume(args: LoadArguments) -> i32 {
@@ -72,23 +72,29 @@ pub(crate) fn run_resume(args: LoadArguments) -> i32 {
         Err(_) => return 3,
     };
     runtime.block_on(async move {
-        let requested_by =
-            match current_session_ref(&target.endpoint.service_id, args.from.as_deref()) {
-                Ok(value) => value,
-                Err(message) => {
-                    return crate::endpoint_commands::report_failure(
-                        "invalidField",
-                        &message,
-                        2,
-                        args.json,
-                    );
-                }
-            };
-        let approver =
-            match parse_optional_session_ref(args.approver.as_deref(), "--approver", args.json) {
-                Ok(value) => value.unwrap_or_else(|| requested_by.clone()),
-                Err(exit) => return exit,
-            };
+        let requested_by = match lifecycle_actor(&target.endpoint.service_id, args.from.as_deref())
+        {
+            Ok(value) => value,
+            Err(message) => {
+                return crate::endpoint_commands::report_failure(
+                    "invalidField",
+                    &message,
+                    2,
+                    args.json,
+                );
+            }
+        };
+        let approver = match lifecycle_approver(args.approver.as_deref(), &requested_by) {
+            Ok(value) => value,
+            Err(message) => {
+                return crate::endpoint_commands::report_failure(
+                    "invalidField",
+                    message,
+                    2,
+                    args.json,
+                );
+            }
+        };
         let mut client = match ControlClient::connect(
             &directory,
             "agent-collaboration",
@@ -169,23 +175,29 @@ pub(crate) fn run_close(args: CloseArguments) -> i32 {
         Err(_) => return 3,
     };
     runtime.block_on(async move {
-        let requested_by =
-            match current_session_ref(&target.endpoint.service_id, args.from.as_deref()) {
-                Ok(value) => value,
-                Err(message) => {
-                    return crate::endpoint_commands::report_failure(
-                        "invalidField",
-                        &message,
-                        2,
-                        args.json,
-                    );
-                }
-            };
-        let approver =
-            match parse_optional_session_ref(args.approver.as_deref(), "--approver", args.json) {
-                Ok(value) => value.unwrap_or_else(|| requested_by.clone()),
-                Err(exit) => return exit,
-            };
+        let requested_by = match lifecycle_actor(&target.endpoint.service_id, args.from.as_deref())
+        {
+            Ok(value) => value,
+            Err(message) => {
+                return crate::endpoint_commands::report_failure(
+                    "invalidField",
+                    &message,
+                    2,
+                    args.json,
+                );
+            }
+        };
+        let approver = match lifecycle_approver(args.approver.as_deref(), &requested_by) {
+            Ok(value) => value,
+            Err(message) => {
+                return crate::endpoint_commands::report_failure(
+                    "invalidField",
+                    message,
+                    2,
+                    args.json,
+                );
+            }
+        };
         let mut client = match ControlClient::connect(
             &directory,
             "agent-collaboration",
@@ -264,5 +276,27 @@ async fn report_wait(
             &operation_id,
             json_output,
         ),
+    }
+}
+
+fn lifecycle_actor(
+    service_id: &collaboration_client::protocol::UuidIdentity,
+    actor: Option<&str>,
+) -> Result<ProviderIdentity, String> {
+    match actor {
+        Some(actor) => serde_json::from_str(actor)
+            .map_err(|_| "--from must be a SessionRef or Human identity JSON".into()),
+        None => current_session_ref(service_id, None).map(Into::into),
+    }
+}
+
+fn lifecycle_approver(
+    approver: Option<&str>,
+    default: &ProviderIdentity,
+) -> Result<ProviderIdentity, &'static str> {
+    match approver {
+        Some(approver) => serde_json::from_str(approver)
+            .map_err(|_| "--approver must be a SessionRef or Human identity JSON"),
+        None => Ok(default.clone()),
     }
 }

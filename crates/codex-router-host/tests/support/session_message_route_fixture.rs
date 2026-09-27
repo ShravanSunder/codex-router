@@ -278,8 +278,8 @@ pub(super) async fn create_provider_target(
                 working_directory.display().to_string(),
             )
             .expect("working directory"),
-            created_by: actor.clone(),
-            approver: actor,
+            created_by: (actor.clone()).into(),
+            approver: (actor).into(),
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
@@ -385,8 +385,8 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
                 service_epoch: inventory.service_epoch,
                 generation: generation_number,
             }),
-            requested_by: requester,
-            approver: approver.clone(),
+            requested_by: (requester).into(),
+            approver: (approver.clone()).into(),
             prompt: MessageContent::HumanUser {
                 text: MessageText::try_from("request permission".to_owned())
                     .expect("permission prompt"),

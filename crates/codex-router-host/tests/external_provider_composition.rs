@@ -100,8 +100,8 @@ sys.stdin.read()
                 root.path().display().to_string(),
             )
             .expect("working directory"),
-            created_by: actor.clone(),
-            approver: actor.clone(),
+            created_by: actor.clone().into(),
+            approver: actor.clone().into(),
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
@@ -129,8 +129,8 @@ sys.stdin.read()
             operation_id: prompt_operation.clone(),
             target: target.clone(),
             generation: Some(generation),
-            requested_by: actor.clone(),
-            approver: actor.clone(),
+            requested_by: actor.clone().into(),
+            approver: actor.clone().into(),
             prompt: MessageContent::Agent {
                 sender: actor,
                 text: MessageText::try_from("composition prompt".to_owned()).expect("prompt"),
@@ -248,14 +248,16 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
                     endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("endpoint"),
                 },
                 session_id: SessionId::try_from("caller".to_owned()).expect("session"),
-            },
+            }
+            .into(),
             approver: SessionRef {
                 endpoint: EndpointRef {
                     service_id,
                     endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("endpoint"),
                 },
                 session_id: SessionId::try_from("caller".to_owned()).expect("session"),
-            },
+            }
+            .into(),
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },

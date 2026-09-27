@@ -776,8 +776,13 @@ impl OperationRequest for ConversationOperationReconcileRequest {
     }
 }
 
-fn actor_matches(actor: &SessionRef, identity: &ServiceIdentity) -> bool {
-    actor.endpoint.service_id == identity.service_id
+fn actor_matches(
+    actor: &collaboration_protocol::ProviderIdentity,
+    identity: &ServiceIdentity,
+) -> bool {
+    actor
+        .session()
+        .is_none_or(|session| session.endpoint.service_id == identity.service_id)
 }
 
 fn target_matches(

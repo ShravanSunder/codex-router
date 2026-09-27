@@ -44,7 +44,11 @@ pub use session_event_hub::{
     HubEvent, HubFuture, HubSessionSummary, SessionEventAttachment, SessionEventHub,
     SessionEventHubError,
 };
+mod app_server_model_catalog;
 mod provider_conversation_backend;
+pub use app_server_model_catalog::{
+    InvalidProviderModelEntry, ProviderModelEntry, render_model_list,
+};
 mod schedule_preparation_evidence_sink;
 mod scheduled_run_contract;
 mod scheduled_run_evidence_sink;

@@ -243,8 +243,8 @@ async fn crash_child_records_durable_boundary() -> TestResult {
                 endpoint: endpoint()?,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: actor.clone(),
-                approver: actor.clone(),
+                created_by: (actor.clone()).into(),
+                approver: (actor.clone()).into(),
                 requested_policy: policy(),
             })
             .await
@@ -256,8 +256,8 @@ async fn crash_child_records_durable_boundary() -> TestResult {
                 target: target()?,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                requested_by: actor.clone(),
-                approver: actor.clone(),
+                requested_by: (actor.clone()).into(),
+                approver: (actor.clone()).into(),
                 requested_policy: policy(),
             })
             .await
@@ -399,8 +399,8 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
                 endpoint: endpoint()?,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: actor.clone(),
-                approver: actor.clone(),
+                created_by: (actor.clone()).into(),
+                approver: (actor.clone()).into(),
                 requested_policy: policy(),
             })
             .await
@@ -411,8 +411,8 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
                 target: target()?,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                requested_by: actor.clone(),
-                approver: actor.clone(),
+                requested_by: (actor.clone()).into(),
+                approver: (actor.clone()).into(),
                 requested_policy: policy(),
             })
             .await
@@ -453,8 +453,8 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
                 endpoint: endpoint()?,
                 generation: Some(restarted_generation),
                 working_directory: working_directory()?,
-                created_by: actor.clone(),
-                approver: actor,
+                created_by: (actor.clone()).into(),
+                approver: (actor).into(),
                 requested_policy: policy(),
             })
             .await
@@ -465,8 +465,8 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
                 target: target()?,
                 generation: Some(restarted_generation),
                 working_directory: working_directory()?,
-                requested_by: actor.clone(),
-                approver: actor,
+                requested_by: (actor.clone()).into(),
+                approver: (actor).into(),
                 requested_policy: policy(),
             })
             .await

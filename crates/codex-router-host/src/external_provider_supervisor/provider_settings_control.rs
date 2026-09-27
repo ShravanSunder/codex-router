@@ -4,7 +4,7 @@ use super::ExternalProviderSupervisor;
 use crate::ExternalProviderRuntimeError;
 use crate::provider_operation_settlement::effective_settings;
 use collaboration_protocol::{
-    ProviderSettingName, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
+    ProviderIdentity, ProviderSettingName, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
     ProviderSettingsFailureKind, ProviderSettingsMappingStatus, ProviderSettingsResult,
     ProviderSettingsSetRequest, SessionRef,
 };
@@ -45,6 +45,15 @@ pub(super) async fn set(
         )
         .await
         .map_err(|error| setting_error(&request, error))?;
+    if let Some(catalog) = runtime
+        .settings_catalog(&String::from(request.target.session_id.clone()))
+        .await
+    {
+        supervisor
+            .inner
+            .record_settings_catalog(request.target.clone(), catalog)
+            .await;
+    }
     Ok(result(request.target, record, observed))
 }
 
@@ -74,7 +83,7 @@ pub(super) async fn accept(
 async fn authorized_session(
     supervisor: &ExternalProviderSupervisor,
     target: &SessionRef,
-    actor: &SessionRef,
+    actor: &ProviderIdentity,
 ) -> Result<ProviderSessionRecord, ProviderSettingsFailure> {
     let record = supervisor
         .inner

@@ -85,6 +85,7 @@ fn state_notification_round_trips_without_a_session_update_kind() {
     }))
     .expect("decode state");
     assert_eq!(state.method(), "_session/state");
+    assert_eq!(state.turn, None);
     assert_eq!(
         state.state,
         ProfileState::RequiresAction {
@@ -99,6 +100,57 @@ fn state_notification_round_trips_without_a_session_update_kind() {
         serde_json::from_value::<StateNotification>(
             json!({"sessionId":"s1", "state":"requires_action"})
         )
+        .is_err()
+    );
+}
+
+#[test]
+fn state_turn_round_trips_and_absence_omits_turn_field() {
+    let running = json!({
+        "sessionId":"s1", "state":"running",
+        "turn":{"turnId":"turn-1","status":"running"}
+    });
+    let decoded: StateNotification = serde_json::from_value(running.clone()).expect("running turn");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("encode running turn"),
+        running
+    );
+
+    let ended = json!({
+        "sessionId":"s1", "state":"idle",
+        "turn":{"turnId":"turn-1","status":"completed","stopReason":"end_turn"}
+    });
+    let decoded: StateNotification = serde_json::from_value(ended.clone()).expect("ended turn");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("encode ended turn"),
+        ended
+    );
+
+    let lost = json!({
+        "sessionId":"s1", "state":"unloaded",
+        "turn":{"turnId":"turn-1","status":"lost","reason":"providerRetired"}
+    });
+    let decoded: StateNotification = serde_json::from_value(lost.clone()).expect("lost turn");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("encode lost turn"),
+        lost
+    );
+
+    let absent: StateNotification = serde_json::from_value(json!({
+        "sessionId":"s1", "state":"authentication_required"
+    }))
+    .expect("state without known turn");
+    assert!(
+        serde_json::to_value(absent)
+            .expect("encode absence")
+            .get("turn")
+            .is_none()
+    );
+    assert!(
+        serde_json::from_value::<StateNotification>(json!({
+            "sessionId":"s1", "state":"closed",
+            "turn":{"turnId":"turn-1","status":"lost"}
+        }))
         .is_err()
     );
 }

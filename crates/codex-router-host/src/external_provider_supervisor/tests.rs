@@ -168,8 +168,8 @@ async fn delivery_prompt_reports_submission_before_turn_settles() {
             operation_id: operation_id.clone(),
             target: target.clone(),
             generation: Some(generation()),
-            requested_by: requester(),
-            approver: requester(),
+            requested_by: (requester()).into(),
+            approver: (requester()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("start work".to_owned()).expect("message"),
             },
@@ -216,8 +216,8 @@ async fn delivery_prompt_without_loaded_session_is_known_not_submitted() {
                 session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
             },
             generation: Some(generation()),
-            requested_by: requester(),
-            approver: requester(),
+            requested_by: (requester()).into(),
+            approver: (requester()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("start work".to_owned()).expect("message"),
             },
@@ -301,8 +301,8 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
             operation_id,
             target: target.clone(),
             generation: Some(generation()),
-            requested_by: requester(),
-            approver: requester(),
+            requested_by: (requester()).into(),
+            approver: (requester()).into(),
             prompt,
         });
     }
@@ -373,8 +373,8 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
             operation_id: OperationId::generate(),
             target: target.clone(),
             generation: Some(generation()),
-            requested_by: requester(),
-            approver: requester(),
+            requested_by: (requester()).into(),
+            approver: (requester()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("active".to_owned()).expect("message"),
             },
@@ -410,8 +410,8 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
             operation_id: queued_id.clone(),
             target,
             generation: Some(generation()),
-            requested_by: requester(),
-            approver: requester(),
+            requested_by: (requester()).into(),
+            approver: (requester()).into(),
             prompt: queued_prompt,
         });
 
@@ -467,8 +467,8 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
                 operation_id: OperationId::generate(),
                 target: target.clone(),
                 generation: Some(generation()),
-                requested_by: requester(),
-                approver: requester(),
+                requested_by: (requester()).into(),
+                approver: (requester()).into(),
                 prompt: MessageContent::Router {
                     text: MessageText::try_from("active".to_owned()).expect("message"),
                 },
@@ -499,8 +499,8 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
         operation_id: queued_id.clone(),
         target,
         generation: Some(generation()),
-        requested_by: requester(),
-        approver: requester(),
+        requested_by: (requester()).into(),
+        approver: (requester()).into(),
         prompt: MessageContent::Router {
             text: MessageText::try_from("queued".to_owned()).expect("message"),
         },
@@ -568,8 +568,8 @@ async fn concurrent_admission_precedes_reconcile_live_state_check() {
                 generation: Some(generation()),
                 working_directory: ProviderWorkingDirectory::try_from("/tmp".to_owned())
                     .expect("working directory"),
-                created_by: requester(),
-                approver: requester(),
+                created_by: (requester()).into(),
+                approver: (requester()).into(),
                 requested_policy: ProviderRequestedPolicy {
                     access: RouterAccess::WriteRestricted,
                 },
@@ -814,8 +814,8 @@ async fn unknown_agent_stop_reason_settles_with_typed_value() {
                     session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
                 },
                 generation: Some(generation()),
-                requested_by: requester(),
-                approver: requester(),
+                requested_by: (requester()).into(),
+                approver: (requester()).into(),
                 prompt: MessageContent::Router {
                     text: MessageText::try_from("continue".to_owned()).expect("message"),
                 },

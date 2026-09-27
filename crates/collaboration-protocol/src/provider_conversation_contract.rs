@@ -1,7 +1,7 @@
 //! Provider-neutral external ACP conversation and operation contracts.
 use crate::{
     CodexGeneration, EndpointRef, MessageContent, MessageText, NonEmptyText, ObservationTimestamp,
-    PositiveSeconds, RouterAccess, SessionRef,
+    PositiveSeconds, ProviderIdentity, RouterAccess, SessionRef,
 };
 use agent_automation::OperationId;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
@@ -436,8 +436,8 @@ pub struct ConversationCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
     pub working_directory: ProviderWorkingDirectory,
-    pub created_by: SessionRef,
-    pub approver: SessionRef,
+    pub created_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub requested_policy: ProviderRequestedPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<ProviderRequestedSettings>,
@@ -451,8 +451,8 @@ pub struct ConversationLoadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
     pub working_directory: ProviderWorkingDirectory,
-    pub requested_by: SessionRef,
-    pub approver: SessionRef,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub requested_policy: ProviderRequestedPolicy,
 }
 
@@ -464,8 +464,8 @@ pub struct ConversationResumeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
     pub working_directory: ProviderWorkingDirectory,
-    pub requested_by: SessionRef,
-    pub approver: SessionRef,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub requested_policy: ProviderRequestedPolicy,
 }
 
@@ -476,8 +476,8 @@ pub struct ConversationCloseRequest {
     pub target: SessionRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
-    pub requested_by: SessionRef,
-    pub approver: SessionRef,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
@@ -489,8 +489,8 @@ pub struct ConversationPromptRequest {
     pub target: SessionRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
-    pub requested_by: SessionRef,
-    pub approver: SessionRef,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub prompt: MessageContent,
 }
 
@@ -502,8 +502,8 @@ pub struct ConversationCancelRequest {
     pub target: SessionRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
-    pub requested_by: SessionRef,
-    pub approver: SessionRef,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]

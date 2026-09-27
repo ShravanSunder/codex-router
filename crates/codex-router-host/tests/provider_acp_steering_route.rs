@@ -154,8 +154,8 @@ async fn prepared_route(
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -414,8 +414,8 @@ async fn running_claude_auto_and_steer_name_the_running_operation() {
             operation_id: running_operation.clone(),
             target: target.clone(),
             generation: Some(generation),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("hold".to_owned()).expect("prompt"),
             },

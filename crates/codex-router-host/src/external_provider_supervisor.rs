@@ -41,7 +41,7 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
 
 const MAX_RETAINED_SETTLEMENTS: usize = 256;
 
@@ -62,7 +62,10 @@ struct SupervisorInner {
     queued_operations: ProviderQueueOperationRegistry,
     hub: Option<Arc<collaboration_service::ProviderSessionEventHub>>,
     history_unavailable: Mutex<HashSet<SessionRef>>,
-    settings_catalogs: Mutex<HashMap<SessionRef, acp_client_runtime::ProviderSettingsCatalog>>,
+    settings_catalogs: Arc<Mutex<HashMap<SessionRef, acp_client_runtime::ProviderSettingsCatalog>>>,
+    model_catalogs:
+        HashMap<EndpointRef, watch::Sender<Vec<collaboration_service::ProviderModelEntry>>>,
+    catalog_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     started_at_ms: i64,
     #[cfg(test)]
     admission_test_pause: StdMutex<Option<AdmissionTestPause>>,
@@ -115,6 +118,17 @@ impl ExternalProviderSupervisor {
     }
 
     #[must_use]
+    pub fn provider_model_catalog(
+        &self,
+        endpoint: &EndpointRef,
+    ) -> Option<watch::Receiver<Vec<collaboration_service::ProviderModelEntry>>> {
+        self.inner
+            .model_catalogs
+            .get(endpoint)
+            .map(watch::Sender::subscribe)
+    }
+
+    #[must_use]
     pub fn live_operation_ids(&self) -> std::collections::HashSet<OperationId> {
         self.inner
             .live_operations
@@ -143,20 +157,49 @@ impl ExternalProviderSupervisor {
         hub: Option<Arc<collaboration_service::ProviderSessionEventHub>>,
     ) -> Result<Self, &'static str> {
         let mut runtimes = HashMap::with_capacity(bindings.len());
+        let mut model_catalogs = HashMap::with_capacity(bindings.len());
+        let mut catalog_tasks = Vec::with_capacity(bindings.len());
+        let settings_catalogs = Arc::new(Mutex::new(HashMap::new()));
         for binding in bindings {
             let endpoint = binding.identity.endpoint.clone();
-            if runtimes
-                .insert(
-                    endpoint,
-                    RuntimeBinding {
-                        identity: binding.identity,
-                        runtime: Arc::new(binding.runtime),
-                    },
-                )
-                .is_some()
-            {
+            if runtimes.contains_key(&endpoint) {
                 return Err("external provider endpoint binding must be unique");
             }
+            let runtime = Arc::new(binding.runtime);
+            let (catalog_sender, _) = watch::channel(vec![
+                crate::provider_model_catalog::provider_default_model()?,
+            ]);
+            let (refresh_sender, mut refresh_receiver) = mpsc::unbounded_channel::<String>();
+            runtime.install_catalog_refresh(refresh_sender);
+            let task_runtime = Arc::clone(&runtime);
+            let task_catalogs = Arc::clone(&settings_catalogs);
+            let task_endpoint = endpoint.clone();
+            let task_sender = catalog_sender.clone();
+            catalog_tasks.push(tokio::spawn(async move {
+                while let Some(session_id) = refresh_receiver.recv().await {
+                    let Some(catalog) = task_runtime.settings_catalog(&session_id).await else {
+                        continue;
+                    };
+                    let Ok(session_id) = SessionId::try_from(session_id) else {
+                        continue;
+                    };
+                    let target = SessionRef {
+                        endpoint: task_endpoint.clone(),
+                        session_id,
+                    };
+                    task_catalogs.lock().await.insert(target, catalog.clone());
+                    task_sender
+                        .send_replace(crate::provider_model_catalog::model_entries(&catalog));
+                }
+            }));
+            model_catalogs.insert(endpoint.clone(), catalog_sender);
+            runtimes.insert(
+                endpoint,
+                RuntimeBinding {
+                    identity: binding.identity,
+                    runtime,
+                },
+            );
         }
         Ok(Self {
             inner: Arc::new(SupervisorInner {
@@ -166,7 +209,9 @@ impl ExternalProviderSupervisor {
                 queued_operations: ProviderQueueOperationRegistry::default(),
                 hub,
                 history_unavailable: Mutex::new(HashSet::new()),
-                settings_catalogs: Mutex::new(HashMap::new()),
+                settings_catalogs,
+                model_catalogs,
+                catalog_tasks: Mutex::new(catalog_tasks),
                 started_at_ms: now_ms(),
                 #[cfg(test)]
                 admission_test_pause: StdMutex::new(None),
@@ -372,6 +417,12 @@ impl ExternalProviderSupervisor {
                 return Err("external provider runtime owner failed to join");
             }
         }
+        for task in self.inner.catalog_tasks.lock().await.drain(..) {
+            tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .map_err(|_| "provider model catalog task drain timed out")?
+                .map_err(|_| "provider model catalog task failed")?;
+        }
         let operations = self
             .inner
             .live_operations
@@ -407,6 +458,17 @@ enum PreparedOperation {
 }
 
 impl SupervisorInner {
+    async fn record_settings_catalog(
+        &self,
+        target: SessionRef,
+        catalog: acp_client_runtime::ProviderSettingsCatalog,
+    ) {
+        if let Some(sender) = self.model_catalogs.get(&target.endpoint) {
+            sender.send_replace(crate::provider_model_catalog::model_entries(&catalog));
+        }
+        self.settings_catalogs.lock().await.insert(target, catalog);
+    }
+
     async fn finish(
         &self,
         operation_id: OperationId,
@@ -638,7 +700,7 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                                             session_id,
                                         };
                                         if let Some(catalog) = catalog {
-                                            completion_inner.settings_catalogs.lock().await.insert(target.clone(), catalog);
+                                            completion_inner.record_settings_catalog(target.clone(), catalog).await;
                                         }
                                         let mut observed = effective_settings(requested_policy.clone());
                                         observed.mode = created.effective_settings.mode;
@@ -681,7 +743,7 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                                 Ok(session_id) => {
                                     let target = SessionRef { endpoint, session_id };
                                     if let Some(catalog) = catalog {
-                                        completion_inner.settings_catalogs.lock().await.insert(target.clone(), catalog);
+                                        completion_inner.record_settings_catalog(target.clone(), catalog).await;
                                     }
                                     ProviderOperationCompletion::Success {
                                         settlement: ConversationOperationSettlement::CreatedWithoutSettings {
@@ -817,10 +879,8 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                                     observed.model = effective.model;
                                     observed.effort = effective.effort;
                                     completion_inner
-                                        .settings_catalogs
-                                        .lock()
-                                        .await
-                                        .insert(completion_target.clone(), catalog);
+                                        .record_settings_catalog(completion_target.clone(), catalog)
+                                        .await;
                                 }
                                 completion_inner
                                     .history_unavailable

@@ -449,8 +449,8 @@ impl ConversationClient {
                     endpoint: input.endpoint,
                     generation: input.generation,
                     working_directory,
-                    created_by: input.created_by.clone(),
-                    approver: input.approver.unwrap_or(input.created_by),
+                    created_by: input.created_by.clone().into(),
+                    approver: input.approver.unwrap_or(input.created_by).into(),
                     requested_policy: ProviderRequestedPolicy {
                         access: input.access,
                     },
