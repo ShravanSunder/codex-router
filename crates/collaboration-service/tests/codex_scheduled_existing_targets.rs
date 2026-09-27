@@ -67,6 +67,7 @@ async fn scheduled_run_to_materialized_thread_preserves_declared_workspace()
         for methods in [
             &["thread/read"][..],
             &["thread/read"][..],
+            &["thread/read"][..],
             &["thread/read", "turn/start"][..],
         ] {
             let (stream, _) = listener.accept().await?;
@@ -126,6 +127,10 @@ async fn scheduled_run_to_materialized_thread_preserves_declared_workspace()
         }
     }
     let sink = EvidenceSink;
+    let no_declared_cwd = route.prepare_existing_target(&target, "", &sink).await?;
+    if no_declared_cwd.target != target {
+        return Err("existing target with no declared cwd selected another thread".into());
+    }
     if route
         .prepare_existing_target(&target, "/wrong-workspace", &sink)
         .await

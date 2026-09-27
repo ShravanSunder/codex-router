@@ -66,6 +66,7 @@ pub(super) async fn deliver_approval_notice(
     let approver_for_prompt = approver.clone();
     let prompt = format!("Request permission for {marker} and wait for the approver decision.");
     let cancellation = CancellationToken::new();
+    let _cancel_prompt_on_drop = cancellation.clone().drop_guard();
     let prompt_cancellation = cancellation.clone();
     let mut prompt_task = tokio::spawn(async move {
         let conversation = ConversationClient::connect(&service_directory, &provider).await?;
@@ -118,10 +119,7 @@ pub(super) async fn deliver_approval_notice(
         Ok(Ok(Ok(_))) => Err("Scripted provider prompt did not complete".into()),
         Ok(Ok(Err(error))) => Err(error.into()),
         Ok(Err(join_error)) => Err(join_error.into()),
-        Err(elapsed) => {
-            cancellation.cancel();
-            Err(elapsed.into())
-        }
+        Err(elapsed) => Err(elapsed.into()),
     }
 }
 
