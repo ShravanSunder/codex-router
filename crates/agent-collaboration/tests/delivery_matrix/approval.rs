@@ -5,7 +5,7 @@ use super::{
     wait_for_input_marker,
 };
 use collaboration_client::{
-    ConversationClient, ConversationClientError, ConversationCreateInput,
+    ConversationClient, ConversationClientError, ConversationCreateActor, ConversationCreateInput,
     ConversationOperationResult, ConversationPromptInput, PublicPromptContent,
     board::Identity,
     protocol::{
@@ -40,8 +40,8 @@ pub(super) async fn deliver_approval_notice(
                 endpoint: provider.clone(),
                 working_directory: proof.workspace.clone(),
                 access: RouterAccess::WriteRestricted,
-                created_by: creator.clone(),
-                approver: Some(approver.clone()),
+                created_by: ConversationCreateActor::Session(creator.clone()),
+                approver: Some(ConversationCreateActor::Session(approver.clone())),
                 generation: None,
                 model: None,
                 mode: None,

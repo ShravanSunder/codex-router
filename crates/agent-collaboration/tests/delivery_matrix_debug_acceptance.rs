@@ -16,7 +16,7 @@ use collaboration_client::protocol::{
     InstructionCreateParams, OperationId, RouterAccess, ScheduleCreateRequest, ScheduleDefinition,
     ScheduleEnableRequest, SchedulePrepareRequest, SessionRef, TimingRequest,
 };
-use collaboration_client::{ConversationClient, ConversationCreateInput};
+use collaboration_client::{ConversationClient, ConversationCreateActor, ConversationCreateInput};
 #[path = "delivery_matrix/approval.rs"]
 mod delivery_matrix_approval;
 #[path = "delivery_matrix/support.rs"]
@@ -308,8 +308,8 @@ async fn create_empty_conversation(
                 endpoint: proof.endpoint.clone(),
                 working_directory: proof.workspace.clone(),
                 access: RouterAccess::WorkspaceWrite,
-                created_by: creator.clone(),
-                approver: Some(creator.clone()),
+                created_by: ConversationCreateActor::Session(creator.clone()),
+                approver: Some(ConversationCreateActor::Session(creator.clone())),
                 generation: None,
                 model: Some("gpt-5.6-luna".to_owned()),
                 mode: None,

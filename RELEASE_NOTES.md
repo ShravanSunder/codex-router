@@ -2,6 +2,7 @@
 
 ## Unreleased - 2026-09-24
 
+- Invalid `conversation create --from` identity JSON now exits 2 with `invalidField`; provider creates accept Human creators and Approvers, including an owner-selected `--approver-owner` shortcut.
 - `wake send --wait-until-first-fire --json` now emits one result with `result.record.firstFire`, or one error retaining the created wake under `created`.
 - Scheduled runs can deliver their first input to a Codex conversation created without an initial prompt.
 - Scheduled runs to materialized existing Codex conversations now compare the native workspace with the schedule's declared workspace and deliver the input.
