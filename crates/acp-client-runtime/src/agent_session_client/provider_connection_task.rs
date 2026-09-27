@@ -51,7 +51,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         let task_settings_unresolved = Arc::clone(&settings_unresolved);
         let tool_registry = Arc::new(ProviderToolCallRegistry::default());
         let task_tool_registry = Arc::clone(&tool_registry);
-        let todo_state = Arc::new(CursorTodoState::default());
+        let todo_state = Arc::new(CursorPlanItems::default());
         let task_todo_state = Arc::clone(&todo_state);
         let task_runtime_handles = ProviderSessionRuntimeHandles {
             event_sink: Arc::clone(&event_sink),
@@ -77,6 +77,10 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             ActiveApprovalContext<P>,
         >::new()));
         let callback_approval_contexts = Arc::clone(&approval_contexts);
+        let callback_question_contexts = Arc::clone(&approval_contexts);
+        let callback_question_port = Arc::clone(&interaction_port);
+        let callback_plan_contexts = Arc::clone(&approval_contexts);
+        let callback_plan_port = Arc::clone(&interaction_port);
         let task_approval_contexts = Arc::clone(&approval_contexts);
         let known_sessions = ProviderKnownSessions::default();
         let request_known_sessions = known_sessions.clone();
@@ -176,6 +180,18 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     callback_auth_status,
                     callback_session_capabilities,
                     callback_event_sink,
+                ))
+                .with_handler(ProviderCursorQuestionHandler::new(
+                    Arc::clone(&tool_registry),
+                    callback_question_contexts,
+                    callback_question_port,
+                ))
+                .with_handler(ProviderCursorCreatePlanHandler::new(
+                    Arc::clone(&tool_registry),
+                    Arc::clone(&todo_state),
+                    Arc::clone(&task_event_sink),
+                    callback_plan_contexts,
+                    callback_plan_port,
                 ))
                 .with_handler(ProviderCursorTodoHandler::new(
                     tool_registry,

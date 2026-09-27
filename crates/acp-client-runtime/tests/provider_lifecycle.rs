@@ -88,6 +88,15 @@ impl InteractionPort for NoopInteractionPort {
     ) -> InteractionFuture<'_, ApprovalPortOutcome> {
         Box::pin(async { ApprovalPortOutcome::Cancelled })
     }
+    fn request_question(
+        &self,
+        _context: Self::Context,
+        _request: session_event_model::QuestionRequest,
+        _turn_cancellation: CancellationToken,
+        _agent_cancellation: CancellationToken,
+    ) -> InteractionFuture<'_, session_event_model::QuestionResponse> {
+        Box::pin(async { session_event_model::QuestionResponse::Cancelled })
+    }
     fn record_refusal(
         &self,
         _context: Self::Context,

@@ -4,13 +4,16 @@ use std::{future::Future, hash::Hash, pin::Pin};
 use tokio_util::sync::CancellationToken;
 
 use crate::RefusedPermissionOption;
-use session_event_model::{ApprovalRequest, ApprovalSubject};
+use session_event_model::{ApprovalRequest, ApprovalSubject, QuestionRequest, QuestionResponse};
 
 pub type InteractionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApprovalPortOutcome {
-    Selected { option_id: String },
+    Selected {
+        option_id: String,
+        note: Option<String>,
+    },
     Cancelled,
     Unavailable,
 }
@@ -43,6 +46,14 @@ pub trait InteractionPort: Send + Sync + 'static {
         turn_cancellation: CancellationToken,
         agent_cancellation: CancellationToken,
     ) -> InteractionFuture<'_, ApprovalPortOutcome>;
+
+    fn request_question(
+        &self,
+        context: Self::Context,
+        request: QuestionRequest,
+        turn_cancellation: CancellationToken,
+        agent_cancellation: CancellationToken,
+    ) -> InteractionFuture<'_, QuestionResponse>;
 
     fn record_refusal(
         &self,

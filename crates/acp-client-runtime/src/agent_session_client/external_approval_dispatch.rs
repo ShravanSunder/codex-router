@@ -158,7 +158,7 @@ async fn handle_contextual_permission_request<P: InteractionPort>(
         outcome = &mut approval => outcome,
     };
     match outcome {
-        ApprovalPortOutcome::Selected { option_id } => {
+        ApprovalPortOutcome::Selected { option_id, .. } => {
             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id))
         }
         ApprovalPortOutcome::Cancelled => RequestPermissionOutcome::Cancelled,
