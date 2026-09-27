@@ -20,8 +20,10 @@ fn typed_participants(
         "provider-session",
     ))
     .expect("requester");
-    let approver = message_board::Identity::Session {
-        session: super::board_session_ref(&super::tests::session(&broker.service_id, "approver"))
+    let approver = message_board::Identity::Human {
+        human_id: "turn-cancel-approver"
+            .to_owned()
+            .try_into()
             .expect("approver"),
     };
     (requester, approver)

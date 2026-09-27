@@ -30,6 +30,7 @@ pub use codex_conversation_operation_recorder::{
     CodexConversationOperationRecorder, UnavailableConversationOperationRecorder,
 };
 mod provider_session_event_hub;
+mod provider_session_observation_dispatch;
 mod provider_session_record;
 mod session_event_hub;
 pub use provider_operation_store::{

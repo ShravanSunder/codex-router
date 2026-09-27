@@ -47,7 +47,6 @@ pub(crate) struct SendArguments {
 }
 
 pub(crate) fn prepare(args: &SendArguments) -> Result<(PathBuf, PreparedMessage), String> {
-    let directory = crate::endpoint_commands::resolve_directory(args.service_directory.clone())?;
     let target = args.target.parse()?;
     if let Some(epoch) = &args.expected_service_epoch {
         let _: collaboration_client::protocol::CodexGeneration = serde_json::from_value(
@@ -101,6 +100,7 @@ pub(crate) fn prepare(args: &SendArguments) -> Result<(PathBuf, PreparedMessage)
         (None, None) => None,
         _ => return Err("Provide both expected service epoch and generation".into()),
     };
+    let directory = crate::endpoint_commands::resolve_directory(args.service_directory.clone())?;
     Ok((
         directory,
         PreparedMessage {

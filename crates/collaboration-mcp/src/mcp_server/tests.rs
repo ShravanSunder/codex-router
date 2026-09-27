@@ -157,7 +157,12 @@ fn typed_tool_names_cover_every_control_domain_operation() {
         .expect("Control method map");
     let expected = methods
         .keys()
-        .filter(|method| method.as_str() != "control/initialize")
+        .filter(|method| {
+            !matches!(
+                method.as_str(),
+                "control/initialize" | "provider/sessionObserve" | "provider/sessionListen"
+            )
+        })
         .map(|method| expected_tool_name(method))
         .chain([
             "conversation_create".to_owned(),

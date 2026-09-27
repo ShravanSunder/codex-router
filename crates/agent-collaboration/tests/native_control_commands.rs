@@ -133,6 +133,29 @@ async fn session_inspect_cli_preserves_native_rejection_message() {
             .write_all(format!("{initialized}\n").as_bytes())
             .await
             .expect("write init");
+        let discovery: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read discovery")
+                .expect("discovery frame"),
+        )
+        .expect("discovery JSON");
+        assert_eq!(discovery["method"], "endpoint/list");
+        let inventory = json!({"jsonrpc":"2.0","id":discovery["id"],"result":{
+            "serviceEpoch":epoch,"sequence":0,"endpoints":[{
+                "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
+                "label":"Fixture Codex",
+                "availability":{"state":"available","observedAt":"2026-09-05T12:00:00Z"},
+                "channels":[{"kind":"nativeCodex","transport":"unixWebSocket",
+                    "path":"codex-native.sock","schemaDigest":null,
+                    "generation":{"serviceEpoch":epoch,"generation":1}}]
+            }]
+        }});
+        write
+            .write_all(format!("{inventory}\n").as_bytes())
+            .await
+            .expect("write discovery");
         let inspect: Value = serde_json::from_str(
             &lines
                 .next_line()

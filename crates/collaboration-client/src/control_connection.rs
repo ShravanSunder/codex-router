@@ -689,6 +689,41 @@ impl ControlClient {
             return Ok(frame);
         }
     }
+
+    /// Reads one provider Session event on a subscribed Control connection.
+    pub async fn next_provider_session_notification(&mut self) -> Result<Value, ClientError> {
+        if self.connection.failed {
+            return Err(ClientError::Protocol("connection is retired"));
+        }
+        loop {
+            let frame = if let Some(frame) = self.connection.notifications.pop_front() {
+                frame
+            } else if let Some(frame) = self.connection.incoming.pop_front() {
+                frame
+            } else {
+                self.connection.read_frames().await?;
+                continue;
+            };
+            if frame.get("method").and_then(Value::as_str) == Some("endpoint/changed") {
+                self.notification_state.consume(frame)?;
+                continue;
+            }
+            if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+                || frame.get("method").and_then(Value::as_str) != Some("provider/sessionEvent")
+                || frame.get("id").is_some()
+                || frame.as_object().is_none_or(|object| object.len() != 3)
+            {
+                self.connection.failed = true;
+                return Err(ClientError::Protocol(
+                    "invalid provider Session notification",
+                ));
+            }
+            return frame
+                .get("params")
+                .cloned()
+                .ok_or(ClientError::Protocol("provider Session event missing"));
+        }
+    }
     pub async fn close(mut self) -> Result<(), ClientError> {
         self.connection.stream.shutdown().await?;
         Ok(())

@@ -273,7 +273,7 @@ mod tests {
     use acp_client_runtime::{ApprovalPortOutcome, InteractionPort, SessionEventSink};
     use collaboration_protocol::{
         CodexGeneration, EndpointId as ControlEndpointId, EndpointRef as ControlEndpointRef,
-        GenerationNumber, OperationId, SessionId as ControlSessionId,
+        GenerationNumber, OperationId, ProviderIdentity, SessionId as ControlSessionId,
         SessionRef as ControlSessionRef, UuidIdentity,
     };
     use collaboration_service::{
@@ -304,9 +304,12 @@ mod tests {
             endpoint: provider_endpoint,
             session_id: ControlSessionId::try_from("session-one".to_owned()).expect("session"),
         };
-        let approver = ControlSessionRef {
+        let requester = ControlSessionRef {
             endpoint: approver_endpoint.clone(),
-            session_id: ControlSessionId::try_from("approver".to_owned()).expect("approver"),
+            session_id: ControlSessionId::try_from("requester".to_owned()).expect("requester"),
+        };
+        let approver = ProviderIdentity::Human {
+            human_id: "owner".to_owned().try_into().expect("human ID"),
         };
         let broker = ServiceInteractionBroker::load(
             service_id.clone(),
@@ -354,8 +357,8 @@ mod tests {
         let request_task = tokio::spawn({
             let port = Arc::clone(&port);
             let context = crate::ExternalProviderApprovalContext {
-                requester: (approver.clone()).into(),
-                approver: (approver.clone()).into(),
+                requester: requester.clone().into(),
+                approver: approver.clone(),
                 target,
                 operation_id: OperationId::generate(),
                 binding_generation: CodexGeneration {
@@ -389,10 +392,7 @@ mod tests {
         })
         .await
         .expect("pending interaction published");
-        let actor = message_board::Identity::Session {
-            session: serde_json::from_value(serde_json::to_value(&approver).expect("actor JSON"))
-                .expect("actor"),
-        };
+        let actor = approver.to_board_identity().expect("board actor");
         broker
             .decide_typed_interaction(
                 "approval-one",
@@ -418,8 +418,8 @@ mod tests {
         let question_task = tokio::spawn({
             let port = Arc::clone(&port);
             let context = crate::ExternalProviderApprovalContext {
-                requester: (approver.clone()).into(),
-                approver: (approver.clone()).into(),
+                requester: requester.into(),
+                approver: approver.clone(),
                 target: question_target,
                 operation_id: OperationId::generate(),
                 binding_generation: CodexGeneration {

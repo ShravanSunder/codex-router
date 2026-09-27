@@ -43,6 +43,7 @@ mod interaction_actor;
 mod permission_diagnostic;
 mod provider_session_inspect;
 mod provider_session_list;
+mod session_observation_contract;
 pub use provider_session_inspect::{
     ProviderConfigOptionView, ProviderConfigValueView, ProviderHistoryAvailability,
     ProviderInspectFailure, ProviderInspectFailureKind, ProviderSessionInspectRequest,
@@ -70,6 +71,10 @@ pub use provider_session_list::{
 pub use question_contract::{
     QuestionAnswerParams, QuestionAnswerResult, QuestionAnswerValue, QuestionFieldView,
     QuestionListParams, QuestionListResult, QuestionRecord, QuestionResponse, QuestionState,
+};
+pub use session_observation_contract::{
+    BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
+    ProviderSessionListenReady, ProviderSessionListenRequest,
 };
 mod backend_generation;
 mod control_error_validation;

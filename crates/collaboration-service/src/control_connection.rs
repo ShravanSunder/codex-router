@@ -25,6 +25,9 @@ pub async fn serve_control_connection(
 ) -> io::Result<()> {
     let mut subscription = identity.directory.subscribe()?;
     let mut wake_subscription: Option<crate::wakeup_subscription::WakeSubscriptionState> = None;
+    let mut provider_subscription: Option<
+        crate::provider_session_observation_dispatch::ProviderSessionSubscription,
+    > = None;
     let mut wake_poll = tokio::time::interval(std::time::Duration::from_millis(50));
     wake_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut decoder = ControlFrameDecoder::default();
@@ -40,6 +43,21 @@ pub async fn serve_control_connection(
                         let mut output=serde_json::to_vec(&json!({"jsonrpc":"2.0","method":"wake/changed","params":change})).map_err(io::Error::other)?;
                         output.push(b'\n');stream.write_all(&output).await?;
                     }
+                }
+                continue;
+            },
+            provider_event = async {
+                match provider_subscription.as_mut() {
+                    Some(subscription) => subscription.next_value().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(event) = provider_event {
+                    let mut output=serde_json::to_vec(&json!({"jsonrpc":"2.0","method":"provider/sessionEvent","params":event})).map_err(io::Error::other)?;
+                    output.push(b'\n');
+                    stream.write_all(&output).await?;
+                } else {
+                    provider_subscription = None;
                 }
                 continue;
             },
@@ -129,6 +147,38 @@ pub async fn serve_control_connection(
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::session_message_dispatch::dispatch(
+                            json!(id),
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request) if request.method == "provider/sessionListen" => {
+                    admission.complete(&request.id);
+                    let id = request.id.clone();
+                    match crate::provider_session_observation_dispatch::listen(
+                        request.params,
+                        &identity,
+                    )
+                    .await
+                    {
+                        Ok(subscription) => {
+                            let response =
+                                json!({"jsonrpc":"2.0","id":id,"result":subscription.ready});
+                            provider_subscription = Some(subscription);
+                            response
+                        }
+                        Err(error) => error.response(json!(id)),
+                    }
+                }
+                Ok(request) if request.method == "provider/sessionObserve" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::provider_session_observation_dispatch::observe(
                             json!(id),
                             request.params,
                             &identity,

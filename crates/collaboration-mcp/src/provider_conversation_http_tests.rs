@@ -82,7 +82,17 @@ async fn initialized_http_exposes_one_conversation_surface_for_provider_operatio
                 json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
             )
             .await;
-            if expected == "conversation/prompt" {
+            if expected == "conversation/create" {
+                let wait = read_json_line(&mut lines).await;
+                assert_eq!(wait["method"], "conversation/operationWait");
+                assert_eq!(wait["params"]["operationId"], CREATE_OPERATION);
+                write_json_line(&mut writer, json!({"jsonrpc":"2.0","id":wait["id"],"result":{
+                    "operation":terminal_snapshot(CREATE_OPERATION,"conversationCreate"),
+                    "output":{"kind":"available","settlement":{"kind":"created",
+                        "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
+                        "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"}}}
+                }})).await;
+            } else if expected == "conversation/prompt" {
                 let wait = read_json_line(&mut lines).await;
                 assert_eq!(wait["method"], "conversation/operationWait");
                 assert_eq!(wait["params"]["operationId"], PROMPT_OPERATION);

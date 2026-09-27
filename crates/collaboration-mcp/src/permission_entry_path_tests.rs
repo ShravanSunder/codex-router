@@ -362,30 +362,42 @@ async fn serve_approval_deliveries(
                     let text = request["params"]["input"][0]["text"]
                         .as_str()
                         .expect("approval delivery text");
-                    let record: collaboration_protocol::ApprovalRequestRecord =
-                        serde_json::from_str(
-                            text.rsplit_once("\n\n").map_or(text, |(_, value)| value),
-                        )
-                        .expect("delivered approval record");
-                    assert_eq!(record.approver, approver);
-                    assert_eq!(
-                        String::from(record.requester.session_id.clone()),
-                        "permission-requester"
-                    );
-                    assert_eq!(
-                        serde_json::to_value(&record.generation).expect("generation JSON")["generation"],
-                        if delivery_count == 2 && index == 1 {
-                            6
-                        } else {
-                            7
-                        }
-                    );
-                    assert!(
-                        record.operation["params"]["toolCall"]["content"][0]["content"]["text"]
-                            .as_str()
-                            .is_some_and(|text| text.contains("Requested permissions:")
-                                && text.contains("\"enabled\": true"))
-                    );
+                    let body = text.rsplit_once("\n\n").map_or(text, |(_, value)| value);
+                    let notice: Value = serde_json::from_str(body).expect("delivered notice");
+                    if notice["kind"] == "externalProviderQuestion" {
+                        assert_eq!(notice["requestId"], "mcp-question");
+                        assert_eq!(
+                            notice["approver"]["session"]["sessionId"],
+                            String::from(approver.session_id.clone())
+                        );
+                        assert!(
+                            notice["answerCommand"]
+                                .as_str()
+                                .is_some_and(|command| command.contains("question answer"))
+                        );
+                    } else {
+                        let record: collaboration_protocol::ApprovalRequestRecord =
+                            serde_json::from_value(notice).expect("delivered approval record");
+                        assert_eq!(record.approver, approver);
+                        assert_eq!(
+                            String::from(record.requester.session_id.clone()),
+                            "permission-requester"
+                        );
+                        assert_eq!(
+                            serde_json::to_value(&record.generation).expect("generation JSON")["generation"],
+                            if delivery_count == 2 && index == 1 {
+                                6
+                            } else {
+                                7
+                            }
+                        );
+                        assert!(
+                            record.operation["params"]["toolCall"]["content"][0]["content"]["text"]
+                                .as_str()
+                                .is_some_and(|text| text.contains("Requested permissions:")
+                                    && text.contains("\"enabled\": true"))
+                        );
+                    }
                     json!({"turn":{"id":format!("approval-delivery-{index}")}})
                 }
                 _ => json!({}),
@@ -749,7 +761,7 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
 // waiting broker request through the same public Control path as the CLI.
 #[tokio::test]
 async fn streamable_http_question_form_reaches_the_waiting_agent() {
-    let fixture = ApprovalFixture::start(0).await;
+    let fixture = ApprovalFixture::start(1).await;
     let requester =
         serde_json::from_value(serde_json::to_value(&fixture.requester).expect("requester JSON"))
             .expect("typed requester");
@@ -767,6 +779,7 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
         .request_question(requester, approver, question)
         .await
         .expect("pending question");
+    fixture.await_delivery(0).await;
     let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
         bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
         service_directory: fixture.service_directory().to_owned(),
