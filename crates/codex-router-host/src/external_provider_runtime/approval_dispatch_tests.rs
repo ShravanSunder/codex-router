@@ -82,6 +82,7 @@ send({'jsonrpc':'2.0','id':first_prompt['id'],'result':{'stopReason':'end_turn'}
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: Vec::new(),
@@ -110,6 +111,7 @@ send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -142,6 +144,7 @@ send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: Vec::new(),
@@ -204,6 +207,7 @@ sys.stdin.read()
         event_socket = event_socket.display().to_string(),
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-u".to_owned(), "-c".to_owned(), fixture],
         environment: Vec::new(),
@@ -242,6 +246,7 @@ sys.stdin.read()
         event_socket = event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-u".to_owned(), "-c".to_owned(), fixture],
         environment: Vec::new(),
@@ -250,7 +255,7 @@ sys.stdin.read()
 
 async fn wait_for_pending_approval<TPromptFuture>(
     broker: &ServiceApprovalBroker,
-    approval_notice: &Notify,
+    _approval_notice: &Notify,
     mut pending_request: Pin<&mut TPromptFuture>,
 ) -> TestResult
 where
@@ -258,17 +263,71 @@ where
         Future<Output = Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>>,
 {
     tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::select! {
-            result = pending_request.as_mut() => Err::<(), Box<dyn std::error::Error + Send + Sync>>(
-                format!("permission prompt settled before its cancellation test: {result:?}").into()
-            ),
-            () = approval_notice.notified() => Ok(()),
+        loop {
+            if !observed_typed_approvals(broker, true).await.is_empty() {
+                break Ok(());
+            }
+            tokio::select! {
+                result = pending_request.as_mut() => break Err::<(), Box<dyn std::error::Error + Send + Sync>>(
+                    format!("permission prompt settled before its cancellation test: {result:?}").into()
+                ),
+                () = tokio::task::yield_now() => {}
+            }
         }
     })
     .await
     .map_err(|_| "permission request did not become pending")??;
-    assert!(!broker.list(true).await.approvals.is_empty());
+    assert!(!observed_typed_approvals(broker, true).await.is_empty());
     Ok(())
+}
+
+struct ObservedTypedApproval {
+    request_id: String,
+    state: collaboration_protocol::ApprovalState,
+    reason: Option<String>,
+    request: session_event_model::ApprovalRequest,
+}
+
+async fn observed_typed_approvals(
+    broker: &ServiceApprovalBroker,
+    pending_only: bool,
+) -> Vec<ObservedTypedApproval> {
+    broker
+        .list_interactions()
+        .await
+        .into_iter()
+        .filter_map(|record| {
+            let collaboration_service::InteractionHistoryRecord::Approval {
+                request, state, ..
+            } = record
+            else {
+                return None;
+            };
+            let (state, reason) = match state {
+                collaboration_service::InteractionHistoryState::Pending => (
+                    collaboration_protocol::ApprovalState::PendingClientDecision,
+                    None,
+                ),
+                collaboration_service::InteractionHistoryState::Decided { .. } => {
+                    (collaboration_protocol::ApprovalState::Decided, None)
+                }
+                collaboration_service::InteractionHistoryState::Cancelled { reason } => (
+                    collaboration_protocol::ApprovalState::Cancelled,
+                    Some(reason),
+                ),
+            };
+            if pending_only && state != collaboration_protocol::ApprovalState::PendingClientDecision
+            {
+                return None;
+            }
+            Some(ObservedTypedApproval {
+                request_id: request.request_id.clone(),
+                state,
+                reason,
+                request,
+            })
+        })
+        .collect()
 }
 
 fn session_ref(
@@ -364,10 +423,8 @@ async fn permission_decision_survives_late_agent_withdrawal_and_peer_turn_progre
     let prompt_b_outcome = tokio::time::timeout(Duration::from_secs(2), prompt_b).await??;
     assert_eq!(prompt_b_outcome.output, "session-b-replied");
 
-    let pending = broker
-        .list(true)
+    let pending = observed_typed_approvals(&broker, true)
         .await
-        .approvals
         .pop()
         .expect("pending approval");
     broker
@@ -382,7 +439,7 @@ async fn permission_decision_survives_late_agent_withdrawal_and_peer_turn_progre
     let prompt_a_outcome = tokio::time::timeout(Duration::from_secs(2), &mut prompt_a).await??;
     assert_eq!(prompt_a_outcome.output, "session-a-approved");
     assert_eq!(
-        broker.list(false).await.approvals[0].state,
+        observed_typed_approvals(&broker, false).await[0].state,
         collaboration_protocol::ApprovalState::Decided
     );
 
@@ -487,14 +544,14 @@ async fn peer_cancellation_and_binding_retirement_settle_permission_history_once
             assert_eq!(outcome.stop_reason, ProviderPromptStopReason::Cancelled);
             assert_eq!(outcome.output, "permission-cancelled");
         }
-        let history = broker.list(false).await.approvals;
+        let history = observed_typed_approvals(&broker, false).await;
         assert_eq!(history.len(), 1);
         assert_eq!(
             history[0].state,
             collaboration_protocol::ApprovalState::Cancelled
         );
         assert!(history[0].reason.is_some());
-        assert!(broker.list(true).await.approvals.is_empty());
+        assert!(observed_typed_approvals(&broker, true).await.is_empty());
         runtime.shutdown().await;
     }
     Ok(())
@@ -538,10 +595,8 @@ async fn permission_wait_does_not_block_steering_reply_dispatch() -> TestResult 
     )
     .await??;
     assert!(matches!(steer, ProviderSteeringOutcome::Injected { .. }));
-    let pending = broker
-        .list(true)
+    let pending = observed_typed_approvals(&broker, true)
         .await
-        .approvals
         .pop()
         .expect("approval is still pending");
     broker
@@ -556,7 +611,7 @@ async fn permission_wait_does_not_block_steering_reply_dispatch() -> TestResult 
     let outcome = tokio::time::timeout(Duration::from_secs(2), &mut prompt).await??;
     assert_eq!(outcome.output, "session-a-steered-and-approved");
     assert_eq!(
-        broker.list(false).await.approvals[0].state,
+        observed_typed_approvals(&broker, false).await[0].state,
         collaboration_protocol::ApprovalState::Decided
     );
     runtime.shutdown().await;
@@ -596,14 +651,14 @@ async fn permission_wait_observes_cancellation_during_provider_cancel() -> TestR
     let outcome = tokio::time::timeout(Duration::from_secs(5), &mut prompt).await??;
     assert_eq!(outcome.stop_reason, ProviderPromptStopReason::Cancelled);
     assert_eq!(outcome.output, "session-a-cancelled");
-    let history = broker.list(false).await.approvals;
+    let history = observed_typed_approvals(&broker, false).await;
     assert_eq!(history.len(), 1);
     assert_eq!(
         history[0].state,
         collaboration_protocol::ApprovalState::Cancelled
     );
     assert!(history[0].reason.is_some());
-    assert!(broker.list(true).await.approvals.is_empty());
+    assert!(observed_typed_approvals(&broker, true).await.is_empty());
     runtime.shutdown().await;
     Ok(())
 }
@@ -653,8 +708,8 @@ async fn permission_arriving_after_router_cancel_is_answered_cancelled() -> Test
     let outcome: ExternalProviderPromptOutcome =
         tokio::time::timeout(Duration::from_secs(2), prompt).await???;
     assert_eq!(outcome.stop_reason, ProviderPromptStopReason::Cancelled);
-    assert!(broker.list(true).await.approvals.is_empty());
-    let history = broker.list(false).await.approvals;
+    assert!(observed_typed_approvals(&broker, true).await.is_empty());
+    let history = observed_typed_approvals(&broker, false).await;
     assert_eq!(history.len(), 1);
     assert_eq!(
         history[0].state,
@@ -679,9 +734,9 @@ async fn provider_option_sets_keep_order_scope_and_selected_id() -> TestResult {
                 {"optionId":"reject-once","name":"Reject","kind":"reject_once"}
             ]),
             serde_json::json!([
-                {"optionId":"allow-once","label":"Allow once","scope":{"kind":"allowOnce"}},
-                {"optionId":"allow-always","label":"Always allow","scope":{"kind":"allowAlways"}},
-                {"optionId":"reject-once","label":"Reject","scope":{"kind":"rejectOnce"}}
+                {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}},
+                {"optionId":"allow-always","label":"Always allow","choice":{"effect":"allow","scope":{"persistent":{"where_stored":"the agent's own persistent permissions (location not reported)"}}}},
+                {"optionId":"reject-once","label":"Reject","choice":{"effect":"decline","scope":"once"}}
             ]),
         ),
         (
@@ -693,10 +748,10 @@ async fn provider_option_sets_keep_order_scope_and_selected_id() -> TestResult {
                 {"optionId":"reject","name":"Reject","kind":"reject_once"}
             ]),
             serde_json::json!([
-                {"optionId":"allow-once","label":"Allow once","scope":{"kind":"allowOnce"}},
-                {"optionId":"allow-with-updates","label":"Allow with updates","scope":{"kind":"allowAlways"}},
-                {"optionId":"allow-skill-exact","label":"Allow this skill","scope":{"kind":"allowAlways"}},
-                {"optionId":"reject","label":"Reject","scope":{"kind":"rejectOnce"}}
+                {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}},
+                {"optionId":"allow-with-updates","label":"Allow with updates","choice":{"effect":"allow","scope":{"persistent":{"where_stored":"the agent's own persistent permissions (location not reported)"}}}},
+                {"optionId":"allow-skill-exact","label":"Allow this skill","choice":{"effect":"allow","scope":{"persistent":{"where_stored":"the agent's own persistent permissions (location not reported)"}}}},
+                {"optionId":"reject","label":"Reject","choice":{"effect":"decline","scope":"once"}}
             ]),
         ),
     ];
@@ -746,16 +801,16 @@ async fn provider_option_sets_keep_order_scope_and_selected_id() -> TestResult {
                 },
             ));
             wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
-            let pending = broker.list(true).await.approvals;
+            let pending = observed_typed_approvals(&broker, true).await;
             assert_eq!(pending.len(), 1, "{agent_name}");
             assert_eq!(
-                serde_json::to_value(&pending[0].offered_options)?,
+                serde_json::to_value(&pending[0].request.options)?,
                 expected_options,
                 "{agent_name}"
             );
             assert_eq!(
-                serde_json::to_value(&pending[0].presentation)?,
-                serde_json::json!({"title":"Run command","kind":"Execute"}),
+                serde_json::to_value(&pending[0].request.subject)?,
+                serde_json::json!({"type":"tool_call","toolCall":{"toolCallId":"tool-a","kind":"Execute","title":"Run command"}}),
                 "{agent_name}"
             );
             assert!(matches!(
@@ -770,7 +825,7 @@ async fn provider_option_sets_keep_order_scope_and_selected_id() -> TestResult {
                     .await,
                 Err(error) if error.code() == "decisionNotOffered"
             ));
-            assert_eq!(broker.list(true).await.approvals.len(), 1);
+            assert_eq!(observed_typed_approvals(&broker, true).await.len(), 1);
             broker
                 .decide(ApprovalDecideParams {
                     request_id: pending[0].request_id.clone(),
@@ -783,7 +838,7 @@ async fn provider_option_sets_keep_order_scope_and_selected_id() -> TestResult {
             let outcome = tokio::time::timeout(Duration::from_secs(5), &mut prompt).await??;
             assert_eq!(outcome.stop_reason, ProviderPromptStopReason::EndTurn);
             assert_eq!(
-                broker.list(false).await.approvals[0].state,
+                observed_typed_approvals(&broker, false).await[0].state,
                 collaboration_protocol::ApprovalState::Decided
             );
             runtime.shutdown().await;
@@ -833,14 +888,14 @@ async fn output_limit_cancels_pending_permission() -> TestResult {
         error,
         ExternalProviderRuntimeError::PromptOutputLimitExceeded
     ));
-    let history = broker.list(false).await.approvals;
+    let history = observed_typed_approvals(&broker, false).await;
     assert_eq!(history.len(), 1);
     assert_eq!(
         history[0].state,
         collaboration_protocol::ApprovalState::Cancelled
     );
     assert_eq!(history[0].reason.as_deref(), Some("turnCancelled"));
-    assert!(broker.list(true).await.approvals.is_empty());
+    assert!(observed_typed_approvals(&broker, true).await.is_empty());
     runtime.shutdown().await;
     Ok(())
 }
@@ -909,13 +964,13 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
         .await
         .map_err(|_| "provider connection did not retire after fixture exit")?;
     runtime.shutdown().await;
-    let history = broker.list(false).await.approvals;
+    let history = observed_typed_approvals(&broker, false).await;
     assert_eq!(history.len(), 1);
     assert_eq!(
         history[0].state,
         collaboration_protocol::ApprovalState::Cancelled
     );
     assert_eq!(history[0].reason.as_deref(), Some("providerRetired"));
-    assert!(broker.list(true).await.approvals.is_empty());
+    assert!(observed_typed_approvals(&broker, true).await.is_empty());
     Ok(())
 }

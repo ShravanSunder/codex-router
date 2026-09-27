@@ -63,6 +63,7 @@ impl ExternalProviderLaunchBinding {
             label: NonEmptyText::try_from(label.to_owned())?,
             provider,
             launch: crate::ExternalProviderLaunch {
+                persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
                 executable,
                 arguments,
                 environment: Vec::new(),

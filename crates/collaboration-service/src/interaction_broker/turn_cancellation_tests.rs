@@ -41,6 +41,7 @@ async fn typed_approval_cancelled_before_admission_records_turn_cancelled() {
             approver,
             typed_request("typed-before-admission"),
             turn_cancellation,
+            CancellationToken::new(),
         )
         .await;
     assert!(matches!(result, Err(InteractionHistoryError::NotPending)));
@@ -66,6 +67,7 @@ async fn typed_decision_after_turn_cancel_is_not_pending() {
             approver.clone(),
             typed_request("typed-decision-race"),
             turn_cancellation.clone(),
+            CancellationToken::new(),
         )
         .await
         .expect("pending request");
@@ -115,6 +117,7 @@ async fn typed_turn_cancelled_after_record_before_insert_leaves_no_pending_row()
                     approver,
                     typed_request("typed-after-record"),
                     turn_cancellation,
+                    CancellationToken::new(),
                 )
                 .await
         }
@@ -153,6 +156,7 @@ async fn typed_session_cancellation_settles_only_that_sessions_requests() {
             approver.clone(),
             typed_request("first"),
             CancellationToken::new(),
+            CancellationToken::new(),
         )
         .await
         .expect("first pending");
@@ -162,6 +166,7 @@ async fn typed_session_cancellation_settles_only_that_sessions_requests() {
             approver,
             typed_request("second"),
             CancellationToken::new(),
+            CancellationToken::new(),
         )
         .await
         .expect("second pending");
@@ -169,7 +174,8 @@ async fn typed_session_cancellation_settles_only_that_sessions_requests() {
         broker
             .cancel_typed_approvals(&requester, "turnCancelled")
             .await
-            .expect("cancel first"),
+            .expect("cancel first")
+            .len(),
         1
     );
     assert!(first.await.is_err());

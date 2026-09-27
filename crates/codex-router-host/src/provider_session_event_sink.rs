@@ -174,12 +174,154 @@ impl SessionEventSink for HubSessionEventSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acp_client_runtime::SessionEventSink;
-    use collaboration_service::{ProviderOperationStore, ProviderSessionEventHub, SessionEventHub};
+    use acp_client_runtime::{ApprovalPortOutcome, InteractionPort, SessionEventSink};
+    use collaboration_protocol::{
+        CodexGeneration, EndpointId as ControlEndpointId, EndpointRef as ControlEndpointRef,
+        GenerationNumber, OperationId, SessionId as ControlSessionId,
+        SessionRef as ControlSessionRef, UuidIdentity,
+    };
+    use collaboration_service::{
+        NativeControlBackend, NativeGenerationGate, ProviderOperationStore,
+        ProviderSessionEventHub, ServiceApprovalBroker, SessionEventHub,
+    };
     use message_board::{EndpointId, ServiceId, SessionEndpointRef, SessionId, SessionRef};
     use session_event_model::{SessionEvent, TurnOutcome};
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn typed_broker_request_and_decision_publish_pending_and_resolution_in_order() {
+        let root = tempfile::tempdir().expect("temporary store");
+        let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
+            .expect("service ID");
+        let provider_endpoint = ControlEndpointRef {
+            service_id: service_id.clone(),
+            endpoint_id: ControlEndpointId::try_from("fixture-provider".to_owned())
+                .expect("provider endpoint"),
+        };
+        let approver_endpoint = ControlEndpointRef {
+            service_id: service_id.clone(),
+            endpoint_id: ControlEndpointId::try_from("codex-local".to_owned())
+                .expect("approver endpoint"),
+        };
+        let target = ControlSessionRef {
+            endpoint: provider_endpoint,
+            session_id: ControlSessionId::try_from("session-one".to_owned()).expect("session"),
+        };
+        let approver = ControlSessionRef {
+            endpoint: approver_endpoint.clone(),
+            session_id: ControlSessionId::try_from("approver".to_owned()).expect("approver"),
+        };
+        let broker = ServiceApprovalBroker::load(
+            service_id.clone(),
+            NativeControlBackend {
+                codex_home: root.path().to_owned(),
+                endpoint: approver_endpoint,
+                gate: NativeGenerationGate::default(),
+            },
+            root.path().join("approval-routes.json"),
+        )
+        .await
+        .expect("broker");
+        let store = ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("provider store");
+        let hub = Arc::new(ProviderSessionEventHub::new(Arc::new(Mutex::new(store))));
+        let endpoint = SessionEndpointRef {
+            service_id: ServiceId::try_from(String::from(service_id)).expect("service"),
+            endpoint_id: EndpointId::try_from("fixture-provider".to_owned()).expect("endpoint"),
+        };
+        let session = SessionRef {
+            endpoint: endpoint.clone(),
+            session_id: SessionId::try_from("session-one".to_owned()).expect("session"),
+        };
+        let sink = Arc::new(HubSessionEventSink::new(Arc::clone(&hub), endpoint));
+        let port = Arc::new(crate::acp_interaction_port::HostInteractionPort::default());
+        port.install_broker(Arc::clone(&broker)).await;
+        port.install_event_sink(Arc::clone(&sink) as Arc<dyn SessionEventSink>)
+            .await;
+        sink.publish(
+            "session-one",
+            SessionEvent::TurnStarted {
+                turn_id: "turn-one".into(),
+                input_id: "input-one".into(),
+            },
+        )
+        .expect("turn start");
+        let request = serde_json::from_value(serde_json::json!({
+            "requestId":"approval-one", "title":"Run command", "options":[
+                {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}}
+            ]
+        }))
+        .expect("approval request");
+        let request_task = tokio::spawn({
+            let port = Arc::clone(&port);
+            let context = crate::ExternalProviderApprovalContext {
+                requester: approver.clone(),
+                approver: approver.clone(),
+                target,
+                operation_id: OperationId::generate(),
+                binding_generation: CodexGeneration {
+                    service_epoch: UuidIdentity::try_from(
+                        "00000000-0000-4000-8000-000000000001".to_owned(),
+                    )
+                    .expect("epoch"),
+                    generation: GenerationNumber::try_from(1).expect("generation"),
+                },
+                binding_retirement: tokio_util::sync::CancellationToken::new(),
+            };
+            async move {
+                port.request_approval(
+                    context,
+                    request,
+                    tokio_util::sync::CancellationToken::new(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(attached) = hub.attach(session.clone()).await
+                    && attached.snapshot.len() == 2
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pending interaction published");
+        let actor = message_board::Identity::Session {
+            session: serde_json::from_value(serde_json::to_value(&approver).expect("actor JSON"))
+                .expect("actor"),
+        };
+        broker
+            .decide_typed_interaction("approval-one", &actor, "allow-once", false)
+            .await
+            .expect("approver decision");
+        assert_eq!(
+            request_task.await.expect("port task"),
+            ApprovalPortOutcome::Selected {
+                option_id: "allow-once".into(),
+            }
+        );
+        sink.shutdown().await.expect("drain");
+        let attached = hub.attach(session).await.expect("attach history");
+        assert_eq!(attached.snapshot.len(), 3);
+        assert!(matches!(
+            &attached.snapshot[0].event,
+            SessionEvent::TurnStarted { .. }
+        ));
+        assert!(matches!(
+            &attached.snapshot[1].event,
+            SessionEvent::InteractionRequested { .. }
+        ));
+        assert!(matches!(
+            &attached.snapshot[2].event,
+            SessionEvent::InteractionResolved { .. }
+        ));
+    }
 
     #[tokio::test]
     async fn publication_before_replay_reset_is_never_reintroduced_after_it() {

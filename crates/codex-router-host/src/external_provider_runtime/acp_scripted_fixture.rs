@@ -123,6 +123,7 @@ impl AcpFixtureScript {
     pub(crate) fn launch(self) -> ExternalProviderLaunch {
         let script = serde_json::to_string(&self.steps).expect("fixture script serializes");
         ExternalProviderLaunch {
+            persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
             executable: PathBuf::from("/usr/bin/python3"),
             arguments: vec![
                 "-u".to_owned(),

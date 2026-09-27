@@ -1227,6 +1227,7 @@ async fn populated_old_approval_reader_survives_human_interaction_history() {
             human.clone(),
             typed_approval_request("human-approval-1"),
             tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("record new interaction");
@@ -1297,6 +1298,7 @@ async fn typed_interaction_rejects_self_approver_and_corrupt_stored_rows() {
                 Identity::Session { session: requester },
                 typed_approval_request("self-request"),
                 tokio_util::sync::CancellationToken::new(),
+                tokio_util::sync::CancellationToken::new(),
             )
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::SelfApprover)
@@ -1312,6 +1314,56 @@ async fn typed_interaction_rejects_self_approver_and_corrupt_stored_rows() {
     )
     .await;
     assert!(matches!(reload, Err(ApprovalBrokerError::Unavailable)));
+}
+
+#[tokio::test]
+async fn refused_typed_offer_preserves_reviewed_fields_and_order_without_legacy_write() {
+    use message_board::{HumanId, Identity};
+
+    let (broker, _, directory) = fixture_broker().await;
+    let requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let approver = Identity::Human {
+        human_id: HumanId::try_from("owner".to_owned()).expect("human ID"),
+    };
+    let refusal = crate::interaction_broker::RefusedTypedApproval {
+        request_id: "malformed-offer".into(),
+        title: "Run command".into(),
+        description: Some("Reviewed description".into()),
+        subject: None,
+        options: vec![
+            crate::interaction_broker::RefusedApprovalOption {
+                option_id: "duplicate".into(),
+                label: "First".into(),
+                provider_kind: "AllowOnce".into(),
+            },
+            crate::interaction_broker::RefusedApprovalOption {
+                option_id: "duplicate".into(),
+                label: "Second".into(),
+                provider_kind: "RejectOnce".into(),
+            },
+        ],
+        reason: "permission options contain a duplicate identifier".into(),
+    };
+    broker
+        .record_typed_refusal(requester, approver, refusal.clone())
+        .await
+        .expect("persist refusal");
+    let recorded = broker.list_interactions().await;
+    assert!(matches!(
+        &recorded[0],
+        crate::interaction_broker::InteractionHistoryRecord::RefusedApproval { refusal: stored, .. }
+            if stored == &refusal && stored.options[0].label == "First" && stored.options[1].label == "Second"
+    ));
+    assert!(!directory.join("approval-history.json").exists());
+    let reloaded = ServiceApprovalBroker::load(
+        broker.service_id.clone(),
+        broker.backend.clone(),
+        directory.join("approval-routes.json"),
+    )
+    .await
+    .expect("reload typed refusal");
+    assert_eq!(reloaded.list_interactions().await, recorded);
 }
 
 // R17: the exact option ID is returned to the waiting agent. Persistent scope
@@ -1365,6 +1417,7 @@ async fn typed_approval_preserves_cursor_choices_and_returns_exact_option_id() {
             requester,
             approver.clone(),
             request,
+            tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -1438,6 +1491,7 @@ async fn claude_choices_resolve_legacy_decisions_without_inventing_an_option() {
             requester,
             actor.clone(),
             request,
+            tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -1712,6 +1766,7 @@ async fn restart_cancels_populated_pending_interaction_history() {
             requester.clone(),
             approver.clone(),
             typed_approval_request("restart-approval"),
+            tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
         )
         .await

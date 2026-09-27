@@ -78,6 +78,15 @@ pub(crate) async fn compose_provider_startup(
             }
             ExternalProviderStartup::Launch(binding) => {
                 let executable = binding.launch.executable.display().to_string();
+                let mut launch = binding.launch;
+                launch.persistence_target = match binding.provider {
+                    ProviderKind::Cursor => {
+                        acp_client_runtime::ProviderPersistenceTarget::CursorAllowlist
+                    }
+                    ProviderKind::ClaudeCode => {
+                        acp_client_runtime::ProviderPersistenceTarget::ClaudeSettingsRule
+                    }
+                };
                 let endpoint = EndpointRef {
                     service_id: service_id.clone(),
                     endpoint_id: binding.endpoint_id.clone(),
@@ -93,7 +102,7 @@ pub(crate) async fn compose_provider_startup(
                     .map_err(io::Error::other)?,
                 };
                 let runtime = ExternalProviderRuntime::initialize_with_mcp_http_and_hub(
-                    binding.launch,
+                    launch,
                     "router-collaboration",
                     mcp_url.to_owned(),
                     Arc::clone(hub.as_ref().ok_or_else(|| {

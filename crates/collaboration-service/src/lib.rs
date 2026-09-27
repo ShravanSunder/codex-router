@@ -96,7 +96,8 @@ pub use interaction_broker::{
     ApprovalDecisionError, ExternalApprovalOperationMetadata, ExternalApprovalOption,
     ExternalApprovalOptionScope, ExternalApprovalRefusal, ExternalApprovalRequest,
     InteractionHistoryError, InteractionHistoryRecord, InteractionHistoryState,
-    QuestionHistoryState, QuestionResponse, ServiceApprovalBroker,
+    QuestionHistoryState, QuestionResponse, RefusedApprovalOption, RefusedTypedApproval,
+    ServiceApprovalBroker,
 };
 
 mod acp_channel_listener;

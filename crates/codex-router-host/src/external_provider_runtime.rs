@@ -166,12 +166,16 @@ impl ExternalProviderRuntime {
     ) -> Result<Self, ExternalProviderRuntimeError> {
         let interaction_port = Arc::new(HostInteractionPort::default());
         let event_sink = Arc::new(HubSessionEventSink::new(hub, endpoint));
+        let published_sink: Arc<dyn acp_client_runtime::SessionEventSink> = event_sink.clone();
+        interaction_port
+            .install_event_sink(Arc::clone(&published_sink))
+            .await;
         let result = AgentSessionClient::initialize_with_mcp_http(
             launch,
             server_name,
             server_url,
             Arc::clone(&interaction_port),
-            Arc::clone(&event_sink) as Arc<dyn acp_client_runtime::SessionEventSink>,
+            published_sink,
         )
         .await;
         let client = match result {
