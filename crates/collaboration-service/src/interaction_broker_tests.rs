@@ -650,6 +650,51 @@ async fn typed_interaction_rejects_self_approver_and_corrupt_stored_rows() {
 }
 
 #[tokio::test]
+async fn typed_approval_rejects_foreign_service_participants_without_pending_history() {
+    use message_board::Identity;
+
+    let (broker, _, _) = fixture_broker().await;
+    let foreign_service = crate::new_service_uuid().expect("foreign service");
+    let foreign_requester =
+        board_session_ref(&session(&foreign_service, "provider-session")).expect("requester");
+    let local_approver =
+        board_session_ref(&session(&broker.service_id, "approver")).expect("approver");
+    assert!(matches!(
+        broker
+            .request_typed_approval(
+                foreign_requester,
+                Identity::Session {
+                    session: local_approver,
+                },
+                typed_approval_request("foreign-service"),
+                tokio_util::sync::CancellationToken::new(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await,
+        Err(crate::interaction_broker::InteractionHistoryError::Unavailable)
+    ));
+    let local_requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let foreign_approver =
+        board_session_ref(&session(&foreign_service, "approver")).expect("foreign approver");
+    assert!(matches!(
+        broker
+            .request_typed_approval(
+                local_requester,
+                Identity::Session {
+                    session: foreign_approver,
+                },
+                typed_approval_request("foreign-approver"),
+                tokio_util::sync::CancellationToken::new(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await,
+        Err(crate::interaction_broker::InteractionHistoryError::Unavailable)
+    ));
+    assert!(broker.list_interactions().await.is_empty());
+}
+
+#[tokio::test]
 async fn refused_typed_offer_preserves_reviewed_fields_and_order_without_legacy_write() {
     use message_board::{HumanId, Identity};
 

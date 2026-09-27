@@ -172,6 +172,21 @@ struct TypedPendingApproval {
 }
 
 impl ServiceInteractionBroker {
+    fn participants_belong_to_service(
+        &self,
+        requester: &message_board::SessionRef,
+        approver: &message_board::Identity,
+    ) -> bool {
+        let service_id = String::from(self.service_id.clone());
+        requester.endpoint.service_id.as_str() == service_id
+            && match approver {
+                message_board::Identity::Session { session } => {
+                    session.endpoint.service_id.as_str() == service_id
+                }
+                message_board::Identity::Human { .. } => true,
+            }
+    }
+
     pub async fn load(
         service_id: UuidIdentity,
         backend: NativeControlBackend,
@@ -316,6 +331,9 @@ impl ServiceInteractionBroker {
         retirement: tokio_util::sync::CancellationToken,
     ) -> Result<oneshot::Receiver<session_event_model::OfferedOptionId>, InteractionHistoryError>
     {
+        if !self.participants_belong_to_service(&requester, &approver) {
+            return Err(InteractionHistoryError::Unavailable);
+        }
         let request_id = request.request_id.clone();
         let mut pending = self.typed_pending_approvals.lock().await;
         if pending.contains_key(&request_id) {
@@ -404,6 +422,9 @@ impl ServiceInteractionBroker {
         approver: message_board::Identity,
         refusal: RefusedTypedApproval,
     ) -> Result<(), InteractionHistoryError> {
+        if !self.participants_belong_to_service(&requester, &approver) {
+            return Err(InteractionHistoryError::Unavailable);
+        }
         self.interaction_history
             .record_refused_approval(requester, approver, refusal)
             .await
@@ -415,6 +436,9 @@ impl ServiceInteractionBroker {
         approver: message_board::Identity,
         request: session_event_model::QuestionRequest,
     ) -> Result<oneshot::Receiver<QuestionResponse>, InteractionHistoryError> {
+        if !self.participants_belong_to_service(&requester, &approver) {
+            return Err(InteractionHistoryError::Unavailable);
+        }
         let request_id = request.request_id.clone();
         let mut pending = self.pending_questions.lock().await;
         if pending.contains_key(&request_id) {
