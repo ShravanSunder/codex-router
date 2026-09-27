@@ -17,7 +17,9 @@ pub(crate) fn decode_prompt_result(
         "max_turn_requests" => Ok(ProviderPromptStopReason::MaxTurnRequests),
         "refusal" => Ok(ProviderPromptStopReason::Refusal),
         "cancelled" => Ok(ProviderPromptStopReason::Cancelled),
-        unknown => Err(ExternalProviderRuntimeError::unknown_stop_reason(unknown)),
+        unknown => Ok(ProviderPromptStopReason::Unknown(
+            safe_unknown_stop_reason(unknown).to_owned(),
+        )),
     }
 }
 
@@ -30,7 +32,20 @@ pub(crate) fn decode_typed_stop_reason(
         StopReason::MaxTurnRequests => Ok(ProviderPromptStopReason::MaxTurnRequests),
         StopReason::Refusal => Ok(ProviderPromptStopReason::Refusal),
         StopReason::Cancelled => Ok(ProviderPromptStopReason::Cancelled),
-        _ => Err(ExternalProviderRuntimeError::FrameDecodeFailure),
+        _ => Ok(ProviderPromptStopReason::Unknown("unrecognized".to_owned())),
+    }
+}
+
+fn safe_unknown_stop_reason(value: &str) -> &str {
+    if !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    {
+        value
+    } else {
+        "unrecognized"
     }
 }
 
@@ -39,15 +54,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn untrusted_stop_reason_is_omitted_from_diagnostics() {
+    fn unknown_stop_reason_is_typed_without_exposing_untrusted_text() {
         let private_payload = "../token=synthetic-secret";
-        let error = decode_prompt_result(&serde_json::json!({"stopReason": private_payload}))
-            .expect_err("unknown stop reason");
-        let diagnostic = error.to_string();
+        let reason = decode_prompt_result(&serde_json::json!({"stopReason": private_payload}))
+            .expect("unknown stop reason keeps the turn");
         assert_eq!(
-            diagnostic,
-            "agent ended the turn with an unrecognized stop reason"
+            reason,
+            ProviderPromptStopReason::Unknown("unrecognized".to_owned())
         );
-        assert!(!diagnostic.contains(private_payload));
+        assert!(!format!("{reason:?}").contains(private_payload));
+        let ordinary = decode_prompt_result(&serde_json::json!({"stopReason": "future_reason"}))
+            .expect("safe unknown value is retained");
+        assert_eq!(
+            ordinary,
+            ProviderPromptStopReason::Unknown("future_reason".to_owned())
+        );
     }
 }
