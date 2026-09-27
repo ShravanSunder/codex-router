@@ -1,6 +1,9 @@
 //! Request-local effect evidence; never a replay or delivery store.
 use serde_json::{Value, json};
 
+pub(crate) const HELD_BY_ANOTHER_CLIENT_GUIDANCE: &str =
+    "Message it from the Codex client that holds it.";
+
 pub(crate) struct MessageEffects {
     pub id: Value,
     pub resume: &'static str,
@@ -27,7 +30,7 @@ impl MessageEffects {
     pub fn native_rejection(&self, stage: &str, code: i64, native: Option<&Value>) -> Value {
         let (reason, next_action) = classify_native_rejection(code, native);
         let message = if reason == "heldByAnotherClient" {
-            "Message it from the Codex client that holds it."
+            HELD_BY_ANOTHER_CLIENT_GUIDANCE
         } else {
             "Message operation failed"
         };
