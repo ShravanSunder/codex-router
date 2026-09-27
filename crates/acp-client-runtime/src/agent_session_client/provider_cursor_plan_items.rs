@@ -9,7 +9,7 @@ use agent_client_protocol::{Agent, ConnectionTo, Dispatch, Error, HandleDispatch
 use serde::Deserialize;
 use session_event_model::{SessionEvent, SessionItem, SessionItemKind};
 
-use crate::{SessionEventSink, provider_tool_call_registry::ProviderToolCallRegistry};
+use crate::{SessionEventSink, provider_connection_activity::ProviderConnectionActivity};
 
 #[derive(Default)]
 pub(crate) struct CursorPlanItems(Mutex<HashMap<(String, String), CursorPlanRecord>>);
@@ -145,14 +145,14 @@ impl CursorTodoStatus {
 }
 
 pub(super) struct ProviderCursorTodoHandler {
-    tool_registry: Arc<ProviderToolCallRegistry>,
+    tool_registry: Arc<ProviderConnectionActivity>,
     todo_state: Arc<CursorPlanItems>,
     event_sink: Arc<dyn SessionEventSink>,
 }
 
 impl ProviderCursorTodoHandler {
     pub(super) fn new(
-        tool_registry: Arc<ProviderToolCallRegistry>,
+        tool_registry: Arc<ProviderConnectionActivity>,
         todo_state: Arc<CursorPlanItems>,
         event_sink: Arc<dyn SessionEventSink>,
     ) -> Self {

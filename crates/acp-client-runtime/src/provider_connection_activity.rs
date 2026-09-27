@@ -1,4 +1,4 @@
-//! Resolve Cursor requests that carry a tool-call ID but no Session ID.
+//! Track active provider Turns and resolve tool-scoped connection requests.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -8,21 +8,23 @@ use std::{
 use agent_client_protocol::{Agent, ConnectionTo, Dispatch, Error, HandleDispatchFrom, Handled};
 
 #[derive(Default)]
-pub(crate) struct ProviderToolCallRegistry(Mutex<RegistryState>);
+pub(crate) struct ProviderConnectionActivity(Mutex<RegistryState>);
 
 #[derive(Default)]
 struct RegistryState {
-    running_sessions: HashSet<String>,
+    running_sessions: HashMap<String, String>,
     tool_sessions: HashMap<String, HashSet<String>>,
 }
 
-impl ProviderToolCallRegistry {
-    pub(crate) fn turn_started(&self, session_id: &str) {
+impl ProviderConnectionActivity {
+    pub(crate) fn turn_started(&self, session_id: &str, turn_id: &str) {
         let mut state = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.running_sessions.insert(session_id.to_owned());
+        state
+            .running_sessions
+            .insert(session_id.to_owned(), turn_id.to_owned());
     }
 
     pub(crate) fn observe_tool_call(&self, session_id: &str, tool_call_id: &str) {
@@ -48,7 +50,7 @@ impl ProviderToolCallRegistry {
                 .flatten();
         }
         (state.running_sessions.len() == 1)
-            .then(|| state.running_sessions.iter().next().cloned())
+            .then(|| state.running_sessions.keys().next().cloned())
             .flatten()
     }
 
@@ -63,14 +65,39 @@ impl ProviderToolCallRegistry {
             !owners.is_empty()
         });
     }
+
+    pub(crate) fn claim_turn_end(&self, session_id: &str, turn_id: &str) -> bool {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.running_sessions.get(session_id).map(String::as_str) != Some(turn_id) {
+            return false;
+        }
+        state.running_sessions.remove(session_id);
+        state.tool_sessions.retain(|_, owners| {
+            owners.remove(session_id);
+            !owners.is_empty()
+        });
+        true
+    }
+
+    pub(crate) fn drain_running_turns(&self) -> Vec<(String, String)> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.tool_sessions.clear();
+        state.running_sessions.drain().collect()
+    }
 }
 
 /// Observe tool ownership before the SDK hands a session/update to its
 /// Session actor. Cursor may send a connection request immediately afterward.
-pub(crate) struct ToolCallOwnershipHandler(Arc<ProviderToolCallRegistry>);
+pub(crate) struct ToolCallOwnershipHandler(Arc<ProviderConnectionActivity>);
 
 impl ToolCallOwnershipHandler {
-    pub(crate) fn new(registry: Arc<ProviderToolCallRegistry>) -> Self {
+    pub(crate) fn new(registry: Arc<ProviderConnectionActivity>) -> Self {
         Self(registry)
     }
 }
@@ -113,19 +140,19 @@ impl HandleDispatchFrom<Agent> for ToolCallOwnershipHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::ProviderToolCallRegistry;
+    use super::ProviderConnectionActivity;
 
     /// Cursor omits sessionId. A unique observed tool call wins over the
     /// single-running-Turn fallback; concurrent unknowns remain unresolved.
     #[test]
     fn resolves_only_unique_tool_ownership_or_one_running_turn() {
-        let registry = ProviderToolCallRegistry::default();
-        registry.turn_started("first");
+        let registry = ProviderConnectionActivity::default();
+        registry.turn_started("first", "turn-first");
         assert_eq!(
             registry.resolve_session("unknown").as_deref(),
             Some("first")
         );
-        registry.turn_started("second");
+        registry.turn_started("second", "turn-second");
         assert_eq!(registry.resolve_session("unknown"), None);
         registry.observe_tool_call("first", "first-tool");
         registry.observe_tool_call("second", "second-tool");
@@ -150,5 +177,19 @@ mod tests {
         );
         registry.turn_ended("first");
         assert_eq!(registry.resolve_session("first-tool"), None);
+    }
+
+    #[test]
+    fn connection_retirement_claims_only_unsettled_turns() {
+        let registry = ProviderConnectionActivity::default();
+        registry.turn_started("settled", "turn-one");
+        registry.turn_started("lost", "turn-two");
+        assert!(registry.claim_turn_end("settled", "turn-one"));
+        assert!(!registry.claim_turn_end("settled", "turn-one"));
+        assert_eq!(
+            registry.drain_running_turns(),
+            vec![("lost".to_owned(), "turn-two".to_owned())]
+        );
+        assert!(registry.drain_running_turns().is_empty());
     }
 }

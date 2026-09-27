@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     ApprovalPortOutcome, InteractionPort, SessionEventSink,
-    provider_tool_call_registry::ProviderToolCallRegistry,
+    provider_connection_activity::ProviderConnectionActivity,
 };
 
 #[derive(Deserialize)]
@@ -35,7 +35,7 @@ struct CursorCreatePlan {
 }
 
 pub(super) struct ProviderCursorCreatePlanHandler<P: InteractionPort> {
-    tool_registry: Arc<ProviderToolCallRegistry>,
+    tool_registry: Arc<ProviderConnectionActivity>,
     plan_items: Arc<CursorPlanItems>,
     event_sink: Arc<dyn SessionEventSink>,
     approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
@@ -44,7 +44,7 @@ pub(super) struct ProviderCursorCreatePlanHandler<P: InteractionPort> {
 
 impl<P: InteractionPort> ProviderCursorCreatePlanHandler<P> {
     pub(super) fn new(
-        tool_registry: Arc<ProviderToolCallRegistry>,
+        tool_registry: Arc<ProviderConnectionActivity>,
         plan_items: Arc<CursorPlanItems>,
         event_sink: Arc<dyn SessionEventSink>,
         approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
