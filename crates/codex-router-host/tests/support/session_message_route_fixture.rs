@@ -267,6 +267,7 @@ pub(super) async fn create_provider_target(
     let operation_id = OperationId::generate();
     client
         .create_provider_conversation(ConversationCreateRequest {
+            settings: None,
             operation_id: operation_id.clone(),
             endpoint,
             generation: Some(collaboration_protocol::CodexGeneration {

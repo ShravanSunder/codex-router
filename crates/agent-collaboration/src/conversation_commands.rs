@@ -40,7 +40,7 @@ struct ConversationArguments {
 enum ConversationCommand {
     /// Create a conversation and return its stable SessionRef without submitting a prompt.
     #[command(
-        long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. --model and --effort are required for Codex endpoints and rejected for provider endpoints. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
+        long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. --model and --effort are required for Codex endpoints; provider endpoints accept advertised --mode, --model and --effort values. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
     )]
     Create(CreateArguments),
     /// Run an ACP prompt and wait for settlement. For an empty conversation returned by
@@ -61,10 +61,13 @@ enum ConversationCommand {
 struct CreateArguments {
     #[arg(long)]
     endpoint: String,
-    /// Required for Codex endpoints; rejected for provider endpoints.
+    /// Provider mode option value advertised by the agent.
+    #[arg(long)]
+    mode: Option<String>,
+    /// Required for Codex endpoints; provider value must be advertised by the agent.
     #[arg(long)]
     model: Option<String>,
-    /// Required for Codex endpoints; rejected for provider endpoints.
+    /// Required for Codex endpoints; provider value must be advertised by the agent.
     #[arg(long)]
     effort: Option<String>,
     #[arg(long)]

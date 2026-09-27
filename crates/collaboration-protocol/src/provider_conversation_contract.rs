@@ -281,6 +281,62 @@ pub struct EffectiveProviderSettings {
     pub provider_permission_mode: Option<NonEmptyText>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_outcome: Option<ProviderPermissionOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderRequestedSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderSettingName {
+    Mode,
+    Model,
+    Effort,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppliedProviderSetting {
+    pub setting: ProviderSettingName,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FailedProviderSetting {
+    pub setting: ProviderSettingName,
+    pub value: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InvalidSettingSessionDisposition {
+    Closed,
+    RemainsCreated,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InvalidProviderSetting {
+    pub setting: ProviderSettingName,
+    pub value: String,
+    pub advertised: Vec<String>,
+    pub session_disposition: InvalidSettingSessionDisposition,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -379,6 +435,8 @@ pub struct ConversationCreateRequest {
     pub created_by: SessionRef,
     pub approver: SessionRef,
     pub requested_policy: ProviderRequestedPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<ProviderRequestedSettings>,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
@@ -459,6 +517,11 @@ pub enum ConversationOperationSettlement {
         target: SessionRef,
         effective_settings: EffectiveProviderSettings,
     },
+    CreatedWithoutSettings {
+        target: SessionRef,
+        applied: Vec<AppliedProviderSetting>,
+        failed: Vec<FailedProviderSetting>,
+    },
     Loaded {
         target: SessionRef,
         effective_settings: EffectiveProviderSettings,
@@ -510,6 +573,8 @@ pub struct ConversationOperationWaitResult {
 #[serde(rename_all = "camelCase")]
 pub enum ConversationOperationFailureKind {
     InvalidRequest,
+    InvalidSetting,
+    SettingsUnresolved,
     UnsupportedCapability,
     AuthenticationRequired,
     PermissionRejected,
@@ -531,6 +596,8 @@ pub struct ConversationOperationFailure {
     pub effect: ProviderOperationEffect,
     pub message: NonEmptyText,
     pub operation_id: OperationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_setting: Option<InvalidProviderSetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_code: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

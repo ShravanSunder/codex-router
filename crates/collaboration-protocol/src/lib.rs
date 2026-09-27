@@ -12,21 +12,23 @@ mod conversation_create_outcome;
 mod provider_conversation_contract;
 pub use conversation_create_outcome::ConversationCreateOutcome;
 pub use provider_conversation_contract::{
-    ConversationAdmissionState, ConversationBindingIdentity, ConversationCancelRequest,
-    ConversationCreateRequest, ConversationLoadRequest, ConversationOperationFailure,
-    ConversationOperationFailureKind, ConversationOperationFailureStage,
-    ConversationOperationQueueState, ConversationOperationReconcileRequest,
-    ConversationOperationSettlement, ConversationOperationShowRequest,
-    ConversationOperationSnapshot, ConversationOperationSubmission,
-    ConversationOperationWaitOutput, ConversationOperationWaitRequest,
-    ConversationOperationWaitResult, ConversationOutputUnavailableReason,
-    ConversationPromptRequest, EffectiveProviderSettings, ProviderAuthenticationState,
-    ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities, ProviderCapability,
-    ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
-    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
-    ProviderPermissionOutcome, ProviderPromptStopReason, ProviderReconciliationState,
-    ProviderRequestedPolicy, ProviderRuntimeIdentity, ProviderSettingsMappingStatus,
-    ProviderTransport, ProviderWorkingDirectory,
+    AppliedProviderSetting, ConversationAdmissionState, ConversationBindingIdentity,
+    ConversationCancelRequest, ConversationCreateRequest, ConversationLoadRequest,
+    ConversationOperationFailure, ConversationOperationFailureKind,
+    ConversationOperationFailureStage, ConversationOperationQueueState,
+    ConversationOperationReconcileRequest, ConversationOperationSettlement,
+    ConversationOperationShowRequest, ConversationOperationSnapshot,
+    ConversationOperationSubmission, ConversationOperationWaitOutput,
+    ConversationOperationWaitRequest, ConversationOperationWaitResult,
+    ConversationOutputUnavailableReason, ConversationPromptRequest, EffectiveProviderSettings,
+    FailedProviderSetting, InvalidProviderSetting, InvalidSettingSessionDisposition,
+    ProviderAuthenticationState, ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities,
+    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationKind,
+    ProviderOperationStage, ProviderPermissionOutcome, ProviderPromptStopReason,
+    ProviderReconciliationState, ProviderRequestedPolicy, ProviderRequestedSettings,
+    ProviderRuntimeIdentity, ProviderSettingName, ProviderSettingsMappingStatus, ProviderTransport,
+    ProviderWorkingDirectory,
 };
 mod access_contract;
 mod approval_contract;

@@ -249,6 +249,47 @@ impl ExternalProviderRuntime {
         self.client.create_session_with_observation(cwd).await
     }
 
+    pub async fn create_session_with_settings(
+        &self,
+        cwd: PathBuf,
+        settings: acp_client_runtime::RequestedProviderSettings,
+    ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
+        self.client
+            .create_session_with_settings(cwd, settings)
+            .await
+    }
+
+    pub async fn settings_unresolved(&self, provider_session_id: &str) -> bool {
+        self.client.settings_unresolved(provider_session_id).await
+    }
+
+    pub async fn set_setting(
+        &self,
+        provider_session_id: String,
+        kind: acp_client_runtime::ProviderSettingKind,
+        value: String,
+    ) -> Result<acp_client_runtime::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        self.client
+            .set_setting(provider_session_id, kind, value)
+            .await
+    }
+
+    pub async fn accept_session_settings(
+        &self,
+        provider_session_id: String,
+    ) -> Result<acp_client_runtime::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        self.client
+            .accept_session_settings(provider_session_id)
+            .await
+    }
+
+    pub async fn settings_catalog(
+        &self,
+        provider_session_id: &str,
+    ) -> Option<acp_client_runtime::ProviderSettingsCatalog> {
+        self.client.settings_catalog(provider_session_id).await
+    }
+
     pub async fn load_session(
         &self,
         provider_session_id: String,

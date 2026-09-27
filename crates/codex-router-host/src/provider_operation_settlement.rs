@@ -1,8 +1,9 @@
 //! Persist applied provider effects and session metadata at one settlement boundary.
 use collaboration_protocol::{
-    ConversationOperationFailure, ConversationOperationSettlement, EffectiveProviderSettings,
-    MessageText, OperationId, ProviderAuthenticationState, ProviderOperationEffect,
-    ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
+    AppliedProviderSetting, ConversationOperationFailure, ConversationOperationSettlement,
+    EffectiveProviderSettings, FailedProviderSetting, MessageText, OperationId,
+    ProviderAuthenticationState, ProviderOperationEffect, ProviderPromptStopReason,
+    ProviderReconciliationState, ProviderRequestedPolicy, ProviderSettingName,
     ProviderSettingsMappingStatus, ProviderWorkingDirectory, SessionRef,
 };
 use collaboration_service::{
@@ -16,6 +17,10 @@ pub(crate) enum ProviderOperationCompletion {
         session_record: Option<Box<ProviderSessionRecord>>,
     },
     Failure(ConversationOperationFailure),
+    FailureWithSession {
+        failure: ConversationOperationFailure,
+        session_record: Box<ProviderSessionRecord>,
+    },
 }
 
 pub(crate) async fn persist_provider_success(
@@ -56,6 +61,38 @@ pub(crate) fn effective_settings(
         authentication: ProviderAuthenticationState::Unverified,
         provider_permission_mode: None,
         permission_outcome: None,
+        mode: None,
+        model: None,
+        effort: None,
+    }
+}
+
+pub(crate) fn provider_setting_name(
+    kind: acp_client_runtime::ProviderSettingKind,
+) -> ProviderSettingName {
+    match kind {
+        acp_client_runtime::ProviderSettingKind::Mode => ProviderSettingName::Mode,
+        acp_client_runtime::ProviderSettingKind::Model => ProviderSettingName::Model,
+        acp_client_runtime::ProviderSettingKind::Effort => ProviderSettingName::Effort,
+    }
+}
+
+pub(crate) fn provider_applied_setting(
+    setting: acp_client_runtime::AppliedProviderSetting,
+) -> AppliedProviderSetting {
+    AppliedProviderSetting {
+        setting: provider_setting_name(setting.kind),
+        value: setting.value,
+    }
+}
+
+pub(crate) fn provider_failed_setting(
+    setting: acp_client_runtime::FailedProviderSetting,
+) -> FailedProviderSetting {
+    FailedProviderSetting {
+        setting: provider_setting_name(setting.kind),
+        value: setting.value,
+        reason: setting.reason,
     }
 }
 

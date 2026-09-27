@@ -23,6 +23,10 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
     };
     if !args.cwd.is_absolute()
         || args
+            .mode
+            .as_deref()
+            .is_some_and(|value| validate_choice_value(value, "--mode").is_err())
+        || args
             .model
             .as_deref()
             .is_some_and(|value| validate_choice_value(value, "--model").is_err())
@@ -33,7 +37,7 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
     {
         return crate::endpoint_commands::report_failure(
             "invalidField",
-            "Create requires an absolute --cwd and non-empty supplied --model/--effort",
+            "Create requires an absolute --cwd and non-empty supplied --mode/--model/--effort",
             2,
             args.json,
         );
@@ -150,6 +154,7 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
             fork,
             generation,
             model: args.model,
+            mode: args.mode,
             effort: args.effort,
             access: match args.access {
                 ConversationAccess::WriteRestricted => RouterAccess::WriteRestricted,
@@ -172,7 +177,13 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
             }
         };
         match client.create(request, timeout).await {
-            Ok(outcome) => emit_create_outcome(&outcome, args.json).map_or(3, |()| 0),
+            Ok(outcome) => emit_create_outcome(&outcome, args.json).map_or(3, |()| {
+                if matches!(outcome, ConversationCreateOutcome::CreatedWithoutSettings { .. }) {
+                    4
+                } else {
+                    0
+                }
+            }),
             Err(error) => report_create_client_error(error, &operation_id, args.json),
         }
     })
@@ -317,6 +328,7 @@ pub(super) fn run_new_prompt(args: PromptArguments) -> i32 {
             approver,
             generation,
             model: args.model,
+            mode: None,
             effort: args.effort.clone(),
             fork: None,
             root_message_id,
@@ -345,6 +357,7 @@ pub(super) fn run_new_prompt(args: PromptArguments) -> i32 {
             Ok(outcome) => {
                 emit_create_prompt_outcome(&outcome, args.json).map_or(3, |()| match &outcome {
                     ConversationCreatePromptOutcome::CreatePending { .. } => 0,
+                    ConversationCreatePromptOutcome::CreatedWithoutSettings { .. } => 4,
                     ConversationCreatePromptOutcome::Prompt { prompt, .. } => {
                         operation_result_exit(prompt)
                     }

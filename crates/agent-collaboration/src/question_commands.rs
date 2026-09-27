@@ -35,7 +35,7 @@ enum QuestionCommand {
         /// Exact typed Identity or SessionRef JSON for the designated Approver.
         #[arg(long)]
         actor: String,
-        /// JSON object of field IDs to typed values for an answered form.
+        /// JSON object of field IDs to typed values; choices use selectedOptionIds.
         #[arg(long, group = "answer")]
         content: Option<String>,
         #[arg(long, group = "answer")]

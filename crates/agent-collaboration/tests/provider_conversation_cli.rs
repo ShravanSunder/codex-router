@@ -265,6 +265,12 @@ async fn common_create_waits_for_provider_target_and_prints_operation_first() {
         assert_eq!(create["method"], "conversation/create");
         assert_eq!(create["params"]["operationId"], CREATE_OPERATION);
         assert_eq!(create["params"]["generation"], generation());
+        assert_eq!(
+            create["params"]["settings"],
+            json!({
+                "mode":"ask", "model":"provider-model", "effort":"high"
+            })
+        );
         write_response(&mut write, &create, json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", None, "admitted", "none")})).await;
         let wait: Value = serde_json::from_str(
             &lines
@@ -277,7 +283,9 @@ async fn common_create_waits_for_provider_target_and_prints_operation_first() {
         assert_eq!(wait["method"], "conversation/operationWait");
         assert_eq!(wait["params"]["operationId"], CREATE_OPERATION);
         write_response(&mut write, &wait, json!({"operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied"),
-            "output":{"kind":"outputUnavailable","reason":"notRetained"}})).await;
+            "output":{"kind":"available","settlement":{"kind":"created","target":target(),
+                "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified",
+                    "authentication":"authenticated","mode":"ask","model":"provider-model","effort":"high"}}}})).await;
     });
     let create = run_cli(
         &root,
@@ -296,6 +304,12 @@ async fn common_create_waits_for_provider_target_and_prints_operation_first() {
             "/tmp/project",
             "--access",
             "workspace-write",
+            "--mode",
+            "ask",
+            "--model",
+            "provider-model",
+            "--effort",
+            "high",
             "--json",
         ]
         .into_iter()
@@ -366,7 +380,7 @@ async fn codex_create_missing_model_and_effort_fails_before_start_record() {
 }
 
 #[tokio::test]
-async fn provider_create_rejects_model_and_effort_before_start_record() {
+async fn provider_create_accepts_mode_model_and_effort_past_local_preflight() {
     let root = fixture_directory("provider-create-codex-inputs");
     let output = run_cli(
         &root,
@@ -381,6 +395,8 @@ async fn provider_create_rejects_model_and_effort_before_start_record() {
             "workspace-write",
             "--model",
             "gpt-5.6",
+            "--mode",
+            "ask",
             "--effort",
             "medium",
             "--json",
@@ -390,7 +406,7 @@ async fn provider_create_rejects_model_and_effort_before_start_record() {
         .collect(),
     )
     .await;
-    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(output.status.code(), Some(3));
     let rendered = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -400,9 +416,9 @@ async fn provider_create_rejects_model_and_effort_before_start_record() {
         !rendered.contains("conversationCreateStarted"),
         "{rendered}"
     );
-    assert!(rendered.contains("claude-local"), "{rendered}");
-    assert!(rendered.contains("--model"), "{rendered}");
-    assert!(rendered.contains("--effort"), "{rendered}");
+    assert!(rendered.contains("manifest-read"), "{rendered}");
+    assert!(!rendered.contains("unsupportedCapability"), "{rendered}");
+    assert!(!rendered.contains("omit these fields"), "{rendered}");
     cleanup_unpublished_fixture(&root);
 }
 

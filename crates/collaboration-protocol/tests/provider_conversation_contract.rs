@@ -1,6 +1,7 @@
 use collaboration_protocol::{
-    ConversationBindingIdentity, ConversationCreateOutcome, ConversationOperationFailure,
-    control_error_is_valid, control_schema_document,
+    ConversationBindingIdentity, ConversationCreateOutcome, ConversationCreateRequest,
+    ConversationOperationFailure, ConversationOperationSettlement, control_error_is_valid,
+    control_schema_document,
 };
 use serde_json::{Value, json};
 
@@ -181,6 +182,49 @@ fn mutations_require_caller_operation_identity_and_allow_unpinned_generation() {
         .unwrap_or_else(|| panic!("params"))
         .remove("generation");
     assert!(create_validator.is_valid(&request));
+}
+
+#[test]
+fn provider_create_settings_and_partial_settlement_have_additive_typed_shapes() {
+    let request = json!({
+        "operationId":"019f0000-0000-7000-8000-000000000010",
+        "endpoint":endpoint(),
+        "workingDirectory":"/tmp/provider-work",
+        "createdBy":session("creator"),
+        "approver":session("approver"),
+        "requestedPolicy":{"access":"workspace-write"},
+        "settings":{"mode":"plan","model":"provider-model","effort":"high"}
+    });
+    let decoded: ConversationCreateRequest =
+        serde_json::from_value(request.clone()).expect("provider settings request");
+    assert_eq!(serde_json::to_value(decoded).expect("round trip"), request);
+    let settlement = json!({
+        "kind":"createdWithoutSettings", "target":session("created"),
+        "applied":[{"setting":"mode","value":"plan"}],
+        "failed":[{"setting":"model","value":"provider-model","reason":"agent refused"}]
+    });
+    let decoded: ConversationOperationSettlement =
+        serde_json::from_value(settlement.clone()).expect("partial settlement");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("round trip"),
+        settlement
+    );
+}
+
+#[test]
+fn invalid_setting_failure_names_advertised_values_and_session_disposition() {
+    let failure = json!({
+        "kind":"invalidSetting", "stage":"settlement", "effect":"none",
+        "message":"mode value invalid; advertised: plan, default; Session closed",
+        "operationId":"019f0000-0000-7000-8000-000000000011",
+        "invalidSetting":{
+            "setting":"mode", "value":"wrong", "advertised":["plan","default"],
+            "sessionDisposition":"closed"
+        }
+    });
+    let decoded: ConversationOperationFailure =
+        serde_json::from_value(failure.clone()).expect("typed invalid setting");
+    assert_eq!(serde_json::to_value(decoded).expect("round trip"), failure);
 }
 
 #[test]

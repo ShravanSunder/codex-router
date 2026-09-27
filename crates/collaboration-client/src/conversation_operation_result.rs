@@ -38,6 +38,12 @@ pub enum ConversationCreatePromptOutcome {
     CreatePending {
         operation_id: OperationId,
     },
+    CreatedWithoutSettings {
+        operation_id: OperationId,
+        target: SessionRef,
+        applied: Vec<collaboration_protocol::AppliedProviderSetting>,
+        failed: Vec<collaboration_protocol::FailedProviderSetting>,
+    },
     Prompt {
         create_operation_id: OperationId,
         prompt: Box<ConversationOperationResult>,

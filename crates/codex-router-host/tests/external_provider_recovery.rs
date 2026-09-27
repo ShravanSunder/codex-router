@@ -238,6 +238,7 @@ async fn crash_child_records_durable_boundary() -> TestResult {
     if mode == "create" {
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id,
                 endpoint: endpoint()?,
                 generation: Some(generation()?),
@@ -393,6 +394,7 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
     let duplicate = if mode == "create" {
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: operation_id.clone(),
                 endpoint: endpoint()?,
                 generation: Some(generation()?),
@@ -446,6 +448,7 @@ async fn verify_dispatched_crash(mode: &str, expected_target: Option<SessionRef>
     let fresh = if mode == "create" {
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: fresh_operation_id,
                 endpoint: endpoint()?,
                 generation: Some(restarted_generation),

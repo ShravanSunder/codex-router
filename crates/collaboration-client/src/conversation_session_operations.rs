@@ -408,6 +408,7 @@ fn operation_settlement_failure(
         effect,
         message,
         operation_id,
+        invalid_setting: None,
         provider_code: None,
         target: Some(target),
         endpoint: None,

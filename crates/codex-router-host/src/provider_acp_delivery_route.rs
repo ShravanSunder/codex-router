@@ -203,6 +203,12 @@ impl ProviderAcpDeliveryRoute {
             return Ok(Self::not_submitted("provider runtime is unavailable", true));
         };
         let provider_session_id = String::from(request.target.session_id.clone());
+        if runtime.settings_unresolved(&provider_session_id).await {
+            return Ok(Self::rejected(
+                DeliveryRejectionReason::SettingsUnresolved,
+                "settingsUnresolved: set requested settings or accept current values before prompt, steer or queue",
+            ));
+        }
         let capabilities = runtime.capability_report(&provider_session_id).await;
         if request.mode == MessageDelivery::Steer && !capabilities.supports_steering {
             return Ok(Self::rejected(
