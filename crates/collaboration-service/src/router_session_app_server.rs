@@ -33,6 +33,7 @@ pub struct RouterSessionAppServerContext {
     events: Arc<dyn SessionEventHub>,
     model_catalog: watch::Receiver<Vec<ProviderModelEntry>>,
     interaction_broker: Option<Arc<crate::ServiceInteractionBroker>>,
+    project_trust: Option<Arc<dyn codex_native_integration::CodexProjectTrustLookup>>,
 }
 
 impl RouterSessionAppServerContext {
@@ -50,12 +51,22 @@ impl RouterSessionAppServerContext {
             events,
             model_catalog,
             interaction_broker: None,
+            project_trust: None,
         }
     }
 
     #[must_use]
     pub fn with_interaction_broker(mut self, broker: Arc<crate::ServiceInteractionBroker>) -> Self {
         self.interaction_broker = Some(broker);
+        self
+    }
+
+    #[must_use]
+    pub fn with_project_trust(
+        mut self,
+        lookup: Arc<dyn codex_native_integration::CodexProjectTrustLookup>,
+    ) -> Self {
+        self.project_trust = Some(lookup);
         self
     }
 }
@@ -114,6 +125,8 @@ impl RouterSessionAppServerListener {
 enum ThreadMethodError {
     #[error("invalid thread parameters")]
     InvalidParams,
+    #[error("launch the Codex TUI with --cd <project> to choose where this provider session works")]
+    WorkingDirectoryRequired,
     #[error("image input could not be read")]
     ImageUnreadable,
     #[error("image input exceeds the 1 MiB message limit")]
@@ -220,6 +233,7 @@ pub async fn serve_router_session_app_server_connection(
                 Err(error) => {
                     let code = match error {
                         ThreadMethodError::InvalidParams
+                        | ThreadMethodError::WorkingDirectoryRequired
                         | ThreadMethodError::ImageUnreadable
                         | ThreadMethodError::ImageTooLarge
                         | ThreadMethodError::PromptTooLarge
@@ -231,7 +245,13 @@ pub async fn serve_router_session_app_server_connection(
                 }
             }
         } else {
-            handle_app_server_request(id, method, &context.model_catalog.borrow())
+            handle_app_server_request(
+                id,
+                method,
+                request.get("params").unwrap_or(&Value::Null),
+                &context.model_catalog.borrow(),
+                context.project_trust.as_deref(),
+            )
         };
         websocket
             .send(Message::Text(response.to_string().into()))
@@ -297,6 +317,10 @@ use methods::{
     handle_app_server_request, handle_app_server_thread_request, handle_app_server_turn_request,
 };
 
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
+#[path = "router_session_app_server_cwd_tests.rs"]
+mod cwd_tests;
 #[cfg(test)]
 #[allow(clippy::panic_in_result_fn)]
 #[path = "router_session_app_server_model_tests.rs"]

@@ -6,6 +6,26 @@ use codex_router_host::{
 use collaboration_protocol::{EndpointId, EndpointRef, SessionId, SessionRef};
 use std::os::unix::fs::PermissionsExt as _;
 
+async fn assert_provider_ready(directory: &std::path::Path) {
+    let mut client = collaboration_client::ControlClient::connect(directory, "face-proof", "1")
+        .await
+        .expect("Control client");
+    let inventory = client.list_endpoints().await.expect("endpoint inventory");
+    let provider = inventory
+        .endpoints
+        .iter()
+        .find(|endpoint| String::from(endpoint.endpoint.endpoint_id.clone()) == "claude-local")
+        .expect("Claude endpoint");
+    assert!(
+        matches!(
+            provider.availability,
+            collaboration_protocol::EndpointAvailability::Available { .. }
+        ),
+        "provider unavailable: {:?}",
+        provider.availability
+    );
+}
+
 #[tokio::test]
 async fn composed_acp_connection_admits_provider_without_codex_generation() {
     use serde_json::{Value, json};
@@ -52,6 +72,7 @@ sys.stdin.read()
     )
     .await
     .expect("Host starts provider face");
+    assert_provider_ready(root.path()).await;
     let stream = UnixStream::connect(root.path().join("codex-acp.sock"))
         .await
         .expect("ACP socket");
@@ -166,6 +187,10 @@ request=receive()
 assert request['method']=='session/prompt'
 assert request['params']['prompt']==[{'type':'text','text':'queued by another agent'}]
 send({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end_turn'}})
+request=receive()
+assert request['method']=='session/prompt'
+assert request['params']['prompt']==[{'type':'text','text':'prompt by another agent'}]
+send({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
 "#).expect("provider fixture");
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700))
@@ -187,6 +212,7 @@ sys.stdin.read()
     )
     .await
     .expect("Host starts provider face");
+    assert_provider_ready(root.path()).await;
     let socket = root.path().join("router-sessions/claude-local.sock");
     let stream = UnixStream::connect(socket)
         .await
@@ -194,6 +220,25 @@ sys.stdin.read()
     let (mut client, _) = client_async("ws://localhost/rpc", stream)
         .await
         .expect("websocket handshake");
+    client
+        .send(Message::Text(
+            json!({"id":"trust","method":"config/read","params":{"includeLayers":true,"cwd":root.path()}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("trust read");
+    let trust: Value = serde_json::from_str(
+        client
+            .next()
+            .await
+            .expect("trust response")
+            .expect("frame")
+            .to_text()
+            .expect("text"),
+    )
+    .expect("trust JSON");
+    assert_eq!(trust["result"]["config"]["projects"], json!({}));
     client
         .send(Message::Text(
             json!({"id":1,"method":"thread/start","params":{
@@ -356,6 +401,76 @@ sys.stdin.read()
     .await
     .expect("ACP queue deadline");
     assert!(queued["result"]["inputId"].as_str().is_some(), "{queued}");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = client
+                .next()
+                .await
+                .expect("queued turn event")
+                .expect("frame");
+            let event: Value = serde_json::from_str(frame.to_text().expect("text frame"))
+                .expect("JSON queued turn event");
+            if event["method"] == "turn/completed" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("queued turn completion deadline");
+
+    let load = json!({"jsonrpc":"2.0","id":12,"method":"session/load","params":{
+        "sessionId":"tui-provider-session","cwd":root.path(),"mcpServers":[],
+        "_meta":{"router":{"sessionRef":target}}
+    }});
+    acp_write
+        .write_all(format!("{load}\n").as_bytes())
+        .await
+        .expect("noncreator attach request");
+    let attached: Value = timeout(Duration::from_secs(5), async {
+        loop {
+            let line = acp_lines
+                .next_line()
+                .await
+                .expect("read attach")
+                .expect("attach response");
+            let frame: Value = serde_json::from_str(&line).expect("attach JSON");
+            if frame["id"] == 12 {
+                break frame;
+            }
+        }
+    })
+    .await
+    .expect("noncreator attach deadline");
+    assert_eq!(
+        attached["result"]["sessionId"], "tui-provider-session",
+        "{attached}"
+    );
+
+    let prompt = json!({"jsonrpc":"2.0","id":13,"method":"session/prompt","params":{
+        "sessionId":"tui-provider-session",
+        "prompt":[{"type":"text","text":"prompt by another agent"}],
+        "_meta":{"router":{"sessionRef":target}}
+    }});
+    acp_write
+        .write_all(format!("{prompt}\n").as_bytes())
+        .await
+        .expect("noncreator prompt request");
+    let prompted: Value = timeout(Duration::from_secs(5), async {
+        loop {
+            let line = acp_lines
+                .next_line()
+                .await
+                .expect("read prompt")
+                .expect("prompt response");
+            let frame: Value = serde_json::from_str(&line).expect("prompt JSON");
+            if frame["id"] == 13 {
+                break frame;
+            }
+        }
+    })
+    .await
+    .expect("noncreator prompt deadline");
+    assert!(prompted["result"].is_object(), "{prompted}");
     client.close(None).await.expect("close websocket");
     runtime.shutdown().await.expect("Host shutdown");
     let mut store = ProviderOperationStore::open(&root.path().join("provider-operations.sqlite"))

@@ -423,7 +423,7 @@ impl CollaborationRuntime {
         )?
         .with_connection_budget(std::sync::Arc::clone(&permits));
         let stored = std::sync::Arc::new(collaboration_service::NativeStoredSessions::new(
-            inputs.codex_home,
+            inputs.codex_home.clone(),
             String::from(service_id.clone()),
         ));
         let mut acp = collaboration_service::AcpChannelListener::bind(
@@ -481,7 +481,10 @@ impl CollaborationRuntime {
                     std::sync::Arc::clone(&events),
                     catalog,
                 )
-                .with_interaction_broker(std::sync::Arc::clone(&approval_broker));
+                .with_interaction_broker(std::sync::Arc::clone(&approval_broker))
+                .with_project_trust(std::sync::Arc::new(
+                    codex_native_integration::CodexHomeProjectTrust::new(inputs.codex_home.clone()),
+                ));
                 let socket_path = socket_directory.join(format!(
                     "{}.sock",
                     String::from(description.endpoint.endpoint_id.clone())

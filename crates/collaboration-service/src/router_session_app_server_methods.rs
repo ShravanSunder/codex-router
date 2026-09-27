@@ -4,13 +4,68 @@ use super::*;
 pub(super) fn handle_app_server_request(
     id: Value,
     method: &str,
+    params: &Value,
     catalog: &[ProviderModelEntry],
+    project_trust: Option<&dyn codex_native_integration::CodexProjectTrustLookup>,
 ) -> Value {
     let result = match method {
         "initialize" => Some(json!({})),
         "account/read" => Some(json!({"account":null,"requiresOpenaiAuth":false})),
         "model/list" => Some(render_model_list(catalog)),
         "configRequirements/read" => Some(json!({"requirements":null})),
+        "config/read"
+            if params.get("includeLayers") == Some(&Value::Bool(true))
+                && params.get("cwd").and_then(Value::as_str).is_some() =>
+        {
+            let cwd = Path::new(
+                params
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            );
+            if !cwd.is_absolute() || !cwd.is_dir() {
+                return json!({"id":id,"error":{"code":-32602,"message":"config/read cwd must be an absolute existing directory"}});
+            }
+            let answer = project_trust.map_or_else(
+                || codex_native_integration::ProjectTrustAnswer::ConfigUnavailable {
+                    reason: "Codex trust lookup unavailable".into(),
+                    trust_target: cwd.to_string_lossy().into_owned(),
+                },
+                |lookup| lookup.project_trust(cwd),
+            );
+            let (projects, layers) = match answer {
+                codex_native_integration::ProjectTrustAnswer::Trusted {
+                    matched_key,
+                    match_kind,
+                } => {
+                    let layers = if match_kind
+                        == codex_native_integration::ProjectTrustMatchKind::WorkingDirectory
+                    {
+                        json!([])
+                    } else {
+                        json!([{"name":{"type":"project","dotCodexFolder":format!("{matched_key}/.codex")}}])
+                    };
+                    (json!({matched_key:{"trust_level":"trusted"}}), layers)
+                }
+                codex_native_integration::ProjectTrustAnswer::Untrusted {
+                    trust_target,
+                    explicitly_untrusted: true,
+                } => {
+                    let layers = if trust_target == cwd.to_string_lossy() {
+                        json!([])
+                    } else {
+                        json!([{"name":{"type":"project","dotCodexFolder":format!("{trust_target}/.codex")},
+                            "disabledReason": format!("{trust_target} is marked as untrusted in the effective configuration.")}])
+                    };
+                    (json!({trust_target:{"trust_level":"untrusted"}}), layers)
+                }
+                _ => (json!({}), json!([])),
+            };
+            Some(json!({"config":{"projects":projects},"origins":{},"layers":layers}))
+        }
+        "config/batchWrite" | "config/write" => {
+            return json!({"id":id,"error":{"code":-32000,"message":"Provider session trust is read-only here; trust this project in Codex itself"}});
+        }
         "collaborationMode/list" | "hooks/list" | "skills/list" => {
             Some(json!({"data":[],"nextCursor":null}))
         }
@@ -41,11 +96,18 @@ pub(super) async fn handle_app_server_thread_request(
             {
                 return Err(ThreadMethodError::InvalidParams);
             }
-            let working_directory = match params.get("cwd").and_then(Value::as_str) {
-                Some(cwd) => PathBuf::from(cwd),
-                None => std::env::current_dir().map_err(|_| ThreadMethodError::Unavailable)?,
-            };
+            let working_directory = params
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .ok_or(ThreadMethodError::WorkingDirectoryRequired)?;
             if !working_directory.is_absolute() {
+                return Err(ThreadMethodError::InvalidParams);
+            }
+            let metadata = tokio::fs::metadata(&working_directory)
+                .await
+                .map_err(|_| ThreadMethodError::InvalidParams)?;
+            if !metadata.is_dir() {
                 return Err(ThreadMethodError::InvalidParams);
             }
             let model_override =
