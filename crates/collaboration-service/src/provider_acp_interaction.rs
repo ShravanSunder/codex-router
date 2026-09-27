@@ -233,3 +233,91 @@ pub(crate) async fn apply_interaction_reply(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session() -> SessionRef {
+        serde_json::from_value(json!({
+            "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"claude-local"},
+            "sessionId":"provider-session"
+        }))
+        .expect("session")
+    }
+
+    fn actor() -> Identity {
+        serde_json::from_value(json!({"kind":"human","humanId":"owner"})).expect("actor")
+    }
+
+    #[test]
+    fn plan_approval_keeps_origin_subject_and_persistent_target() {
+        let request = serde_json::from_value(json!({
+            "requestId":"approval-1","title":"Approve plan","optionsOrigin":"routerSynthesized",
+            "subject":{"type":"plan","toolCallId":"tool-1","planItemId":"plan-2"},
+            "options":[{"optionId":"always","label":"Always allow","choice":{
+                "effect":"allow","scope":{"persistent":{"where_stored":"Cursor allowlist"}}
+            }}]
+        }))
+        .expect("approval request");
+        let approver = actor();
+        let outbound = present_interaction(
+            &session(),
+            PendingInteraction::Approval {
+                approver: approver.clone(),
+                request: Box::new(request),
+            },
+            &approver,
+            true,
+        )
+        .expect("outbound approval");
+        assert_eq!(
+            outbound.frame["params"]["_meta"]["router"]["optionsOrigin"],
+            "routerSynthesized"
+        );
+        assert_eq!(
+            outbound.frame["params"]["toolCall"]["_meta"]["router"]["planItemId"],
+            "plan-2"
+        );
+        assert_eq!(outbound.frame["params"]["options"][0]["optionId"], "always");
+        assert_eq!(
+            outbound.frame["params"]["options"][0]["_meta"]["router"]["persistentTarget"],
+            "Cursor allowlist"
+        );
+    }
+
+    #[test]
+    fn question_choices_keep_option_ids_labels_and_array_bounds() {
+        let request = serde_json::from_value(json!({
+            "requestId":"question-1","prompt":"Pick items","fields":[
+                {"kind":"singleChoice","fieldId":"mode","label":"Mode","description":null,
+                    "required":true,"options":[{"optionId":"safe","label":"Safe mode"}]},
+                {"kind":"multiChoice","fieldId":"items","label":"Items","description":null,
+                    "required":true,"options":[{"optionId":"first","label":"First item"}],"min":1,"max":1}
+            ]
+        }))
+        .expect("question request");
+        let approver = actor();
+        let outbound = present_interaction(
+            &session(),
+            PendingInteraction::Question {
+                approver: approver.clone(),
+                request: Box::new(request),
+            },
+            &approver,
+            true,
+        )
+        .expect("outbound question");
+        let properties = &outbound.frame["params"]["requestedSchema"]["properties"];
+        assert_eq!(
+            properties["mode"]["oneOf"][0],
+            json!({"const":"safe","title":"Safe mode"})
+        );
+        assert_eq!(
+            properties["items"]["items"]["oneOf"][0],
+            json!({"const":"first","title":"First item"})
+        );
+        assert_eq!(properties["items"]["minItems"], 1);
+        assert_eq!(properties["items"]["maxItems"], 1);
+    }
+}
