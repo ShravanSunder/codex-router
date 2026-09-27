@@ -25,9 +25,9 @@ use collaboration_protocol::{
     ConversationOperationWaitResult, ConversationOutputUnavailableReason,
     ConversationPromptRequest, ConversationResumeRequest, EndpointRef, NonEmptyText, OperationId,
     ProviderBindingIdentity, ProviderOperationEffect, ProviderOperationKind,
-    ProviderOperationStage, ProviderReconciliationState, ProviderSessionInspectRequest,
-    ProviderSettingsAcceptRequest, ProviderSettingsSetRequest, SessionId, SessionRef,
-    render_message,
+    ProviderOperationStage, ProviderPromptStopReason, ProviderReconciliationState,
+    ProviderSessionInspectRequest, ProviderSettingsAcceptRequest, ProviderSettingsSetRequest,
+    SessionId, SessionRef, render_message,
 };
 use collaboration_service::{
     ProviderConversationBackend, ProviderConversationFuture, ProviderOperationAdmission,
@@ -420,8 +420,15 @@ impl SupervisorInner {
                 session_record,
             } => {
                 let terminal_stop_reason = match &settlement {
+                    // The durable summary column is an old closed string enum.
+                    // Keep a future value in the live settlement without writing
+                    // an unreadable value into rollback-visible storage.
+                    ConversationOperationSettlement::PromptCompleted {
+                        stop_reason: ProviderPromptStopReason::Unknown(_),
+                        ..
+                    } => None,
                     ConversationOperationSettlement::PromptCompleted { stop_reason, .. } => {
-                        Some(*stop_reason)
+                        Some(stop_reason.clone())
                     }
                     _ => None,
                 };

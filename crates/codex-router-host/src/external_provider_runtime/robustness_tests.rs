@@ -510,13 +510,13 @@ async fn unknown_stop_reason_has_sanitized_terminal_projection() {
         .create_session(PathBuf::from("/tmp"))
         .await
         .expect("session created");
-    let error = runtime
+    let outcome = runtime
         .prompt("fixture-session".to_owned(), "continue".to_owned())
         .await
-        .expect_err("unknown stop reason cannot be a successful PR 1 settlement");
+        .expect("unknown stop reason has a typed terminal outcome");
     assert_eq!(
-        error.to_string(),
-        "agent ended the turn with an unrecognized stop reason (future_reason)"
+        outcome.stop_reason,
+        ProviderPromptStopReason::Unknown("future_reason".into())
     );
     runtime.shutdown().await;
 }

@@ -380,6 +380,7 @@ fn provider_stop_reason(reason: ProviderPromptStopReason) -> ConversationStopRea
         ProviderPromptStopReason::MaxTurnRequests => ConversationStopReason::MaxTurnRequests,
         ProviderPromptStopReason::Refusal => ConversationStopReason::Refusal,
         ProviderPromptStopReason::Cancelled => ConversationStopReason::Cancelled,
+        ProviderPromptStopReason::Unknown(value) => ConversationStopReason::Unknown(value),
     }
 }
 

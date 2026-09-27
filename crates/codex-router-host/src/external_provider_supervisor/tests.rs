@@ -4,8 +4,9 @@ use collaboration_protocol::{
     CodexGeneration, ConversationCreateRequest, ConversationPromptRequest, EndpointId,
     GenerationNumber, MessageContent, MessageText, PositiveSeconds, ProviderBindingId,
     ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
-    ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy, ProviderRuntimeIdentity,
-    ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId, UuidIdentity,
+    ProviderCapabilityStatus, ProviderKind, ProviderPromptStopReason, ProviderRequestedPolicy,
+    ProviderRuntimeIdentity, ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId,
+    UuidIdentity,
 };
 
 fn create_fixture() -> ExternalProviderLaunch {
@@ -770,9 +771,9 @@ fn unsupported_prompt_content_is_a_validation_failure_without_provider_effect() 
 }
 
 #[tokio::test]
-async fn unknown_agent_stop_reason_projects_applied_unknown_settlement() {
+async fn unknown_agent_stop_reason_settles_with_typed_value() {
     // ACP v1 prompt-turn.mdx:369-390 defines the recognized stop reasons.
-    // R4 preserves an unknown value until E4 has a typed unknown reason.
+    // R4 preserves an unknown value in the terminal settlement.
     let fixture = crate::external_provider_runtime::acp_scripted_fixture::AcpFixtureScript::new()
         .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
         .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "unknown-stop-fixture", "version": "1"}}))
@@ -823,27 +824,26 @@ async fn unknown_agent_stop_reason_projects_applied_unknown_settlement() {
             .expect("prompt submitted"),
         provider_delivery_submission::ProviderPromptDispatch::Submitted
     );
-    let failure = backend
+    let waited = backend
         .wait(ConversationOperationWaitRequest {
             operation_id: operation_id.clone(),
             timeout_seconds: PositiveSeconds::try_from(5).expect("timeout"),
         })
         .await
-        .expect_err("unknown stop reason is a terminal failure projection");
-    assert_eq!(
-        failure.kind,
-        ConversationOperationFailureKind::OutcomeUnknown
-    );
-    assert_eq!(failure.effect, ProviderOperationEffect::Applied);
-    assert_eq!(
-        String::from(failure.message),
-        "agent ended the turn with an unrecognized stop reason (future_reason)"
-    );
+        .expect("unknown stop reason is a typed terminal settlement");
+    assert!(matches!(waited.output,
+        ConversationOperationWaitOutput::Available {
+            settlement: ConversationOperationSettlement::PromptCompleted {
+                stop_reason: ProviderPromptStopReason::Unknown(value), ..
+            }
+        } if value == "future_reason"));
     let operation = backend
         .show(ConversationOperationShowRequest { operation_id })
         .await
         .expect("terminal operation");
     assert_eq!(operation.stage, ProviderOperationStage::Terminal);
+    assert_eq!(operation.effect, ProviderOperationEffect::Applied);
+    assert_eq!(operation.terminal_stop_reason, None);
     backend.shutdown().await.expect("supervisor shutdown");
 }
 

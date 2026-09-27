@@ -386,3 +386,19 @@ fn validated_provider_collections_and_paths_reject_ambiguous_values() {
         .is_err()
     );
 }
+
+#[test]
+fn unknown_stop_reason_round_trips_with_completed_prompt_output() {
+    let settlement = json!({
+        "kind":"promptCompleted",
+        "target":session("provider-conversation"),
+        "stopReason":{"unknown":"future_reason"},
+        "response":"first second"
+    });
+    let decoded: collaboration_protocol::ConversationOperationSettlement =
+        serde_json::from_value(settlement.clone()).expect("typed unknown settlement");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("encode settlement"),
+        settlement
+    );
+}

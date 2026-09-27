@@ -281,7 +281,7 @@ impl ProviderOperationStore {
         terminal_stop_reason: Option<ProviderPromptStopReason>,
         terminal_at_ms: i64,
     ) -> Result<ProviderOperationRecord, ProviderOperationStoreError> {
-        let encoded_stop_reason = terminal_stop_reason.map(encode_enum).transpose()?;
+        let encoded_stop_reason = terminal_stop_reason.as_ref().map(encode_enum).transpose()?;
         let result = sqlx::query!(
             "UPDATE provider_operations
              SET stage=?,effect=?,reconciliation_state=?,terminal_stop_reason=?,terminal_at_ms=MAX(admitted_at_ms,?),updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)
@@ -512,7 +512,7 @@ fn validate_record(record: &ProviderOperationRecord) -> Result<(), ProviderOpera
         }
         ProviderOperationStage::Terminal => record.terminal_at_ms.is_some(),
     };
-    let outcome_valid = record.terminal_stop_reason.is_none_or(|_| {
+    let outcome_valid = record.terminal_stop_reason.as_ref().is_none_or(|_| {
         record.operation_kind == ProviderOperationKind::ConversationPrompt
             && record.stage == ProviderOperationStage::Terminal
             && record.effect == ProviderOperationEffect::Applied

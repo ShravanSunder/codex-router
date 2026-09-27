@@ -634,7 +634,7 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             .as_ref()
             .ok()
             .and_then(|result| result.as_ref().ok())
-            .map(|outcome| outcome.stop_reason);
+            .map(|outcome| outcome.stop_reason.clone());
         let identity_corroborated = prompt_result
             .as_ref()
             .ok()

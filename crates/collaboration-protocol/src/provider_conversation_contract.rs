@@ -525,7 +525,7 @@ pub struct ConversationOperationReconcileRequest {
     pub operation_id: OperationId,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPromptStopReason {
     EndTurn,
@@ -533,6 +533,7 @@ pub enum ProviderPromptStopReason {
     MaxTurnRequests,
     Refusal,
     Cancelled,
+    Unknown(String),
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
