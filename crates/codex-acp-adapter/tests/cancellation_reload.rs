@@ -44,7 +44,7 @@ impl UnmaterializedBindingStore for TestBindingHolder {
         self.hold(binding);
     }
     fn finish(&self, _session_id: &str) {}
-    fn create_tasks(&self) -> tokio_util::task::TaskTracker {
+    fn host_tasks(&self) -> tokio_util::task::TaskTracker {
         self.tasks.clone()
     }
 }
@@ -77,6 +77,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
                     "initialize",
                     "initialized",
                     "thread/start",
+                    "thread/read",
                     "turn/start",
                     "turn/interrupt",
                 ]

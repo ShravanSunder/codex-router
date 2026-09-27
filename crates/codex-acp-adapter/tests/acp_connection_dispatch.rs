@@ -22,7 +22,7 @@ struct FixtureCatalog;
 struct TestBindingHolder {
     bindings: Mutex<BTreeMap<String, AcpSessionBinding>>,
     held: tokio::sync::Notify,
-    create_tasks: tokio_util::task::TaskTracker,
+    host_tasks: tokio_util::task::TaskTracker,
 }
 impl UnmaterializedBindingStore for TestBindingHolder {
     fn hold(&self, binding: AcpSessionBinding) {
@@ -45,8 +45,8 @@ impl UnmaterializedBindingStore for TestBindingHolder {
         self.hold(binding);
     }
     fn finish(&self, _session_id: &str) {}
-    fn create_tasks(&self) -> tokio_util::task::TaskTracker {
-        self.create_tasks.clone()
+    fn host_tasks(&self) -> tokio_util::task::TaskTracker {
+        self.host_tasks.clone()
     }
 }
 struct DelayedCatalog {
@@ -533,6 +533,7 @@ async fn closed_create_connection_loads_held_binding_without_native_resume_and_p
             "initialize",
             "initialized",
             "thread/start",
+            "thread/read",
             "turn/start",
             "thread/read",
         ] {

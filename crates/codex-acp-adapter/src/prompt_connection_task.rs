@@ -90,7 +90,13 @@ pub async fn run_prompt_task(mut inputs: PromptTaskInputs) -> PromptTaskCompleti
                 cancellation_barrier: frontend_detached
                     .then_some(crate::CancellationBarrier::UnknownTurn),
                 binding: None,
-                terminal: (!frontend_detached).then(|| failure(&inputs.request_id, &message)),
+                terminal: (!frontend_detached).then(|| {
+                    if matches!(error, crate::PromptExecutionError::Busy) {
+                        busy_failure(&inputs.request_id, &message)
+                    } else {
+                        failure(&inputs.request_id, &message)
+                    }
+                }),
             };
         }
     };
@@ -145,4 +151,7 @@ fn cancelled_response(id: &Value, state: &str) -> Value {
 }
 fn failure(id: &Value, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"Native prompt rejected","data":{"detail":message}}})
+}
+fn busy_failure(id: &Value, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":message,"data":{"kind":"busy"}}})
 }

@@ -37,6 +37,7 @@ const TEST_SCRATCH: &str =
 #[derive(Default)]
 struct TestBindingHolder {
     bindings: Mutex<BTreeMap<String, AcpSessionBinding>>,
+    host_tasks: tokio_util::task::TaskTracker,
 }
 impl UnmaterializedBindingStore for TestBindingHolder {
     fn hold(&self, binding: AcpSessionBinding) {
@@ -58,8 +59,8 @@ impl UnmaterializedBindingStore for TestBindingHolder {
         self.hold(binding);
     }
     fn finish(&self, _session_id: &str) {}
-    fn create_tasks(&self) -> tokio_util::task::TaskTracker {
-        tokio_util::task::TaskTracker::new()
+    fn host_tasks(&self) -> tokio_util::task::TaskTracker {
+        self.host_tasks.clone()
     }
 }
 struct EmptyCatalog;
@@ -126,7 +127,13 @@ async fn frontend_eof_detaches_active_turn_and_reconnect_is_busy_until_native_id
         let (first_stream, _) = listener.accept().await?;
         let mut first = tokio::spawn(async move {
             let mut wire = tokio_tungstenite::accept_async(first_stream).await?;
-            for method in ["initialize", "initialized", "thread/start", "turn/start"] {
+            for method in [
+                "initialize",
+                "initialized",
+                "thread/start",
+                "thread/read",
+                "turn/start",
+            ] {
                 let request = read_native_request(&mut wire).await;
                 assert_eq!(request["method"], method);
                 if method == "initialized" {
@@ -136,6 +143,9 @@ async fn frontend_eof_detaches_active_turn_and_reconnect_is_busy_until_native_id
                     "initialize" => json!({}),
                     "thread/start" => {
                         json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","status":{"type":"idle"},"turns":[]}})
+                    }
+                    "thread/read" => {
+                        json!({"thread":{"id":"thread-a","status":{"type":"idle"},"turns":[]}})
                     }
                     _ => json!({"turn":{"id":"turn-a","status":"inProgress"}}),
                 };
@@ -210,7 +220,7 @@ async fn frontend_eof_detaches_active_turn_and_reconnect_is_busy_until_native_id
     };
 
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
-    let first_serving = tokio::spawn(serve_acp_connection(server, connection_inputs()));
+    let mut first_serving = tokio::spawn(serve_acp_connection(server, connection_inputs()));
     let (read, mut write) = client.into_split();
     let mut read = BufReader::new(read);
     async fn call(
@@ -257,6 +267,13 @@ async fn frontend_eof_detaches_active_turn_and_reconnect_is_busy_until_native_id
     drop(write);
     drop(read);
     let _update_authorized = publish_update_tx.send(());
+    // The frontend's connection and listener permit must be released while
+    // the native turn is still running, not after its terminal arrives.
+    tokio::time::timeout(std::time::Duration::from_secs(3), &mut first_serving)
+        .await
+        .expect("ACP connection should exit at frontend EOF")
+        .unwrap()
+        .unwrap();
 
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
     let second_serving = tokio::spawn(serve_acp_connection(server, connection_inputs()));
@@ -301,7 +318,8 @@ async fn frontend_eof_detaches_active_turn_and_reconnect_is_busy_until_native_id
     second_serving.await.unwrap().unwrap();
 
     let _finish_authorized = finish_turn_tx.send(());
-    first_serving.await.unwrap().unwrap();
+    holder.host_tasks.close();
+    holder.host_tasks.wait().await;
     backend.await.unwrap().unwrap();
     std::fs::remove_file(socket).unwrap();
 }
@@ -321,6 +339,14 @@ async fn native_callback_after_prompt_command_eof_interrupts_active_turn() {
             &mut wire,
             &resume,
             json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-callback-eof","cwd":"/work","status":{"type":"idle"},"turns":[]}}),
+        )
+        .await;
+        let activity = read_native_request(&mut wire).await;
+        assert_eq!(activity["method"], "thread/read");
+        reply_native(
+            &mut wire,
+            &activity,
+            json!({"thread":{"id":"thread-callback-eof","status":{"type":"idle"},"turns":[]}}),
         )
         .await;
         let start = read_native_request(&mut wire).await;
@@ -425,6 +451,14 @@ async fn native_callback_after_frontend_eof_interrupts_turn_and_finishes_actor()
             reply_native(&mut wire, &request, result).await;
         }
 
+        let activity = read_native_request(&mut wire).await;
+        assert_eq!(activity["method"], "thread/read");
+        reply_native(
+            &mut wire,
+            &activity,
+            json!({"thread":{"id":"thread-callback","status":{"type":"idle"},"turns":[]}}),
+        )
+        .await;
         let start = read_native_request(&mut wire).await;
         assert_eq!(start["method"], "turn/start");
         reply_native(
