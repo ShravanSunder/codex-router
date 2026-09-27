@@ -2,7 +2,14 @@
 
 #![allow(clippy::expect_used)]
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use acp_client_runtime::{
     AgentSessionClient, ApprovalPortOutcome, EventSinkClosed, ExternalProviderLaunch,
@@ -45,6 +52,16 @@ elif mode=='steer':
          'mimeType':'text/plain'}],request
     assert request['params']['_meta']['steering']['idleBehavior']=='promptRequired'
     send({'jsonrpc':'2.0','id':request['id'],'result':{'outcome':'promptRequired'}})
+elif mode=='approval':
+    assert request['method']=='session/prompt',request
+    assert len(request['params']['prompt'])==2,request
+    send({'jsonrpc':'2.0','id':91,'method':'session/request_permission','params':{
+        'sessionId':'fixture-session',
+        'toolCall':{'toolCallId':'tool-1','title':'Run command','kind':'execute'},
+        'options':[{'optionId':'allow-once','name':'Allow','kind':'allow_once'}]}})
+    answer=read()
+    assert answer['id']==91 and answer['result']['outcome']['outcome']=='cancelled',answer
+    send({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end_turn'}})
 else:
     assert request['method']=='session/prompt',request
     assert request['params']['prompt']==[
@@ -55,7 +72,10 @@ else:
 sys.stdin.read()
 "#;
 
-struct NoopInteractionPort;
+#[derive(Default)]
+struct NoopInteractionPort {
+    approval_requests: AtomicUsize,
+}
 impl InteractionPort for NoopInteractionPort {
     type Context = ();
     type OperationId = u64;
@@ -72,6 +92,7 @@ impl InteractionPort for NoopInteractionPort {
         _turn_cancellation: CancellationToken,
         _agent_cancellation: CancellationToken,
     ) -> InteractionFuture<'_, ApprovalPortOutcome> {
+        self.approval_requests.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { ApprovalPortOutcome::Cancelled })
     }
     fn request_question(
@@ -114,8 +135,13 @@ impl SessionEventSink for NoopEventSink {
 
 async fn fixture_client(
     mode: &str,
-) -> (tempfile::TempDir, AgentSessionClient<NoopInteractionPort>) {
+) -> (
+    tempfile::TempDir,
+    AgentSessionClient<NoopInteractionPort>,
+    Arc<NoopInteractionPort>,
+) {
     let root = tempfile::tempdir().expect("fixture root");
+    let port = Arc::new(NoopInteractionPort::default());
     let client = AgentSessionClient::initialize(
         ExternalProviderLaunch {
             executable: PathBuf::from("python3"),
@@ -128,7 +154,7 @@ async fn fixture_client(
             environment: Vec::new(),
             persistence_target: ProviderPersistenceTarget::Unspecified,
         },
-        Arc::new(NoopInteractionPort),
+        Arc::clone(&port),
         Arc::new(NoopEventSink),
     )
     .await
@@ -137,7 +163,7 @@ async fn fixture_client(
         .create_session(root.path().to_path_buf())
         .await
         .expect("session opens");
-    (root, client)
+    (root, client, port)
 }
 
 fn text_and_link() -> Vec<PromptContent> {
@@ -154,7 +180,7 @@ fn text_and_link() -> Vec<PromptContent> {
 
 #[tokio::test]
 async fn text_and_resource_link_reach_agent_as_two_ordered_blocks() {
-    let (_root, client) = fixture_client("blocks").await;
+    let (_root, client, _port) = fixture_client("blocks").await;
     let result = tokio::time::timeout(
         Duration::from_secs(2),
         client.prompt_contents_for_operation_with_input(
@@ -173,16 +199,16 @@ async fn text_and_resource_link_reach_agent_as_two_ordered_blocks() {
 
 #[tokio::test]
 async fn unsupported_image_is_rejected_before_any_acp_prompt() {
-    let (_root, client) = fixture_client("unsupported").await;
+    let (_root, client, port) = fixture_client("unsupported").await;
     let image =
         PromptContent::image("image/png".to_owned(), "aGVsbG8=".to_owned(), None).expect("image");
     let (dispatch, dispatch_result) = tokio::sync::oneshot::channel();
     let result = client
-        .prompt_contents_for_operation_with_input(
+        .prompt_contents_with_approval_dispatch_for_input(
             "fixture-session".to_owned(),
             InputId::generate(),
-            None,
             vec![image],
+            (),
             Some(dispatch),
         )
         .await;
@@ -199,6 +225,7 @@ async fn unsupported_image_is_rejected_before_any_acp_prompt() {
         dispatch_result.await.expect("dispatch result"),
         acp_client_runtime::ProviderPromptDispatchObservation::NotSubmitted
     );
+    assert_eq!(port.approval_requests.load(Ordering::SeqCst), 0);
     let follow_up = tokio::time::timeout(
         Duration::from_secs(2),
         client.prompt("fixture-session".to_owned(), "After rejection".to_owned()),
@@ -211,7 +238,7 @@ async fn unsupported_image_is_rejected_before_any_acp_prompt() {
 
 #[tokio::test]
 async fn advertised_image_reaches_agent_with_exact_data_and_mime_type() {
-    let (_root, client) = fixture_client("image").await;
+    let (_root, client, _port) = fixture_client("image").await;
     let image =
         PromptContent::image("image/png".to_owned(), "aGVsbG8=".to_owned(), None).expect("image");
     let result = tokio::time::timeout(
@@ -232,7 +259,7 @@ async fn advertised_image_reaches_agent_with_exact_data_and_mime_type() {
 
 #[tokio::test]
 async fn multi_block_steer_reaches_extension_in_order() {
-    let (_root, client) = fixture_client("steer").await;
+    let (_root, client, _port) = fixture_client("steer").await;
     let image =
         PromptContent::image("image/png".to_owned(), "aGVsbG8=".to_owned(), None).expect("image");
     let rejected = client
@@ -262,5 +289,25 @@ async fn multi_block_steer_reaches_extension_in_order() {
         result.expect("steer result"),
         acp_client_runtime::ProviderSteeringOutcome::PromptRequired
     );
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn multi_block_delivery_retains_approval_context() {
+    let (_root, client, port) = fixture_client("approval").await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            InputId::generate(),
+            text_and_link(),
+            (),
+            None,
+        ),
+    )
+    .await
+    .expect("prompt completes");
+    assert!(result.is_ok(), "prompt result: {result:?}");
+    assert_eq!(port.approval_requests.load(Ordering::SeqCst), 1);
     client.shutdown().await;
 }
