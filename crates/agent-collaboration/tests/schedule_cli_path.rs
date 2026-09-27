@@ -16,6 +16,7 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        owner_human_id: None,
     })
     .await?;
     let mut client = ControlClient::connect(&root, "schedule-cli-fixture", "1").await?;
