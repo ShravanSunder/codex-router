@@ -6,7 +6,8 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -43,8 +44,11 @@ pub struct PeerSessionSummary {
     pub name: Option<String>,
     pub cwd: PathBuf,
     pub status: PeerSessionStatus,
+    /// Unix seconds converted from Claude Code's millisecond registry values.
     pub started_at: i64,
+    /// Unix seconds converted from Claude Code's millisecond registry values.
     pub updated_at: i64,
+    /// Unix seconds converted from Claude Code's millisecond registry values.
     pub status_updated_at: Option<i64>,
     pub kind: String,
     pub entrypoint: String,
@@ -186,7 +190,7 @@ impl ClaudeCodeSessionRegistry {
                 }
                 continue;
             }
-            let Ok(bytes) = fs::read(&path) else {
+            let Ok(file) = fs::File::open(&path) else {
                 if record_unreadable_live_process(
                     process_id,
                     &mut is_process_live,
@@ -196,6 +200,22 @@ impl ClaudeCodeSessionRegistry {
                 }
                 continue;
             };
+            let mut bytes = Vec::new();
+            if file
+                .take(MAX_REGISTRY_RECORD_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+                || bytes.len() as u64 > MAX_REGISTRY_RECORD_BYTES
+            {
+                if record_unreadable_live_process(
+                    process_id,
+                    &mut is_process_live,
+                    &mut has_unreadable_live_record,
+                ) {
+                    skipped_records = skipped_records.saturating_add(1);
+                }
+                continue;
+            }
             let Ok(envelope) = serde_json::from_slice::<Value>(&bytes) else {
                 if record_unreadable_live_process(
                     process_id,
@@ -281,12 +301,18 @@ fn decode_summary(session_id: &SessionId, envelope: &Value) -> Option<PeerSessio
             .map(str::to_owned),
         cwd: PathBuf::from(cwd),
         status: decode_status(envelope.get("status")),
-        started_at: envelope.get("startedAt")?.as_i64()?,
-        updated_at: envelope.get("updatedAt")?.as_i64()?,
-        status_updated_at: envelope.get("statusUpdatedAt").and_then(Value::as_i64),
+        started_at: registry_millis_as_unix_seconds(envelope.get("startedAt")?)?,
+        updated_at: registry_millis_as_unix_seconds(envelope.get("updatedAt")?)?,
+        status_updated_at: envelope
+            .get("statusUpdatedAt")
+            .and_then(registry_millis_as_unix_seconds),
         kind: envelope.get("kind")?.as_str()?.to_owned(),
         entrypoint: envelope.get("entrypoint")?.as_str()?.to_owned(),
     })
+}
+
+fn registry_millis_as_unix_seconds(value: &Value) -> Option<i64> {
+    Some(value.as_i64()?.div_euclid(1_000))
 }
 
 fn decode_status(value: Option<&Value>) -> PeerSessionStatus {
@@ -381,7 +407,7 @@ fn unsupported(reason: &str) -> PeerSessionLookup {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaudeCodeSessionRegistry, PeerRegistryError};
+    use super::{ClaudeCodeSessionRegistry, PeerRegistryError, PeerSessionLookup};
     use collaboration_protocol::SessionId;
     use rustix::io::Errno;
     use serde_json::json;
@@ -419,5 +445,41 @@ mod tests {
                 source: Errno::IO
             }) if pid == process_id
         ));
+    }
+
+    #[test]
+    fn unrelated_probe_failure_does_not_hide_a_writable_target() {
+        let root = tempfile::tempdir().expect("registry directory");
+        let target_pid = std::process::id();
+        let unrelated_pid = 999_999_u32;
+        for (process_id, session_id) in [
+            (target_pid, "fixture-target"),
+            (unrelated_pid, "unrelated-session"),
+        ] {
+            std::fs::write(
+                root.path().join(format!("{process_id}.json")),
+                json!({
+                    "pid":process_id,"sessionId":session_id,"peerProtocol":1,
+                    "messagingSocketPath":"/private/tmp/peer.sock"
+                })
+                .to_string(),
+            )
+            .expect("registry record");
+        }
+        let target = SessionId::try_from("fixture-target".to_owned()).expect("target ID");
+        let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+        let lookup = registry
+            .lookup_with_probe(&target, |process_id| {
+                if process_id == target_pid {
+                    Ok(true)
+                } else {
+                    Err(PeerRegistryError::LivenessProbe {
+                        process_id,
+                        source: Errno::IO,
+                    })
+                }
+            })
+            .expect("unrelated probe error is isolated");
+        assert!(matches!(lookup, PeerSessionLookup::Writable(_)));
     }
 }

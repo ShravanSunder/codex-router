@@ -63,7 +63,7 @@ fn classify_endpoint_for_session_list(endpoint: &EndpointDescription) -> Invento
 }
 #[derive(Subcommand)]
 enum InventoryCommand {
-    /// Read stored metadata or live sessions from the selected endpoint; never resumes sessions.
+    /// Read stored metadata or live sessions without resuming them; live pages are not snapshots, so sessions may move between pages.
     List {
         #[arg(long)]
         endpoint: String,

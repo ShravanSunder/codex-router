@@ -59,8 +59,11 @@ pub enum ProviderSessionSummary {
         name: Option<String>,
         working_directory: ProviderWorkingDirectory,
         status: ClaudeCodeInteractiveStatus,
+        /// Unix seconds, converted from Claude Code registry milliseconds.
         started_at: i64,
+        /// Unix seconds, converted from Claude Code registry milliseconds.
         updated_at: i64,
+        /// Unix seconds, converted from Claude Code registry milliseconds.
         status_updated_at: Option<i64>,
         kind: String,
         entrypoint: String,

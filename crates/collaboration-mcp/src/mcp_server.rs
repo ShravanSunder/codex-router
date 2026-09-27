@@ -261,7 +261,7 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::None)
     }
 
-    #[tool(name = "provider_sessions_list", description = "Lists Router-hosted provider Sessions and live Claude Code terminal sessions. Claude terminal discovery supports active or loaded views; stored applies only to hosted Sessions.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSessionListResult>())]
+    #[tool(name = "provider_sessions_list", description = "Lists Router-hosted provider Sessions and live Claude Code terminal sessions. Claude terminal discovery supports active or loaded views; stored applies only to hosted Sessions. Live pages are not snapshots, so sessions may move between pages.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSessionListResult>())]
     async fn provider_sessions_list(
         &self,
         Parameters(request): Parameters<ProviderSessionListParams>,

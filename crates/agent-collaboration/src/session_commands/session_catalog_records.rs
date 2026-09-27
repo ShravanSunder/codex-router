@@ -156,10 +156,10 @@ impl SessionPickerRecord {
         let (
             target,
             working_directory,
-            updated_at,
+            updated_at_seconds,
             provider_state,
             name,
-            created_at,
+            created_at_seconds,
             runtime_status,
         ) = match summary {
             ProviderSessionSummary::HostedProvider {
@@ -205,7 +205,7 @@ impl SessionPickerRecord {
         };
         let session_id = String::from(target.session_id.clone());
         let cwd = String::from(working_directory.clone());
-        let updated_at_ms = updated_at.saturating_mul(1_000);
+        let updated_at_ms = updated_at_seconds.saturating_mul(1_000);
         let title = name
             .clone()
             .unwrap_or_else(|| format!("{endpoint_label} · {session_id}"));
@@ -219,12 +219,12 @@ impl SessionPickerRecord {
             full_title: title,
             explicit_name: name,
             recency: format_recency_at_ms(Some(updated_at_ms)),
-            created: created_at.map_or_else(
+            created: created_at_seconds.map_or_else(
                 || "-".to_owned(),
                 |value| format_recency_at_ms(Some(value.saturating_mul(1_000))),
             ),
             recency_at_ms: Some(updated_at_ms),
-            created_at_ms: created_at.map(|value| value.saturating_mul(1_000)),
+            created_at_ms: created_at_seconds.map(|value| value.saturating_mul(1_000)),
             branch: "-".to_owned(),
             persisted_branch: String::new(),
             context,

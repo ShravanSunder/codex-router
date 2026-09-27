@@ -27,7 +27,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
             "messagingSocketPath":root.path().join("secret-peer.sock"),
             "peerFeatures":["secret-internal-feature"],
             "cwd":root.path(),"name":"Terminal fixture","status":"waiting",
-            "startedAt":1_000,"updatedAt":2_000,"statusUpdatedAt":2_001,
+            "startedAt":1_790_162_100_123_i64,"updatedAt":1_790_162_494_441_i64,"statusUpdatedAt":1_790_162_494_789_i64,
             "kind":"interactive","entrypoint":"cli"
         })
         .to_string(),
@@ -64,7 +64,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
             },
             created_by: creator.clone().into(),
             approver: creator.clone().into(),
-            updated_at_ms: 3_000,
+            updated_at_ms: 1_790_162_500_000,
         })
         .await
         .expect("record session");
@@ -91,7 +91,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
             },
             created_by: creator.clone().into(),
             approver: creator.clone().into(),
-            updated_at_ms: 1_000,
+            updated_at_ms: 1_790_162_300_000,
         })
         .await
         .expect("Cursor provider record");
@@ -109,7 +109,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
             },
             created_by: creator.clone().into(),
             approver: creator.clone().into(),
-            updated_at_ms: 2_000,
+            updated_at_ms: 1_790_162_400_000,
         })
         .await
         .expect("record older session");
@@ -171,7 +171,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
     assert_eq!(cold.sessions[0].target(), &target);
     assert!(
         matches!(&cold.sessions[0], collaboration_protocol::ProviderSessionSummary::HostedProvider {
-        state: ProviderSessionState::Unloaded, updated_at: 3, created_by, ..
+        state: ProviderSessionState::Unloaded, updated_at: 1_790_162_500, created_by, ..
     } if created_by == &creator.clone().into())
     );
     let wire = serde_json::to_value(&cold.sessions[0]).expect("row JSON");
@@ -231,6 +231,15 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         .expect("Claude terminal list through Control");
     assert_eq!(terminal.sessions.len(), 1);
     assert_eq!(terminal.skipped_records, Some(0));
+    assert!(matches!(
+        &terminal.sessions[0],
+        collaboration_protocol::ProviderSessionSummary::ClaudeCodeInteractive {
+            started_at: 1_790_162_100,
+            updated_at: 1_790_162_494,
+            status_updated_at: Some(1_790_162_494),
+            ..
+        }
+    ));
     let terminal_json = serde_json::to_string(&terminal).expect("terminal page JSON");
     assert!(terminal_json.contains("claudeCodeInteractive"));
     assert!(terminal_json.contains("terminal-session"));
@@ -247,11 +256,17 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         .expect("combined provider and terminal list");
     assert!(both.sessions.iter().any(|row| matches!(
         row,
-        collaboration_protocol::ProviderSessionSummary::ClaudeCodeInteractive { .. }
+        collaboration_protocol::ProviderSessionSummary::HostedProvider {
+            updated_at: 1_790_162_500,
+            ..
+        }
     )));
     assert!(both.sessions.iter().any(|row| matches!(
         row,
-        collaboration_protocol::ProviderSessionSummary::HostedProvider { .. }
+        collaboration_protocol::ProviderSessionSummary::ClaudeCodeInteractive {
+            updated_at: 1_790_162_494,
+            ..
+        }
     )));
     let first_mixed_page = client
         .list_provider_sessions(ProviderSessionListParams {
@@ -264,7 +279,10 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         .expect("first mixed page");
     assert!(matches!(
         &first_mixed_page.sessions[0],
-        collaboration_protocol::ProviderSessionSummary::ClaudeCodeInteractive { .. }
+        collaboration_protocol::ProviderSessionSummary::HostedProvider {
+            updated_at: 1_790_162_500,
+            ..
+        }
     ));
     let second_mixed_page = client
         .list_provider_sessions(ProviderSessionListParams {
@@ -278,7 +296,10 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         .expect("second mixed page");
     assert!(matches!(
         &second_mixed_page.sessions[0],
-        collaboration_protocol::ProviderSessionSummary::HostedProvider { .. }
+        collaboration_protocol::ProviderSessionSummary::ClaudeCodeInteractive {
+            updated_at: 1_790_162_494,
+            ..
+        }
     ));
     let invalid_source = client
         .list_provider_sessions(ProviderSessionListParams {

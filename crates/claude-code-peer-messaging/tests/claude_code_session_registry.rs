@@ -44,6 +44,9 @@ fn live_sessions_lists_sanitized_current_process_and_skips_dead_pid() {
         inventory.sessions[0].name.as_deref(),
         Some("Fixture session")
     );
+    assert_eq!(inventory.sessions[0].started_at, 1_789_990_000);
+    assert_eq!(inventory.sessions[0].updated_at, 1_789_990_001);
+    assert_eq!(inventory.sessions[0].status_updated_at, Some(1_789_990_001));
     let public_json = serde_json::to_string(&inventory).expect("public inventory JSON");
     assert!(!public_json.contains("messagingSocketPath"));
     assert!(!public_json.contains("secret-peer.sock"));

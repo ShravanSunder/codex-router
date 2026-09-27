@@ -30,7 +30,7 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
             "pid":process_id,"sessionId":"interactive-session","peerProtocol":1,
             "messagingSocketPath":root.path().join("secret-peer.sock"),
             "cwd":root.path(),"name":"Interactive fixture","status":"idle",
-            "startedAt":100,"updatedAt":200,"kind":"interactive","entrypoint":"cli"
+        "startedAt":1_790_162_100_123_i64,"updatedAt":1_790_162_494_441_i64,"kind":"interactive","entrypoint":"cli"
         })
         .to_string(),
     )
@@ -162,6 +162,10 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
     assert_eq!(
         interactive_result["result"]["page"]["records"][0]["target"]["sessionId"],
         "interactive-session"
+    );
+    assert_eq!(
+        interactive_result["result"]["page"]["records"][0]["updatedAt"],
+        1_790_162_494
     );
     assert_eq!(interactive_result["result"]["page"]["skippedRecords"], 0);
     assert!(!String::from_utf8_lossy(&interactive.stdout).contains("secret-peer.sock"));
