@@ -8,7 +8,7 @@ use codex_router_host::{
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     NativeSessionScope, NativeSessionSource, NativeSessionView, ProviderIdentity,
-    ProviderSessionListParams, ProviderSessionListenRequest, SessionRef,
+    ProviderSessionListParams, ProviderSessionListenRequest, ProviderSessionSummary, SessionRef,
 };
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt as _, path::Path, time::Duration};
@@ -219,16 +219,18 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
     let human_record = listed
         .sessions
         .iter()
-        .find(|record| record.target == human_target)
+        .find(|record| record.target() == &human_target)
         .ok_or("Human-created Session not listed")?;
-    assert!(matches!(
-        human_record.created_by,
-        ProviderIdentity::Human { .. }
-    ));
-    assert!(matches!(
-        human_record.approver,
-        ProviderIdentity::Human { .. }
-    ));
+    let ProviderSessionSummary::HostedProvider {
+        created_by,
+        approver,
+        ..
+    } = human_record
+    else {
+        return Err("Human-created Session had an interactive registry shape".into());
+    };
+    assert!(matches!(created_by, ProviderIdentity::Human { .. }));
+    assert!(matches!(approver, ProviderIdentity::Human { .. }));
     runtime.shutdown().await?;
     Ok(())
 }
