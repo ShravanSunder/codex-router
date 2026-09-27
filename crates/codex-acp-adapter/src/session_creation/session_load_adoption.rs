@@ -2,7 +2,7 @@
 use super::*;
 
 impl AcpSessionBinding {
-    pub fn adopt_unmaterialized(
+    pub async fn adopt_unmaterialized(
         &self,
         catalog: &mut AcpSchemaCatalog,
         generation: &CodexGeneration,
@@ -30,7 +30,7 @@ impl AcpSessionBinding {
         let configuration = McpConfiguration::parse(catalog, servers)
             .map_err(|_| SessionSetupError::InvalidParameters)?;
         if !self.accepts_configuration(generation, session_id, &configuration)
-            || normalized_directory(cwd)? != self.working_directory
+            || normalized_directory(cwd).await? != self.working_directory
         {
             return Err(SessionSetupError::ConfigurationMismatch);
         }
@@ -59,7 +59,8 @@ impl AcpSessionBinding {
                 .get("cwd")
                 .and_then(Value::as_str)
                 .ok_or(SessionSetupError::InvalidParameters)?,
-        )?;
+        )
+        .await?;
         let servers = params
             .get("mcpServers")
             .and_then(Value::as_array)
@@ -88,7 +89,7 @@ impl AcpSessionBinding {
             let effective = cwd
                 .and_then(Value::as_str)
                 .ok_or(SessionSetupError::OutcomeUnknown)?;
-            if normalized_directory(effective)? != requested_cwd {
+            if normalized_directory(effective).await? != requested_cwd {
                 return Err(SessionSetupError::ConfigurationMismatch);
             }
         }

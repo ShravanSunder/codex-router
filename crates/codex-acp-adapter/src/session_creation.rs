@@ -217,7 +217,7 @@ impl AcpSessionBinding {
             .and_then(Value::as_str)
             .ok_or(SessionSetupError::InvalidParameters)?;
         let choice = router_model_choice(&inputs.params)?;
-        let expected_cwd = normalized_directory(cwd)?;
+        let expected_cwd = normalized_directory(cwd).await?;
         let servers = inputs
             .params
             .get("mcpServers")
@@ -225,19 +225,22 @@ impl AcpSessionBinding {
             .ok_or(SessionSetupError::InvalidParameters)?;
         let configuration = McpConfiguration::parse(catalog, servers)
             .map_err(|_| SessionSetupError::InvalidParameters)?;
-        let directories = match inputs.params.get("additionalDirectories") {
-            None => Vec::new(),
-            Some(value) => value
+        let mut directories = Vec::new();
+        if let Some(value) = inputs.params.get("additionalDirectories") {
+            for directory in value
                 .as_array()
                 .ok_or(SessionSetupError::InvalidParameters)?
-                .iter()
-                .map(|value| {
+            {
+                directories.push(
                     normalized_directory(
-                        value.as_str().ok_or(SessionSetupError::InvalidParameters)?,
+                        directory
+                            .as_str()
+                            .ok_or(SessionSetupError::InvalidParameters)?,
                     )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        };
+                    .await?,
+                );
+            }
+        }
         // A fork without an explicit choice inherits the source thread's own
         // model and reasoning effort, read once before the fork is dispatched.
         let inherited = match choice.fork_thread_id {
@@ -372,7 +375,7 @@ impl AcpSessionBinding {
             .get("cwd")
             .and_then(Value::as_str)
             .ok_or(SessionSetupError::OutcomeUnknown)?;
-        if normalized_directory(effective_cwd)? != expected_cwd {
+        if normalized_directory(effective_cwd).await? != expected_cwd {
             return Err(SessionSetupError::ConfigurationMismatch);
         }
         let thread = result
@@ -383,24 +386,28 @@ impl AcpSessionBinding {
                 .get("cwd")
                 .and_then(Value::as_str)
                 .ok_or(SessionSetupError::OutcomeUnknown)?,
-        )? != expected_cwd
+        )
+        .await?
+            != expected_cwd
         {
             return Err(SessionSetupError::ConfigurationMismatch);
         }
         if !directories.is_empty() {
-            let actual = result
+            let values = result
                 .get("runtimeWorkspaceRoots")
                 .and_then(Value::as_array)
-                .ok_or(SessionSetupError::ConfigurationMismatch)?
-                .iter()
-                .map(|value| {
+                .ok_or(SessionSetupError::ConfigurationMismatch)?;
+            let mut actual = Vec::with_capacity(values.len());
+            for value in values {
+                actual.push(
                     normalized_directory(
                         value
                             .as_str()
                             .ok_or(SessionSetupError::ConfigurationMismatch)?,
                     )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                    .await?,
+                );
+            }
             if actual != directories {
                 return Err(SessionSetupError::ConfigurationMismatch);
             }
@@ -500,7 +507,8 @@ impl AcpSessionBinding {
                 .get("cwd")
                 .and_then(Value::as_str)
                 .ok_or(SessionSetupError::InvalidParameters)?,
-        )?;
+        )
+        .await?;
         let route = inputs
             .approval_broker
             .route(&session_id)
@@ -705,7 +713,7 @@ fn validate_observed_settings(
     }
     Ok(())
 }
-fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
+async fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
     let path = Path::new(value);
     if !path.is_absolute() || value.contains('\0') {
         return Err(SessionSetupError::InvalidParameters);
@@ -720,13 +728,15 @@ fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
             other => normalized.push(other.as_os_str()),
         }
     }
-    match std::fs::canonicalize(&normalized) {
+    tokio::task::spawn_blocking(move || match std::fs::canonicalize(&normalized) {
         Ok(canonical) => Ok(canonical),
         // Native setup will reject an absent cwd. Keep lexical normalization
         // here so a native rejection retains its existing error category.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(normalized),
         Err(_) => Err(SessionSetupError::InvalidParameters),
-    }
+    })
+    .await
+    .map_err(|_| SessionSetupError::Unavailable)?
 }
 fn map_native_failure(error: NativeConnectionError) -> SessionSetupError {
     match error {
@@ -743,16 +753,16 @@ mod access_validation_tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
-    #[test]
-    fn cwd_comparison_resolves_existing_directory_symlinks() {
+    #[tokio::test]
+    async fn cwd_comparison_resolves_existing_directory_symlinks() {
         let root = std::env::temp_dir().join(format!("acp-cwd-alias-{}", std::process::id()));
         let real = root.join("real");
         let alias = root.join("alias");
         std::fs::create_dir_all(&real).unwrap();
         symlink(&real, &alias).unwrap();
         assert_eq!(
-            normalized_directory(alias.to_str().unwrap()).unwrap(),
-            normalized_directory(real.to_str().unwrap()).unwrap()
+            normalized_directory(alias.to_str().unwrap()).await.unwrap(),
+            normalized_directory(real.to_str().unwrap()).await.unwrap()
         );
         std::fs::remove_file(alias).unwrap();
         std::fs::remove_dir(real).unwrap();
@@ -760,11 +770,11 @@ mod access_validation_tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn cwd_comparison_resolves_the_system_tmp_symlink() {
+    #[tokio::test]
+    async fn cwd_comparison_resolves_the_system_tmp_symlink() {
         assert_eq!(
-            normalized_directory("/tmp").unwrap(),
-            normalized_directory("/private/tmp").unwrap()
+            normalized_directory("/tmp").await.unwrap(),
+            normalized_directory("/private/tmp").await.unwrap()
         );
     }
 
