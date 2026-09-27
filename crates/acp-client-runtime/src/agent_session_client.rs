@@ -9,6 +9,7 @@ mod provider_client_contract;
 mod provider_client_initialization;
 mod provider_client_operations;
 mod provider_connection_task;
+mod provider_cursor_todos;
 mod provider_frame_observation;
 mod provider_initialize_request;
 mod provider_lifecycle_requests;
@@ -24,6 +25,7 @@ use crate::provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
     ProviderSessionRuntimeHandles, ProviderSteeringOutcome, run_provider_session,
 };
+use crate::provider_tool_call_registry::{ProviderToolCallRegistry, ToolCallOwnershipHandler};
 use crate::{AcpProtocolVersion, InteractionPort, SessionEventSink};
 use agent_client_protocol::schema::ProtocolVersion;
 #[cfg(any(test, feature = "test-observation"))]
@@ -60,6 +62,8 @@ pub use provider_client_contract::{
 pub(crate) use provider_client_contract::{
     provider_frame_decode_error, sanitized_initialization_error,
 };
+pub(crate) use provider_cursor_todos::CursorTodoState;
+use provider_cursor_todos::ProviderCursorTodoHandler;
 pub(crate) use provider_frame_observation::ProviderFrameObservation;
 use provider_initialize_request::initialize_provider_connection;
 use provider_request_fallback::{

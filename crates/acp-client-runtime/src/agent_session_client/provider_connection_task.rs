@@ -49,8 +49,14 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             crate::ProviderSettingKind,
         >::new()));
         let task_settings_unresolved = Arc::clone(&settings_unresolved);
+        let tool_registry = Arc::new(ProviderToolCallRegistry::default());
+        let task_tool_registry = Arc::clone(&tool_registry);
+        let todo_state = Arc::new(CursorTodoState::default());
+        let task_todo_state = Arc::clone(&todo_state);
         let task_runtime_handles = ProviderSessionRuntimeHandles {
             event_sink: Arc::clone(&event_sink),
+            tool_registry: Arc::clone(&tool_registry),
+            todo_state: Arc::clone(&todo_state),
             session_settings: Arc::clone(&task_session_settings),
             last_settings_catalog: Arc::clone(&task_last_settings_catalog),
             settings_unresolved: Arc::clone(&task_settings_unresolved),
@@ -129,6 +135,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             let final_interaction_port = Arc::clone(&callback_interaction_port);
             let connection = Client.builder().name("codex-router-host")
                 .with_handler(ProviderRequestSessionGuard::new(request_known_sessions))
+                .with_handler(ToolCallOwnershipHandler::new(Arc::clone(&tool_registry)))
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, connection| {
                         #[cfg(any(test, feature = "test-observation"))]
@@ -169,6 +176,11 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     callback_auth_status,
                     callback_session_capabilities,
                     callback_event_sink,
+                ))
+                .with_handler(ProviderCursorTodoHandler::new(
+                    tool_registry,
+                    todo_state,
+                    Arc::clone(&task_event_sink),
                 ))
                 .with_handler(ProviderRequestFallback)
                 .connect_with(
@@ -320,6 +332,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 task_session_capabilities.write().await.remove(&provider_session_id);
                                                 task_session_settings.write().await.remove(&provider_session_id);
                                                 task_settings_unresolved.write().await.remove(&provider_session_id);
+                                                task_tool_registry.turn_ended(&provider_session_id);
+                                                task_todo_state.forget_session(&provider_session_id);
                                             }
                                             let _result = reply.send(result);
                                         }

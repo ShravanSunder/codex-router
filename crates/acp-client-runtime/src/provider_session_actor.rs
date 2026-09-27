@@ -1,6 +1,7 @@
 //! One provider session's prompt, cancellation, and steering actor.
 use crate::InteractionPort;
 use crate::SessionEventSink;
+use crate::agent_session_client::CursorTodoState;
 #[cfg(any(test, feature = "test-observation"))]
 use crate::agent_session_client::ExternalProviderToolCall;
 use crate::agent_session_client::ProviderTurnCancellation;
@@ -10,6 +11,7 @@ use crate::agent_session_client::{
 };
 use crate::provider_prompt_content::ProviderPromptContent;
 use crate::provider_prompt_observation::read_bounded_prompt;
+use crate::provider_tool_call_registry::ProviderToolCallRegistry;
 use agent_client_protocol::schema::v1::{CancelNotification, PromptRequest};
 use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, JsonRpcMessage, UntypedMessage};
 use serde_json::json;
@@ -46,6 +48,8 @@ pub enum ProviderSessionActivity {
 #[derive(Clone)]
 pub(crate) struct ProviderSessionRuntimeHandles {
     pub(crate) event_sink: Arc<dyn SessionEventSink>,
+    pub(crate) tool_registry: Arc<ProviderToolCallRegistry>,
+    pub(crate) todo_state: Arc<CursorTodoState>,
     pub(crate) session_settings:
         Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::ProviderSettingsCatalog>>>,
     pub(crate) last_settings_catalog:
@@ -144,6 +148,7 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             continue;
                         }
                         let turn_id = uuid::Uuid::now_v7().to_string();
+                        runtime_handles.tool_registry.turn_started(session.session_id().0.as_ref());
                         if runtime_handles.event_sink.publish(
                             session.session_id().0.as_ref(),
                             SessionEvent::TurnStarted { turn_id: turn_id.clone(), input_id },
@@ -152,6 +157,8 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                 CancelNotification::new(session.session_id().clone()),
                             );
                             let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
+                            runtime_handles.tool_registry.turn_ended(session.session_id().0.as_ref());
+                            runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());
                             return;
                         }
                         if let Some(dispatch) = dispatch {
@@ -175,6 +182,8 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             tokio::select! {
                                 biased;
                                 () = shutdown.cancelled() => {
+                                    runtime_handles.tool_registry.turn_ended(provider_session_id.0.as_ref());
+                                    runtime_handles.todo_state.forget_session(provider_session_id.0.as_ref());
                                     let _result = reply.send(Err(ExternalProviderRuntimeError::Operation(
                                         "provider runtime shut down while prompt was active".to_owned(),
                                     )));
@@ -214,9 +223,13 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                         provider_session_id.0.as_ref(),
                                         SessionEvent::TurnEnded { turn_id: turn_id.clone(), outcome },
                                     ).is_err() {
+                                        runtime_handles.tool_registry.turn_ended(provider_session_id.0.as_ref());
+                                        runtime_handles.todo_state.forget_session(provider_session_id.0.as_ref());
                                         let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
                                         return;
                                     }
+                                    runtime_handles.tool_registry.turn_ended(provider_session_id.0.as_ref());
+                                    runtime_handles.todo_state.forget_session(provider_session_id.0.as_ref());
                                     let _result = reply.send(result);
                                     for waiter in idle_waiters.drain(..) {
                                         let _result = waiter.send(Ok(()));
@@ -271,10 +284,13 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                         let result = steer_provider_turn::<P>(session.connection(), session.session_id(), prompt, None).await;
                         if matches!(result, Ok(ProviderSteeringOutcome::StartedNewTurn)) {
                             let turn_id = uuid::Uuid::now_v7().to_string();
+                            runtime_handles.tool_registry.turn_started(session.session_id().0.as_ref());
                             if runtime_handles.event_sink.publish(
                                 session.session_id().0.as_ref(),
                                 SessionEvent::TurnStarted { turn_id, input_id },
                             ).is_err() {
+                                runtime_handles.tool_registry.turn_ended(session.session_id().0.as_ref());
+                                runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());
                                 let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
                                 return;
                             }
