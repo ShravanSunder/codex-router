@@ -316,8 +316,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             let catalog = result.as_ref().as_ref().ok().map(|session| {
                                                 crate::provider_settings_catalog_codec::catalog_from_session_response(&session.response())
                                             });
-                                            let result = (*result).and_then(|mut session| {
-                                                discard_queued_session_updates(&mut session)?;
+                                            let result = (*result).and_then(|session| {
                                                 register_static_provider_session(
                                                     session,
                                                     &mut sessions,

@@ -81,6 +81,14 @@ send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-s
               'priority':'medium','status':'pending'}]}}})
 send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session',
     'update':{'sessionUpdate':'future_kind','content':{'type':'text','text':'Future detail'}}}})
+for update in [
+    {'sessionUpdate':'current_mode_update','currentModeId':'ask'},
+    {'sessionUpdate':'config_option_update','configOptions':[]},
+    {'sessionUpdate':'session_info_update','title':'Working session'},
+    {'sessionUpdate':'usage_update','used':5,'size':100},
+    {'sessionUpdate':'available_commands_update','availableCommands':[]},
+]:
+    send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session','update':update}})
 send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
 "#;
@@ -495,6 +503,24 @@ async fn text_and_thought_chunks_publish_ordered_items() {
             item_id: unknown.item_id.clone()
         })
     );
+    for expected_kind in [
+        session_event_model::SessionItemKind::ModeChange,
+        session_event_model::SessionItemKind::ConfigChange,
+        session_event_model::SessionItemKind::SessionInfo,
+        session_event_model::SessionItemKind::Usage,
+        session_event_model::SessionItemKind::Notice,
+    ] {
+        let Some(SessionEvent::ItemStarted { item }) = items.next() else {
+            panic!("metadata Item absent: {observed:?}")
+        };
+        assert_eq!(item.kind, expected_kind);
+        assert_eq!(
+            items.next(),
+            Some(&SessionEvent::ItemCompleted {
+                item_id: item.item_id.clone()
+            })
+        );
+    }
     assert_eq!(
         items.next(),
         Some(&SessionEvent::ItemCompleted {

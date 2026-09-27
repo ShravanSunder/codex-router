@@ -59,6 +59,26 @@ impl ProviderItemProjection {
                 self.finish_text()?;
                 self.observe_plan(plan)
             }
+            SessionUpdate::CurrentModeUpdate(mode) => self.emit_once(
+                SessionItemKind::ModeChange,
+                mode.current_mode_id.0.to_string(),
+            ),
+            SessionUpdate::ConfigOptionUpdate(config) => self.emit_once(
+                SessionItemKind::ConfigChange,
+                serde_json::to_string(&config.config_options).unwrap_or_default(),
+            ),
+            SessionUpdate::SessionInfoUpdate(info) => self.emit_once(
+                SessionItemKind::SessionInfo,
+                serde_json::to_string(info).unwrap_or_default(),
+            ),
+            SessionUpdate::UsageUpdate(usage) => self.emit_once(
+                SessionItemKind::Usage,
+                serde_json::to_string(usage).unwrap_or_default(),
+            ),
+            SessionUpdate::AvailableCommandsUpdate(commands) => self.emit_once(
+                SessionItemKind::Notice,
+                serde_json::to_string(commands).unwrap_or_default(),
+            ),
             _ => self.finish_text(),
         }
     }
@@ -262,6 +282,28 @@ impl ProviderItemProjection {
                 source_kind: source_kind.to_owned(),
             },
             text: Some(text.to_owned()),
+        };
+        self.event_sink.publish(
+            &self.session_id,
+            SessionEvent::ItemStarted { item: item.clone() },
+        )?;
+        self.event_sink.publish(
+            &self.session_id,
+            SessionEvent::ItemCompleted {
+                item_id: item.item_id,
+            },
+        )
+    }
+
+    fn emit_once(&mut self, kind: SessionItemKind, text: String) -> Result<(), EventSinkOverflow> {
+        self.finish_text()?;
+        if text.len() > MAX_PROMPT_OUTPUT_BYTES {
+            return Err(EventSinkOverflow);
+        }
+        let item = SessionItem {
+            item_id: uuid::Uuid::now_v7().to_string(),
+            kind,
+            text: Some(text),
         };
         self.event_sink.publish(
             &self.session_id,
