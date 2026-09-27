@@ -16,6 +16,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             .spawn_process()
             .map_err(|error| ExternalProviderRuntimeError::Launch(error.to_string()))?;
         let shutdown = CancellationToken::new();
+        let sink_closed = CancellationToken::new();
+        let client_sink_closed = sink_closed.clone();
         let retirement = CancellationToken::new();
         let frame_observation = Arc::new(ProviderFrameObservation::default());
         let task_frame_observation = Arc::clone(&frame_observation);
@@ -57,6 +59,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         let retirement_todos = Arc::clone(&todo_state);
         let task_runtime_handles = ProviderSessionRuntimeHandles {
             event_sink: Arc::clone(&event_sink),
+            sink_closed: sink_closed.clone(),
             tool_registry: Arc::clone(&tool_registry),
             todo_state: Arc::clone(&todo_state),
             session_settings: Arc::clone(&task_session_settings),
@@ -81,10 +84,6 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             ActiveApprovalContext<P>,
         >::new()));
         let callback_approval_contexts = Arc::clone(&approval_contexts);
-        let callback_auth_contexts = Arc::clone(&approval_contexts);
-        let callback_auth_port = Arc::clone(&interaction_port);
-        let callback_todo_contexts = Arc::clone(&approval_contexts);
-        let callback_todo_port = Arc::clone(&interaction_port);
         let callback_question_contexts = Arc::clone(&approval_contexts);
         let callback_question_port = Arc::clone(&interaction_port);
         let callback_plan_contexts = Arc::clone(&approval_contexts);
@@ -190,9 +189,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     callback_auth_status,
                     callback_session_capabilities,
                     callback_event_sink,
-                    Arc::clone(&tool_registry),
-                    callback_auth_contexts,
-                    callback_auth_port,
+                    task_shutdown.clone(),
+                    sink_closed.clone(),
                 ))
                 .with_handler(ProviderCursorQuestionHandler::new(
                     Arc::clone(&tool_registry),
@@ -205,6 +203,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     Arc::clone(&task_event_sink),
                     callback_plan_contexts,
                     callback_plan_port,
+                    task_shutdown.clone(),
+                    sink_closed.clone(),
                 ))
                 .with_handler(ProviderFormElicitationHandler::new(
                     callback_elicitation_contexts,
@@ -214,8 +214,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     tool_registry,
                     todo_state,
                     Arc::clone(&task_event_sink),
-                    callback_todo_contexts,
-                    callback_todo_port,
+                    task_shutdown.clone(),
+                    sink_closed.clone(),
                 ))
                 .with_handler(ProviderRequestFallback)
                 .connect_with(
@@ -330,6 +330,10 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                         }
                                         PendingSessionAdmission::Restore { provider_session_id, result, reply } => {
                                             pending_loads.remove(&provider_session_id);
+                                            if matches!(result.as_ref(), Err(ExternalProviderRuntimeError::SinkClosed)) {
+                                                sink_closed.cancel();
+                                                task_shutdown.cancel();
+                                            }
                                             let report = result.as_ref().as_ref().ok().map(|restored| {
                                                 base_capabilities.with_session_response(&restored.session.response())
                                             });
@@ -630,6 +634,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             last_settings_catalog,
             settings_unresolved,
             shutdown,
+            sink_closed: client_sink_closed,
             retirement,
             task: tokio::sync::Mutex::new(Some(task)),
             shutdown_failed,

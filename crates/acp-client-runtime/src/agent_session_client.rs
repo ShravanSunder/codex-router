@@ -223,6 +223,7 @@ pub struct AgentSessionClient<P: InteractionPort> {
     last_settings_catalog: Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
     settings_unresolved: Arc<tokio::sync::RwLock<HashMap<String, crate::ProviderSettingKind>>>,
     shutdown: CancellationToken,
+    sink_closed: CancellationToken,
     retirement: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     shutdown_failed: Arc<std::sync::atomic::AtomicBool>,

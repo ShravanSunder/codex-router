@@ -1,30 +1,53 @@
-//! A full event sink cancels an active provider Turn without inventing its end.
+//! Output byte limits and event-consumer shutdown have different outcomes.
 
 #![allow(clippy::expect_used)]
 
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use acp_client_runtime::{
-    AgentSessionClient, ApprovalPortOutcome, EventSinkOverflow, ExternalProviderLaunch,
+    AgentSessionClient, ApprovalPortOutcome, EventSinkClosed, ExternalProviderLaunch,
     ExternalProviderRuntimeError, HistoryReplayFuture, InteractionFuture, InteractionPort,
     ProviderPersistenceTarget, RefusedApprovalOffer, SessionEventSink,
 };
-use session_event_model::{
-    ApprovalRequest, LocalCause, SessionEvent, SessionItemKind, StopReason, TurnOutcome,
-};
+use session_event_model::{ApprovalRequest, LocalCause, SessionEvent, StopReason, TurnOutcome};
 use tokio_util::sync::CancellationToken;
 
-const OVERFLOW_FIXTURE: &str = r#"
+const OUTPUT_LIMIT_FIXTURE: &str = r#"
 import json,sys
 def read(): return json.loads(sys.stdin.readline())
 def send(value): print(json.dumps(value),flush=True)
 request=read()
 assert request['method']=='initialize'
 send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},
-    'agentInfo':{'name':'overflow-fixture','version':'1'}}})
+    'agentInfo':{'name':'output-limit-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})
+prompt=read()
+assert prompt['method']=='session/prompt'
+send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session',
+    'update':{'sessionUpdate':'agent_message_chunk',
+              'content':{'type':'text','text':'x'*1048577}}}})
+cancel=read()
+assert cancel['method']=='session/cancel',cancel
+send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+
+const CLOSED_SINK_FIXTURE: &str = r#"
+import json,sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},
+    'agentInfo':{'name':'closed-sink-fixture','version':'1'}}})
 request=read()
 assert request['method']=='session/new'
 send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})
@@ -33,9 +56,24 @@ assert prompt['method']=='session/prompt'
 send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session',
     'update':{'sessionUpdate':'agent_message_chunk',
               'content':{'type':'text','text':'Chunk'}}}})
-cancel=read()
-assert cancel['method']=='session/cancel',cancel
-send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+
+const CLOSED_AUTH_SINK_FIXTURE: &str = r#"
+import json,sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},
+    'agentInfo':{'name':'closed-auth-sink-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})
+prompt=read()
+assert prompt['method']=='session/prompt'
+send({'jsonrpc':'2.0','method':'_auth/status_update',
+    'params':{'authStatus':{'kind':'none','label':'Signed out'}}})
 sys.stdin.read()
 "#;
 
@@ -53,54 +91,6 @@ send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'
 prompt=read()
 assert prompt['method']=='session/prompt'
 os.close(1)
-sys.stdin.read()
-"#;
-
-const PLAN_OVERFLOW_FIXTURE: &str = r#"
-import json,sys
-def read(): return json.loads(sys.stdin.readline())
-def send(value): print(json.dumps(value),flush=True)
-request=read()
-assert request['method']=='initialize'
-send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},
-    'agentInfo':{'name':'plan-overflow-fixture','version':'1'}}})
-request=read()
-assert request['method']=='session/new'
-send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})
-prompt=read()
-assert prompt['method']=='session/prompt'
-send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session',
-    'update':{'sessionUpdate':'tool_call','toolCallId':'plan-tool',
-              'title':'Create plan','kind':'other','status':'pending'}}})
-send({'jsonrpc':'2.0','id':'create-plan','method':'cursor/create_plan',
-    'params':{'toolCallId':'plan-tool','name':'Plan','plan':'# Steps'}})
-received=[]
-for _ in range(2): received.append(read())
-assert any(message.get('method')=='session/cancel' for message in received),received
-assert any(message.get('id')=='create-plan' and message.get('result',{}).get('outcome')=='cancelled'
-           for message in received),received
-send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
-sys.stdin.read()
-"#;
-
-const AUTH_OVERFLOW_FIXTURE: &str = r#"
-import json,sys
-def read(): return json.loads(sys.stdin.readline())
-def send(value): print(json.dumps(value),flush=True)
-request=read()
-assert request['method']=='initialize'
-send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},
-    'agentInfo':{'name':'auth-overflow-fixture','version':'1'}}})
-request=read()
-assert request['method']=='session/new'
-send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})
-prompt=read()
-assert prompt['method']=='session/prompt'
-send({'jsonrpc':'2.0','method':'_auth/status_update',
-    'params':{'authStatus':{'kind':'none','label':'Signed out'}}})
-cancel=read()
-assert cancel['method']=='session/cancel',cancel
-send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
 "#;
 
@@ -152,227 +142,49 @@ impl InteractionPort for NoopInteractionPort {
 }
 
 #[derive(Default)]
-struct RejectItemSink(Mutex<Vec<SessionEvent>>);
-impl SessionEventSink for RejectItemSink {
-    fn begin_history_replay(&self, _session_id: &str) -> HistoryReplayFuture<'_> {
-        Box::pin(async { Ok(()) })
-    }
-    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkOverflow> {
-        if matches!(event, SessionEvent::ItemStarted { .. }) {
-            return Err(EventSinkOverflow);
-        }
-        self.0.lock().expect("event sink").push(event);
-        Ok(())
-    }
+struct CaptureEventSink {
+    events: Mutex<Vec<SessionEvent>>,
+    reject_items: bool,
+    reject_capabilities: bool,
+    closed: AtomicBool,
 }
-
-#[derive(Default)]
-struct RejectPlanSink(Mutex<Vec<SessionEvent>>);
-impl SessionEventSink for RejectPlanSink {
+impl SessionEventSink for CaptureEventSink {
     fn begin_history_replay(&self, _session_id: &str) -> HistoryReplayFuture<'_> {
         Box::pin(async { Ok(()) })
     }
-    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkOverflow> {
-        if matches!(&event, SessionEvent::ItemStarted { item } if item.kind == SessionItemKind::Plan)
+    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkClosed> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(EventSinkClosed);
+        }
+        if (self.reject_items && matches!(event, SessionEvent::ItemStarted { .. }))
+            || (self.reject_capabilities
+                && matches!(event, SessionEvent::CapabilitiesChanged { .. }))
         {
-            return Err(EventSinkOverflow);
+            self.closed.store(true, Ordering::SeqCst);
+            return Err(EventSinkClosed);
         }
-        self.0.lock().expect("event sink").push(event);
+        self.events.lock().expect("event sink").push(event);
         Ok(())
     }
 }
 
-#[derive(Default)]
-struct RejectAuthSink(Mutex<Vec<SessionEvent>>);
-impl SessionEventSink for RejectAuthSink {
-    fn begin_history_replay(&self, _session_id: &str) -> HistoryReplayFuture<'_> {
-        Box::pin(async { Ok(()) })
-    }
-    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkOverflow> {
-        if matches!(event, SessionEvent::CapabilitiesChanged { .. }) {
-            return Err(EventSinkOverflow);
-        }
-        self.0.lock().expect("event sink").push(event);
-        Ok(())
-    }
-}
-
-/// A connection-scoped auth notification must cancel the active Turn when
-/// its capability event cannot enter the Session history.
-#[tokio::test]
-async fn rejected_auth_change_cancels_running_turn_with_local_cause() {
+async fn run_fixture(
+    fixture: &str,
+    sink: Arc<CaptureEventSink>,
+) -> (
+    Result<acp_client_runtime::ExternalProviderPromptOutcome, ExternalProviderRuntimeError>,
+    Arc<CaptureEventSink>,
+) {
     let root = tempfile::tempdir().expect("fixture root");
-    let sink = Arc::new(RejectAuthSink::default());
     let client = AgentSessionClient::initialize(
         ExternalProviderLaunch {
             executable: PathBuf::from("python3"),
-            arguments: vec![
-                "-u".to_owned(),
-                "-c".to_owned(),
-                AUTH_OVERFLOW_FIXTURE.to_owned(),
-            ],
+            arguments: vec!["-u".to_owned(), "-c".to_owned(), fixture.to_owned()],
             environment: Vec::new(),
             persistence_target: ProviderPersistenceTarget::Unspecified,
         },
         Arc::new(NoopInteractionPort),
-        sink.clone(),
-    )
-    .await
-    .expect("fixture initializes");
-    let session_id = client
-        .create_session(root.path().to_path_buf())
-        .await
-        .expect("session opens");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        client.prompt(session_id, "Check auth".to_owned()),
-    )
-    .await
-    .expect("turn settles");
-    assert!(matches!(
-        result,
-        Err(ExternalProviderRuntimeError::PromptOutputLimitExceeded)
-    ));
-    client.shutdown().await;
-    let events = sink.0.lock().expect("event sink");
-    assert!(matches!(
-        events.last(),
-        Some(SessionEvent::TurnEnded {
-            outcome: TurnOutcome::Ended {
-                stop_reason: StopReason::EndTurn,
-                local_cause: Some(LocalCause::OutputOverflow),
-            },
-            ..
-        })
-    ));
-}
-
-/// A connection-scoped Cursor plan request can overflow the same Turn's
-/// Item sink, even though its callback does not pass through read_update.
-#[tokio::test]
-async fn rejected_cursor_plan_cancels_running_turn_with_local_cause() {
-    let root = tempfile::tempdir().expect("fixture root");
-    let sink = Arc::new(RejectPlanSink::default());
-    let client = AgentSessionClient::initialize(
-        ExternalProviderLaunch {
-            executable: PathBuf::from("python3"),
-            arguments: vec![
-                "-u".to_owned(),
-                "-c".to_owned(),
-                PLAN_OVERFLOW_FIXTURE.to_owned(),
-            ],
-            environment: Vec::new(),
-            persistence_target: ProviderPersistenceTarget::Unspecified,
-        },
-        Arc::new(NoopInteractionPort),
-        sink.clone(),
-    )
-    .await
-    .expect("fixture initializes");
-    let session_id = client
-        .create_session(root.path().to_path_buf())
-        .await
-        .expect("session opens");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        client.prompt_with_approval_context(session_id, "Plan".to_owned(), ()),
-    )
-    .await
-    .expect("turn settles");
-    assert!(matches!(
-        result,
-        Err(ExternalProviderRuntimeError::PromptOutputLimitExceeded)
-    ));
-    client.shutdown().await;
-    let events = sink.0.lock().expect("event sink");
-    assert!(matches!(
-        events.last(),
-        Some(SessionEvent::TurnEnded {
-            outcome: TurnOutcome::Ended {
-                stop_reason: StopReason::EndTurn,
-                local_cause: Some(LocalCause::OutputOverflow),
-            },
-            ..
-        })
-    ));
-}
-
-/// Oracle: R5 and Program Design overflow row require a cancel, followed by
-/// the agent-confirmed stop reason plus Router's separate local cause.
-#[tokio::test]
-async fn rejected_item_cancels_turn_and_keeps_agent_stop_reason() {
-    let root = tempfile::tempdir().expect("fixture root");
-    let sink = Arc::new(RejectItemSink::default());
-    let client = AgentSessionClient::initialize(
-        ExternalProviderLaunch {
-            executable: PathBuf::from("python3"),
-            arguments: vec![
-                "-u".to_owned(),
-                "-c".to_owned(),
-                OVERFLOW_FIXTURE.to_owned(),
-            ],
-            environment: Vec::new(),
-            persistence_target: ProviderPersistenceTarget::Unspecified,
-        },
-        Arc::new(NoopInteractionPort),
-        sink.clone(),
-    )
-    .await
-    .expect("fixture initializes");
-    let session_id = client
-        .create_session(root.path().to_path_buf())
-        .await
-        .expect("session opens");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        client.prompt(session_id, "Generate".to_owned()),
-    )
-    .await
-    .expect("turn settles");
-    assert!(
-        matches!(
-            result,
-            Err(ExternalProviderRuntimeError::PromptOutputLimitExceeded)
-        ),
-        "prompt result: {result:?}"
-    );
-    client.shutdown().await;
-    let events = sink.0.lock().expect("event sink");
-    assert!(matches!(
-        events.first(),
-        Some(SessionEvent::TurnStarted { .. })
-    ));
-    assert!(matches!(
-        events.last(),
-        Some(SessionEvent::TurnEnded {
-            outcome: TurnOutcome::Ended {
-                stop_reason: StopReason::EndTurn,
-                local_cause: Some(LocalCause::OutputOverflow),
-            },
-            ..
-        })
-    ));
-}
-
-/// A provider that closes stdout before its prompt result cannot confirm a
-/// stop reason; the Turn is lost and keeps the retirement reason.
-#[tokio::test]
-async fn provider_eof_ends_running_turn_lost() {
-    let root = tempfile::tempdir().expect("fixture root");
-    let sink = Arc::new(RejectItemSink::default());
-    let client = AgentSessionClient::initialize(
-        ExternalProviderLaunch {
-            executable: PathBuf::from("python3"),
-            arguments: vec![
-                "-u".to_owned(),
-                "-c".to_owned(),
-                LOST_PROVIDER_FIXTURE.to_owned(),
-            ],
-            environment: Vec::new(),
-            persistence_target: ProviderPersistenceTarget::Unspecified,
-        },
-        Arc::new(NoopInteractionPort),
-        sink.clone(),
+        Arc::clone(&sink) as Arc<dyn SessionEventSink>,
     )
     .await
     .expect("fixture initializes");
@@ -386,17 +198,101 @@ async fn provider_eof_ends_running_turn_lost() {
     )
     .await
     .expect("turn settles");
-    assert!(result.is_err());
     client.shutdown().await;
-    let events = sink.0.lock().expect("event sink");
+    (result, sink)
+}
+
+/// R5: a bounded output byte limit cancels the Turn, then keeps the agent's
+/// confirmed stop reason alongside Router's separate local cause.
+#[tokio::test]
+async fn output_byte_limit_cancels_turn_and_keeps_agent_stop_reason() {
+    let (result, sink) =
+        run_fixture(OUTPUT_LIMIT_FIXTURE, Arc::new(CaptureEventSink::default())).await;
+    assert!(matches!(
+        result,
+        Err(ExternalProviderRuntimeError::PromptOutputLimitExceeded)
+    ));
+    let events = sink.events.lock().expect("event sink");
+    assert!(matches!(
+        events.first(),
+        Some(SessionEvent::TurnStarted { .. })
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(SessionEvent::TurnEnded {
+            outcome: TurnOutcome::Ended {
+                stop_reason: StopReason::EndTurn,
+                local_cause: Some(LocalCause::OutputOverflow),
+            },
+            ..
+        })
+    ));
+}
+
+/// A closed event consumer is a typed shutdown, without inventing an agent
+/// stop reason or treating it as the prompt byte limit.
+#[tokio::test]
+async fn closed_event_consumer_ends_active_turn_with_sink_closed() {
+    let (result, sink) = run_fixture(
+        CLOSED_SINK_FIXTURE,
+        Arc::new(CaptureEventSink {
+            reject_items: true,
+            ..CaptureEventSink::default()
+        }),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(ExternalProviderRuntimeError::SinkClosed)
+    ));
+    let events = sink.events.lock().expect("event sink");
     assert!(matches!(
         events.first(),
         Some(SessionEvent::TurnStarted { .. })
     ));
     assert!(
-        matches!(events.last(), Some(SessionEvent::TurnEnded {
-        outcome: TurnOutcome::Lost { reason }, ..
-    }) if reason == "providerRetired"),
-        "events: {events:?}"
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnEnded { .. }))
     );
+}
+
+/// A connection-scoped callback also retires the active prompt with the same
+/// typed shutdown when its consumer closes.
+#[tokio::test]
+async fn closed_auth_event_consumer_retires_active_prompt() {
+    let (result, sink) = run_fixture(
+        CLOSED_AUTH_SINK_FIXTURE,
+        Arc::new(CaptureEventSink {
+            reject_capabilities: true,
+            ..CaptureEventSink::default()
+        }),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(ExternalProviderRuntimeError::SinkClosed)),
+        "result: {result:?}"
+    );
+    let events = sink.events.lock().expect("event sink");
+    assert!(matches!(
+        events.first(),
+        Some(SessionEvent::TurnStarted { .. })
+    ));
+}
+
+/// A provider that closes stdout before its prompt result cannot confirm a
+/// stop reason; the Turn is lost with the retirement reason.
+#[tokio::test]
+async fn provider_eof_ends_running_turn_lost() {
+    let (result, sink) =
+        run_fixture(LOST_PROVIDER_FIXTURE, Arc::new(CaptureEventSink::default())).await;
+    assert!(result.is_err());
+    let events = sink.events.lock().expect("event sink");
+    assert!(matches!(
+        events.first(),
+        Some(SessionEvent::TurnStarted { .. })
+    ));
+    assert!(matches!(events.last(), Some(SessionEvent::TurnEnded {
+        outcome: TurnOutcome::Lost { reason }, ..
+    }) if reason == "providerRetired"));
 }

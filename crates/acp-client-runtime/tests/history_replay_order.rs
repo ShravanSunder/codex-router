@@ -8,7 +8,7 @@ use std::{
 };
 
 use acp_client_runtime::{
-    AgentSessionClient, ApprovalPortOutcome, EventSinkOverflow, ExternalProviderLaunch,
+    AgentSessionClient, ApprovalPortOutcome, EventSinkClosed, ExternalProviderLaunch,
     ExternalProviderRuntimeError, HistoryReplayFuture, HistoryReplayUnavailable, InteractionFuture,
     InteractionPort, RefusedApprovalOffer, SessionEventSink,
 };
@@ -152,7 +152,7 @@ impl SessionEventSink for ReplaySink {
         })
     }
 
-    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkOverflow> {
+    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkClosed> {
         if let Some(events) = &self.events {
             events.lock().expect("replay events").push(event);
         }

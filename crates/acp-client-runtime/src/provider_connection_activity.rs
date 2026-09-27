@@ -14,7 +14,6 @@ pub(crate) struct ProviderConnectionActivity(Mutex<RegistryState>);
 struct RegistryState {
     running_sessions: HashMap<String, String>,
     tool_sessions: HashMap<String, HashSet<String>>,
-    output_overflows: HashSet<String>,
 }
 
 impl ProviderConnectionActivity {
@@ -61,7 +60,6 @@ impl ProviderConnectionActivity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.running_sessions.remove(session_id);
-        state.output_overflows.remove(session_id);
         state.tool_sessions.retain(|_, owners| {
             owners.remove(session_id);
             !owners.is_empty()
@@ -77,7 +75,6 @@ impl ProviderConnectionActivity {
             return false;
         }
         state.running_sessions.remove(session_id);
-        state.output_overflows.remove(session_id);
         state.tool_sessions.retain(|_, owners| {
             owners.remove(session_id);
             !owners.is_empty()
@@ -91,30 +88,7 @@ impl ProviderConnectionActivity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.tool_sessions.clear();
-        state.output_overflows.clear();
         state.running_sessions.drain().collect()
-    }
-
-    pub(crate) fn output_overflowed(&self, session_id: &str) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .output_overflows
-            .contains(session_id)
-    }
-
-    /// Connection-level callbacks do not pass through the prompt observer.
-    /// Record their overflow so its actor can preserve the local cause when
-    /// the agent eventually reports the Turn's stop reason.
-    pub(crate) fn mark_output_overflow(&self, session_id: &str) -> Option<bool> {
-        let mut state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state
-            .running_sessions
-            .contains_key(session_id)
-            .then(|| state.output_overflows.insert(session_id.to_owned()))
     }
 }
 

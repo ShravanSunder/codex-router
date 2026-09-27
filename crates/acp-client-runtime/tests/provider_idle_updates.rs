@@ -5,7 +5,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use acp_client_runtime::{
-    AgentSessionClient, ApprovalPortOutcome, EventSinkOverflow, ExternalProviderLaunch,
+    AgentSessionClient, ApprovalPortOutcome, EventSinkClosed, ExternalProviderLaunch,
     HistoryReplayFuture, InteractionFuture, InteractionPort, ProviderPersistenceTarget,
     RefusedApprovalOffer, SessionEventSink,
 };
@@ -99,8 +99,8 @@ impl SessionEventSink for CaptureEventSink {
     fn begin_history_replay(&self, _session_id: &str) -> HistoryReplayFuture<'_> {
         Box::pin(async { Ok(()) })
     }
-    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkOverflow> {
-        self.0.send(event).map_err(|_| EventSinkOverflow)
+    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkClosed> {
+        self.0.send(event).map_err(|_| EventSinkClosed)
     }
 }
 
