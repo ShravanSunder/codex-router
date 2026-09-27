@@ -147,6 +147,14 @@ fn setting_error(
             value: Some(request.value.clone()),
             advertised: Vec::new(),
         },
+        ExternalProviderRuntimeError::SettingOutcomeUnknown { .. } => ProviderSettingsFailure {
+            kind: ProviderSettingsFailureKind::OutcomeUnknown,
+            target: request.target.clone(),
+            message: "provider setting outcome is unknown; Session remains gated".into(),
+            setting: Some(request.setting),
+            value: Some(request.value.clone()),
+            advertised: Vec::new(),
+        },
         other => {
             let mut failure = plain_error(&request.target, other);
             if failure.kind == ProviderSettingsFailureKind::OutcomeUnknown {
@@ -216,5 +224,15 @@ mod tests {
         assert_eq!(failure.kind, ProviderSettingsFailureKind::OutcomeUnknown);
         assert_eq!(failure.setting, Some(ProviderSettingName::Mode));
         assert_eq!(failure.value.as_deref(), Some("ask"));
+        let precise = setting_error(
+            &request,
+            ExternalProviderRuntimeError::SettingOutcomeUnknown {
+                provider_session_id: "provider-session".into(),
+                setting: acp_client_runtime::ProviderSettingKind::Mode,
+                value: "ask".into(),
+            },
+        );
+        assert_eq!(precise.kind, ProviderSettingsFailureKind::OutcomeUnknown);
+        assert_eq!(precise.setting, Some(ProviderSettingName::Mode));
     }
 }

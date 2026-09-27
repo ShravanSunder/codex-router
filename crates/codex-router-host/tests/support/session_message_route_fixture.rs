@@ -408,6 +408,7 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
             decision: Some(ApprovalDecision::Allow),
             option_id: None,
             acknowledge_persistent: false,
+            note: None,
             actor: serde_json::from_value(json!({"kind":"session","session":approver}))
                 .expect("approver identity"),
         })

@@ -395,6 +395,7 @@ async fn fixture_acp_permission_notice_reaches_approver_and_allow_executes_comma
                 decision: Some(ApprovalDecision::Allow),
                 option_id: None,
                 acknowledge_persistent: false,
+                note: None,
                 actor: approval_actor(&approver),
             })
             .await
@@ -607,6 +608,7 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
                                 decision: Some(ApprovalDecision::Allow),
                                 option_id: None,
                                 acknowledge_persistent: false,
+                                note: None,
                                 actor: approval_actor(&approver),
                             }).await.map_err(|error| {
                                 ExternalProviderRuntimeError::Operation(error.to_string())

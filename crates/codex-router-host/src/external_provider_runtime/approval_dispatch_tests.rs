@@ -433,6 +433,7 @@ async fn permission_decision_survives_late_agent_withdrawal_and_peer_turn_progre
             decision: Some(ApprovalDecision::Allow),
             option_id: None,
             acknowledge_persistent: false,
+            note: None,
             actor: approval_actor(&requester_and_approver),
         })
         .await?;
@@ -605,6 +606,7 @@ async fn permission_wait_does_not_block_steering_reply_dispatch() -> TestResult 
             decision: Some(ApprovalDecision::Allow),
             option_id: None,
             acknowledge_persistent: false,
+            note: None,
             actor: approval_actor(&requester),
         })
         .await?;
@@ -820,6 +822,7 @@ async fn provider_option_sets_keep_order_scope_and_selected_id() -> TestResult {
                         decision: Some(ApprovalDecision::AllowForSession),
                         option_id: None,
                         acknowledge_persistent: false,
+                        note: None,
                         actor: approval_actor(&approver),
                     })
                     .await,
@@ -832,6 +835,7 @@ async fn provider_option_sets_keep_order_scope_and_selected_id() -> TestResult {
                     decision: Some(decision),
                     option_id: None,
                     acknowledge_persistent: false,
+                    note: None,
                     actor: approval_actor(&approver),
                 })
                 .await?;

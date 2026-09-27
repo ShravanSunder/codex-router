@@ -77,6 +77,7 @@ async fn typed_decision_after_turn_cancel_is_not_pending() {
                 decision: None,
                 option_id: Some("allow-once".into()),
                 acknowledge_persistent: false,
+                note: None,
                 actor: approver,
             })
             .await,

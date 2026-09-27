@@ -135,6 +135,32 @@ async fn front_door_inputs_keep_arrival_order() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn unobservable_steer_end_returns_the_live_session_to_idle() -> TestResult {
+    let (_root, hub) = hub(8).await?;
+    let target = session()?;
+    hub.publish(
+        target.clone(),
+        SessionEvent::TurnStarted {
+            turn_id: "steer-turn".into(),
+            input_id: session_event_model::InputId::new("steer-input")?,
+        },
+    )
+    .await?;
+    hub.publish(
+        target.clone(),
+        SessionEvent::TurnEnded {
+            turn_id: "steer-turn".into(),
+            outcome: TurnOutcome::Lost {
+                reason: "endNotObservable".into(),
+            },
+        },
+    )
+    .await?;
+    ensure_eq!(hub.state(target).await?, SessionState::Idle);
+    Ok(())
+}
+
 // R25: pending approval and question requests remain visible on later attach.
 #[tokio::test]
 async fn late_attach_replays_pending_approval_and_question() -> TestResult {

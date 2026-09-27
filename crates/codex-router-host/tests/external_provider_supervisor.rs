@@ -968,6 +968,7 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
             decision: Some(ApprovalDecision::Allow),
             option_id: None,
             acknowledge_persistent: false,
+            note: None,
             actor: serde_json::from_value(json!({"kind":"session","session":approver.clone()}))?,
         })
         .await
@@ -1080,6 +1081,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
                 decision: Some(ApprovalDecision::Allow),
                 option_id: None,
                 acknowledge_persistent: false,
+                note: None,
                 actor: serde_json::from_value(json!({"kind":"session","session":approver}))?,
             })
             .await,

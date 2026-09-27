@@ -173,6 +173,7 @@ async fn insert_pending(
             decision: Some(ApprovalDecision::Allow),
             option_id: None,
             acknowledge_persistent: false,
+            note: None,
             actor: board_identity(&approver).expect("approver identity"),
         },
         receiver,
@@ -570,18 +571,21 @@ async fn populated_old_approval_reader_survives_human_interaction_history() {
     };
     assert!(matches!(
         broker
-            .decide_typed_interaction("human-approval-1", &wrong_actor, "allow-once", false)
+            .decide_typed_interaction("human-approval-1", &wrong_actor, "allow-once", false, None)
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::WrongActor)
     ));
     broker
-        .decide_typed_interaction("human-approval-1", &human, "allow-once", false)
+        .decide_typed_interaction("human-approval-1", &human, "allow-once", false, None)
         .await
         .expect("human decision");
-    assert_eq!(receiver.await.expect("agent option").as_str(), "allow-once");
+    assert_eq!(
+        receiver.await.expect("agent option").option_id.as_str(),
+        "allow-once"
+    );
     assert!(matches!(
         broker
-            .decide_typed_interaction("human-approval-1", &human, "allow-once", false)
+            .decide_typed_interaction("human-approval-1", &human, "allow-once", false, None)
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::AlreadySettled)
     ));
@@ -824,6 +828,7 @@ async fn typed_approval_preserves_cursor_choices_and_returns_exact_option_id() {
         decision: None,
         option_id: Some(option_id.into()),
         acknowledge_persistent,
+        note: Some("Approver note".into()),
         actor: approver.clone(),
     };
     assert!(matches!(
@@ -841,10 +846,9 @@ async fn typed_approval_preserves_cursor_choices_and_returns_exact_option_id() {
         .await
         .expect("persistent choice");
     assert_eq!(receipt.option_id.as_deref(), Some("allow-always"));
-    assert_eq!(
-        receiver.await.expect("agent option ID").as_str(),
-        "allow-always"
-    );
+    let selected = receiver.await.expect("agent option ID");
+    assert_eq!(selected.option_id.as_str(), "allow-always");
+    assert_eq!(selected.note.as_deref(), Some("Approver note"));
 }
 
 #[tokio::test]
@@ -920,6 +924,7 @@ async fn claude_choices_resolve_legacy_decisions_without_inventing_an_option() {
         decision: Some(decision),
         option_id: None,
         acknowledge_persistent: false,
+        note: None,
         actor: actor.clone(),
     };
     assert!(matches!(
@@ -932,7 +937,10 @@ async fn claude_choices_resolve_legacy_decisions_without_inventing_an_option() {
         .await
         .expect("legacy decline");
     assert_eq!(receipt.decision, Some(ApprovalDecision::Deny));
-    assert_eq!(receiver.await.expect("agent option ID").as_str(), "no-once");
+    assert_eq!(
+        receiver.await.expect("agent option ID").option_id.as_str(),
+        "no-once"
+    );
 }
 
 // R18: a form stays pending until its Approver answers it; values are checked
@@ -1244,7 +1252,7 @@ async fn restart_cancels_populated_pending_interaction_history() {
         } if reason == "hostRestarted"));
     assert!(matches!(
         broker_after_restart
-            .decide_typed_interaction("restart-approval", &approver, "allow-once", false)
+            .decide_typed_interaction("restart-approval", &approver, "allow-once", false, None)
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::AlreadySettled)
     ));
@@ -1255,6 +1263,7 @@ async fn restart_cancels_populated_pending_interaction_history() {
                 decision: None,
                 option_id: Some("allow-once".into()),
                 acknowledge_persistent: false,
+                note: None,
                 actor: approver.clone(),
             })
             .await,

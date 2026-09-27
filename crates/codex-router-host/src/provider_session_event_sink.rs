@@ -190,7 +190,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     #[tokio::test]
-    async fn typed_broker_request_and_decision_publish_pending_and_resolution_in_order() {
+    async fn typed_broker_interactions_publish_pending_and_resolution_in_order() {
         let root = tempfile::tempdir().expect("temporary store");
         let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
             .expect("service ID");
@@ -254,6 +254,7 @@ mod tests {
             ]
         }))
         .expect("approval request");
+        let question_target = target.clone();
         let request_task = tokio::spawn({
             let port = Arc::clone(&port);
             let context = crate::ExternalProviderApprovalContext {
@@ -297,18 +298,76 @@ mod tests {
                 .expect("actor"),
         };
         broker
-            .decide_typed_interaction("approval-one", &actor, "allow-once", false)
+            .decide_typed_interaction(
+                "approval-one",
+                &actor,
+                "allow-once",
+                false,
+                Some("note".into()),
+            )
             .await
             .expect("approver decision");
         assert_eq!(
             request_task.await.expect("port task"),
             ApprovalPortOutcome::Selected {
                 option_id: "allow-once".into(),
+                note: Some("note".into()),
             }
         );
+        let question = serde_json::from_value(serde_json::json!({
+            "requestId":"question-one","prompt":"Choose count","fields":[
+                {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true}
+            ]
+        })).expect("question request");
+        let question_task = tokio::spawn({
+            let port = Arc::clone(&port);
+            let context = crate::ExternalProviderApprovalContext {
+                requester: approver.clone(),
+                approver: approver.clone(),
+                target: question_target,
+                operation_id: OperationId::generate(),
+                binding_generation: CodexGeneration {
+                    service_epoch: UuidIdentity::try_from(
+                        "00000000-0000-4000-8000-000000000001".to_owned(),
+                    )
+                    .expect("epoch"),
+                    generation: GenerationNumber::try_from(1).expect("generation"),
+                },
+                binding_retirement: tokio_util::sync::CancellationToken::new(),
+            };
+            async move {
+                port.request_question(
+                    context,
+                    question,
+                    tokio_util::sync::CancellationToken::new(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(attached) = hub.attach(session.clone()).await
+                    && attached.snapshot.len() == 4
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pending question published");
+        let response = session_event_model::QuestionResponse::Answered {
+            content: serde_json::from_value(serde_json::json!({"count":3})).expect("answer"),
+        };
+        broker
+            .respond_question("question-one", &actor, response.clone())
+            .await
+            .expect("question answer");
+        assert_eq!(question_task.await.expect("question task"), response);
         sink.shutdown().await.expect("drain");
         let attached = hub.attach(session).await.expect("attach history");
-        assert_eq!(attached.snapshot.len(), 3);
+        assert_eq!(attached.snapshot.len(), 5);
         assert!(matches!(
             &attached.snapshot[0].event,
             SessionEvent::TurnStarted { .. }
@@ -319,6 +378,14 @@ mod tests {
         ));
         assert!(matches!(
             &attached.snapshot[2].event,
+            SessionEvent::InteractionResolved { .. }
+        ));
+        assert!(matches!(
+            &attached.snapshot[3].event,
+            SessionEvent::InteractionRequested { .. }
+        ));
+        assert!(matches!(
+            &attached.snapshot[4].event,
             SessionEvent::InteractionResolved { .. }
         ));
     }

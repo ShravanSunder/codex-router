@@ -165,10 +165,16 @@ pub struct ServiceInteractionBroker {
 }
 
 struct TypedPendingApproval {
-    completion: oneshot::Sender<session_event_model::OfferedOptionId>,
+    completion: oneshot::Sender<TypedApprovalSelection>,
     turn_cancellation: tokio_util::sync::CancellationToken,
     retirement: tokio_util::sync::CancellationToken,
     requester: message_board::SessionRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypedApprovalSelection {
+    pub option_id: session_event_model::OfferedOptionId,
+    pub note: Option<String>,
 }
 
 impl ServiceInteractionBroker {
@@ -331,8 +337,7 @@ impl ServiceInteractionBroker {
         request: session_event_model::ApprovalRequest,
         turn_cancellation: tokio_util::sync::CancellationToken,
         retirement: tokio_util::sync::CancellationToken,
-    ) -> Result<oneshot::Receiver<session_event_model::OfferedOptionId>, InteractionHistoryError>
-    {
+    ) -> Result<oneshot::Receiver<TypedApprovalSelection>, InteractionHistoryError> {
         if !self.participants_belong_to_service(&requester, &approver) {
             return Err(InteractionHistoryError::Unavailable);
         }
@@ -585,6 +590,7 @@ impl ServiceInteractionBroker {
         actor: &message_board::Identity,
         option_id: &str,
         acknowledge_persistent: bool,
+        note: Option<String>,
     ) -> Result<session_event_model::OfferedOptionId, InteractionHistoryError> {
         let mut pending = self.typed_pending_approvals.lock().await;
         if let Some(approval) = pending.get(request_id)
@@ -619,7 +625,10 @@ impl ServiceInteractionBroker {
             .ok_or(InteractionHistoryError::NotPending)?;
         sender
             .completion
-            .send(selected.clone())
+            .send(TypedApprovalSelection {
+                option_id: selected.clone(),
+                note,
+            })
             .map_err(|_| InteractionHistoryError::Unavailable)?;
         Ok(selected)
     }
@@ -943,6 +952,7 @@ impl ServiceInteractionBroker {
                     &params.actor,
                     &option_id,
                     params.acknowledge_persistent,
+                    params.note.clone(),
                 )
                 .await
                 .map_err(ApprovalDecisionError::from)?;

@@ -60,6 +60,9 @@ impl SessionHistory {
                 self.turn_running = false;
                 self.state = match outcome {
                     TurnOutcome::Ended { .. } => SessionState::Idle,
+                    TurnOutcome::Lost { reason } if reason == "endNotObservable" => {
+                        SessionState::Idle
+                    }
                     TurnOutcome::Lost { .. } => SessionState::Unloaded,
                 };
             }
