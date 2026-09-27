@@ -181,6 +181,14 @@ fn typed_approval_request(request_id: &str) -> session_event_model::ApprovalRequ
     .expect("typed approval request")
 }
 
+fn select_typed(option_id: &str) -> crate::interaction_broker::TypedInteractionDecision {
+    crate::interaction_broker::TypedInteractionDecision::SelectApproval {
+        option_id: option_id.to_owned(),
+        acknowledge_persistent: false,
+        note: None,
+    }
+}
+
 pub(super) async fn fixture_broker() -> (Arc<ServiceInteractionBroker>, CodexGeneration, PathBuf) {
     let service_id = crate::new_service_uuid().unwrap_or_else(|error| panic!("service: {error}"));
     let generation: CodexGeneration = serde_json::from_value(json!({
@@ -663,21 +671,20 @@ async fn populated_old_approval_reader_survives_human_interaction_history() {
     };
     assert!(matches!(
         broker
-            .decide_typed_interaction("human-approval-1", &wrong_actor, "allow-once", false, None)
+            .decide_typed_interaction("human-approval-1", &wrong_actor, select_typed("allow-once"))
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::WrongActor)
     ));
     broker
-        .decide_typed_interaction("human-approval-1", &human, "allow-once", false, None)
+        .decide_typed_interaction("human-approval-1", &human, select_typed("allow-once"))
         .await
         .expect("human decision");
-    assert_eq!(
-        receiver.await.expect("agent option").option_id.as_str(),
-        "allow-once"
-    );
+    assert!(matches!(receiver.await.expect("agent option"),
+        crate::interaction_broker::TypedApprovalResolution::Selected(selected)
+            if selected.option_id.as_str() == "allow-once"));
     assert!(matches!(
         broker
-            .decide_typed_interaction("human-approval-1", &human, "allow-once", false, None)
+            .decide_typed_interaction("human-approval-1", &human, select_typed("allow-once"))
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::AlreadySettled)
     ));
@@ -982,7 +989,11 @@ async fn typed_approval_preserves_cursor_choices_and_returns_exact_option_id() {
         .await
         .expect("persistent choice");
     assert_eq!(receipt.option_id.as_deref(), Some("allow-always"));
-    let selected = receiver.await.expect("agent option ID");
+    let crate::interaction_broker::TypedApprovalResolution::Selected(selected) =
+        receiver.await.expect("agent option ID")
+    else {
+        panic!("selection expected");
+    };
     assert_eq!(selected.option_id.as_str(), "allow-always");
     assert_eq!(selected.note.as_deref(), Some("Approver note"));
 }
@@ -1073,10 +1084,9 @@ async fn claude_choices_resolve_legacy_decisions_without_inventing_an_option() {
         .await
         .expect("legacy decline");
     assert_eq!(receipt.decision, Some(ApprovalDecision::Deny));
-    assert_eq!(
-        receiver.await.expect("agent option ID").option_id.as_str(),
-        "no-once"
-    );
+    assert!(matches!(receiver.await.expect("agent option ID"),
+        crate::interaction_broker::TypedApprovalResolution::Selected(selected)
+            if selected.option_id.as_str() == "no-once"));
 }
 
 // R18: a form stays pending until its Approver answers it; values are checked
@@ -1286,7 +1296,7 @@ async fn cancelling_a_session_answers_its_pending_questions_only() {
             .filter(|record| matches!(record,
                 crate::interaction_broker::InteractionHistoryRecord::Question {
                     state: crate::interaction_broker::QuestionHistoryState::Cancelled { reason }, ..
-                } if reason == "turn cancelled"
+                } if reason.as_str() == "turn cancelled"
             ))
             .count()
             == 2
@@ -1412,10 +1422,10 @@ async fn restart_cancels_populated_pending_interaction_history() {
     assert!(matches!(&records["restart-question"],
         crate::interaction_broker::InteractionHistoryRecord::Question {
             state: crate::interaction_broker::QuestionHistoryState::Cancelled { reason }, ..
-        } if reason == "hostRestarted"));
+        } if reason.as_str() == "hostRestarted"));
     assert!(matches!(
         broker_after_restart
-            .decide_typed_interaction("restart-approval", &approver, "allow-once", false, None)
+            .decide_typed_interaction("restart-approval", &approver, select_typed("allow-once"))
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::AlreadySettled)
     ));

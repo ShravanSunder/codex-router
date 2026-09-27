@@ -368,6 +368,147 @@ async fn question_answer_delivery_reports_later_history_write_failure() {
 }
 
 #[tokio::test]
+async fn only_approver_can_explicitly_cancel_a_pending_approval() {
+    let (broker, _, _) = super::tests::fixture_broker().await;
+    let (requester, approver) = typed_participants(&broker);
+    let wrong_actor = message_board::Identity::Human {
+        human_id: "other".to_owned().try_into().expect("other human"),
+    };
+    let receiver = broker
+        .request_typed_approval(
+            requester,
+            approver.clone(),
+            typed_request("approver-cancel-approval"),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("approval pending");
+    assert!(matches!(
+        broker
+            .decide_typed_interaction(
+                "approver-cancel-approval",
+                &wrong_actor,
+                TypedInteractionDecision::Cancel
+            )
+            .await,
+        Err(InteractionHistoryError::WrongActor)
+    ));
+    assert!(matches!(
+        broker
+            .interaction_history
+            .interaction("approver-cancel-approval")
+            .await,
+        Some(InteractionHistoryRecord::Approval {
+            state: InteractionHistoryState::Pending,
+            ..
+        })
+    ));
+    assert_eq!(
+        broker
+            .decide_typed_interaction(
+                "approver-cancel-approval",
+                &approver,
+                TypedInteractionDecision::Cancel
+            )
+            .await
+            .expect("approver cancelled"),
+        TypedInteractionDecisionOutcome::ApprovalCancelled
+    );
+    assert_eq!(
+        receiver.await.expect("agent cancellation"),
+        TypedApprovalResolution::Cancelled
+    );
+    assert!(matches!(
+        broker
+            .interaction_history
+            .interaction("approver-cancel-approval")
+            .await,
+        Some(InteractionHistoryRecord::Approval {
+            state: InteractionHistoryState::Cancelled {
+                reason: session_event_model::InteractionCancelReason::ApproverCancelled
+            },
+            ..
+        })
+    ));
+    let record = broker
+        .interaction_history
+        .interaction("approver-cancel-approval")
+        .await
+        .expect("history");
+    assert_eq!(
+        serde_json::to_value(record).expect("wire state")["state"]["reason"],
+        "approverCancelled"
+    );
+}
+
+#[tokio::test]
+async fn only_approver_can_explicitly_cancel_a_pending_question() {
+    let (broker, _, _) = super::tests::fixture_broker().await;
+    let (requester, approver) = typed_participants(&broker);
+    let wrong_actor = message_board::Identity::Human {
+        human_id: "other".to_owned().try_into().expect("other human"),
+    };
+    let receiver = broker
+        .request_question(
+            requester,
+            approver.clone(),
+            typed_question("approver-cancel-question"),
+            None,
+        )
+        .await
+        .expect("question pending");
+    assert!(matches!(
+        broker
+            .decide_typed_interaction(
+                "approver-cancel-question",
+                &wrong_actor,
+                TypedInteractionDecision::Cancel
+            )
+            .await,
+        Err(InteractionHistoryError::WrongActor)
+    ));
+    assert!(matches!(
+        broker
+            .interaction_history
+            .interaction("approver-cancel-question")
+            .await,
+        Some(InteractionHistoryRecord::Question {
+            state: QuestionHistoryState::Pending,
+            ..
+        })
+    ));
+    assert_eq!(
+        broker
+            .decide_typed_interaction(
+                "approver-cancel-question",
+                &approver,
+                TypedInteractionDecision::Cancel
+            )
+            .await
+            .expect("approver cancelled"),
+        TypedInteractionDecisionOutcome::QuestionCancelled
+    );
+    assert_eq!(
+        receiver.await.expect("agent cancellation"),
+        QuestionResponse::Cancelled
+    );
+    assert!(
+        matches!(broker.interaction_history.interaction("approver-cancel-question").await,
+        Some(InteractionHistoryRecord::Question { state: QuestionHistoryState::Cancelled { reason }, .. }) if reason == session_event_model::InteractionCancelReason::ApproverCancelled)
+    );
+    let record = broker
+        .interaction_history
+        .interaction("approver-cancel-question")
+        .await
+        .expect("history");
+    assert_eq!(
+        serde_json::to_value(record).expect("wire state")["state"]["reason"],
+        "approverCancelled"
+    );
+}
+
+#[tokio::test]
 async fn retired_requester_questions_are_cancelled_with_approvals() {
     let (broker, _, _) = super::tests::fixture_broker().await;
     let (requester, approver) = typed_participants(&broker);
@@ -425,6 +566,6 @@ async fn retired_requester_questions_are_cancelled_with_approvals() {
         .await
         .expect("history");
     assert!(
-        matches!(record, InteractionHistoryRecord::Question { state: QuestionHistoryState::Cancelled { reason }, .. } if reason == "providerRetired")
+        matches!(record, InteractionHistoryRecord::Question { state: QuestionHistoryState::Cancelled { reason }, .. } if reason.as_str() == "providerRetired")
     );
 }

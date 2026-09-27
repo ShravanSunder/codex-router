@@ -1113,13 +1113,17 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
         .decide_typed_interaction(
             &pending.request_id,
             &serde_json::from_value(json!({"kind":"session","session":approver.clone()}))?,
-            "allow-exact-once",
-            false,
-            None,
+            collaboration_service::TypedInteractionDecision::SelectApproval {
+                option_id: "allow-exact-once".into(),
+                acknowledge_persistent: false,
+                note: None,
+            },
         )
         .await
         .map_err(|error| format!("approval decision failed: {error}"))?;
-    ensure_eq!(decision.as_str(), "allow-exact-once");
+    ensure!(matches!(decision,
+        collaboration_service::TypedInteractionDecisionOutcome::ApprovalSelected { option_id }
+            if option_id.as_str() == "allow-exact-once"));
 
     let settled = operation(wait(&backend, prompt_operation_id).await)?;
     ensure!(matches!(
@@ -1226,9 +1230,11 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
             .decide_typed_interaction(
                 &pending.request_id,
                 &serde_json::from_value(json!({"kind":"session","session":approver}))?,
-                "allow-exact-once",
-                false,
-                None,
+                collaboration_service::TypedInteractionDecision::SelectApproval {
+                    option_id: "allow-exact-once".into(),
+                    acknowledge_persistent: false,
+                    note: None,
+                },
             )
             .await,
         Err(collaboration_service::InteractionHistoryError::AlreadySettled)

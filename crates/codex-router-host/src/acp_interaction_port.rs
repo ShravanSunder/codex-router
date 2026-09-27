@@ -401,15 +401,20 @@ fn board_session_ref(value: &collaboration_protocol::SessionRef) -> Option<Board
 
 fn approval_receiver_outcome(
     selected: Result<
-        collaboration_service::TypedApprovalSelection,
+        collaboration_service::TypedApprovalResolution,
         tokio::sync::oneshot::error::RecvError,
     >,
 ) -> ApprovalPortOutcome {
     match selected {
-        Ok(selected) => ApprovalPortOutcome::Selected {
-            option_id: selected.option_id.as_str().to_owned(),
-            note: selected.note,
-        },
+        Ok(collaboration_service::TypedApprovalResolution::Selected(selected)) => {
+            ApprovalPortOutcome::Selected {
+                option_id: selected.option_id.as_str().to_owned(),
+                note: selected.note,
+            }
+        }
+        Ok(collaboration_service::TypedApprovalResolution::Cancelled) => {
+            ApprovalPortOutcome::Cancelled
+        }
         Err(_) => ApprovalPortOutcome::Cancelled,
     }
 }
