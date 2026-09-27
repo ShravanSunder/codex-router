@@ -301,6 +301,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 setup_error = registration.setup_error.take();
                                                 register_provider_session(registration, &mut sessions)
                                             });
+                                            let mut settings_sink_closed = false;
                                             if let Ok(created) = &mut result {
                                                 known_sessions.track(created.provider_session_id.clone()).await;
                                                 if let Some(report) = report {
@@ -309,6 +310,16 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 }
                                                 if let Some(catalog) = catalog {
                                                     created.effective_settings = catalog.effective_settings();
+                                                    if task_event_sink.publish(
+                                                        &created.provider_session_id,
+                                                        session_event_model::SessionEvent::SettingsChanged {
+                                                            settings: catalog.to_session_settings(),
+                                                        },
+                                                    ).is_err() {
+                                                        sink_closed.cancel();
+                                                        task_shutdown.cancel();
+                                                        settings_sink_closed = true;
+                                                    }
                                                     task_session_settings.write().await.insert(created.provider_session_id.clone(), catalog.clone());
                                                     *task_last_settings_catalog.write().await = Some(catalog);
                                                 }
@@ -321,10 +332,14 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     task_settings_unresolved.write().await.insert(created.provider_session_id.clone(), kind);
                                                 }
                                             }
-                                            let result = result.and_then(|created| match setup_error {
-                                                Some(error) => Err(error),
-                                                None => Ok(created),
-                                            });
+                                            let result = if settings_sink_closed {
+                                                Err(ExternalProviderRuntimeError::SinkClosed)
+                                            } else {
+                                                result.and_then(|created| match setup_error {
+                                                    Some(error) => Err(error),
+                                                    None => Ok(created),
+                                                })
+                                            };
                                             let _result = activation.send(());
                                             let _result = reply.send(result);
                                         }
@@ -341,7 +356,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 restored.settings_catalog.clone()
                                             });
                                             let (activation, ready) = tokio::sync::oneshot::channel();
-                                            let result = (*result).and_then(|restored| {
+                                            let mut result = (*result).and_then(|restored| {
                                                 register_static_provider_session(
                                                     StaticSessionActivation {
                                                         session: restored.session,
@@ -362,6 +377,16 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 let report = report.with_auth_status(task_auth_status.read().await.clone());
                                                 task_session_capabilities.write().await.insert(provider_session_id.clone(), report);
                                                 if let Some(catalog) = catalog {
+                                                    if task_event_sink.publish(
+                                                        &provider_session_id,
+                                                        session_event_model::SessionEvent::SettingsChanged {
+                                                            settings: catalog.to_session_settings(),
+                                                        },
+                                                    ).is_err() {
+                                                        sink_closed.cancel();
+                                                        task_shutdown.cancel();
+                                                        result = Err(ExternalProviderRuntimeError::SinkClosed);
+                                                    }
                                                     task_session_settings.write().await.insert(provider_session_id.clone(), catalog.clone());
                                                     *task_last_settings_catalog.write().await = Some(catalog);
                                                 }

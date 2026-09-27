@@ -256,13 +256,14 @@ async fn live_update_continues_replayed_item_projection() {
 async fn history_replay_reset_precedes_session_load() {
     let root = tempfile::tempdir().expect("fixture root");
     let marker = root.path().join("reset-finished");
+    let events = Arc::new(Mutex::new(Vec::new()));
     let client = AgentSessionClient::initialize(
         fixture_launch(&marker),
         Arc::new(TestInteractionPort),
         Arc::new(ReplaySink {
             marker: marker.clone(),
             fail: false,
-            events: None,
+            events: Some(Arc::clone(&events)),
         }),
     )
     .await
@@ -285,6 +286,9 @@ async fn history_replay_reset_precedes_session_load() {
         Some("model-a")
     );
     assert_eq!(last_catalog, catalog);
+    assert!(matches!(events.lock().expect("events").last(),
+        Some(SessionEvent::SettingsChanged { settings })
+            if settings.model.as_deref() == Some("model-a")));
     assert!(
         !marker.with_extension("early").exists(),
         "load waited for reset"

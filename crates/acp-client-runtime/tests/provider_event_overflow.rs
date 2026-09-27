@@ -221,8 +221,13 @@ async fn output_byte_limit_cancels_turn_and_keeps_agent_stop_reason() {
     let events = sink.events.lock().expect("event sink");
     assert!(matches!(
         events.first(),
-        Some(SessionEvent::TurnStarted { .. })
+        Some(SessionEvent::SettingsChanged { .. })
     ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnStarted { .. }))
+    );
     assert!(matches!(
         events.last(),
         Some(SessionEvent::TurnEnded {
@@ -254,8 +259,13 @@ async fn closed_event_consumer_ends_active_turn_with_sink_closed() {
     let events = sink.events.lock().expect("event sink");
     assert!(matches!(
         events.first(),
-        Some(SessionEvent::TurnStarted { .. })
+        Some(SessionEvent::SettingsChanged { .. })
     ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnStarted { .. }))
+    );
     assert!(
         !events
             .iter()
@@ -282,8 +292,13 @@ async fn closed_auth_event_consumer_retires_active_prompt() {
     let events = sink.events.lock().expect("event sink");
     assert!(matches!(
         events.first(),
-        Some(SessionEvent::TurnStarted { .. })
+        Some(SessionEvent::SettingsChanged { .. })
     ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnStarted { .. }))
+    );
 }
 
 /// A provider that closes stdout before its prompt result cannot confirm a
@@ -296,8 +311,13 @@ async fn provider_eof_ends_running_turn_lost() {
     let events = sink.events.lock().expect("event sink");
     assert!(matches!(
         events.first(),
-        Some(SessionEvent::TurnStarted { .. })
+        Some(SessionEvent::SettingsChanged { .. })
     ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnStarted { .. }))
+    );
     assert!(matches!(events.last(), Some(SessionEvent::TurnEnded {
         outcome: TurnOutcome::Lost { reason }, ..
     }) if reason == "providerRetired"));

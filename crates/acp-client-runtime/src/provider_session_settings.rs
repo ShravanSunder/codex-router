@@ -89,6 +89,33 @@ pub struct ProviderSettingsCatalog {
 }
 
 impl ProviderSettingsCatalog {
+    /// Snapshot the values currently reported by the agent for the ordered
+    /// Session event stream. Choice catalogs remain client-owned.
+    #[must_use]
+    pub(crate) fn to_session_settings(&self) -> session_event_model::SessionSettings {
+        use session_event_model::{ConfigValue, ConfigValueState, SessionSettings};
+
+        let effective = self.effective_settings();
+        SessionSettings {
+            mode: effective.mode,
+            model: effective.model,
+            effort: effective.effort,
+            config: self
+                .config_options
+                .iter()
+                .map(|option| ConfigValue {
+                    id: option.id.clone(),
+                    value: match &option.current_value {
+                        ProviderConfigValue::Select(value) => {
+                            ConfigValueState::Select(value.clone())
+                        }
+                        ProviderConfigValue::Boolean(value) => ConfigValueState::Boolean(*value),
+                    },
+                })
+                .collect(),
+        }
+    }
+
     #[must_use]
     pub fn advertised_values(&self, kind: ProviderSettingKind) -> Vec<String> {
         if kind == ProviderSettingKind::Mode
@@ -137,5 +164,49 @@ impl ProviderSettingsCatalog {
             model: selected(ProviderSettingKind::Model),
             effort: selected(ProviderSettingKind::Effort),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use session_event_model::{ConfigValue, ConfigValueState};
+
+    #[test]
+    fn current_config_values_preserve_select_and_boolean_kinds() {
+        let catalog = ProviderSettingsCatalog {
+            config_options: vec![
+                ProviderConfigOption {
+                    id: "model".to_owned(),
+                    name: "Model".to_owned(),
+                    category: Some(ProviderSettingKind::Model),
+                    current_value: ProviderConfigValue::Select("model-a".to_owned()),
+                    choices: Vec::new(),
+                },
+                ProviderConfigOption {
+                    id: "autoRun".to_owned(),
+                    name: "Auto run".to_owned(),
+                    category: None,
+                    current_value: ProviderConfigValue::Boolean(true),
+                    choices: Vec::new(),
+                },
+            ],
+            ..ProviderSettingsCatalog::default()
+        };
+        let settings = catalog.to_session_settings();
+        assert_eq!(settings.model.as_deref(), Some("model-a"));
+        assert_eq!(
+            settings.config,
+            vec![
+                ConfigValue {
+                    id: "model".to_owned(),
+                    value: ConfigValueState::Select("model-a".to_owned())
+                },
+                ConfigValue {
+                    id: "autoRun".to_owned(),
+                    value: ConfigValueState::Boolean(true)
+                },
+            ]
+        );
     }
 }
