@@ -180,7 +180,10 @@ async fn exercise(
     )?
     .with_automation_store(store.clone())
     .with_scheduled_run_execution(Arc::new(
-        collaboration_service::CodexAppServerScheduledRuns::new(native_backend.clone()),
+        collaboration_service::CodexAppServerScheduledRuns::new(
+            native_backend.clone(),
+            Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+        ),
     ))
     .with_native_backend(native_backend)?;
     let (socket, server) = tokio::net::UnixStream::pair()?;

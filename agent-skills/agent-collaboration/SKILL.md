@@ -25,6 +25,7 @@ The Host reads owner-editable `<router-root>/providers.json` at startup and crea
 - A direct message goes to one recipient; a reply goes to the actual sender. Delivery notifications and heartbeats are tool events, not messages from an agent.
 - A board listener, once armed, delivers selected activity; session-delivered notifications need no additional wait call. Keep one listener per dependency and retain its identity.
 - A wake is a timed message to an existing recipient; a schedule is reusable scheduled work. Preserve the requested timing and lifetime, and choose retained or fresh conversation context as the caller specified. A wake runs a real turn; it does not prove cache savings.
+- CLI `wake send --wait-until-first-fire --json` emits one result with `result.record.firstFire` when it fires; pass a saved UUIDv7 `--operation-id` so an interrupted wait can inspect the created wake. A wait error keeps the durably created wake under `created`. MCP `wake_wait_until_first_fire` is a separate one-result tool call.
 
 IF taking one of these actions, read the named help or advertised schema and return the stated result:
 

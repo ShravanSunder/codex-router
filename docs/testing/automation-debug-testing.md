@@ -65,6 +65,47 @@ The test uses each root once. After a failure, inspect its private `proof-events
 
 Stop the foreground debug Host with Ctrl-C when finished. It shuts down its retained children. The private test artifacts remain for inspection, and Codex retains its ordinary session records. No directory deletion or production restart is part of this procedure.
 
+## Run the recipient-observed delivery matrix
+
+This matrix uses the foreground CLI Host with an isolated `HOME`, `CODEX_HOME`, Router root, sockets, and workspace. It never reads the owner's Codex or Claude session registry. The setup test creates a fresh owner-private direct child of `/tmp`, a non-secret debug profile, a symlink to the installed Codex executable, and `providers.json` pointing at the repository's scripted Cursor ACP fixture. It copies no credentials. The CLI Host reads `providers.json` through its normal provider configuration path. Announce the shared 43127 port before starting; stop only this foreground Host with Ctrl-C and release both ports when done.
+
+```sh
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-collaboration --test delivery_matrix_debug_acceptance \
+  prepare_delivery_matrix_provider_fixture \
+  -- --ignored --exact --nocapture
+```
+
+Start the Host in a separate foreground terminal after setup:
+
+```sh
+env HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
+  CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET="$proof_root/native-socket/app-server.sock" \
+  ./target/debug/codex-router host --router-root "$proof_root" \
+  --port 43127 --mcp-bind 127.0.0.1:43128 --require-debug-isolation
+```
+
+Require `codex-router host status --router-root "$proof_root" --port 43127 --require-debug-isolation` to report router and app-server ready, and confirm `cursor-local` advertises the scripted fixture. If the isolated home or private Router lacks model access, report that state without copying account data or switching to the owner Codex home.
+
+```sh
+matrix_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+matrix_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+env HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
+  CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  CARGO_HOME="$matrix_cargo_home" RUSTUP_HOME="$matrix_rustup_home" \
+  cargo test -p agent-collaboration --test delivery_matrix_debug_acceptance \
+  delivery_matrix_reaches_codex_and_fixture_claude_peer \
+  -- --ignored --exact --nocapture
+```
+
+The suite exercises CLI and MCP messages, fired wakes, scheduled runs, Board Thread Listen pushes, and approval notices. The approval requester is the scripted Cursor ACP fixture; native Codex approvals under the owner's `auto_review` reviewer do not reach Router. It counts a Codex cell only after the exact input appears in `thread/read(includeTurns=true)`, and a Claude peer cell only after its fixture socket reads the user frame. Approval cells also require a pending broker record before the approver decides. The suite compares owner `~/.codex/config.toml` and `~/.claude/settings.json` hashes at entry, after each cell, and at exit; a change fails the run and must be reported without restoration. A five-minute Board Listen debounce makes the complete run longer than a typical smoke test. Router-hosted ACP provider **target** cells remain pending until that route lands.
+
+Two additional target rows remain pending: Router-hosted ACP provider sessions until PR 3 is integrated, and a Codex thread active in another app-server or desktop client. The latter needs recipient-observed proof and an actionable ownership outcome; the current Codex route claims every target on its endpoint, and an unclassified native refusal becomes `unknown` with `retryLater`.
+
+The materialized existing Codex target is a pending matrix cell in this isolated run: the private Codex home has no model authentication to finish an initial turn and return the thread to idle. A default-run fake app-server integration test covers its declared cwd and scheduled turn/start. Recipient-observed live proof remains for the post-release real-session run.
+
+After the owner replaces production with a release containing this suite's fixes, repeat one documented pass against real sessions: read the Codex recipient's exact input through `thread/read`, and obtain an explicit receipt confirmation from the Claude Code recipient. Keep that live result separate from the isolated fixture matrix.
+
 ### Restart the Host for board persistence proof
 
 Build the board test binary, start a fresh debug Host as above, and run phase one:

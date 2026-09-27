@@ -18,6 +18,7 @@ pub(crate) async fn dispatch(
     backend: &NativeControlBackend,
     run: ScheduledRunSubmission,
     sink: &dyn RunEvidenceSink,
+    held_connection: Option<&mut NativeProtocolConnection>,
 ) -> Result<RunSubmission, DeliveryContractError> {
     let RouteEffectEvidence::CodexAppServer(mut effects) = run.recorded else {
         return Err(DeliveryContractError::InvalidEvidence);
@@ -42,62 +43,75 @@ pub(crate) async fn dispatch(
     let schemas = admission
         .schemas()
         .ok_or(DeliveryContractError::ClientOperation)?;
-    let Ok(mut connection) = NativeProtocolConnection::connect(admission.backend_path()).await
-    else {
-        return Ok(RunSubmission::NotStartedBusy);
+    let held_unmaterialized = held_connection.is_some();
+    let mut opened_connection = None;
+    if held_connection.is_none() {
+        let Ok(connection) = NativeProtocolConnection::connect(admission.backend_path()).await
+        else {
+            return Ok(RunSubmission::NotStartedBusy);
+        };
+        opened_connection = Some(connection);
+    }
+    let connection = match held_connection {
+        Some(connection) => connection,
+        None => opened_connection
+            .as_mut()
+            .ok_or(DeliveryContractError::ClientOperation)?,
     };
     let thread_id = String::from(run.target.session_id.clone());
-    let read = connection
-        .request_validated(
-            &schemas,
-            NativeOperation::ReadThread,
-            json!({"threadId":thread_id,"includeTurns":false}),
-        )
-        .await;
-    let Ok(read) = read else {
-        return Ok(RunSubmission::NotStartedBusy);
-    };
-    if read.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id.as_str()) {
-        return Err(DeliveryContractError::InvalidEvidence);
-    }
-    match read.pointer("/thread/status/type").and_then(Value::as_str) {
-        Some("active") => return Ok(RunSubmission::NotStartedBusy),
-        Some("notLoaded") => {
-            effects.resume = PreparationEffect::Unknown;
-            if matches!(
-                sink.record(RouteEffectEvidence::CodexAppServer(effects.clone()))
-                    .await?,
-                RunEvidenceDisposition::AdmissionRefused
-            ) {
+    if !held_unmaterialized {
+        let read = connection
+            .request_validated(
+                &schemas,
+                NativeOperation::ReadThread,
+                json!({"threadId":thread_id,"includeTurns":false}),
+            )
+            .await;
+        let Ok(read) = read else {
+            return Ok(RunSubmission::NotStartedBusy);
+        };
+        if read.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id.as_str()) {
+            return Err(DeliveryContractError::InvalidEvidence);
+        }
+        match read.pointer("/thread/status/type").and_then(Value::as_str) {
+            Some("active") => return Ok(RunSubmission::NotStartedBusy),
+            Some("notLoaded") => {
+                effects.resume = PreparationEffect::Unknown;
+                if matches!(
+                    sink.record(RouteEffectEvidence::CodexAppServer(effects.clone()))
+                        .await?,
+                    RunEvidenceDisposition::AdmissionRefused
+                ) {
+                    return Ok(RunSubmission::NotStartedBusy);
+                }
+                let resumed = connection
+                    .request_validated(
+                        &schemas,
+                        NativeOperation::ResumeThread,
+                        json!({"threadId":thread_id,"excludeTurns":true}),
+                    )
+                    .await;
+                effects.resume = match resumed {
+                    Ok(value)
+                        if value.pointer("/thread/id").and_then(Value::as_str)
+                            == Some(thread_id.as_str()) =>
+                    {
+                        PreparationEffect::Accepted
+                    }
+                    Ok(_) => return Ok(RunSubmission::Unknown),
+                    Err(NativeConnectionError::Rejected { .. }) => PreparationEffect::Rejected,
+                    Err(
+                        NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable,
+                    ) => PreparationEffect::NotDispatched,
+                    Err(_) => return Ok(RunSubmission::Unknown),
+                };
+                sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                    .await?;
                 return Ok(RunSubmission::NotStartedBusy);
             }
-            let resumed = connection
-                .request_validated(
-                    &schemas,
-                    NativeOperation::ResumeThread,
-                    json!({"threadId":thread_id,"excludeTurns":true}),
-                )
-                .await;
-            effects.resume = match resumed {
-                Ok(value)
-                    if value.pointer("/thread/id").and_then(Value::as_str)
-                        == Some(thread_id.as_str()) =>
-                {
-                    PreparationEffect::Accepted
-                }
-                Ok(_) => return Ok(RunSubmission::Unknown),
-                Err(NativeConnectionError::Rejected { .. }) => PreparationEffect::Rejected,
-                Err(NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable) => {
-                    PreparationEffect::NotDispatched
-                }
-                Err(_) => return Ok(RunSubmission::Unknown),
-            };
-            sink.record(RouteEffectEvidence::CodexAppServer(effects))
-                .await?;
-            return Ok(RunSubmission::NotStartedBusy);
+            Some("idle") => {}
+            _ => return Ok(RunSubmission::NotStartedBusy),
         }
-        Some("idle") => {}
-        _ => return Ok(RunSubmission::NotStartedBusy),
     }
     effects.generation = Some(admission.generation().clone());
     effects.submission = SubmissionEffect::Dispatching;

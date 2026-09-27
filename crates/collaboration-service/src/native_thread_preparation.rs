@@ -171,7 +171,13 @@ pub(crate) async fn prepare(
         (DestinationPreparation::Existing { .. }, None) => false,
         _ => true,
     };
-    if actual_cwd != Some(cwd(input.destination)) || !matches_existing || target.is_none() {
+    let requested_cwd = cwd(input.destination);
+    let cwd_check_required = !matches!(input.destination, DestinationPreparation::Existing { .. })
+        || !requested_cwd.is_empty();
+    if (cwd_check_required && actual_cwd != Some(requested_cwd))
+        || !matches_existing
+        || target.is_none()
+    {
         return Err(NativePreparationFailure {
             explanation: "Native response did not establish the requested identity/workspace; inspect retained effects before retrying.",
             effects: Box::new(effects),

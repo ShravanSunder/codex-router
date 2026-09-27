@@ -212,6 +212,7 @@ pub trait ScheduledRunExecution: Send + Sync {
     fn prepare_existing_target<'a>(
         &'a self,
         target: &SessionRef,
+        declared_cwd: &str,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget>;
     fn prepare_fresh_session<'a>(

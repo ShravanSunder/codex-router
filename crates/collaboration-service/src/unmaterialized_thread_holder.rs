@@ -33,6 +33,40 @@ impl UnmaterializedThreadHolder {
     }
 }
 
+/// Clears a checked-out slot if dispatch exits before it can restore or finish it.
+pub(crate) struct HeldBindingCleanup<'a> {
+    holder: &'a UnmaterializedThreadHolder,
+    session_id: String,
+    active: bool,
+}
+
+impl<'a> HeldBindingCleanup<'a> {
+    pub(crate) fn new(holder: &'a UnmaterializedThreadHolder, session_id: &str) -> Self {
+        Self {
+            holder,
+            session_id: session_id.into(),
+            active: true,
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.active = false;
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.holder.finish(&self.session_id);
+        self.disarm();
+    }
+}
+
+impl Drop for HeldBindingCleanup<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.holder.finish(&self.session_id);
+        }
+    }
+}
+
 impl UnmaterializedBindingStore for UnmaterializedThreadHolder {
     fn hold(&self, binding: AcpSessionBinding) {
         if !binding.is_unmaterialized() {

@@ -162,6 +162,7 @@ impl ScheduledRunExecution for FakeScheduledExecution {
     fn prepare_existing_target<'a>(
         &'a self,
         target: &SessionRef,
+        _declared_cwd: &str,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget> {
         let target = target.clone();
@@ -185,7 +186,7 @@ impl ScheduledRunExecution for FakeScheduledExecution {
         _: FreshSessionRequest,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget> {
-        self.prepare_existing_target(&self.target, sink)
+        self.prepare_existing_target(&self.target, "", sink)
     }
 
     fn submit_run<'a>(

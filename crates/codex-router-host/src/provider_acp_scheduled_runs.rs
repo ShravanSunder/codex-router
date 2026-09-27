@@ -271,6 +271,7 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
     fn prepare_existing_target<'a>(
         &'a self,
         target: &SessionRef,
+        _declared_cwd: &str,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget> {
         let target = target.clone();
