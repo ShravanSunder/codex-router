@@ -2,7 +2,7 @@
 use super::*;
 pub(super) use agent_client_protocol::schema::v1::ToolKind;
 
-pub(super) const MAX_ACP_FRAME_BYTES: usize = 64 * 1024 * 1024;
+pub(super) use acp_client_runtime::MAX_ACP_FRAME_BYTES;
 
 pub(crate) use acp_client_runtime::sanitized_initialization_error_for_test as sanitized_initialization_error;
 

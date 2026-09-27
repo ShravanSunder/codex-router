@@ -57,7 +57,7 @@ use tokio_util::sync::CancellationToken;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 /// ACP JSON-RPC frames are capped at 64 MiB to allow large tool results while
 /// keeping each provider connection's transport memory bounded.
-const MAX_ACP_FRAME_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_ACP_FRAME_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_PROMPT_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
