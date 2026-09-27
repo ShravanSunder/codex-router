@@ -167,6 +167,7 @@ async fn rejected_persistent_acp_choice_is_visible_and_retryable() -> TestResult
             request.clone(),
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await?;
     let _sent = provider.events.send(HubEvent {

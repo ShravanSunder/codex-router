@@ -103,6 +103,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
             request.clone(),
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await?;
     let _sent = backend.events.send(HubEvent {
@@ -475,6 +476,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
             second_request.clone(),
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await?;
     let _sent = backend.events.send(HubEvent {
@@ -561,6 +563,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
             cancelled_request.clone(),
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await?;
     let _sent = backend.events.send(HubEvent {

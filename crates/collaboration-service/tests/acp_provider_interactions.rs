@@ -165,6 +165,7 @@ async fn only_the_approver_receives_and_decides_exact_provider_options() -> Test
             request.clone(),
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await?;
     let pending = PendingInteraction::Approval {
@@ -224,6 +225,7 @@ async fn only_the_approver_receives_and_decides_exact_provider_options() -> Test
             cancel_request.clone(),
             tokio_util::sync::CancellationToken::new(),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await?;
     let pending_cancel = PendingInteraction::Approval {
