@@ -319,6 +319,7 @@ impl CollaborationRuntime {
             &mcp_url,
         )
         .await?;
+        let provider_face_endpoints = startup.endpoints.clone();
         let provider_retirements = startup.retirements;
         let external_provider_supervisor = startup.supervisor;
         let provider_session_hub = startup.hub;
@@ -338,7 +339,7 @@ impl CollaborationRuntime {
             > = supervisor.clone();
             identity = identity.with_provider_conversation_backend(provider_backend);
         }
-        if let Some(hub) = provider_session_hub {
+        if let Some(hub) = provider_session_hub.clone() {
             identity = identity.with_provider_session_hub(hub);
         }
         let endpoint = EndpointRef {
@@ -425,15 +426,75 @@ impl CollaborationRuntime {
             inputs.codex_home,
             String::from(service_id.clone()),
         ));
-        let acp = collaboration_service::AcpChannelListener::bind(
+        let mut acp = collaboration_service::AcpChannelListener::bind(
             &inputs.directory.join("codex-acp.sock"),
             publication.admission_gate(),
             stored,
-            approval_broker,
+            approval_broker.clone(),
             unmaterialized_threads,
             crate::codex_conversation_recording_composition::adapter_recorder(codex_recorder),
         )?
         .with_connection_budget(permits);
+        let mut provider_app_servers = Vec::new();
+        if let (Some(supervisor), Some(delivery), Some(hub), Some(store)) = (
+            &external_provider_supervisor,
+            &provider_delivery_route,
+            &provider_session_hub,
+            &provider_store,
+        ) {
+            let commands: std::sync::Arc<dyn collaboration_service::SessionCommandPort> =
+                std::sync::Arc::new(crate::HostSessionCommandPort::new(
+                    std::sync::Arc::clone(supervisor),
+                    std::sync::Arc::clone(delivery),
+                    std::sync::Arc::clone(hub),
+                    std::sync::Arc::clone(store),
+                ));
+            let events: std::sync::Arc<dyn collaboration_service::SessionEventHub> =
+                std::sync::Arc::clone(hub) as _;
+            let socket_directory = inputs.directory.join("router-sessions");
+            create_private_socket_directory(&socket_directory)?;
+            for description in provider_face_endpoints {
+                let Some(catalog) = supervisor.provider_model_catalog(&description.endpoint) else {
+                    continue;
+                };
+                let endpoint = message_board::SessionEndpointRef {
+                    service_id: message_board::ServiceId::try_from(String::from(
+                        description.endpoint.service_id.clone(),
+                    ))
+                    .map_err(io::Error::other)?,
+                    endpoint_id: message_board::EndpointId::try_from(String::from(
+                        description.endpoint.endpoint_id.clone(),
+                    ))
+                    .map_err(io::Error::other)?,
+                };
+                acp = acp.with_provider_session_backend(
+                    endpoint.clone(),
+                    std::sync::Arc::clone(&commands),
+                    std::sync::Arc::clone(&events),
+                );
+                let context = collaboration_service::RouterSessionAppServerContext::new(
+                    endpoint,
+                    message_board::Identity::Human {
+                        human_id: owner_human_id.clone(),
+                    },
+                    std::sync::Arc::clone(&commands),
+                    std::sync::Arc::clone(&events),
+                    catalog,
+                )
+                .with_interaction_broker(std::sync::Arc::clone(&approval_broker));
+                let socket_path = socket_directory.join(format!(
+                    "{}.sock",
+                    String::from(description.endpoint.endpoint_id.clone())
+                ));
+                provider_app_servers.push(
+                    collaboration_service::RouterSessionAppServerListener::bind(
+                        &socket_path,
+                        std::sync::Arc::new(context),
+                    )?,
+                );
+            }
+            acp = acp.with_interaction_broker(std::sync::Arc::clone(&approval_broker));
+        }
         let publication = publication.with_acp_listener()?;
         if let Some(settings) = settings_backend
             && settings.recover().await.is_err()
@@ -471,6 +532,9 @@ impl CollaborationRuntime {
         tasks.spawn(control.run(shutdown.clone()));
         tasks.spawn(native.run(shutdown.clone()));
         tasks.spawn(acp.run(shutdown.clone()));
+        for app_server in provider_app_servers {
+            tasks.spawn(app_server.run(shutdown.clone()));
+        }
         for (retirement, mut description) in provider_retirements {
             let directory = endpoint_directory.clone();
             provider_retirement_tasks.spawn(async move {
@@ -882,6 +946,24 @@ fn unix_seconds() -> io::Result<i64> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(io::Error::other)?;
     i64::try_from(elapsed.as_secs()).map_err(io::Error::other)
+}
+
+fn create_private_socket_directory(path: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.is_dir() && metadata.permissions().mode() & 0o077 == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    "provider socket directory must be private",
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn current_observation_timestamp() -> io::Result<ObservationTimestamp> {

@@ -53,7 +53,7 @@ pub struct QueueInputCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuedSessionInput {
     pub input_id: String,
-    pub position: u32,
+    pub position: u64,
     pub preview: String,
 }
 
@@ -94,6 +94,8 @@ pub enum CommandFailure {
     UnsupportedOperation { operation: &'static str },
     #[error("session is busy")]
     Busy,
+    #[error("session has no active turn")]
+    NoActiveTurn,
     #[error("session settings are unresolved")]
     SettingsUnresolved,
     #[error("content type is unsupported: {0}")]
