@@ -18,11 +18,12 @@ pub struct ServiceIdentity {
     pub(crate) native_backend: Option<crate::NativeControlBackend>,
     pub(crate) session_delivery: Option<std::sync::Arc<dyn crate::SessionMessageDelivery>>,
     pub(crate) scheduled_run_execution: Option<std::sync::Arc<dyn crate::ScheduledRunExecution>>,
-    pub(crate) approval_broker: Option<std::sync::Arc<crate::ServiceApprovalBroker>>,
+    pub(crate) approval_broker: Option<std::sync::Arc<crate::ServiceInteractionBroker>>,
     pub(crate) automation:
         Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
     pub(crate) provider_operations:
         Option<std::sync::Arc<tokio::sync::Mutex<crate::ProviderOperationStore>>>,
+    pub(crate) provider_session_hub: Option<std::sync::Arc<dyn crate::SessionEventHub>>,
     pub(crate) codex_conversation_recorder:
         Option<std::sync::Arc<crate::CodexConversationOperationRecorder>>,
     pub(crate) provider_conversations:
@@ -96,6 +97,15 @@ impl ServiceIdentity {
         self
     }
 
+    #[must_use]
+    pub fn with_provider_session_hub(
+        mut self,
+        hub: std::sync::Arc<dyn crate::SessionEventHub>,
+    ) -> Self {
+        self.provider_session_hub = Some(hub);
+        self
+    }
+
     pub fn with_codex_conversation_recorder(
         mut self,
         recorder: std::sync::Arc<crate::CodexConversationOperationRecorder>,
@@ -142,7 +152,7 @@ impl ServiceIdentity {
     #[must_use]
     pub fn with_approval_broker(
         mut self,
-        broker: std::sync::Arc<crate::ServiceApprovalBroker>,
+        broker: std::sync::Arc<crate::ServiceInteractionBroker>,
     ) -> Self {
         self.approval_broker = Some(broker);
         self
@@ -210,6 +220,7 @@ impl ServiceIdentity {
             wake_wait_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             automation: None,
             provider_operations: None,
+            provider_session_hub: None,
             codex_conversation_recorder: None,
             provider_conversations: None,
             board: None,

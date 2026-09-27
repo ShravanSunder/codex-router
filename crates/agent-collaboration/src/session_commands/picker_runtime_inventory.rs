@@ -1,11 +1,12 @@
 //! Read-only runtime inventory joined with the existing stored picker catalog.
-use super::{SessionPickerRecord, SessionRecord};
+use super::{SessionPickerIdentity, SessionPickerRecord, SessionRecord};
 use crate::picker_runtime_status::{
     PickerRecordsSnapshot, PickerRuntimeCoverage, PickerRuntimeStatus,
 };
 use collaboration_client::protocol::{
     ChannelDescription, CodexGeneration, EndpointAvailability, EndpointInventory, EndpointRef,
-    NativeSessionListParams, NativeSessionObservation, NativeSessionView,
+    NativeSessionListParams, NativeSessionObservation, NativeSessionScope, NativeSessionSource,
+    NativeSessionView, ProviderSessionListParams,
 };
 use collaboration_client::{ClientError, ControlClient};
 use std::{
@@ -18,7 +19,7 @@ const MAX_RUNTIME_ROWS: usize = 4096;
 pub(super) async fn load_runtime_records(
     client: &mut ControlClient,
     metadata: &[SessionPickerRecord],
-) -> Result<Vec<SessionPickerRecord>, ClientError> {
+) -> Result<(EndpointRef, Vec<SessionPickerRecord>), ClientError> {
     let (endpoint, generation) = selected_generation(client.list_endpoints().await?)?;
     let known: BTreeMap<_, _> = metadata
         .iter()
@@ -46,6 +47,7 @@ pub(super) async fn load_runtime_records(
             ));
         }
         for summary in page.sessions {
+            let target = summary.target.clone();
             let id = String::from(summary.target.session_id.clone());
             if !seen_ids.insert(id.clone()) || rows.len() >= MAX_RUNTIME_ROWS {
                 return Err(ClientError::Protocol("runtime inventory exceeded bounds"));
@@ -67,6 +69,7 @@ pub(super) async fn load_runtime_records(
                     &inspected.thread,
                 )
             };
+            row.identity = SessionPickerIdentity::HostedCodex(target);
             row.runtime_status = PickerRuntimeStatus::from_native(&status);
             rows.push(row);
         }
@@ -89,7 +92,72 @@ pub(super) async fn load_runtime_records(
             "runtime inventory generation changed",
         ));
     }
-    Ok(rows)
+    Ok((endpoint, rows))
+}
+
+async fn load_provider_records(
+    client: &mut ControlClient,
+) -> Result<(Option<EndpointRef>, Vec<SessionPickerRecord>), ClientError> {
+    let inventory = client.list_endpoints().await?;
+    let native_endpoint = inventory
+        .endpoints
+        .iter()
+        .find(|entry| {
+            entry
+                .channels
+                .iter()
+                .any(|channel| matches!(channel, ChannelDescription::NativeCodex { .. }))
+        })
+        .map(|entry| entry.endpoint.clone());
+    let providers = inventory
+        .endpoints
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .channels
+                .iter()
+                .any(|channel| matches!(channel, ChannelDescription::ExternalProvider { .. }))
+        })
+        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    for provider in providers {
+        let mut cursor = None;
+        let mut seen_cursors = BTreeSet::new();
+        loop {
+            let page = client
+                .list_provider_sessions(ProviderSessionListParams {
+                    endpoint: provider.endpoint.clone(),
+                    view: NativeSessionView::Stored,
+                    scope: NativeSessionScope::Any,
+                    source: NativeSessionSource::All,
+                    query: None,
+                    page_size: 100,
+                    cursor,
+                })
+                .await?;
+            for summary in page.sessions {
+                if rows.len() >= MAX_RUNTIME_ROWS {
+                    return Err(ClientError::Protocol(
+                        "provider picker inventory exceeded bounds",
+                    ));
+                }
+                let label = String::from(provider.label.clone());
+                rows.push(SessionPickerRecord::from_provider_summary(&summary, &label));
+            }
+            match page.next_cursor {
+                Some(next) if seen_cursors.insert(next.clone()) && seen_cursors.len() <= 64 => {
+                    cursor = Some(next)
+                }
+                Some(_) => {
+                    return Err(ClientError::Protocol(
+                        "provider picker cursor did not converge",
+                    ));
+                }
+                None => break,
+            }
+        }
+    }
+    Ok((native_endpoint, rows))
 }
 
 fn selected_generation(
@@ -203,49 +271,102 @@ impl PickerRuntimeInventory {
         directory: Option<&Path>,
         stored: Vec<SessionPickerRecord>,
     ) -> PickerRecordsSnapshot {
-        let mut combined: BTreeMap<String, SessionPickerRecord> = self
+        if directory.is_none() {
+            self.remembered.retain(|row| !row.identity.is_provider());
+        }
+        let (provider_result, native_result) = if let Some(directory) = directory {
+            let metadata = stored.clone();
+            let providers = async {
+                let mut client = ControlClient::connect(
+                    directory,
+                    "sessions-picker-providers",
+                    env!("CARGO_PKG_VERSION"),
+                )
+                .await?;
+                let result = load_provider_records(&mut client).await;
+                let _closed = client.close().await;
+                result
+            };
+            let native = async {
+                let mut client = ControlClient::connect(
+                    directory,
+                    "sessions-picker-native",
+                    env!("CARGO_PKG_VERSION"),
+                )
+                .await?;
+                let result = load_runtime_records(&mut client, &metadata).await;
+                let _closed = client.close().await;
+                result
+            };
+            let deadline = std::time::Duration::from_secs(5);
+            let (providers, native) = tokio::join!(
+                tokio::time::timeout(deadline, providers),
+                tokio::time::timeout(deadline, native)
+            );
+            (
+                providers.ok().and_then(Result::ok),
+                native.ok().and_then(Result::ok),
+            )
+        } else {
+            (None, None)
+        };
+        let native_endpoint = native_result
+            .as_ref()
+            .map(|(endpoint, _)| endpoint)
+            .or_else(|| {
+                provider_result
+                    .as_ref()
+                    .and_then(|(endpoint, _)| endpoint.as_ref())
+            });
+        let provider_inventory_available = provider_result.is_some();
+        let mut combined: BTreeMap<SessionPickerIdentity, SessionPickerRecord> = self
             .remembered
             .iter()
             .cloned()
             .chain(stored)
             .map(|mut row| {
+                if let Some(endpoint) = native_endpoint
+                    && matches!(row.identity, SessionPickerIdentity::LocalCodex(_))
+                {
+                    row = row.with_hosted_codex(endpoint);
+                }
                 row.runtime_status = PickerRuntimeStatus::Unknown;
+                if row.identity.is_provider() && !provider_inventory_available {
+                    row.provider_state = None;
+                }
                 row.recency = super::format_recency_at_ms(row.recency_at_ms);
                 row.created = super::format_recency_at_ms(row.created_at_ms);
-                (row.session_id.clone(), row)
+                (row.identity.clone(), row)
             })
             .collect();
-        let metadata: Vec<_> = combined.values().cloned().collect();
-        let result = if let Some(directory) = directory {
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                let mut client =
-                    ControlClient::connect(directory, "sessions-picker", env!("CARGO_PKG_VERSION"))
-                        .await?;
-                let result = load_runtime_records(&mut client, &metadata).await;
-                let _closed = client.close().await;
-                result
-            })
-            .await
-            .ok()
-            .and_then(Result::ok)
-        } else {
-            None
-        };
         let runtime_coverage = if directory.is_none() {
             PickerRuntimeCoverage::LocalOnly
-        } else if result.is_some() {
+        } else if native_result.is_some() {
             PickerRuntimeCoverage::Available
         } else {
             PickerRuntimeCoverage::Unavailable
         };
-        if let Some(runtime) = result {
-            self.remembered = runtime.clone();
-            for row in runtime {
-                combined.insert(row.session_id.clone(), row);
+        if native_result.is_some() || provider_result.is_some() {
+            self.remembered.clear();
+            if let Some((_, runtime)) = native_result {
+                for row in runtime {
+                    combined.insert(row.identity.clone(), row.clone());
+                    self.remembered.push(row);
+                }
+            }
+            if let Some((_, providers)) = provider_result {
+                combined.retain(|identity, _| !identity.is_provider());
+                for row in providers {
+                    combined.insert(row.identity.clone(), row.clone());
+                    self.remembered.push(row);
+                }
             }
         } else {
             for row in &mut self.remembered {
                 row.runtime_status = PickerRuntimeStatus::Unknown;
+                if row.identity.is_provider() {
+                    row.provider_state = None;
+                }
             }
         }
         PickerRecordsSnapshot {

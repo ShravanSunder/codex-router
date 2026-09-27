@@ -101,6 +101,17 @@ impl ProviderAcpMessageFifo {
             let _result = worker.await;
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_workers(&self) {
+        let workers = match self.workers.lock() {
+            Ok(mut workers) => std::mem::take(&mut *workers),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+        for worker in workers {
+            worker.await.expect("provider queue worker completes");
+        }
+    }
 }
 
 impl Drop for ProviderAcpMessageFifo {
@@ -147,6 +158,7 @@ async fn run_provider_message_fifo(
         let mut retry_delay = MIN_RETRY_DELAY;
         let mut loaded = false;
         let mut operation_admitted = false;
+        let mut dispatch_started = false;
         loop {
             if shutdown.is_cancelled() {
                 drop_current_and_remaining(
@@ -236,6 +248,15 @@ async fn run_provider_message_fifo(
                 }
                 retry_delay = next_retry_delay(retry_delay);
                 continue;
+            }
+            if !dispatch_started {
+                if !supervisor
+                    .queued_operation_registry()
+                    .try_start(&operation_id)
+                {
+                    break;
+                }
+                dispatch_started = true;
             }
             let submitted = tokio::select! {
                 () = shutdown.cancelled() => {

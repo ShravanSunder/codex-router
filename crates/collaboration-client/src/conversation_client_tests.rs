@@ -326,6 +326,30 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
                 })
             })
         }
+        fn resume(
+            &self,
+            _: collaboration_protocol::ConversationResumeRequest,
+        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+            let operation = self.admitted.clone();
+            Box::pin(async move {
+                Ok(ConversationOperationSubmission {
+                    admission: ConversationAdmissionState::Admitted,
+                    operation,
+                })
+            })
+        }
+        fn close(
+            &self,
+            _: collaboration_protocol::ConversationCloseRequest,
+        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+            let operation = self.admitted.clone();
+            Box::pin(async move {
+                Ok(ConversationOperationSubmission {
+                    admission: ConversationAdmissionState::Admitted,
+                    operation,
+                })
+            })
+        }
         fn prompt(
             &self,
             _: ConversationPromptRequest,
@@ -366,11 +390,16 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
             let wait_delay = self.wait_delay;
             Box::pin(async move {
                 tokio::time::sleep(wait_delay).await;
+                let target = operation.target.clone();
                 Ok(ConversationOperationWaitResult {
                     operation,
-                    output: ConversationOperationWaitOutput::OutputUnavailable {
-                        reason:
-                            collaboration_protocol::ConversationOutputUnavailableReason::NotRetained,
+                    output: ConversationOperationWaitOutput::Available {
+                        settlement: serde_json::from_value(json!({
+                            "kind":"created","target":target,
+                            "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},
+                                "mappingStatus":"verified","authentication":"authenticated"}
+                        }))
+                        .expect("created settlement"),
                     },
                 })
             })
@@ -436,6 +465,10 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
         != (ConversationCreateOutcome::Created {
             operation_id: operation_id.clone(),
             target: serde_json::from_value(target)?,
+            effective_settings: Some(serde_json::from_value(json!({
+                "requestedPolicy":{"access":"workspace-write"},
+                "mappingStatus":"verified","authentication":"authenticated"
+            }))?),
         })
         || create_calls.load(Ordering::SeqCst) != 1
         || wait_calls.load(Ordering::SeqCst) != 1

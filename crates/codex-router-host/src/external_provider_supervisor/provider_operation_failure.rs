@@ -4,8 +4,44 @@ use super::{failure, failure_with_provider_code};
 use crate::ExternalProviderRuntimeError;
 use collaboration_protocol::{
     ConversationOperationFailure, ConversationOperationFailureKind,
-    ConversationOperationFailureStage, OperationId, ProviderOperationEffect, SessionRef,
+    ConversationOperationFailureStage, InvalidProviderSetting, InvalidSettingSessionDisposition,
+    OperationId, ProviderOperationEffect, SessionRef,
 };
+
+pub(super) fn invalid_setting_failure(
+    operation_id: OperationId,
+    target: Option<SessionRef>,
+    setting: acp_client_runtime::ProviderSettingKind,
+    value: String,
+    advertised: Vec<String>,
+    disposition: acp_client_runtime::InvalidSettingSessionDisposition,
+) -> ConversationOperationFailure {
+    let (message, disposition) = match disposition {
+        acp_client_runtime::InvalidSettingSessionDisposition::Closed => (
+            "invalid provider setting; see advertised values; new Session was closed",
+            InvalidSettingSessionDisposition::Closed,
+        ),
+        acp_client_runtime::InvalidSettingSessionDisposition::RemainsCreated => (
+            "invalid provider setting; see advertised values; new Session remains created and idle",
+            InvalidSettingSessionDisposition::RemainsCreated,
+        ),
+    };
+    let mut result = failure(
+        ConversationOperationFailureKind::InvalidSetting,
+        ConversationOperationFailureStage::Settlement,
+        ProviderOperationEffect::Applied,
+        message,
+        operation_id,
+        target,
+    );
+    result.invalid_setting = Some(InvalidProviderSetting {
+        setting: crate::provider_operation_settlement::provider_setting_name(setting),
+        value,
+        advertised,
+        session_disposition: disposition,
+    });
+    result
+}
 
 pub(super) fn prompt_runtime_failure(
     operation_id: OperationId,
@@ -67,6 +103,14 @@ pub(super) fn runtime_failure(
             ConversationOperationFailureStage::Validation,
             ProviderOperationEffect::None,
             "provider conversation already has active work",
+            operation_id,
+            target,
+        ),
+        ExternalProviderRuntimeError::SettingsUnresolved => failure(
+            ConversationOperationFailureKind::SettingsUnresolved,
+            ConversationOperationFailureStage::Validation,
+            ProviderOperationEffect::None,
+            "provider Session settings are unresolved; set a value or accept current settings before work",
             operation_id,
             target,
         ),
@@ -167,6 +211,19 @@ pub(super) fn runtime_failure(
             ConversationOperationFailureStage::Settlement,
             ProviderOperationEffect::Unknown,
             "provider frame could not be decoded or classified",
+            operation_id,
+            target,
+        ),
+        ExternalProviderRuntimeError::UnsupportedContent { content_type } => failure(
+            ConversationOperationFailureKind::UnsupportedCapability,
+            ConversationOperationFailureStage::Validation,
+            ProviderOperationEffect::None,
+            match content_type {
+                "image" => "unsupportedContent{image}",
+                "audio" => "unsupportedContent{audio}",
+                "embeddedResource" => "unsupportedContent{embeddedResource}",
+                _ => "unsupportedContent{unknown}",
+            },
             operation_id,
             target,
         ),

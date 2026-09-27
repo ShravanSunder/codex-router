@@ -267,6 +267,7 @@ pub(super) async fn create_provider_target(
     let operation_id = OperationId::generate();
     client
         .create_provider_conversation(ConversationCreateRequest {
+            settings: None,
             operation_id: operation_id.clone(),
             endpoint,
             generation: Some(collaboration_protocol::CodexGeneration {
@@ -377,6 +378,7 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
     let operation_id = OperationId::generate();
     client
         .prompt_provider_conversation(ConversationPromptRequest {
+            input_id: None,
             operation_id: operation_id.clone(),
             target: requester.clone(),
             generation: Some(collaboration_protocol::CodexGeneration {
@@ -404,8 +406,12 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
     client
         .decide_approval(ApprovalDecideParams {
             request_id: pending.request_id,
-            decision: ApprovalDecision::Allow,
-            actor: approver,
+            decision: Some(ApprovalDecision::Allow),
+            option_id: None,
+            acknowledge_persistent: false,
+            note: None,
+            actor: serde_json::from_value(json!({"kind":"session","session":approver}))
+                .expect("approver identity"),
         })
         .await
         .expect("approval decision");

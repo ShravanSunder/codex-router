@@ -276,6 +276,36 @@ impl ControlClient {
         }
         Ok(result)
     }
+    pub async fn list_provider_sessions(
+        &mut self,
+        params: collaboration_protocol::ProviderSessionListParams,
+    ) -> Result<collaboration_protocol::ProviderSessionListResult, ClientError> {
+        if !(1..=100).contains(&params.page_size) {
+            return Err(ClientError::InvalidRequest(
+                "invalid provider session page size",
+            ));
+        }
+        let value = self
+            .connection
+            .call("provider/sessionList", json!(params))
+            .await?;
+        let result: collaboration_protocol::ProviderSessionListResult =
+            serde_json::from_value(value)
+                .map_err(|_| ClientError::Protocol("invalid provider session inventory"))?;
+        if result.endpoint != params.endpoint
+            || result.sessions.len() > params.page_size as usize
+            || result
+                .sessions
+                .iter()
+                .any(|row| row.target.endpoint != params.endpoint)
+        {
+            self.connection.failed = true;
+            return Err(ClientError::Protocol(
+                "inconsistent provider session inventory",
+            ));
+        }
+        Ok(result)
+    }
     pub async fn inspect_session(
         &mut self,
         target: &collaboration_protocol::SessionRef,

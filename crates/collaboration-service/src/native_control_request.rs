@@ -12,5 +12,5 @@ pub(crate) struct NativeControlRequest<'a> {
     pub endpoints: &'a [EndpointDescription],
     pub stored_observation:
         Option<crate::stored_inventory_observation::StoredInventoryObservation<'a>>,
-    pub access_routes: Option<&'a crate::ServiceApprovalBroker>,
+    pub access_routes: Option<&'a crate::ServiceInteractionBroker>,
 }

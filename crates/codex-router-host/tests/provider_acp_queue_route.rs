@@ -66,6 +66,7 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),

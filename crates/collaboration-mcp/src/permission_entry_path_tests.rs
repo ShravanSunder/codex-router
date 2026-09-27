@@ -8,7 +8,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     EndpointDirectory, LocalControlService, ManifestPublication, NativeControlBackend,
-    NativeGenerationGate, ServiceApprovalBroker, ServiceIdentity,
+    NativeGenerationGate, ServiceIdentity, ServiceInteractionBroker,
 };
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
@@ -32,7 +32,7 @@ const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000012";
 
 struct ApprovalFixture {
     directory: tempfile::TempDir,
-    broker: Arc<ServiceApprovalBroker>,
+    broker: Arc<ServiceInteractionBroker>,
     generation: CodexGeneration,
     requester: SessionRef,
     approver: SessionRef,
@@ -116,7 +116,7 @@ impl ApprovalFixture {
             gate: gate.clone(),
             codex_home: directory.path().to_owned(),
         };
-        let broker = ServiceApprovalBroker::load(
+        let broker = ServiceInteractionBroker::load(
             service_id.clone(),
             native_backend.clone(),
             directory.path().join("approval-routes.json"),
@@ -759,7 +759,7 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
         "requestId":"mcp-question", "prompt":"Choose settings", "fields":[
             {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true},
             {"kind":"boolean","fieldId":"dryRun","label":"Dry run","description":null,"required":true},
-            {"kind":"singleChoice","fieldId":"color","label":"Color","description":null,"required":true,"options":["red","blue"]}
+            {"kind":"singleChoice","fieldId":"color","label":"Color","description":null,"required":true,"options":[{"optionId":"red","label":"Red"},{"optionId":"blue","label":"Blue"}]}
         ]
     })).expect("question");
     let agent_reply = fixture
@@ -824,7 +824,7 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
         "question_answer",
         json!({
             "requestId":"mcp-question", "actor":fixture.approver,
-            "response":{"action":"answered","content":{"count":3,"dryRun":true,"color":"blue"}}
+            "response":{"action":"answered","content":{"count":3,"dryRun":true,"color":{"selectedOptionIds":["blue"]}}}
         }),
     )
     .await;
@@ -834,7 +834,7 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
     assert_eq!(
         serde_json::to_value(response).expect("response JSON"),
         json!({
-            "action":"answered","content":{"count":3,"dryRun":true,"color":"blue"}
+            "action":"answered","content":{"count":3,"dryRun":true,"color":{"selectedOptionIds":["blue"]}}
         })
     );
     listener.shutdown().await.expect("MCP shutdown");

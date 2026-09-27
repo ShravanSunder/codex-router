@@ -1,8 +1,8 @@
 //! Descriptive stored/loaded/active inventory through the public Control client.
 use clap::{Parser, Subcommand, ValueEnum};
 use collaboration_client::protocol::{
-    EndpointRef, NativeSessionListParams, NativeSessionScope, NativeSessionSource,
-    NativeSessionView,
+    ChannelDescription, EndpointDescription, EndpointRef, NativeSessionListParams,
+    NativeSessionScope, NativeSessionSource, NativeSessionView, ProviderSessionListParams,
 };
 use collaboration_client::{ClientError, ControlClient};
 use serde_json::json;
@@ -33,6 +33,31 @@ enum InventorySource {
     Subagents,
     All,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InventoryEndpointKind {
+    Codex,
+    Provider,
+    Unsupported,
+}
+
+fn classify_endpoint_for_session_list(endpoint: &EndpointDescription) -> InventoryEndpointKind {
+    if endpoint
+        .channels
+        .iter()
+        .any(|channel| matches!(channel, ChannelDescription::NativeCodex { .. }))
+    {
+        InventoryEndpointKind::Codex
+    } else if endpoint
+        .channels
+        .iter()
+        .any(|channel| matches!(channel, ChannelDescription::ExternalProvider { .. }))
+    {
+        InventoryEndpointKind::Provider
+    } else {
+        InventoryEndpointKind::Unsupported
+    }
+}
 #[derive(Subcommand)]
 enum InventoryCommand {
     /// Read stored metadata or currently loaded/active native observations; never resumes threads.
@@ -50,7 +75,7 @@ enum InventoryCommand {
         #[arg(long)]
         any: bool,
         #[arg(long, value_enum)]
-        source: InventorySource,
+        source: Option<InventorySource>,
         #[arg(long)]
         query: Option<String>,
         #[arg(long,default_value_t=100,value_parser=clap::value_parser!(u32).range(1..=100))]
@@ -133,17 +158,16 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
         let mut client =
             ControlClient::connect(&directory, "sessions-inventory", env!("CARGO_PKG_VERSION"))
                 .await?;
-        let params = NativeSessionListParams {
-            endpoint: EndpointRef {
-                service_id: client.identity().service_id.clone(),
-                endpoint_id: endpoint,
-            },
-            view: match view {
+        let endpoint = EndpointRef {
+            service_id: client.identity().service_id.clone(),
+            endpoint_id: endpoint,
+        };
+        let view = match view {
                 InventoryView::Stored => NativeSessionView::Stored,
                 InventoryView::Loaded => NativeSessionView::Loaded,
                 InventoryView::Active => NativeSessionView::Active,
-            },
-            scope: if let Some(path) = cwd {
+            };
+        let scope = if let Some(path) = cwd {
                 NativeSessionScope::Cwd {
                     path: collaboration_client::session_catalog::normalize_path(&path),
                 }
@@ -162,23 +186,42 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
                 }
             } else {
                 NativeSessionScope::Any
-            },
-            source: match source {
+            };
+        let source = source.map(|source| match source {
                 InventorySource::Interactive => NativeSessionSource::Interactive,
                 InventorySource::Subagents => NativeSessionSource::Subagents,
                 InventorySource::All => NativeSessionSource::All,
-            },
-            query,
-            page_size,
-            cursor,
+            });
+        let inventory = client.list_endpoints().await?;
+        let endpoint_kind = inventory.endpoints.iter()
+            .find(|entry| entry.endpoint == endpoint)
+            .map(classify_endpoint_for_session_list)
+            .ok_or_else(|| ClientError::Rejected {
+                code: -32050,
+                data: Some(json!({"kind":"endpointNotFound","stage":"discovery","message":"Endpoint not found"})),
+            })?;
+        let result = match endpoint_kind {
+            InventoryEndpointKind::Codex => {
+                let source = source.ok_or(ClientError::InvalidRequest("--source is required for Codex sessions"))?;
+                serde_json::to_value(client.list_sessions(NativeSessionListParams {
+                    endpoint, view, scope, source, query, page_size, cursor,
+                }).await?).map_err(|_| ClientError::Protocol("session inventory encoding failed"))
+            }
+            InventoryEndpointKind::Provider => serde_json::to_value(client.list_provider_sessions(ProviderSessionListParams {
+                endpoint, view, scope, source: source.unwrap_or(NativeSessionSource::All),
+                query, page_size, cursor,
+            }).await?).map_err(|_| ClientError::Protocol("provider session inventory encoding failed")),
+            InventoryEndpointKind::Unsupported => Err(ClientError::Rejected {
+                code: -32050,
+                data: Some(json!({"kind":"unsupportedCapability","stage":"discovery","message":"Session inventory unsupported on this endpoint"})),
+            }),
         };
-        let result = client.list_sessions(params).await;
         let _closed = client.close().await;
         result
     });
     match result {
         Ok(result) => {
-            let record = crate::endpoint_commands::result_envelope(json!(result));
+            let record = crate::endpoint_commands::result_envelope(result);
             let text = if machine {
                 record.to_string()
             } else {
@@ -214,6 +257,9 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
             }
             exit
         }
+        Err(ClientError::InvalidRequest(message)) => {
+            crate::endpoint_commands::report_failure("invalidUsage", message, 2, machine)
+        }
         Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
             &error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
@@ -227,5 +273,81 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
                 machine,
             )
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InventoryArguments, InventoryEndpointKind, classify_endpoint_for_session_list};
+    use clap::Parser;
+    use collaboration_client::protocol::{EndpointDescription, NativeSessionListResult};
+    use serde_json::json;
+
+    #[test]
+    fn provider_source_defaults_to_all_and_endpoint_kind_drives_dispatch() {
+        let parsed = InventoryArguments::try_parse_from([
+            "sessions",
+            "list",
+            "--endpoint",
+            "claude-local",
+            "--view",
+            "stored",
+            "--any",
+        ]);
+        assert!(parsed.is_ok(), "provider source is optional");
+        let provider: EndpointDescription = serde_json::from_value(json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+            "label":"Provider", "availability":{"state":"available","observedAt":"2026-09-26T00:00:00Z"},
+            "channels":[{"kind":"externalProvider","transport":"stdioAcp","bindingId":"fixture-binding",
+                "bindingGeneration":7,"runtime":{"provider":"claudeCode","runtimeName":"fixture"},
+                "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]}]
+        })).expect("provider endpoint");
+        let native: EndpointDescription = serde_json::from_value(json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+            "label":"Codex", "availability":{"state":"available","observedAt":"2026-09-26T00:00:00Z"},
+            "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock",
+                "schemaDigest":null,"generation":null}]
+        })).expect("native endpoint");
+        assert_eq!(
+            classify_endpoint_for_session_list(&provider),
+            InventoryEndpointKind::Provider
+        );
+        assert_eq!(
+            classify_endpoint_for_session_list(&native),
+            InventoryEndpointKind::Codex
+        );
+    }
+
+    #[test]
+    fn native_list_keeps_the_frozen_codex_page_shape() {
+        let frozen_native_result = json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+            "observedAt":"2026-09-26T00:00:00Z","generation":null,
+            "sessions":[{
+                "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"thread-1"},
+                "name":null,"title":"Existing thread","source":"interactive",
+                "workingDirectory":"/tmp/project",
+                "observation":{"kind":"stored","updatedAt":"2026-09-26T00:00:00Z"},
+                "gitBranch":null,"idleSeconds":0
+            }]
+        });
+        let decoded: NativeSessionListResult =
+            serde_json::from_value(frozen_native_result.clone()).expect("0.1.38 native result");
+        let rendered = serde_json::to_value(decoded).expect("native result serialization");
+        assert_eq!(rendered, frozen_native_result);
+        let output = crate::endpoint_commands::result_envelope(rendered);
+        let frozen_codex_page = json!({
+            "page":{
+                "endpoint":frozen_native_result["endpoint"],
+                "observedAt":"2026-09-26T00:00:00Z",
+                "generation":null,
+                "records":frozen_native_result["sessions"],
+                "nextCursor":null
+            }
+        });
+        assert_eq!(
+            serde_json::to_vec(&output["result"]).expect("CLI result bytes"),
+            serde_json::to_vec(&frozen_codex_page).expect("frozen 0.1.38 page bytes")
+        );
     }
 }

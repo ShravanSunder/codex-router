@@ -40,6 +40,9 @@ enum ApprovalCommand {
         deny: bool,
         #[arg(long, group = "decision")]
         option_id: Option<String>,
+        /// Optional note sent to the provider with the selected option.
+        #[arg(long)]
+        note: Option<String>,
         #[arg(long)]
         acknowledge_persistent: bool,
         #[arg(long)]
@@ -87,6 +90,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
             allow_for_session,
             deny,
             option_id,
+            note,
             acknowledge_persistent,
             actor,
             output,
@@ -130,6 +134,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
                     request_id,
                     decision,
                     option_id,
+                    note,
                     acknowledge_persistent,
                     actor,
                 }),

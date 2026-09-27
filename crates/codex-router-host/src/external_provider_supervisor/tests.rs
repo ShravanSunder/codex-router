@@ -10,6 +10,7 @@ use collaboration_protocol::{
 
 fn create_fixture() -> ExternalProviderLaunch {
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -29,6 +30,7 @@ sys.stdin.read()
 
 fn pending_prompt_fixture() -> ExternalProviderLaunch {
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -71,6 +73,7 @@ sys.stdin.read()
         socket_path.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -160,6 +163,7 @@ async fn delivery_prompt_reports_submission_before_turn_settles() {
 
     let dispatch = backend
         .submit_delivery_prompt(ConversationPromptRequest {
+            input_id: None,
             operation_id: operation_id.clone(),
             target: target.clone(),
             generation: Some(generation()),
@@ -204,6 +208,7 @@ async fn delivery_prompt_without_loaded_session_is_known_not_submitted() {
 
     let dispatch = backend
         .submit_delivery_prompt(ConversationPromptRequest {
+            input_id: None,
             operation_id: OperationId::generate(),
             target: SessionRef {
                 endpoint: endpoint(),
@@ -232,17 +237,29 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
     let root = tempfile::tempdir().expect("temporary root");
     let socket_path = root.path().join("prompt-events.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path).expect("fixture event listener");
-    let runtime = ExternalProviderRuntime::initialize(ordered_prompt_fixture(&socket_path))
-        .await
-        .expect("fixture initializes");
-    runtime
-        .create_session(PathBuf::from("/tmp"))
-        .await
-        .expect("session/new");
     let store = ProviderOperationStore::open(&root.path().join("operations.sqlite"))
         .await
         .expect("operation store opens");
     let store = Arc::new(Mutex::new(store));
+    let hub = Arc::new(collaboration_service::ProviderSessionEventHub::new(
+        Arc::clone(&store),
+    ));
+    let hub_endpoint: message_board::SessionEndpointRef =
+        serde_json::from_value(serde_json::to_value(endpoint()).expect("endpoint JSON"))
+            .expect("hub endpoint");
+    let runtime = ExternalProviderRuntime::initialize_with_mcp_http_and_hub(
+        ordered_prompt_fixture(&socket_path),
+        "fixture",
+        "http://127.0.0.1:1/mcp",
+        Arc::clone(&hub),
+        hub_endpoint,
+    )
+    .await
+    .expect("fixture initializes");
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
     let backend = Arc::new(
         ExternalProviderSupervisor::new(
             vec![ExternalProviderBinding {
@@ -262,17 +279,30 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
         endpoint: endpoint(),
         session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
     };
+    let mut queued_input_ids = Vec::new();
     for text in ["first", "second"] {
         let permit = queue.reserve(&target).expect("queue capacity");
+        let operation_id = OperationId::generate();
+        let input_id = session_event_model::InputId::generate();
+        queued_input_ids.push(input_id.clone());
+        let prompt = MessageContent::Router {
+            text: MessageText::try_from(text.to_owned()).expect("prompt text"),
+        };
+        backend.queued_operation_registry().record_queued(
+            operation_id.clone(),
+            target.clone(),
+            binding(),
+            input_id.clone(),
+            &prompt,
+        );
         permit.send(ConversationPromptRequest {
-            operation_id: OperationId::generate(),
+            input_id: Some(input_id),
+            operation_id,
             target: target.clone(),
             generation: Some(generation()),
             requested_by: requester(),
             approver: requester(),
-            prompt: MessageContent::Router {
-                text: MessageText::try_from(text.to_owned()).expect("prompt text"),
-            },
+            prompt,
         });
     }
 
@@ -290,6 +320,21 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
     }
     queue.shutdown().await;
     backend.shutdown().await.expect("supervisor shuts down");
+    let hub_target: message_board::SessionRef =
+        serde_json::from_value(serde_json::to_value(target).expect("target JSON"))
+            .expect("hub target");
+    let attached = collaboration_service::SessionEventHub::attach(hub.as_ref(), hub_target)
+        .await
+        .expect("hub history");
+    let started = attached
+        .snapshot
+        .into_iter()
+        .filter_map(|event| match event.event {
+            session_event_model::SessionEvent::TurnStarted { input_id, .. } => Some(input_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(started, queued_input_ids);
 }
 
 #[tokio::test]
@@ -323,6 +368,7 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
     };
     let active = backend
         .submit_delivery_prompt(ConversationPromptRequest {
+            input_id: None,
             operation_id: OperationId::generate(),
             target: target.clone(),
             generation: Some(generation()),
@@ -344,18 +390,28 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
         Arc::new(NoLivePeer),
     );
     let queued_id = OperationId::generate();
+    let queued_input = session_event_model::InputId::generate();
+    let queued_prompt = MessageContent::Router {
+        text: MessageText::try_from("never started".to_owned()).expect("message"),
+    };
+    backend.queued_operation_registry().record_queued(
+        queued_id.clone(),
+        target.clone(),
+        binding(),
+        queued_input.clone(),
+        &queued_prompt,
+    );
     queue
         .reserve(&target)
         .expect("queue capacity")
         .send(ConversationPromptRequest {
+            input_id: Some(queued_input),
             operation_id: queued_id.clone(),
             target,
             generation: Some(generation()),
             requested_by: requester(),
             approver: requester(),
-            prompt: MessageContent::Router {
-                text: MessageText::try_from("never started".to_owned()).expect("message"),
-            },
+            prompt: queued_prompt,
         });
 
     queue.shutdown().await;
@@ -406,6 +462,7 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
     assert_eq!(
         backend
             .submit_delivery_prompt(ConversationPromptRequest {
+                input_id: None,
                 operation_id: OperationId::generate(),
                 target: target.clone(),
                 generation: Some(generation()),
@@ -425,11 +482,19 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
         Arc::new(NoLivePeer),
     );
     let queued_id = OperationId::generate();
+    let queued_input_id = session_event_model::InputId::generate();
     let permit = queue.reserve(&target).expect("queue capacity");
-    backend
-        .queued_operation_registry()
-        .record_queued(queued_id.clone(), target.clone(), binding());
+    backend.queued_operation_registry().record_queued(
+        queued_id.clone(),
+        target.clone(),
+        binding(),
+        queued_input_id.clone(),
+        &MessageContent::Router {
+            text: MessageText::try_from("queued work".to_owned()).expect("message"),
+        },
+    );
     permit.send(ConversationPromptRequest {
+        input_id: Some(queued_input_id.clone()),
         operation_id: queued_id.clone(),
         target,
         generation: Some(generation()),
@@ -444,24 +509,15 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
         .expect("provider runtime")
         .shutdown()
         .await;
-    let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let snapshot = backend
-                .queued_operation_registry()
-                .snapshot(&queued_id)
-                .expect("queued operation snapshot")
-                .expect("queued operation exists");
-            if matches!(
-                snapshot.queue_state,
-                Some(collaboration_protocol::ConversationOperationQueueState::NotSubmitted { .. })
-            ) {
-                break snapshot;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("queued operation settles");
+    tokio::time::timeout(Duration::from_secs(5), queue.wait_for_workers())
+        .await
+        .expect("queued operation worker settles after provider retirement");
+    let snapshot = backend
+        .queued_operation_registry()
+        .snapshot(&queued_id)
+        .expect("queued operation snapshot")
+        .expect("queued operation exists");
+    assert_eq!(snapshot.input_id, Some(queued_input_id));
     assert!(matches!(
         snapshot.queue_state,
         Some(collaboration_protocol::ConversationOperationQueueState::NotSubmitted { reason })
@@ -505,6 +561,7 @@ async fn concurrent_admission_precedes_reconcile_live_state_check() {
     let create_task = tokio::spawn(async move {
         create_backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: create_operation_id,
                 endpoint: endpoint(),
                 generation: Some(generation()),
@@ -688,6 +745,30 @@ fn lost_provider_prompt_has_terminal_unknown_effect_and_sanitized_reason() {
     );
 }
 
+#[test]
+fn unsupported_prompt_content_is_a_validation_failure_without_provider_effect() {
+    // ACP v1 initialization.mdx:202-217 makes optional prompt content
+    // conditional on advertised capabilities.
+    for (content_type, expected_message) in [
+        ("image", "unsupportedContent{image}"),
+        ("audio", "unsupportedContent{audio}"),
+        ("embeddedResource", "unsupportedContent{embeddedResource}"),
+    ] {
+        let failure = runtime_failure(
+            OperationId::generate(),
+            None,
+            ExternalProviderRuntimeError::UnsupportedContent { content_type },
+        );
+        assert_eq!(
+            failure.kind,
+            ConversationOperationFailureKind::UnsupportedCapability
+        );
+        assert_eq!(failure.stage, ConversationOperationFailureStage::Validation);
+        assert_eq!(failure.effect, ProviderOperationEffect::None);
+        assert_eq!(String::from(failure.message), expected_message);
+    }
+}
+
 #[tokio::test]
 async fn unknown_agent_stop_reason_projects_applied_unknown_settlement() {
     // ACP v1 prompt-turn.mdx:369-390 defines the recognized stop reasons.
@@ -725,6 +806,7 @@ async fn unknown_agent_stop_reason_projects_applied_unknown_settlement() {
     assert_eq!(
         backend
             .submit_delivery_prompt(ConversationPromptRequest {
+                input_id: None,
                 operation_id: operation_id.clone(),
                 target: SessionRef {
                     endpoint: endpoint(),

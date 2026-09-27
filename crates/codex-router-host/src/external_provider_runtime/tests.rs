@@ -39,6 +39,7 @@ fn python_fixture(
         "import json,sys; {record_process_id}request=json.loads(sys.stdin.readline()); print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':{response_version},'agentCapabilities':{{'loadSession':True}},'agentInfo':{{'name':'fixture-agent','version':'1.2.3'}}}}}})); sys.stdout.flush(); sys.stdin.read()"
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -81,6 +82,7 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -118,6 +120,7 @@ sys.stdin.read()
         observed_socket = observed_prompt_socket.display().to_string(),
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -160,10 +163,20 @@ async fn steering_injects_during_prompt_and_returns_prompt_required_when_idle() 
         .await
         .expect("prompt dispatch notification")
         .expect("prompt was sent before settlement");
-    tokio::time::timeout(Duration::from_secs(2), listener.accept())
-        .await
-        .expect("prompt observed before steer")
-        .expect("prompt notification");
+    // Read the notice to EOF instead of dropping the accepted stream: an early
+    // close makes the fixture's `sendall` fail with EPIPE, which kills the
+    // provider and surfaces as a spurious steering TransportFailure.
+    let prompt_notice = tokio::time::timeout(Duration::from_secs(2), async {
+        let (mut stream, _address) = listener.accept().await.expect("prompt notification");
+        let mut notice = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut notice)
+            .await
+            .expect("prompt notice payload");
+        notice
+    })
+    .await
+    .expect("prompt observed before steer");
+    assert_eq!(prompt_notice, b"prompt");
     assert_eq!(
         runtime
             .session_activity("fixture-session".to_owned())
@@ -224,6 +237,7 @@ print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'canc
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -246,6 +260,7 @@ print(json.dumps({'jsonrpc':'2.0','id':second['id'],'result':{'stopReason':'end_
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -278,6 +293,7 @@ sys.stdin.read()
 "#
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -305,6 +321,7 @@ for line in sys.stdin:
         admission_log = admission_log.display().to_string(),
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -329,6 +346,7 @@ print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -376,6 +394,7 @@ sys.stdin.read()
 "#
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -509,6 +528,7 @@ print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'canc
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -532,6 +552,7 @@ print(json.dumps(new)); print(json.dumps({'jsonrpc':'2.0','id':request['id'],'re
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -554,6 +575,7 @@ sys.stdin.read()
 "#
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -563,6 +585,7 @@ sys.stdin.read()
 #[tokio::test]
 async fn missing_executable_fails_before_runtime_admission() {
     let error = ExternalProviderRuntime::initialize(ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/definitely/missing/codex-router-acp-provider"),
         arguments: vec![],
         environment: vec![],
@@ -692,8 +715,8 @@ async fn capability_report_uses_initialize_and_session_advertisements() {
 fn prompt_content_gate_matches_advertised_optional_types() {
     // ACP v1 initialization.mdx:202-217: text and resource links are baseline;
     // image, audio and embedded resources require promptCapabilities.
-    use crate::provider_capability_report::ProviderCapabilityReport;
-    use crate::provider_prompt_content::ProviderPromptContent;
+    use acp_client_runtime::ProviderCapabilityReport;
+    use acp_client_runtime::ProviderPromptContent;
     use agent_client_protocol::schema::v1::ContentBlock;
 
     let examples = [
@@ -725,7 +748,7 @@ fn prompt_content_gate_matches_advertised_optional_types() {
         for (content_type, wire_block) in &examples {
             let block: ContentBlock =
                 serde_json::from_value(wire_block.clone()).expect("ACP content example");
-            let result = ProviderPromptContent::new(vec![block], &report);
+            let result = ProviderPromptContent::new_for_test(vec![block], &report);
             let accepted = match *content_type {
                 "text" | "resourceLink" => true,
                 "image" => report.accepts_image,
@@ -840,11 +863,15 @@ async fn unsupported_protocol_version_is_rejected() {
         .await
         .expect_err("v0 must not be admitted");
 
+    assert_eq!(
+        error.to_string(),
+        "provider selected unsupported ACP protocol version ProtocolVersion(0)"
+    );
     assert!(matches!(
-        error,
+        &error,
         ExternalProviderRuntimeError::UnsupportedProtocol {
-            actual: ProtocolVersion::V0
-        }
+            actual
+        } if *actual == acp_client_runtime::AcpProtocolVersion::new(0)
     ));
     assert_process_reaped(&process_id_path).await;
 }
@@ -853,6 +880,7 @@ async fn unsupported_protocol_version_is_rejected() {
 #[tokio::test]
 async fn clean_eof_before_initialize_is_a_typed_failure() {
     let error = ExternalProviderRuntime::initialize(ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/bin/sh"),
         arguments: vec!["-c".to_owned(), "exit 0".to_owned()],
         environment: vec![],
@@ -865,6 +893,68 @@ async fn clean_eof_before_initialize_is_a_typed_failure() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn stdout_eof_after_initialize_retires_live_provider() {
+    let fixture_root = tempfile::tempdir().expect("fixture root");
+    let process_id_path = fixture_root.path().join("provider.pid");
+    let close_marker = fixture_root.path().join("close-stdout");
+    let fixture = format!(
+        "import json,os,sys,time; open({:?},'w').write(str(os.getpid())); request=json.loads(sys.stdin.readline()); print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{}},'agentInfo':{{'name':'eof-fixture','version':'1'}}}}}})); sys.stdout.flush(); marker={:?};
+while not os.path.exists(marker): time.sleep(0.01)
+os.close(1); sys.stdin.read()",
+        process_id_path.display().to_string(), close_marker.display().to_string()
+    );
+    let runtime = ExternalProviderRuntime::initialize(ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), fixture],
+        environment: vec![],
+    })
+    .await
+    .expect("fixture initializes before stdout closes");
+    std::fs::write(&close_marker, b"close").expect("signal fixture to close stdout");
+
+    tokio::time::timeout(Duration::from_secs(2), runtime.retirement().cancelled())
+        .await
+        .expect("stdout EOF must retire the connection while provider stays alive");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let process_id = std::fs::read_to_string(&process_id_path)
+                .expect("fixture wrote process id")
+                .trim()
+                .parse::<i32>()
+                .expect("positive process id");
+            let process_id =
+                rustix::process::Pid::from_raw(process_id).expect("positive process id");
+            if matches!(
+                rustix::process::test_kill_process(process_id),
+                Err(rustix::io::Errno::SRCH)
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retired provider process must be reaped");
+}
+
+/// Blocks until the fixture has recorded its process id, bounded in real time.
+#[cfg(unix)]
+fn wait_for_recorded_process_id(process_id_path: &std::path::Path) -> bool {
+    let real_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < real_deadline {
+        if std::fs::read_to_string(process_id_path)
+            .is_ok_and(|value| value.trim().parse::<i32>().is_ok())
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
 async fn held_initialize_times_out_and_reaps_owned_process() {
     let fixture_root = tempfile::tempdir().expect("fixture root");
     let process_id_path = fixture_root.path().join("provider.pid");
@@ -872,8 +962,18 @@ async fn held_initialize_times_out_and_reaps_owned_process() {
         "import os,sys,time; open({:?},'w').write(str(os.getpid())); sys.stdin.readline(); time.sleep(60)",
         process_id_path.display().to_string()
     );
+    // The timeout must not start running until the fixture is provably alive and
+    // holding initialize. A cold Python start can outlast a short timeout, and a
+    // fixture killed before it records its pid leaves nothing to prove reaped.
+    // A running blocking task stops the paused clock from auto-advancing, so the
+    // simulated timeout elapses only after the pid file exists.
+    let fixture_recorded_process_id = tokio::task::spawn_blocking({
+        let process_id_path = process_id_path.clone();
+        move || wait_for_recorded_process_id(&process_id_path)
+    });
     let error = ExternalProviderRuntime::initialize_with_timeout(
         ExternalProviderLaunch {
+            persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
             executable: PathBuf::from("/usr/bin/python3"),
             arguments: vec!["-c".to_owned(), fixture],
             environment: vec![],
@@ -883,6 +983,12 @@ async fn held_initialize_times_out_and_reaps_owned_process() {
     .await
     .expect_err("held initialize must time out");
 
+    assert!(
+        fixture_recorded_process_id
+            .await
+            .expect("process id watcher finished"),
+        "fixture recorded its process id before the timeout"
+    );
     assert!(matches!(
         error,
         ExternalProviderRuntimeError::InitializeTimeout
@@ -902,6 +1008,7 @@ async fn oversized_initialize_frame_is_rejected_and_reaps_owned_process() {
     );
     let error = ExternalProviderRuntime::initialize_with_timeout(
         ExternalProviderLaunch {
+            persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
             executable: PathBuf::from("/usr/bin/python3"),
             arguments: vec!["-c".to_owned(), fixture],
             environment: vec![],
@@ -1211,21 +1318,12 @@ async fn overlapping_prompt_cannot_replace_context_and_dropped_waiter_cleans_it(
     assert!(matches!(second, ExternalProviderRuntimeError::LocalBusy));
     assert_eq!(
         runtime
-            .approval_contexts
-            .lock()
-            .expect("approval contexts")
-            .get("fixture-session")
-            .map(|context| String::from(context.operation_id.clone())),
+            .active_approval_operation("fixture-session")
+            .map(String::from),
         Some(first_operation.to_owned())
     );
     drop(first);
-    assert!(
-        runtime
-            .approval_contexts
-            .lock()
-            .expect("approval contexts")
-            .is_empty()
-    );
+    assert!(runtime.active_approval_count() == 0);
     runtime.shutdown().await;
 }
 
@@ -1258,13 +1356,7 @@ async fn shutdown_records_runtime_owner_join_failure() {
     let runtime = ExternalProviderRuntime::initialize(conversation_fixture())
         .await
         .expect("fixture initializes");
-    runtime
-        .task
-        .lock()
-        .await
-        .as_ref()
-        .expect("runtime owner")
-        .abort();
+    runtime.abort_owner_for_test().await;
     runtime.shutdown().await;
     assert!(runtime.shutdown_failed());
 }
@@ -1512,6 +1604,7 @@ async fn live_external_provider_create_and_prompt() {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("current directory"));
     let launch = ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable,
         arguments,
         environment: Vec::new(),
@@ -1579,6 +1672,7 @@ async fn live_external_provider_explicit_cancel() {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("current directory"));
     let runtime = ExternalProviderRuntime::initialize(ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable,
         arguments,
         environment: Vec::new(),

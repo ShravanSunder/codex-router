@@ -186,6 +186,8 @@ pub fn control_schema_document(
     assembly.add_type::<ConfigurationFailure>("configuration-failure")?;
     assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
     assembly.add_type::<ConversationOperationFailure>("conversation-operation-failure")?;
+    assembly.add_type::<ProviderSettingsFailure>("provider-settings-failure")?;
+    assembly.add_type::<ProviderInspectFailure>("provider-inspect-failure")?;
     assembly.add_method::<ConversationCreateRequest, ConversationOperationSubmission>(
         "conversation/create",
         &[],
@@ -194,12 +196,32 @@ pub fn control_schema_document(
         "conversation/load",
         &[],
     )?;
+    assembly.add_method::<ConversationResumeRequest, ConversationOperationSubmission>(
+        "conversation/resume",
+        &[],
+    )?;
+    assembly.add_method::<ConversationCloseRequest, ConversationOperationSubmission>(
+        "conversation/close",
+        &[],
+    )?;
     assembly.add_method::<ConversationPromptRequest, ConversationOperationSubmission>(
         "conversation/prompt",
         &[],
     )?;
     assembly.add_method::<ConversationCancelRequest, ConversationOperationSubmission>(
         "conversation/cancel",
+        &[],
+    )?;
+    assembly.add_method::<ProviderSettingsSetRequest, ProviderSettingsResult>(
+        "conversation/settingsSet",
+        &[],
+    )?;
+    assembly.add_method::<ProviderSettingsAcceptRequest, ProviderSettingsResult>(
+        "conversation/settingsAccept",
+        &[],
+    )?;
+    assembly.add_method::<ProviderSessionInspectRequest, ProviderSessionInspectResult>(
+        "provider/sessionInspect",
         &[],
     )?;
     assembly.add_method::<ConversationOperationShowRequest, ConversationOperationSnapshot>(
@@ -306,6 +328,16 @@ pub fn control_schema_document(
             "overloaded",
         ],
     )?;
+    assembly.add_method::<ProviderSessionListParams, ProviderSessionListResult>(
+        "provider/sessionList",
+        &[
+            "wrongService",
+            "endpointNotFound",
+            "unsupportedCapability",
+            "unavailable",
+            "overloaded",
+        ],
+    )?;
     assembly.add_method::<NativeInspectParams, NativeInspectResult>(
         "codex/sessionInspect",
         &[
@@ -363,6 +395,7 @@ pub fn control_schema_document(
         "approval/decide",
         &[
             "approvalNotPending",
+            "alreadySettled",
             "wrongActor",
             "selfDecision",
             "decisionNotOffered",
@@ -383,6 +416,7 @@ pub fn control_schema_document(
         "question/answer",
         &[
             "questionNotPending",
+            "alreadySettled",
             "wrongActor",
             "invalidAnswer",
             "unavailable",
@@ -590,6 +624,15 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     if method.starts_with("conversation/") {
         data = vec![reference("conversation-operation-failure")];
+    }
+    if matches!(
+        method,
+        "conversation/settingsSet" | "conversation/settingsAccept"
+    ) {
+        data = vec![reference("provider-settings-failure")];
+    }
+    if method == "provider/sessionInspect" {
+        data = vec![reference("provider-inspect-failure")];
     }
     if matches!(
         method,

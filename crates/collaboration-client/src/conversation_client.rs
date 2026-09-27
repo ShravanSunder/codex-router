@@ -9,7 +9,8 @@ use collaboration_protocol::{
     ConversationOperationSettlement, ConversationOperationWaitOutput,
     ConversationOperationWaitRequest, EndpointDescription, EndpointRef, NonEmptyText, OperationId,
     PositiveSeconds, ProviderOperationEffect, ProviderOperationStage, ProviderRequestedPolicy,
-    ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef, UuidIdentity,
+    ProviderRequestedSettings, ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef,
+    UuidIdentity,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,8 @@ pub struct ConversationCreateInput {
     pub generation: Option<CodexGeneration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -215,6 +218,19 @@ impl ConversationClient {
         };
         let target = match created {
             ConversationCreateOutcome::Created { target, .. } => target,
+            ConversationCreateOutcome::CreatedWithoutSettings {
+                operation_id,
+                target,
+                applied,
+                failed,
+            } => {
+                return Ok(ConversationCreatePromptOutcome::CreatedWithoutSettings {
+                    operation_id,
+                    target,
+                    applied,
+                    failed,
+                });
+            }
             ConversationCreateOutcome::Pending { operation_id } => {
                 return Ok(ConversationCreatePromptOutcome::CreatePending { operation_id });
             }
@@ -349,6 +365,13 @@ impl ConversationClient {
         let operation_id = input.operation_id.clone();
         match &mut self {
             Self::CodexAcp(acp) => {
+                if input.mode.is_some() {
+                    return Err(unsupported(
+                        &input.endpoint,
+                        "mode",
+                        "omit mode for this Codex ACP create",
+                    ));
+                }
                 if acp.endpoint() != &input.endpoint {
                     return Err(ConversationClientError::InvalidInput(
                         "Codex ACP endpoint changed",
@@ -387,6 +410,7 @@ impl ConversationClient {
                     Ok(Ok(target)) => Ok(ConversationCreateOutcome::Created {
                         operation_id,
                         target,
+                        effective_settings: None,
                     }),
                     Ok(Err(error)) => Err(error.into()),
                     Err(_) => Ok(ConversationCreateOutcome::Pending { operation_id }),
@@ -399,8 +423,6 @@ impl ConversationClient {
                     ));
                 }
                 for (field, present) in [
-                    ("model", input.model.is_some()),
-                    ("effort", input.effort.is_some()),
                     ("fork", input.fork.is_some()),
                     ("rootMessageId", input.root_message_id.is_some()),
                 ] {
@@ -432,6 +454,18 @@ impl ConversationClient {
                     requested_policy: ProviderRequestedPolicy {
                         access: input.access,
                     },
+                    settings: if input.mode.is_some()
+                        || input.model.is_some()
+                        || input.effort.is_some()
+                    {
+                        Some(ProviderRequestedSettings {
+                            mode: input.mode,
+                            model: input.model,
+                            effort: input.effort,
+                        })
+                    } else {
+                        None
+                    },
                 };
                 let wait_seconds = u32::try_from(timeout.as_secs())
                     .ok()
@@ -440,13 +474,7 @@ impl ConversationClient {
                         "create timeout must be whole seconds within the supported range",
                     ))?;
                 let submitted = tokio::time::timeout(timeout, async {
-                    let admitted = control.create_provider_conversation(request).await?;
-                    if let Some(target) = created_target(&admitted.operation) {
-                        return Ok(ConversationCreateOutcome::Created {
-                            operation_id: operation_id.clone(),
-                            target,
-                        });
-                    }
+                    control.create_provider_conversation(request).await?;
                     let settled = control
                         .wait_for_provider_conversation_operation(
                             ConversationOperationWaitRequest {
@@ -455,20 +483,36 @@ impl ConversationClient {
                             },
                         )
                         .await?;
-                    if let ConversationOperationWaitOutput::Available {
-                        settlement: ConversationOperationSettlement::Created { target, .. },
-                    } = settled.output
-                    {
-                        return Ok(ConversationCreateOutcome::Created {
-                            operation_id: operation_id.clone(),
-                            target,
-                        });
-                    }
-                    if let Some(target) = created_target(&settled.operation) {
-                        return Ok(ConversationCreateOutcome::Created {
-                            operation_id: operation_id.clone(),
-                            target,
-                        });
+                    match settled.output {
+                        ConversationOperationWaitOutput::Available {
+                            settlement:
+                                ConversationOperationSettlement::Created {
+                                    target,
+                                    effective_settings,
+                                },
+                        } => {
+                            return Ok(ConversationCreateOutcome::Created {
+                                operation_id: operation_id.clone(),
+                                target,
+                                effective_settings: Some(effective_settings),
+                            });
+                        }
+                        ConversationOperationWaitOutput::Available {
+                            settlement:
+                                ConversationOperationSettlement::CreatedWithoutSettings {
+                                    target,
+                                    applied,
+                                    failed,
+                                },
+                        } => {
+                            return Ok(ConversationCreateOutcome::CreatedWithoutSettings {
+                                operation_id: operation_id.clone(),
+                                target,
+                                applied,
+                                failed,
+                            });
+                        }
+                        _ => {}
                     }
                     if settled.operation.stage == ProviderOperationStage::Terminal {
                         let effect = settled.operation.effect;
@@ -491,6 +535,7 @@ impl ConversationClient {
                                 effect,
                                 message,
                                 operation_id: operation_id.clone(),
+                                invalid_setting: None,
                                 provider_code: None,
                                 target: None,
                                 endpoint: None,
@@ -512,18 +557,6 @@ impl ConversationClient {
                 }
             }
         }
-    }
-}
-
-fn created_target(
-    snapshot: &collaboration_protocol::ConversationOperationSnapshot,
-) -> Option<SessionRef> {
-    if snapshot.stage == ProviderOperationStage::Terminal
-        && snapshot.effect == ProviderOperationEffect::Applied
-    {
-        snapshot.target.clone()
-    } else {
-        None
     }
 }
 

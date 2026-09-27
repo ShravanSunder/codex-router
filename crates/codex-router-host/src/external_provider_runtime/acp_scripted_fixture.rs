@@ -63,6 +63,15 @@ impl AcpFixtureScript {
         self
     }
 
+    /// Read independent client messages in either arrival order.
+    pub(crate) fn expect_messages_unordered(mut self, expected_messages: Vec<Value>) -> Self {
+        self.steps.push(json!({
+            "action": "expect_messages_unordered",
+            "messages": expected_messages,
+        }));
+        self
+    }
+
     pub(crate) fn respond(mut self, request_name: &str, result: Value) -> Self {
         self.steps.push(json!({
             "action": "respond",
@@ -92,10 +101,10 @@ impl AcpFixtureScript {
         self
     }
 
-    pub(crate) fn wait_for_signal(mut self, process_id_path: &std::path::Path) -> Self {
+    pub(crate) fn exit_on_socket_signal(mut self, socket_path: &std::path::Path) -> Self {
         self.steps.push(json!({
-            "action": "wait_for_signal",
-            "processIdPath": process_id_path,
+            "action": "exit_on_socket_signal",
+            "socketPath": socket_path,
         }));
         self
     }
@@ -114,6 +123,7 @@ impl AcpFixtureScript {
     pub(crate) fn launch(self) -> ExternalProviderLaunch {
         let script = serde_json::to_string(&self.steps).expect("fixture script serializes");
         ExternalProviderLaunch {
+            persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
             executable: PathBuf::from("/usr/bin/python3"),
             arguments: vec![
                 "-u".to_owned(),
@@ -202,6 +212,36 @@ mod tests {
         stdin
             .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":91,\"result\":{\"outcome\":\"cancelled\"}}\n")
             .expect("answer agent request");
+        drop(stdin);
+        let output = child.wait_with_output().expect("fixture exits");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn independent_client_messages_can_arrive_in_reverse_order() {
+        let fixture = AcpFixtureScript::new()
+            .expect_messages_unordered(vec![
+                json!({"jsonrpc": "2.0", "method": "session/cancel"}),
+                json!({"jsonrpc": "2.0", "id": 91, "result": {"outcome": {"outcome": "cancelled"}}}),
+            ])
+            .launch();
+        let mut child = Command::new(&fixture.executable)
+            .args(&fixture.arguments)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start fixture agent");
+        let mut stdin = child.stdin.take().expect("fixture stdin");
+        for message in [
+            json!({"jsonrpc": "2.0", "id": 91, "result": {"outcome": {"outcome": "cancelled"}}}),
+            json!({"jsonrpc": "2.0", "method": "session/cancel"}),
+        ] {
+            writeln!(stdin, "{message}").expect("send client message");
+        }
         drop(stdin);
         let output = child.wait_with_output().expect("fixture exits");
         assert!(

@@ -33,13 +33,17 @@ impl ProviderAcpDeliveryRoute {
         };
         let effect = Self::effect(request, binding, SubmissionEffect::RouterQueued)?;
         sink.record(effect).await?;
+        let input_id = session_event_model::InputId::generate();
         self.supervisor.queued_operation_registry().record_queued(
             operation_id.clone(),
             request.target.clone(),
             binding.clone(),
+            input_id.clone(),
+            &request.message,
         );
         permit.send(ConversationPromptRequest {
             operation_id: operation_id.clone(),
+            input_id: Some(input_id),
             target: request.target.clone(),
             generation: Some(binding.generation.clone()),
             requested_by,

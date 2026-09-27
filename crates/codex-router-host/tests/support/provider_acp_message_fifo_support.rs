@@ -121,6 +121,7 @@ assert request['method']=='session/prompt'
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({:?})
  event.sendall(b'second')
+ event.recv(1)
 print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 sys.stdin.read()
 "#,
@@ -128,6 +129,7 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -150,6 +152,7 @@ for line in sys.stdin:
         load_marker.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -187,6 +190,7 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),

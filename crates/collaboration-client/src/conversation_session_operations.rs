@@ -204,6 +204,7 @@ impl ConversationClient {
                 }
                 let request = ProviderPromptRequest {
                     operation_id: operation_id.clone(),
+                    input_id: None,
                     target: target.clone(),
                     generation: input.generation,
                     requested_by: input.requested_by.clone(),
@@ -408,6 +409,7 @@ fn operation_settlement_failure(
         effect,
         message,
         operation_id,
+        invalid_setting: None,
         provider_code: None,
         target: Some(target),
         endpoint: None,

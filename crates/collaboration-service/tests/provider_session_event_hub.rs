@@ -135,6 +135,32 @@ async fn front_door_inputs_keep_arrival_order() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn unobservable_steer_end_returns_the_live_session_to_idle() -> TestResult {
+    let (_root, hub) = hub(8).await?;
+    let target = session()?;
+    hub.publish(
+        target.clone(),
+        SessionEvent::TurnStarted {
+            turn_id: "steer-turn".into(),
+            input_id: session_event_model::InputId::new("steer-input")?,
+        },
+    )
+    .await?;
+    hub.publish(
+        target.clone(),
+        SessionEvent::TurnEnded {
+            turn_id: "steer-turn".into(),
+            outcome: TurnOutcome::Lost {
+                reason: "endNotObservable".into(),
+            },
+        },
+    )
+    .await?;
+    ensure_eq!(hub.state(target).await?, SessionState::Idle);
+    Ok(())
+}
+
 // R25: pending approval and question requests remain visible on later attach.
 #[tokio::test]
 async fn late_attach_replays_pending_approval_and_question() -> TestResult {
@@ -229,7 +255,7 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
         target.clone(),
         SessionEvent::TurnStarted {
             turn_id: "turn-1".into(),
-            input_id: "input-1".into(),
+            input_id: session_event_model::InputId::new("input-1").expect("input ID"),
         },
     )
     .await?;
@@ -245,6 +271,16 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
         live[0].approver,
         message_board::Identity::Session { session: target }
     );
+    drop(hub);
+    let restarted_store =
+        ProviderOperationStore::open(&root.path().join("operations.sqlite")).await?;
+    let restarted_hub = ProviderSessionEventHub::new(Arc::new(Mutex::new(restarted_store)));
+    let restarted = restarted_hub
+        .sessions(live[0].session.endpoint.clone())
+        .await?;
+    ensure_eq!(restarted.len(), 1);
+    ensure_eq!(restarted[0].state, SessionState::Unloaded);
+    ensure_eq!(restarted[0].approver, live[0].approver);
     Ok(())
 }
 
@@ -256,7 +292,7 @@ async fn replay_reset_replaces_lost_history_and_resyncs_old_subscribers() -> Tes
         target.clone(),
         SessionEvent::TurnStarted {
             turn_id: "old-turn".into(),
-            input_id: "old-input".into(),
+            input_id: session_event_model::InputId::new("old-input").expect("input ID"),
         },
     )
     .await?;
@@ -302,7 +338,7 @@ async fn replay_reset_replaces_lost_history_and_resyncs_old_subscribers() -> Tes
         target.clone(),
         SessionEvent::TurnStarted {
             turn_id: "historical-turn".into(),
-            input_id: "replayed-input".into(),
+            input_id: session_event_model::InputId::new("replayed-input").expect("input ID"),
         },
     )
     .await?;
@@ -327,5 +363,24 @@ async fn replay_reset_replaces_lost_history_and_resyncs_old_subscribers() -> Tes
             .iter()
             .all(|item| { !matches!(&item.event, SessionEvent::InteractionRequested { .. }) })
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_without_replay_invalidates_old_history_and_subscribers() -> TestResult {
+    let (_root, hub) = hub(8).await?;
+    let target = session()?;
+    hub.publish(target.clone(), user_item("old-message"))
+        .await?;
+    let mut stale = hub.attach(target.clone()).await?;
+
+    ensure_eq!(hub.begin_history_unavailable(target.clone()).await?, 1);
+    ensure_eq!(
+        receive_hub_event(&mut stale.receiver).await,
+        Err(HubReceiveError::ResyncRequired)
+    );
+    let current = hub.attach(target.clone()).await?;
+    ensure!(current.snapshot.is_empty());
+    ensure_eq!(hub.state(target).await?, SessionState::Idle);
     Ok(())
 }

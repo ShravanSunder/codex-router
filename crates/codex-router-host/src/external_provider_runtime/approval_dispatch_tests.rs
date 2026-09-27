@@ -8,15 +8,24 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryRequest, NativeControlBackend, NativeGenerationGate, ServiceApprovalBroker,
+    DeliveryRequest, NativeControlBackend, NativeGenerationGate, ServiceInteractionBroker,
     SessionMessageDelivery,
 };
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
+use tokio::io::AsyncWriteExt as _;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-struct AcceptedApprovalNoticeDelivery;
+fn approval_actor(session: &SessionRef) -> message_board::Identity {
+    message_board::Identity::Session {
+        session: serde_json::from_value(serde_json::to_value(session).expect("session JSON"))
+            .expect("board session"),
+    }
+}
+
+struct AcceptedApprovalNoticeDelivery(Arc<Notify>);
 
 impl SessionMessageDelivery for AcceptedApprovalNoticeDelivery {
     fn deliver<'a>(
@@ -24,7 +33,9 @@ impl SessionMessageDelivery for AcceptedApprovalNoticeDelivery {
         _: DeliveryRequest,
         _: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async {
+        let notice_delivered = Arc::clone(&self.0);
+        Box::pin(async move {
+            notice_delivered.notify_one();
             Ok(DeliveryReceipt {
                 outcome: DeliveryOutcome::Started,
                 reachability: Some(SessionReachability::ProviderAcp),
@@ -71,6 +82,7 @@ send({'jsonrpc':'2.0','id':first_prompt['id'],'result':{'stopReason':'end_turn'}
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: Vec::new(),
@@ -99,6 +111,7 @@ send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -131,6 +144,7 @@ send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: Vec::new(),
@@ -155,15 +169,93 @@ fn permission_during_cancel_fixture() -> ExternalProviderLaunch {
             "params": {"sessionId": "session-a", "toolCall": {"toolCallId": "permission-a", "title": "Run an approved command", "kind": "execute"},
                 "options": [{"optionId": "allow-a", "name": "Allow once", "kind": "allow_once"}]}
         }))
-        .expect_message(serde_json::json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "session-a"}}))
-        .expect_message(serde_json::json!({"jsonrpc": "2.0", "id": 91, "result": {"outcome": {"outcome": "cancelled"}}}))
+        .expect_messages_unordered(vec![
+            serde_json::json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "session-a"}}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 91, "result": {"outcome": {"outcome": "cancelled"}}}),
+        ])
         .send(serde_json::json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-a", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "session-a-cancelled"}}}}))
         .respond("prompt", serde_json::json!({"stopReason": "cancelled"}))
         .launch()
 }
 
+fn permission_after_cancel_fixture(event_socket: &std::path::Path) -> ExternalProviderLaunch {
+    // ACP v1 prompt-turn.mdx:336-350 requires every permission offered during
+    // a cancelling Turn to receive `cancelled` before its prompt result.
+    let fixture = format!(
+        r#"
+import json,socket,sys
+def send(value):
+    print(json.dumps(value)); sys.stdout.flush()
+initialize=json.loads(sys.stdin.readline())
+send({{'jsonrpc':'2.0','id':initialize['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{}},'agentInfo':{{'name':'late-permission-fixture','version':'1'}}}}}})
+create=json.loads(sys.stdin.readline())
+send({{'jsonrpc':'2.0','id':create['id'],'result':{{'sessionId':'session-a'}}}})
+prompt=json.loads(sys.stdin.readline())
+assert prompt['method']=='session/prompt'
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
+    event.connect({event_socket:?})
+    event.sendall(b'prompt')
+cancel=json.loads(sys.stdin.readline())
+assert cancel['method']=='session/cancel'
+send({{'jsonrpc':'2.0','id':91,'method':'session/request_permission','params':{{'sessionId':'session-a','toolCall':{{'toolCallId':'permission-after-cancel','title':'Late tool','kind':'execute'}},'options':[{{'optionId':'allow-a','name':'Allow once','kind':'allow_once'}}]}}}})
+answer=json.loads(sys.stdin.readline())
+assert answer['id']==91
+assert answer['result']['outcome']['outcome']=='cancelled'
+send({{'jsonrpc':'2.0','id':prompt['id'],'result':{{'stopReason':'cancelled'}}}})
+sys.stdin.read()
+"#,
+        event_socket = event_socket.display().to_string(),
+    );
+    ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-u".to_owned(), "-c".to_owned(), fixture],
+        environment: Vec::new(),
+    }
+}
+
+fn output_limit_with_pending_permission_fixture(
+    event_socket: &std::path::Path,
+) -> ExternalProviderLaunch {
+    // ACP v1 prompt-turn.mdx:336-350 requires an outstanding permission to
+    // receive `cancelled` when Router cancels the Turn for its output limit.
+    let fixture = format!(
+        r#"
+import json,socket,sys
+def send(value):
+    print(json.dumps(value)); sys.stdout.flush()
+initialize=json.loads(sys.stdin.readline())
+send({{'jsonrpc':'2.0','id':initialize['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{}},'agentInfo':{{'name':'output-limit-permission-fixture','version':'1'}}}}}})
+create=json.loads(sys.stdin.readline())
+send({{'jsonrpc':'2.0','id':create['id'],'result':{{'sessionId':'session-a'}}}})
+prompt=json.loads(sys.stdin.readline())
+assert prompt['method']=='session/prompt'
+send({{'jsonrpc':'2.0','id':91,'method':'session/request_permission','params':{{'sessionId':'session-a','toolCall':{{'toolCallId':'pending-tool','title':'Pending tool','kind':'execute'}},'options':[{{'optionId':'allow-a','name':'Allow once','kind':'allow_once'}}]}}}})
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
+    event.connect({event_socket:?})
+    assert event.recv(1)==b'g'
+send({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'session-a','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'x'*(1024*1024+1)}}}}}}}})
+cancel=json.loads(sys.stdin.readline())
+assert cancel['method']=='session/cancel'
+answer=json.loads(sys.stdin.readline())
+assert answer['id']==91
+assert answer['result']['outcome']['outcome']=='cancelled'
+send({{'jsonrpc':'2.0','id':prompt['id'],'result':{{'stopReason':'cancelled'}}}})
+sys.stdin.read()
+"#,
+        event_socket = event_socket.display().to_string()
+    );
+    ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-u".to_owned(), "-c".to_owned(), fixture],
+        environment: Vec::new(),
+    }
+}
+
 async fn wait_for_pending_approval<TPromptFuture>(
-    broker: &ServiceApprovalBroker,
+    broker: &ServiceInteractionBroker,
+    _approval_notice: &Notify,
     mut pending_request: Pin<&mut TPromptFuture>,
 ) -> TestResult
 where
@@ -172,22 +264,70 @@ where
 {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            tokio::select! {
-                result = pending_request.as_mut() => {
-                    return Err::<(), Box<dyn std::error::Error + Send + Sync>>(
-                        format!("permission prompt settled before its cancellation test: {result:?}").into()
-                    );
-                }
-                () = tokio::task::yield_now() => {}
+            if !observed_typed_approvals(broker, true).await.is_empty() {
+                break Ok(());
             }
-            if !broker.list(true).await.approvals.is_empty() {
-                return Ok::<(), Box<dyn std::error::Error + Send + Sync>>(());
+            tokio::select! {
+                result = pending_request.as_mut() => break Err::<(), Box<dyn std::error::Error + Send + Sync>>(
+                    format!("permission prompt settled before its cancellation test: {result:?}").into()
+                ),
+                () = tokio::task::yield_now() => {}
             }
         }
     })
     .await
     .map_err(|_| "permission request did not become pending")??;
+    assert!(!observed_typed_approvals(broker, true).await.is_empty());
     Ok(())
+}
+
+struct ObservedTypedApproval {
+    request_id: String,
+    state: collaboration_protocol::ApprovalState,
+    reason: Option<String>,
+    request: session_event_model::ApprovalRequest,
+}
+
+async fn observed_typed_approvals(
+    broker: &ServiceInteractionBroker,
+    pending_only: bool,
+) -> Vec<ObservedTypedApproval> {
+    broker
+        .list_interactions()
+        .await
+        .into_iter()
+        .filter_map(|record| {
+            let collaboration_service::InteractionHistoryRecord::Approval {
+                request, state, ..
+            } = record
+            else {
+                return None;
+            };
+            let (state, reason) = match state {
+                collaboration_service::InteractionHistoryState::Pending => (
+                    collaboration_protocol::ApprovalState::PendingClientDecision,
+                    None,
+                ),
+                collaboration_service::InteractionHistoryState::Decided { .. } => {
+                    (collaboration_protocol::ApprovalState::Decided, None)
+                }
+                collaboration_service::InteractionHistoryState::Cancelled { reason } => (
+                    collaboration_protocol::ApprovalState::Cancelled,
+                    Some(reason),
+                ),
+            };
+            if pending_only && state != collaboration_protocol::ApprovalState::PendingClientDecision
+            {
+                return None;
+            }
+            Some(ObservedTypedApproval {
+                request_id: request.request_id.clone(),
+                state,
+                reason,
+                request,
+            })
+        })
+        .collect()
 }
 
 fn session_ref(
@@ -208,14 +348,14 @@ async fn approval_broker_fixture(
     root: &tempfile::TempDir,
     service_id: &UuidIdentity,
     generation: &CodexGeneration,
-) -> TestResult<Arc<ServiceApprovalBroker>> {
+) -> TestResult<(Arc<ServiceInteractionBroker>, Arc<Notify>)> {
     let gate = NativeGenerationGate::default();
     gate.activate(
         generation.clone(),
         root.path().join("unused-native.sock"),
         None,
     )?;
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.clone(),
         NativeControlBackend {
             endpoint: EndpointRef {
@@ -228,8 +368,11 @@ async fn approval_broker_fixture(
         root.path().join("approval-routes.json"),
     )
     .await?;
-    broker.install_session_delivery(Arc::new(AcceptedApprovalNoticeDelivery))?;
-    Ok(broker)
+    let approval_notice = Arc::new(Notify::new());
+    broker.install_session_delivery(Arc::new(AcceptedApprovalNoticeDelivery(Arc::clone(
+        &approval_notice,
+    ))))?;
+    Ok((broker, approval_notice))
 }
 
 #[tokio::test]
@@ -242,7 +385,8 @@ async fn permission_decision_survives_late_agent_withdrawal_and_peer_turn_progre
         generation: GenerationNumber::try_from(1)?,
     };
     let runtime = ExternalProviderRuntime::initialize(permission_dispatch_fixture()).await?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
     runtime.create_session(root.path().to_owned()).await?;
     runtime.create_session(root.path().to_owned()).await?;
@@ -262,21 +406,7 @@ async fn permission_decision_survives_late_agent_withdrawal_and_peer_turn_progre
         },
     );
     tokio::pin!(prompt_a);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                result = &mut prompt_a => {
-                    return Err(format!("permission prompt settled before approval: {result:?}").into());
-                }
-                () = tokio::task::yield_now() => {}
-            }
-            if !broker.list(true).await.approvals.is_empty() {
-                break Ok::<(), Box<dyn std::error::Error + Send + Sync>>(());
-            }
-        }
-    })
-    .await
-    .map_err(|_| "permission request did not become pending")??;
+    wait_for_pending_approval(&broker, &approval_notice, prompt_a.as_mut()).await?;
 
     let prompt_b = runtime.prompt_with_approval_context(
         "session-b".to_owned(),
@@ -293,23 +423,24 @@ async fn permission_decision_survives_late_agent_withdrawal_and_peer_turn_progre
     let prompt_b_outcome = tokio::time::timeout(Duration::from_secs(2), prompt_b).await??;
     assert_eq!(prompt_b_outcome.output, "session-b-replied");
 
-    let pending = broker
-        .list(true)
+    let pending = observed_typed_approvals(&broker, true)
         .await
-        .approvals
         .pop()
         .expect("pending approval");
     broker
         .decide(ApprovalDecideParams {
             request_id: pending.request_id,
-            decision: ApprovalDecision::Allow,
-            actor: requester_and_approver,
+            decision: Some(ApprovalDecision::Allow),
+            option_id: None,
+            acknowledge_persistent: false,
+            note: None,
+            actor: approval_actor(&requester_and_approver),
         })
         .await?;
     let prompt_a_outcome = tokio::time::timeout(Duration::from_secs(2), &mut prompt_a).await??;
     assert_eq!(prompt_a_outcome.output, "session-a-approved");
     assert_eq!(
-        broker.list(false).await.approvals[0].state,
+        observed_typed_approvals(&broker, false).await[0].state,
         collaboration_protocol::ApprovalState::Decided
     );
 
@@ -329,7 +460,8 @@ async fn expired_approval_broker_refusal_carries_typed_operation_reason() -> Tes
     runtime.set_endpoint_id("cursor-local".to_owned()).await;
     runtime.create_session(PathBuf::from("/tmp")).await?;
     let root = tempfile::tempdir()?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, _approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(broker.clone()).await;
     drop(broker);
     let operation_id = OperationId::generate();
@@ -379,7 +511,8 @@ async fn peer_cancellation_and_binding_retirement_settle_permission_history_once
             cancellation_source,
         ))
         .await?;
-        let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+        let (broker, approval_notice) =
+            approval_broker_fixture(&root, &service_id, &generation).await?;
         runtime.install_approval_broker(Arc::clone(&broker)).await;
         runtime.create_session(root.path().to_owned()).await?;
         let requester = session_ref(&service_id, "codex-local", "approver")?;
@@ -398,7 +531,7 @@ async fn peer_cancellation_and_binding_retirement_settle_permission_history_once
             },
         ));
         if cancellation_source == "retirement" {
-            wait_for_pending_approval(&broker, prompt.as_mut()).await?;
+            wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
             retirement.cancel();
         }
         let prompt_result = tokio::time::timeout(Duration::from_secs(5), &mut prompt).await?;
@@ -412,14 +545,14 @@ async fn peer_cancellation_and_binding_retirement_settle_permission_history_once
             assert_eq!(outcome.stop_reason, ProviderPromptStopReason::Cancelled);
             assert_eq!(outcome.output, "permission-cancelled");
         }
-        let history = broker.list(false).await.approvals;
+        let history = observed_typed_approvals(&broker, false).await;
         assert_eq!(history.len(), 1);
         assert_eq!(
             history[0].state,
             collaboration_protocol::ApprovalState::Cancelled
         );
         assert!(history[0].reason.is_some());
-        assert!(broker.list(true).await.approvals.is_empty());
+        assert!(observed_typed_approvals(&broker, true).await.is_empty());
         runtime.shutdown().await;
     }
     Ok(())
@@ -434,7 +567,8 @@ async fn permission_wait_does_not_block_steering_reply_dispatch() -> TestResult 
         generation: GenerationNumber::try_from(1)?,
     };
     let runtime = ExternalProviderRuntime::initialize(permission_during_steer_fixture()).await?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
     runtime.create_session(root.path().to_owned()).await?;
     let requester = session_ref(&service_id, "codex-local", "approver")?;
@@ -451,7 +585,7 @@ async fn permission_wait_does_not_block_steering_reply_dispatch() -> TestResult 
             binding_retirement: CancellationToken::new(),
         },
     ));
-    wait_for_pending_approval(&broker, prompt.as_mut()).await?;
+    wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
 
     let steer = tokio::time::timeout(
         Duration::from_secs(2),
@@ -462,23 +596,24 @@ async fn permission_wait_does_not_block_steering_reply_dispatch() -> TestResult 
     )
     .await??;
     assert!(matches!(steer, ProviderSteeringOutcome::Injected { .. }));
-    let pending = broker
-        .list(true)
+    let pending = observed_typed_approvals(&broker, true)
         .await
-        .approvals
         .pop()
         .expect("approval is still pending");
     broker
         .decide(ApprovalDecideParams {
             request_id: pending.request_id,
-            decision: ApprovalDecision::Allow,
-            actor: requester,
+            decision: Some(ApprovalDecision::Allow),
+            option_id: None,
+            acknowledge_persistent: false,
+            note: None,
+            actor: approval_actor(&requester),
         })
         .await?;
     let outcome = tokio::time::timeout(Duration::from_secs(2), &mut prompt).await??;
     assert_eq!(outcome.output, "session-a-steered-and-approved");
     assert_eq!(
-        broker.list(false).await.approvals[0].state,
+        observed_typed_approvals(&broker, false).await[0].state,
         collaboration_protocol::ApprovalState::Decided
     );
     runtime.shutdown().await;
@@ -494,7 +629,8 @@ async fn permission_wait_observes_cancellation_during_provider_cancel() -> TestR
         generation: GenerationNumber::try_from(1)?,
     };
     let runtime = ExternalProviderRuntime::initialize(permission_during_cancel_fixture()).await?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
     runtime.create_session(root.path().to_owned()).await?;
     let requester = session_ref(&service_id, "codex-local", "approver")?;
@@ -511,20 +647,259 @@ async fn permission_wait_observes_cancellation_during_provider_cancel() -> TestR
             binding_retirement: CancellationToken::new(),
         },
     ));
-    wait_for_pending_approval(&broker, prompt.as_mut()).await?;
+    wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
     runtime.cancel_active_prompt("session-a".to_owned()).await?;
 
     let outcome = tokio::time::timeout(Duration::from_secs(5), &mut prompt).await??;
     assert_eq!(outcome.stop_reason, ProviderPromptStopReason::Cancelled);
     assert_eq!(outcome.output, "session-a-cancelled");
-    let history = broker.list(false).await.approvals;
+    let history = observed_typed_approvals(&broker, false).await;
     assert_eq!(history.len(), 1);
     assert_eq!(
         history[0].state,
         collaboration_protocol::ApprovalState::Cancelled
     );
     assert!(history[0].reason.is_some());
-    assert!(broker.list(true).await.approvals.is_empty());
+    assert!(observed_typed_approvals(&broker, true).await.is_empty());
+    runtime.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn permission_arriving_after_router_cancel_is_answered_cancelled() -> TestResult {
+    // ACP v1 prompt-turn.mdx:336-350: a request received after session/cancel
+    // still needs its cancelled answer before the agent ends the Turn.
+    let root = tempfile::tempdir()?;
+    let event_socket = root.path().join("prompt-event.sock");
+    let listener = tokio::net::UnixListener::bind(&event_socket)?;
+    let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
+    let generation = CodexGeneration {
+        service_epoch: service_id.clone(),
+        generation: GenerationNumber::try_from(1)?,
+    };
+    let runtime = Arc::new(
+        ExternalProviderRuntime::initialize(permission_after_cancel_fixture(&event_socket)).await?,
+    );
+    let (broker, _notice) = approval_broker_fixture(&root, &service_id, &generation).await?;
+    runtime.install_approval_broker(Arc::clone(&broker)).await;
+    runtime.create_session(root.path().to_owned()).await?;
+    let approver = session_ref(&service_id, "codex-local", "approver")?;
+    let prompt_runtime = Arc::clone(&runtime);
+    let prompt = tokio::spawn(async move {
+        let outcome = prompt_runtime
+            .prompt_with_approval_context(
+                "session-a".to_owned(),
+                "Wait for cancellation.".to_owned(),
+                ExternalProviderApprovalContext {
+                    requester: approver.clone(),
+                    approver,
+                    target: session_ref(&service_id, "cursor-local", "session-a")?,
+                    operation_id: OperationId::generate(),
+                    binding_generation: generation,
+                    binding_retirement: CancellationToken::new(),
+                },
+            )
+            .await?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(outcome)
+    });
+    let (mut notice, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await??;
+    let mut payload = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut notice, &mut payload).await?;
+    assert_eq!(payload, b"prompt");
+    runtime.cancel_active_prompt("session-a".to_owned()).await?;
+    let outcome: ExternalProviderPromptOutcome =
+        tokio::time::timeout(Duration::from_secs(2), prompt).await???;
+    assert_eq!(outcome.stop_reason, ProviderPromptStopReason::Cancelled);
+    assert!(observed_typed_approvals(&broker, true).await.is_empty());
+    let history = observed_typed_approvals(&broker, false).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].state,
+        collaboration_protocol::ApprovalState::Cancelled
+    );
+    assert_eq!(history[0].reason.as_deref(), Some("turnCancelled"));
+    runtime.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_option_sets_keep_order_scope_and_selected_id() -> TestResult {
+    // PR 1 baseline: survey-cursor.md:54 and claude-adapter-and-sdk.md:153-155
+    // describe these agent-offered choices. Extraction preserves their order,
+    // disclosed scopes, and the verbatim option ID sent back to the agent.
+    let cases = [
+        (
+            "cursor",
+            serde_json::json!([
+                {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+                {"optionId":"allow-always","name":"Always allow","kind":"allow_always"},
+                {"optionId":"reject-once","name":"Reject","kind":"reject_once"}
+            ]),
+            serde_json::json!([
+                {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}},
+                {"optionId":"allow-always","label":"Always allow","choice":{"effect":"allow","scope":{"persistent":{"where_stored":"the agent's own persistent permissions (location not reported)"}}}},
+                {"optionId":"reject-once","label":"Reject","choice":{"effect":"decline","scope":"once"}}
+            ]),
+        ),
+        (
+            "claude",
+            serde_json::json!([
+                {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+                {"optionId":"allow-with-updates","name":"Allow with updates","kind":"allow_always"},
+                {"optionId":"allow-skill-exact","name":"Allow this skill","kind":"allow_always"},
+                {"optionId":"reject","name":"Reject","kind":"reject_once"}
+            ]),
+            serde_json::json!([
+                {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}},
+                {"optionId":"allow-with-updates","label":"Allow with updates","choice":{"effect":"allow","scope":{"persistent":{"where_stored":"the agent's own persistent permissions (location not reported)"}}}},
+                {"optionId":"allow-skill-exact","label":"Allow this skill","choice":{"effect":"allow","scope":{"persistent":{"where_stored":"the agent's own persistent permissions (location not reported)"}}}},
+                {"optionId":"reject","label":"Reject","choice":{"effect":"decline","scope":"once"}}
+            ]),
+        ),
+    ];
+    for (agent_name, options, expected_options) in cases {
+        let reject_id = if agent_name == "cursor" {
+            "reject-once"
+        } else {
+            "reject"
+        };
+        for (decision, selected_id) in [
+            (ApprovalDecision::Allow, "allow-once"),
+            (ApprovalDecision::Deny, reject_id),
+        ] {
+            let root = tempfile::tempdir()?;
+            let service_id =
+                UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
+            let generation = CodexGeneration {
+                service_epoch: service_id.clone(),
+                generation: GenerationNumber::try_from(1)?,
+            };
+            let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+            .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion":1}))
+            .respond("initialize", serde_json::json!({"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":agent_name,"version":"1"}}))
+            .expect_request("create", "session/new", serde_json::json!({}))
+            .respond("create", serde_json::json!({"sessionId":"session-a"}))
+            .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId":"session-a"}))
+            .send(serde_json::json!({"jsonrpc":"2.0","id":91,"method":"session/request_permission","params":{"sessionId":"session-a","toolCall":{"toolCallId":"tool-a","title":"Run command","kind":"execute"},"options":options.clone()}}))
+            .expect_message(serde_json::json!({"jsonrpc":"2.0","id":91,"result":{"outcome":{"outcome":"selected","optionId":selected_id}}}))
+            .respond("prompt", serde_json::json!({"stopReason":"end_turn"}))
+            .launch();
+            let runtime = ExternalProviderRuntime::initialize(fixture).await?;
+            let (broker, approval_notice) =
+                approval_broker_fixture(&root, &service_id, &generation).await?;
+            runtime.install_approval_broker(Arc::clone(&broker)).await;
+            runtime.create_session(root.path().to_owned()).await?;
+            let approver = session_ref(&service_id, "codex-local", "approver")?;
+            let mut prompt = Box::pin(runtime.prompt_with_approval_context(
+                "session-a".to_owned(),
+                "Run command.".to_owned(),
+                ExternalProviderApprovalContext {
+                    requester: approver.clone(),
+                    approver: approver.clone(),
+                    target: session_ref(&service_id, "cursor-local", "session-a")?,
+                    operation_id: OperationId::generate(),
+                    binding_generation: generation,
+                    binding_retirement: CancellationToken::new(),
+                },
+            ));
+            wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
+            let pending = observed_typed_approvals(&broker, true).await;
+            assert_eq!(pending.len(), 1, "{agent_name}");
+            assert_eq!(
+                serde_json::to_value(&pending[0].request.options)?,
+                expected_options,
+                "{agent_name}"
+            );
+            assert_eq!(
+                serde_json::to_value(&pending[0].request.subject)?,
+                serde_json::json!({"type":"tool_call","toolCall":{"toolCallId":"tool-a","kind":"Execute","title":"Run command"}}),
+                "{agent_name}"
+            );
+            assert!(matches!(
+                broker
+                    .decide(ApprovalDecideParams {
+                        request_id: pending[0].request_id.clone(),
+                        decision: Some(ApprovalDecision::AllowForSession),
+                        option_id: None,
+                        acknowledge_persistent: false,
+                        note: None,
+                        actor: approval_actor(&approver),
+                    })
+                    .await,
+                Err(error) if error.code() == "decisionNotOffered"
+            ));
+            assert_eq!(observed_typed_approvals(&broker, true).await.len(), 1);
+            broker
+                .decide(ApprovalDecideParams {
+                    request_id: pending[0].request_id.clone(),
+                    decision: Some(decision),
+                    option_id: None,
+                    acknowledge_persistent: false,
+                    note: None,
+                    actor: approval_actor(&approver),
+                })
+                .await?;
+            let outcome = tokio::time::timeout(Duration::from_secs(5), &mut prompt).await??;
+            assert_eq!(outcome.stop_reason, ProviderPromptStopReason::EndTurn);
+            assert_eq!(
+                observed_typed_approvals(&broker, false).await[0].state,
+                collaboration_protocol::ApprovalState::Decided
+            );
+            runtime.shutdown().await;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn output_limit_cancels_pending_permission() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let event_socket = root.path().join("output-limit-event.sock");
+    let listener = tokio::net::UnixListener::bind(&event_socket)?;
+    let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
+    let generation = CodexGeneration {
+        service_epoch: service_id.clone(),
+        generation: GenerationNumber::try_from(1)?,
+    };
+    let runtime = ExternalProviderRuntime::initialize(
+        output_limit_with_pending_permission_fixture(&event_socket),
+    )
+    .await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
+    runtime.install_approval_broker(Arc::clone(&broker)).await;
+    runtime.create_session(root.path().to_owned()).await?;
+    let requester = session_ref(&service_id, "codex-local", "approver")?;
+    let mut prompt = Box::pin(runtime.prompt_with_approval_context(
+        "session-a".to_owned(),
+        "Produce output.".to_owned(),
+        ExternalProviderApprovalContext {
+            requester: requester.clone(),
+            approver: requester,
+            target: session_ref(&service_id, "cursor-local", "session-a")?,
+            operation_id: OperationId::generate(),
+            binding_generation: generation,
+            binding_retirement: CancellationToken::new(),
+        },
+    ));
+    wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
+    let (mut event, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await??;
+    tokio::io::AsyncWriteExt::write_all(&mut event, b"g").await?;
+    let error = tokio::time::timeout(Duration::from_secs(5), &mut prompt)
+        .await?
+        .expect_err("output limit stops prompt");
+    assert!(matches!(
+        error,
+        ExternalProviderRuntimeError::PromptOutputLimitExceeded
+    ));
+    let history = observed_typed_approvals(&broker, false).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].state,
+        collaboration_protocol::ApprovalState::Cancelled
+    );
+    assert_eq!(history[0].reason.as_deref(), Some("turnCancelled"));
+    assert!(observed_typed_approvals(&broker, true).await.is_empty());
     runtime.shutdown().await;
     Ok(())
 }
@@ -533,8 +908,9 @@ async fn permission_wait_observes_cancellation_during_provider_cancel() -> TestR
 async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestResult {
     // ACP v1 prompt-turn.mdx:365-367 ends a Turn only at the agent's prompt
     // result. Specification R5 projects connection loss as providerRetired.
-    let root = tempfile::tempdir_in("/private/tmp")?;
-    let process_id_path = root.path().join("fixture-process-id");
+    let root = tempfile::tempdir_in("/tmp")?;
+    let exit_socket_path = root.path().join("fixture-exit.sock");
+    let exit_listener = tokio::net::UnixListener::bind(&exit_socket_path)?;
     let fixture = acp_scripted_fixture::AcpFixtureScript::new()
         .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion": 1}))
         .respond("initialize", serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}, "agentInfo": {"name": "loss-fixture", "version": "1"}}))
@@ -542,8 +918,7 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
         .respond("create", serde_json::json!({"sessionId": "session-a"}))
         .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId": "session-a"}))
         .send(serde_json::json!({"jsonrpc": "2.0", "id": 91, "method": "session/request_permission", "params": {"sessionId": "session-a", "toolCall": {"toolCallId": "permission-a", "title": "Run an approved command", "kind": "execute"}, "options": [{"optionId": "allow-a", "name": "Allow once", "kind": "allow_once"}]}}))
-        .wait_for_signal(&process_id_path)
-        .exit()
+        .exit_on_socket_signal(&exit_socket_path)
         .record_diagnostics(root.path().join("fixture-diagnostics.txt"))
         .launch();
     let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
@@ -552,7 +927,8 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
         generation: GenerationNumber::try_from(1)?,
     };
     let runtime = ExternalProviderRuntime::initialize(fixture).await?;
-    let broker = approval_broker_fixture(&root, &service_id, &generation).await?;
+    let (broker, approval_notice) =
+        approval_broker_fixture(&root, &service_id, &generation).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
     runtime.create_session(root.path().to_owned()).await?;
     let approver = session_ref(&service_id, "codex-local", "approver")?;
@@ -568,32 +944,16 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
             binding_retirement: runtime.retirement(),
         },
     ));
-    if let Err(error) = wait_for_pending_approval(&broker, prompt.as_mut()).await {
+    if let Err(error) = wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await
+    {
         let diagnostics = std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
             .unwrap_or_default();
         return Err(format!("{error}; fixture: {diagnostics}").into());
     }
-    let process_id = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Ok(value) = std::fs::read_to_string(&process_id_path)
-                && let Ok(process_id) = value.parse::<i32>()
-            {
-                break process_id;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| {
-        format!(
-            "fixture process did not become ready for signal: {}",
-            std::fs::read_to_string(root.path().join("fixture-diagnostics.txt"))
-                .unwrap_or_default()
-        )
-    })?;
-    let process_id =
-        rustix::process::Pid::from_raw(process_id).ok_or("invalid fixture process ID")?;
-    rustix::process::kill_process(process_id, rustix::process::Signal::USR1)?;
+    let (mut exit_signal, _) = tokio::time::timeout(Duration::from_secs(5), exit_listener.accept())
+        .await
+        .map_err(|_| "fixture did not arm its exit signal")??;
+    exit_signal.write_all(b"x").await?;
     let prompt_result = tokio::time::timeout(Duration::from_secs(5), &mut prompt)
         .await
         .map_err(|_| "prompt did not settle after fixture agent exited")?;
@@ -604,29 +964,17 @@ async fn provider_exit_cancels_pending_permission_as_provider_retired() -> TestR
         ),
         "{prompt_result:?}"
     );
-    let history_result = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let history = broker.list(false).await.approvals;
-            if history[0].state == collaboration_protocol::ApprovalState::Cancelled {
-                break history;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    let history = match history_result {
-        Ok(history) => history,
-        Err(_) => {
-            return Err(format!(
-                "approval history did not settle after fixture agent exited: {:?}",
-                broker.list(false).await.approvals
-            )
-            .into());
-        }
-    };
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].reason.as_deref(), Some("providerRetired"));
-    assert!(broker.list(true).await.approvals.is_empty());
+    tokio::time::timeout(Duration::from_secs(5), runtime.retirement().cancelled())
+        .await
+        .map_err(|_| "provider connection did not retire after fixture exit")?;
     runtime.shutdown().await;
+    let history = observed_typed_approvals(&broker, false).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].state,
+        collaboration_protocol::ApprovalState::Cancelled
+    );
+    assert_eq!(history[0].reason.as_deref(), Some("providerRetired"));
+    assert!(observed_typed_approvals(&broker, true).await.is_empty());
     Ok(())
 }

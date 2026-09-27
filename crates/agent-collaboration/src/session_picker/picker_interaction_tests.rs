@@ -1,6 +1,47 @@
 use super::*;
 
 #[tokio::test]
+async fn provider_selection_shows_read_only_details_without_a_codex_outcome() {
+    let summary: collaboration_client::protocol::ProviderSessionSummary =
+        serde_json::from_value(serde_json::json!({
+            "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},"sessionId":"provider-one"},
+            "workingDirectory":"/repo/project-a","updatedAt":3,"state":"requiresAction",
+            "approver":{"kind":"human","humanId":"owner"},
+            "createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}
+        }))
+        .expect("provider summary");
+    let mut request = picker_request();
+    request.records = vec![SessionPickerRecord::from_provider_summary(
+        &summary,
+        "Claude fixture",
+    )];
+    let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+    let frames = element! {
+        SessionsPickerComponent(
+            request: request,
+            width: 100usize,
+            selected_outcome_out: &mut selected_outcome,
+        )
+    }
+    .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+        vec![
+            alt_enter_key(),
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+        ],
+    )))
+    .map(|canvas| canvas.to_string())
+    .collect::<Vec<_>>()
+    .await;
+    assert_eq!(selected_outcome, None);
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("Claude fixture") && frame.contains("Read-only"))
+    );
+}
+
+#[tokio::test]
 async fn sessions_picker_iocraft_mock_terminal_handles_keys() {
     let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
     let actual = element! {

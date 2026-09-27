@@ -1,7 +1,7 @@
 use collaboration_client::ControlClient;
 use collaboration_protocol::{EndpointRef, QuestionAnswerParams, QuestionResponse, QuestionState};
 use collaboration_service::{
-    NativeControlBackend, NativeGenerationGate, ServiceApprovalBroker, ServiceIdentity,
+    NativeControlBackend, NativeGenerationGate, ServiceIdentity, ServiceInteractionBroker,
     serve_control_connection,
 };
 use message_board::{HumanId, Identity, SessionEndpointRef, SessionId, SessionRef};
@@ -18,7 +18,7 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
         "serviceId":service_id,"endpointId":"claude-local"
     }))
     .expect("endpoint");
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.to_owned().try_into().expect("service ID"),
         NativeControlBackend {
             endpoint,
@@ -46,7 +46,7 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
         "requestId":"question-1", "prompt":"Choose launch settings", "fields":[
             {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true},
             {"kind":"boolean","fieldId":"dryRun","label":"Dry run","description":null,"required":true},
-            {"kind":"singleChoice","fieldId":"color","label":"Color","description":null,"required":true,"options":["red","blue"]}
+            {"kind":"singleChoice","fieldId":"color","label":"Color","description":null,"required":true,"options":[{"optionId":"red","label":"Red"},{"optionId":"blue","label":"Blue"}]}
         ]
     })).expect("question");
     let agent_reply = broker
@@ -63,8 +63,10 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
     assert_eq!(list.questions[0].prompt, "Choose launch settings");
     assert_eq!(list.questions[0].fields.len(), 3);
     let answer = QuestionResponse::Answered {
-        content: serde_json::from_value(json!({"count":3,"dryRun":true,"color":"blue"}))
-            .expect("content"),
+        content: serde_json::from_value(
+            json!({"count":3,"dryRun":true,"color":{"selectedOptionIds":["blue"]}}),
+        )
+        .expect("content"),
     };
     let wrong_actor = Identity::Human {
         human_id: HumanId::try_from("other".to_owned()).expect("human"),

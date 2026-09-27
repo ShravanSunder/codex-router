@@ -29,28 +29,6 @@ pub(super) fn validate_create_endpoint_options(
                 ),
             });
         }
-    } else if endpoint_id
-        .as_deref()
-        .is_some_and(|endpoint| matches!(endpoint, "claude-local" | "cursor-local"))
-    {
-        let mut supplied_fields = Vec::new();
-        if arguments.model.is_some() {
-            supplied_fields.push("--model");
-        }
-        if arguments.effort.is_some() {
-            supplied_fields.push("--effort");
-        }
-        if !supplied_fields.is_empty() {
-            return Err(CreateInputValidationFailure {
-                kind: "unsupportedCapability",
-                exit_code: 4,
-                message: format!(
-                    "{} is rejected for provider endpoint {}; omit these fields",
-                    supplied_fields.join(" and "),
-                    endpoint_id.as_deref().unwrap_or_default()
-                ),
-            });
-        }
     }
     Ok(())
 }

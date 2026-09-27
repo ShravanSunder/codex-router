@@ -32,7 +32,7 @@ impl ProviderSessionRecord {
 }
 
 impl ProviderOperationStore {
-    /// Atomically settle create/load and make its target loadable after a restart.
+    /// Atomically settle create/load/resume and make its target loadable after a restart.
     pub async fn settle_session_operation(
         &mut self,
         operation_id: &OperationId,
@@ -66,7 +66,7 @@ impl ProviderOperationStore {
                 stage=?,effect=?,reconciliation_state=?,
                 terminal_at_ms=MAX(admitted_at_ms,?),
                 updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)
-             WHERE operation_id=? AND stage=? AND operation_kind IN (?,?)
+             WHERE operation_id=? AND stage=? AND operation_kind IN (?,?,?)
              AND (target_session_id IS NULL OR
                  (target_service_id=? AND target_endpoint_id=? AND target_session_id=?))",
             target_service_id,
@@ -85,6 +85,9 @@ impl ProviderOperationStore {
                 ProviderOperationKind::ConversationCreate
             )?,
             super::provider_operation_store::encode_enum(ProviderOperationKind::ConversationLoad)?,
+            super::provider_operation_store::encode_enum(
+                ProviderOperationKind::ConversationResume
+            )?,
             target_service_id,
             target_endpoint_id,
             target_session_id,

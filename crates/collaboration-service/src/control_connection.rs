@@ -143,8 +143,13 @@ pub async fn serve_control_connection(
                         request.method.as_str(),
                         "conversation/create"
                             | "conversation/load"
+                            | "conversation/resume"
+                            | "conversation/close"
                             | "conversation/prompt"
                             | "conversation/cancel"
+                            | "conversation/settingsSet"
+                            | "conversation/settingsAccept"
+                            | "provider/sessionInspect"
                             | "conversation/operationShow"
                             | "conversation/operationWait"
                             | "conversation/operationReconcile"
@@ -491,6 +496,20 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request) if request.method == "provider/sessionList" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::provider_session_inventory_dispatch::dispatch(
+                            json!(id),
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request)
                     if matches!(
                         request.method.as_str(),
@@ -648,6 +667,9 @@ async fn dispatch_interaction(
                         }
                         crate::interaction_broker::InteractionHistoryError::NotPending => {
                             ("questionNotPending", None)
+                        }
+                        crate::interaction_broker::InteractionHistoryError::AlreadySettled => {
+                            ("alreadySettled", None)
                         }
                         crate::interaction_broker::InteractionHistoryError::InvalidAnswer {
                             field_id,

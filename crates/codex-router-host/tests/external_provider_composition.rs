@@ -92,6 +92,7 @@ sys.stdin.read()
     let create_operation = OperationId::generate();
     client
         .create_provider_conversation(ConversationCreateRequest {
+            settings: None,
             operation_id: create_operation.clone(),
             endpoint: provider_endpoint.endpoint.clone(),
             generation: Some(generation.clone()),
@@ -124,6 +125,7 @@ sys.stdin.read()
     let prompt_operation = OperationId::generate();
     client
         .prompt_provider_conversation(ConversationPromptRequest {
+            input_id: None,
             operation_id: prompt_operation.clone(),
             target: target.clone(),
             generation: Some(generation),
@@ -229,6 +231,7 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
     .expect("provider retirement published");
     let failure = client
         .create_provider_conversation(ConversationCreateRequest {
+            settings: None,
             operation_id: OperationId::generate(),
             endpoint: provider_endpoint.endpoint,
             generation: Some(CodexGeneration {
