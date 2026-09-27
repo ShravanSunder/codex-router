@@ -1,39 +1,55 @@
 //! Capture the connection-scoped Claude auth update without private fields.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use agent_client_protocol::{Agent, ConnectionTo, Dispatch, Error, HandleDispatchFrom, Handled};
 use session_event_model::session_profile_codec::decode_connection_auth_status;
 use session_event_model::{ProviderAuthStatus, SessionEvent};
 use tokio::sync::RwLock;
 
-use crate::{ProviderCapabilityReport, SessionEventSink};
+use super::{ActiveApprovalContext, approval_turn_cancellation::cancel_turn_after_event_overflow};
+use crate::{
+    InteractionPort, ProviderCapabilityReport, SessionEventSink,
+    provider_connection_activity::ProviderConnectionActivity,
+};
 
-pub(super) struct ProviderAuthStatusHandler {
+pub(super) struct ProviderAuthStatusHandler<P: InteractionPort> {
     auth_status: Arc<RwLock<ProviderAuthStatus>>,
     session_capabilities: Arc<RwLock<HashMap<String, ProviderCapabilityReport>>>,
     event_sink: Arc<dyn SessionEventSink>,
+    connection_activity: Arc<ProviderConnectionActivity>,
+    approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
+    interaction_port: Arc<P>,
 }
 
-impl ProviderAuthStatusHandler {
+impl<P: InteractionPort> ProviderAuthStatusHandler<P> {
     pub(super) fn new(
         auth_status: Arc<RwLock<ProviderAuthStatus>>,
         session_capabilities: Arc<RwLock<HashMap<String, ProviderCapabilityReport>>>,
         event_sink: Arc<dyn SessionEventSink>,
+        connection_activity: Arc<ProviderConnectionActivity>,
+        approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
+        interaction_port: Arc<P>,
     ) -> Self {
         Self {
             auth_status,
             session_capabilities,
             event_sink,
+            connection_activity,
+            approval_contexts,
+            interaction_port,
         }
     }
 }
 
-impl HandleDispatchFrom<Agent> for ProviderAuthStatusHandler {
+impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderAuthStatusHandler<P> {
     async fn handle_dispatch_from(
         &mut self,
         message: Dispatch,
-        _connection: ConnectionTo<Agent>,
+        connection: ConnectionTo<Agent>,
     ) -> Result<Handled<Dispatch>, Error> {
         let Dispatch::Notification(notification) = message else {
             return Ok(Handled::No {
@@ -66,12 +82,27 @@ impl HandleDispatchFrom<Agent> for ProviderAuthStatusHandler {
                 .collect::<Vec<_>>()
         };
         for (session_id, capabilities) in reports {
-            self.event_sink
+            if self
+                .event_sink
                 .publish(
                     &session_id,
                     SessionEvent::CapabilitiesChanged { capabilities },
                 )
-                .map_err(|_| Error::internal_error())?;
+                .is_err()
+            {
+                tracing::error!("provider Session event sink overflow on auth status update");
+                let is_running = cancel_turn_after_event_overflow(
+                    &self.connection_activity,
+                    &self.approval_contexts,
+                    &self.interaction_port,
+                    &connection,
+                    &session_id,
+                )
+                .await?;
+                if !is_running {
+                    return Err(Error::internal_error());
+                }
+            }
         }
         Ok(Handled::Yes)
     }

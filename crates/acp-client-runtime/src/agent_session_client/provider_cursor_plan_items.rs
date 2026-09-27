@@ -9,7 +9,10 @@ use agent_client_protocol::{Agent, ConnectionTo, Dispatch, Error, HandleDispatch
 use serde::Deserialize;
 use session_event_model::{SessionEvent, SessionItem, SessionItemKind};
 
-use crate::{SessionEventSink, provider_connection_activity::ProviderConnectionActivity};
+use super::{ActiveApprovalContext, approval_turn_cancellation::cancel_turn_after_event_overflow};
+use crate::{
+    InteractionPort, SessionEventSink, provider_connection_activity::ProviderConnectionActivity,
+};
 
 #[derive(Default)]
 pub(crate) struct CursorPlanItems(Mutex<HashMap<(String, String), CursorPlanRecord>>);
@@ -144,26 +147,32 @@ impl CursorTodoStatus {
     }
 }
 
-pub(super) struct ProviderCursorTodoHandler {
+pub(super) struct ProviderCursorTodoHandler<P: InteractionPort> {
     tool_registry: Arc<ProviderConnectionActivity>,
     todo_state: Arc<CursorPlanItems>,
     event_sink: Arc<dyn SessionEventSink>,
+    approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
+    interaction_port: Arc<P>,
 }
 
-impl ProviderCursorTodoHandler {
+impl<P: InteractionPort> ProviderCursorTodoHandler<P> {
     pub(super) fn new(
         tool_registry: Arc<ProviderConnectionActivity>,
         todo_state: Arc<CursorPlanItems>,
         event_sink: Arc<dyn SessionEventSink>,
+        approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
+        interaction_port: Arc<P>,
     ) -> Self {
         Self {
             tool_registry,
             todo_state,
             event_sink,
+            approval_contexts,
+            interaction_port,
         }
     }
 
-    fn apply_update(&self, params: serde_json::Value) {
+    async fn apply_update(&self, params: serde_json::Value, connection: &ConnectionTo<Agent>) {
         let Ok(update) = serde_json::from_value::<CursorTodoUpdate>(params) else {
             tracing::warn!("malformed Cursor todo update");
             return;
@@ -180,26 +189,39 @@ impl ProviderCursorTodoHandler {
         };
         if self.event_sink.publish(&session_id, event).is_err() {
             tracing::error!("provider Session event sink overflow on Cursor todo update");
+            if let Err(error) = cancel_turn_after_event_overflow(
+                &self.tool_registry,
+                &self.approval_contexts,
+                &self.interaction_port,
+                connection,
+                &session_id,
+            )
+            .await
+            {
+                tracing::warn!(?error, "failed to cancel Turn after Cursor todo overflow");
+            }
         }
     }
 }
 
-impl HandleDispatchFrom<Agent> for ProviderCursorTodoHandler {
+impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderCursorTodoHandler<P> {
     async fn handle_dispatch_from(
         &mut self,
         message: Dispatch,
-        _connection: ConnectionTo<Agent>,
+        connection: ConnectionTo<Agent>,
     ) -> Result<Handled<Dispatch>, Error> {
         match message {
             Dispatch::Request(request, responder) if request.method() == "cursor/update_todos" => {
-                self.apply_update(request.params().clone());
+                self.apply_update(request.params().clone(), &connection)
+                    .await;
                 responder.respond(serde_json::json!({}))?;
                 Ok(Handled::Yes)
             }
             Dispatch::Notification(notification)
                 if notification.method() == "cursor/update_todos" =>
             {
-                self.apply_update(notification.params().clone());
+                self.apply_update(notification.params().clone(), &connection)
+                    .await;
                 Ok(Handled::Yes)
             }
             message => Ok(Handled::No {
