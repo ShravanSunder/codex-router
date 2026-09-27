@@ -43,6 +43,7 @@ automation-storage = { path = "../automation-storage", version = "0.1.16" }
 codex-router-host.workspace = true
 lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
 collaboration-service = { path = "../collaboration-service", version = "0.1.14" }
+collaboration-protocol = { path = "../collaboration-protocol" }
 message-board-storage = { path = "../message-board-storage", version = "0.1.20" }
 tokio-util.workspace = true
 futures-util.workspace = true

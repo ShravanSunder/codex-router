@@ -136,8 +136,9 @@ pub use codex_acp_adapter::BrokeredApprovalOutcome;
 pub use interaction_broker::{
     ApprovalDecisionError, InteractionHistoryError, InteractionHistoryRecord,
     InteractionHistoryState, QuestionHistoryState, QuestionResponse, RefusedApprovalOption,
-    RefusedTypedApproval, ServiceInteractionBroker, TypedApprovalResolution,
-    TypedApprovalSelection, TypedInteractionDecision, TypedInteractionDecisionOutcome,
+    RefusedTypedApproval, ServiceInteractionBroker, TypedApprovalLegacyContext,
+    TypedApprovalResolution, TypedApprovalSelection, TypedInteractionDecision,
+    TypedInteractionDecisionOutcome,
 };
 
 mod acp_channel_listener;

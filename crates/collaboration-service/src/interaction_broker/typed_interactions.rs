@@ -6,16 +6,29 @@ impl ServiceInteractionBroker {
     /// Register an offered approval and return the exact agent option ID when
     /// its typed Approver decides. Legacy approval history remains untouched.
     pub async fn request_typed_approval(
-        &self,
+        self: &Arc<Self>,
         requester: message_board::SessionRef,
         approver: message_board::Identity,
         request: session_event_model::ApprovalRequest,
         turn_cancellation: tokio_util::sync::CancellationToken,
         retirement: tokio_util::sync::CancellationToken,
+        legacy_context: Option<TypedApprovalLegacyContext>,
     ) -> Result<oneshot::Receiver<TypedApprovalResolution>, InteractionHistoryError> {
         if !self.participants_belong_to_service(&requester, &approver) {
             return Err(InteractionHistoryError::Unavailable);
         }
+        let legacy_metadata = if matches!(&approver, message_board::Identity::Session { .. }) {
+            legacy_context.map(|context| LegacyApprovalMetadata {
+                operation_id: context.operation_id,
+                target: context.target,
+                generation: context.generation,
+                expires_at: (chrono::Utc::now()
+                    + chrono::Duration::seconds(APPROVAL_TIMEOUT.as_secs() as i64))
+                .to_rfc3339(),
+            })
+        } else {
+            None
+        };
         let request_id = request.request_id.clone();
         let typed_operation = self.typed_operations.lock().await;
         if self
@@ -33,7 +46,7 @@ impl ServiceInteractionBroker {
                 "providerRetired"
             };
             self.interaction_history
-                .record_cancelled_approval(requester, approver, request, reason)
+                .record_cancelled_approval(requester, approver, request, reason, legacy_metadata)
                 .await?;
             return Err(InteractionHistoryError::NotPending);
         }
@@ -47,6 +60,7 @@ impl ServiceInteractionBroker {
                 approver,
                 request,
                 state: InteractionHistoryState::Pending,
+                legacy_metadata,
             })
             .await?;
         #[cfg(test)]
@@ -73,6 +87,7 @@ impl ServiceInteractionBroker {
                 turn_cancellation: turn_cancellation.clone(),
                 retirement: retirement.clone(),
                 requester: requester_for_pending,
+                notice_task: NoticeTask::default(),
             },
         );
         if turn_cancellation.is_cancelled() || retirement.is_cancelled() {
@@ -91,19 +106,34 @@ impl ServiceInteractionBroker {
             return Err(InteractionHistoryError::NotPending);
         }
         drop(typed_operation);
-        if typed_interaction_notice::deliver_approval_notice(
-            self,
-            &notice_requester,
-            &notice_approver,
-            &notice_request,
-        )
-        .await
-        .is_err()
+        let broker = Arc::downgrade(self);
+        let delivery = self.session_delivery.get().cloned();
+        let request_id_for_notice = request_id.clone();
+        let notice_task = tokio::spawn(async move {
+            if typed_interaction_notice::deliver_approval_notice(
+                delivery.as_ref(),
+                &notice_requester,
+                &notice_approver,
+                &notice_request,
+            )
+            .await
+            .is_err()
+                && let Some(broker) = broker.upgrade()
+            {
+                let _ = broker
+                    .cancel_typed_approval(&request_id_for_notice, "approverUnreachable")
+                    .await;
+            }
+        });
+        if let Some(pending) = self
+            .typed_pending_approvals
+            .lock()
+            .await
+            .get_mut(&request_id)
         {
-            let _ = self
-                .cancel_typed_approval(&request_id, "approverUnreachable")
-                .await;
-            return Err(InteractionHistoryError::Unavailable);
+            pending.notice_task.0 = Some(notice_task);
+        } else {
+            notice_task.abort();
         }
         Ok(receiver)
     }
@@ -139,7 +169,7 @@ impl ServiceInteractionBroker {
     }
 
     pub async fn request_question(
-        &self,
+        self: &Arc<Self>,
         requester: message_board::SessionRef,
         approver: message_board::Identity,
         request: session_event_model::QuestionRequest,
@@ -166,22 +196,33 @@ impl ServiceInteractionBroker {
                 completion: sender,
                 requester,
                 retirement,
+                notice_task: NoticeTask::default(),
             },
         );
         drop(pending);
-        if typed_interaction_notice::deliver_question_notice(
-            self,
-            &notice_requester,
-            &notice_approver,
-            &notice_request,
-        )
-        .await
-        .is_err()
-        {
-            let _ = self
-                .cancel_question(&request_id, "approverUnreachable")
-                .await;
-            return Err(InteractionHistoryError::Unavailable);
+        let broker = Arc::downgrade(self);
+        let delivery = self.session_delivery.get().cloned();
+        let request_id_for_notice = request_id.clone();
+        let notice_task = tokio::spawn(async move {
+            if typed_interaction_notice::deliver_question_notice(
+                delivery.as_ref(),
+                &notice_requester,
+                &notice_approver,
+                &notice_request,
+            )
+            .await
+            .is_err()
+                && let Some(broker) = broker.upgrade()
+            {
+                let _ = broker
+                    .cancel_question(&request_id_for_notice, "approverUnreachable")
+                    .await;
+            }
+        });
+        if let Some(pending) = self.pending_questions.lock().await.get_mut(&request_id) {
+            pending.notice_task.0 = Some(notice_task);
+        } else {
+            notice_task.abort();
         }
         Ok(receiver)
     }

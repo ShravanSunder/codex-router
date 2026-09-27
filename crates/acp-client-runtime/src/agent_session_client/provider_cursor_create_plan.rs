@@ -187,6 +187,7 @@ impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderCursorCreatePlanH
         }
         let port = Arc::clone(&self.interaction_port);
         let request_cancellation = responder.cancellation();
+        let response_guard = context.responses.track();
         connection.spawn(async move {
             let agent_cancellation = CancellationToken::new();
             let decision = port.request_approval(
@@ -204,7 +205,9 @@ impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderCursorCreatePlanH
                 }
                 outcome = &mut decision => outcome,
             };
-            responder.respond(cursor_plan_decision(outcome))
+            let queued = responder.respond(cursor_plan_decision(outcome));
+            drop(response_guard);
+            queued
         })?;
         Ok(Handled::Yes)
     }

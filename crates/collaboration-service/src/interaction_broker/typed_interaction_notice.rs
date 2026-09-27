@@ -1,12 +1,15 @@
 //! Notify a Session Approver through the existing agent-message route.
 
-use super::{APPROVAL_TIMEOUT, InteractionHistoryError, ServiceInteractionBroker};
+use super::{
+    APPROVAL_TIMEOUT, InteractionHistoryError, SessionMessageDelivery, deliver_message_via,
+};
 use collaboration_protocol::SessionRef as ProtocolSessionRef;
 use message_board::{Identity, SessionRef};
 use session_event_model::{ApprovalRequest, ApprovalScope, QuestionRequest};
+use std::sync::Arc;
 
 pub(super) async fn deliver_approval_notice(
-    broker: &ServiceInteractionBroker,
+    delivery: Option<&Arc<dyn SessionMessageDelivery>>,
     requester: &SessionRef,
     approver: &Identity,
     request: &ApprovalRequest,
@@ -54,11 +57,11 @@ pub(super) async fn deliver_approval_notice(
         "request": request,
         "decideCommands": commands,
     });
-    deliver_notice(broker, requester, approver_session, notice).await
+    deliver_notice(delivery, requester, approver_session, notice).await
 }
 
 pub(super) async fn deliver_question_notice(
-    broker: &ServiceInteractionBroker,
+    delivery: Option<&Arc<dyn SessionMessageDelivery>>,
     requester: &SessionRef,
     approver: &Identity,
     request: &QuestionRequest,
@@ -84,11 +87,11 @@ pub(super) async fn deliver_question_notice(
         "request": request,
         "answerCommand": answer_command,
     });
-    deliver_notice(broker, requester, approver_session, notice).await
+    deliver_notice(delivery, requester, approver_session, notice).await
 }
 
 async fn deliver_notice(
-    broker: &ServiceInteractionBroker,
+    delivery: Option<&Arc<dyn SessionMessageDelivery>>,
     requester: &SessionRef,
     approver: &SessionRef,
     notice: serde_json::Value,
@@ -96,9 +99,10 @@ async fn deliver_notice(
     let requester = protocol_session_ref(requester)?;
     let approver = protocol_session_ref(approver)?;
     let text = serde_json::to_string(&notice).map_err(|_| InteractionHistoryError::Unavailable)?;
+    let delivery = delivery.ok_or(InteractionHistoryError::Unavailable)?;
     tokio::time::timeout(
         APPROVAL_TIMEOUT,
-        broker.deliver_message(requester, approver, text),
+        deliver_message_via(delivery.as_ref(), requester, approver, text),
     )
     .await
     .map_err(|_| InteractionHistoryError::Unavailable)?

@@ -1,6 +1,176 @@
 use serde_json::{Value, json};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use tokio_util::sync::CancellationToken;
+
+struct AcceptedNoticeDelivery;
+
+impl collaboration_service::SessionMessageDelivery for AcceptedNoticeDelivery {
+    fn deliver<'a>(
+        &'a self,
+        _: collaboration_service::DeliveryRequest,
+        _: &'a dyn collaboration_service::AttemptEvidenceSink,
+    ) -> collaboration_service::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
+        Box::pin(async {
+            Ok(collaboration_protocol::DeliveryReceipt {
+                outcome: collaboration_protocol::DeliveryOutcome::Started,
+                reachability: Some(collaboration_protocol::SessionReachability::CodexAppServer),
+                client: None,
+            })
+        })
+    }
+
+    fn reconcile_attempt(
+        &self,
+        _: collaboration_service::AttemptReconciliationContext,
+    ) -> collaboration_service::DeliveryFuture<'_, collaboration_service::AttemptReconciliation>
+    {
+        Box::pin(async { Ok(collaboration_service::AttemptReconciliation::StillUnknown) })
+    }
+}
+
+#[tokio::test]
+async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
+    use std::sync::Arc;
+    let directory = tempfile::tempdir_in("/tmp").expect("private fixture directory");
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture permissions");
+    let service_id = "00000000-0000-4000-8000-000000000001";
+    let epoch = "00000000-0000-4000-8000-000000000002";
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let typed_service_id: collaboration_protocol::UuidIdentity =
+        service_id.to_owned().try_into().expect("service ID");
+    let endpoint = collaboration_protocol::EndpointRef {
+        service_id: typed_service_id.clone(),
+        endpoint_id: "claude-local".to_owned().try_into().expect("endpoint ID"),
+    };
+    let broker = collaboration_service::ServiceInteractionBroker::load(
+        typed_service_id,
+        collaboration_service::NativeControlBackend {
+            endpoint: endpoint.clone(),
+            gate: collaboration_service::NativeGenerationGate::default(),
+            codex_home: directory.path().to_owned(),
+        },
+        directory.path().join("approval-routes.json"),
+    )
+    .await
+    .expect("broker");
+    broker
+        .install_session_delivery(Arc::new(AcceptedNoticeDelivery))
+        .expect("notice route");
+    let requester: message_board::SessionRef = serde_json::from_value(json!({
+        "endpoint":endpoint,"sessionId":"provider-session"
+    }))
+    .expect("provider requester");
+    let approver: message_board::SessionRef = serde_json::from_value(json!({
+        "endpoint":endpoint,"sessionId":"approver-session"
+    }))
+    .expect("session approver");
+    let request = serde_json::from_value(json!({
+        "requestId":"provider-cli-approval","title":"Run command",
+        "options":[
+            {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}},
+            {"optionId":"allow-always","label":"Always allow","choice":{"effect":"allow","scope":{"persistent":{"where_stored":"provider settings"}}}}
+        ]
+    })).expect("approval request");
+    let receiver = broker
+        .request_typed_approval(
+            requester,
+            message_board::Identity::Session {
+                session: approver.clone(),
+            },
+            request,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            Some(collaboration_service::TypedApprovalLegacyContext {
+                operation_id: collaboration_protocol::OperationId::generate(),
+                target: serde_json::from_value(
+                    json!({"endpoint":endpoint,"sessionId":"provider-session"}),
+                )
+                .expect("target"),
+                generation: serde_json::from_value(json!({"serviceEpoch":epoch,"generation":1}))
+                    .expect("generation"),
+            }),
+        )
+        .await
+        .expect("pending provider approval");
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+        .expect("service identity")
+        .with_approval_broker(Arc::clone(&broker));
+    let control = collaboration_service::LocalControlService::bind(
+        &directory.path().join("control.sock"),
+        identity,
+    )
+    .expect("control bind");
+    let manifest = serde_json::from_value(json!({
+        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
+        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "controlSchemaDigest":digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+    }))
+    .expect("manifest");
+    let publication =
+        collaboration_service::ManifestPublication::publish(directory.path(), &manifest)
+            .expect("publish manifest");
+    let stop = CancellationToken::new();
+    let service = tokio::spawn(control.run(stop.clone()));
+    let listed = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "approval",
+            "list",
+            "--pending",
+            "--json",
+            "--service-directory",
+        ])
+        .arg(directory.path())
+        .output()
+        .await
+        .expect("CLI list");
+    assert_eq!(
+        listed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let output: Value = serde_json::from_slice(&listed.stdout).expect("CLI output");
+    let row = &output["result"]["record"]["approvals"][0];
+    assert_eq!(
+        row["requestId"], "provider-cli-approval",
+        "CLI output: {output}"
+    );
+    assert_eq!(row["approver"], json!(approver));
+    assert!(row["expiresAt"].is_string());
+    assert!(row.get("optionsOrigin").is_none());
+    let decided = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "approval",
+            "decide",
+            "--request-id",
+            "provider-cli-approval",
+            "--allow",
+            "--actor",
+        ])
+        .arg(serde_json::to_string(&approver).expect("actor JSON"))
+        .args(["--json", "--service-directory"])
+        .arg(directory.path())
+        .output()
+        .await
+        .expect("CLI decision");
+    assert_eq!(
+        decided.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&decided.stderr)
+    );
+    assert!(matches!(receiver.await.expect("agent resolution"),
+        collaboration_service::TypedApprovalResolution::Selected(selected)
+            if selected.option_id.as_str() == "allow-once"));
+    stop.cancel();
+    service
+        .await
+        .expect("service join")
+        .expect("service shutdown");
+    drop(publication);
+}
 
 #[tokio::test]
 async fn approval_list_rejection_preserves_rejected_kind_and_exit_four() {
