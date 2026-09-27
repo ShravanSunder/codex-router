@@ -30,6 +30,7 @@ use super::CodexChildEnvironment;
 use super::CodexTransportMode;
 use super::QUOTA_RECONNECT_FALLBACK;
 use super::QUOTA_RECONNECT_PRIMARY;
+use super::QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION;
 use super::SmokeAccountFixture;
 use super::SmokeTempRoot;
 use super::account_id;
@@ -138,10 +139,17 @@ fn seed_floor_fixture(state_path: &Path, secret_root: &Path) -> Result<(), Strin
         .map_err(|error| format!("floor fixture secret store open failed: {error}"))?;
     reset_fixture_route_band_state(
         state_path,
-        &[QUOTA_RECONNECT_PRIMARY, QUOTA_RECONNECT_FALLBACK],
+        &[
+            QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION,
+            QUOTA_RECONNECT_FALLBACK,
+        ],
         "installed floor",
     )?;
-    seed_smoke_account(&state, &secrets, QUOTA_RECONNECT_PRIMARY)?;
+    seed_smoke_account(
+        &state,
+        &secrets,
+        QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION,
+    )?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -170,7 +178,7 @@ fn save_floor_observation(
         .map_err(|error| format!("floor observation secret store open failed: {error}"))?;
     let primary = SmokeAccountFixture {
         weekly_remaining: journey.new_remaining(),
-        ..QUOTA_RECONNECT_PRIMARY
+        ..QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION
     };
     seed_smoke_account(&state, &secrets, primary)?;
     let fallback = if matches!(journey, FloorJourney::NoPeer) {

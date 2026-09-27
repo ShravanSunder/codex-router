@@ -341,7 +341,11 @@ pub fn run_installed_codex_quota_reconnect_websocket_mock_smoke()
     }
 
     let codex_version = command_output_text(Command::new("codex").arg("--version"))?;
-    seed_quota_reconnect_router_state(&runtime_roots.state_path, &runtime_roots.secret_root)?;
+    seed_quota_reconnect_router_state(
+        &runtime_roots.state_path,
+        &runtime_roots.secret_root,
+        QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION,
+    )?;
     let sqlite_pressure = (runtime_roots.mode == "copied-dev-state")
         .then(|| QuotaReconnectSqlitePressureConfig::new(runtime_roots.state_path.clone()));
     let upstream = MockQuotaReconnectWebSocketUpstream::start(sqlite_pressure)?;
@@ -1282,6 +1286,13 @@ const QUOTA_RECONNECT_FALLBACK: SmokeAccountFixture = SmokeAccountFixture {
     weekly_status: SelectorQuotaWindowStatus::Eligible,
 };
 
+// Far-idle ordering selects the earliest reset before remaining headroom.
+// The single-client reconnect and floor journeys require primary first.
+const QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION: SmokeAccountFixture = SmokeAccountFixture {
+    weekly_reset: 500_000,
+    ..QUOTA_RECONNECT_PRIMARY
+};
+
 const SMOKE_SELECTOR_STALE_AFTER_SECONDS: u64 = 300;
 
 fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed, String> {
@@ -1333,22 +1344,26 @@ fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed,
     })
 }
 
-fn seed_quota_reconnect_router_state(state_path: &Path, secret_root: &Path) -> Result<(), String> {
+fn seed_quota_reconnect_router_state(
+    state_path: &Path,
+    secret_root: &Path,
+    primary_fixture: SmokeAccountFixture,
+) -> Result<(), String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open quota reconnect SQLite state: {error}"))?;
     let secrets = FileSecretStore::open(secret_root)
         .map_err(|error| format!("failed to open quota reconnect secret store: {error}"))?;
     disable_accounts_outside_fixtures(
         &state,
-        &[QUOTA_RECONNECT_PRIMARY, QUOTA_RECONNECT_FALLBACK],
+        &[primary_fixture, QUOTA_RECONNECT_FALLBACK],
         "quota reconnect",
     )?;
     reset_fixture_route_band_state(
         state_path,
-        &[QUOTA_RECONNECT_PRIMARY, QUOTA_RECONNECT_FALLBACK],
+        &[primary_fixture, QUOTA_RECONNECT_FALLBACK],
         "quota reconnect",
     )?;
-    seed_smoke_account(&state, &secrets, QUOTA_RECONNECT_PRIMARY)?;
+    seed_smoke_account(&state, &secrets, primary_fixture)?;
     seed_smoke_account(&state, &secrets, QUOTA_RECONNECT_FALLBACK)?;
     Ok(())
 }
@@ -1357,7 +1372,7 @@ fn seed_s8_overlap_quota_router_state(
     state_path: &Path,
     secret_root: &Path,
 ) -> Result<SmokeSeed, String> {
-    seed_quota_reconnect_router_state(state_path, secret_root)?;
+    seed_quota_reconnect_router_state(state_path, secret_root, QUOTA_RECONNECT_PRIMARY)?;
     let secrets = FileSecretStore::open(secret_root)
         .map_err(|error| format!("failed to open S8 overlap quota secret store: {error}"))?;
     let token_service = LocalRouterTokenService::new(secrets);
