@@ -60,7 +60,7 @@ impl ProviderCapabilityReport {
         report
     }
 
-    pub(crate) fn to_session_model(&self) -> CapabilityReport {
+    pub fn to_session_model(&self) -> CapabilityReport {
         CapabilityReport {
             load: self.supports_load,
             resume: self.supports_resume,

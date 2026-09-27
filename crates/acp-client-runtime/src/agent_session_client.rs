@@ -23,12 +23,12 @@ mod provider_session_restore;
 pub(crate) mod provider_setting_application;
 
 use crate::ProviderCapabilityReport;
+use crate::provider_connection_activity::{ProviderConnectionActivity, ToolCallOwnershipHandler};
 use crate::provider_prompt_content::ProviderPromptContent;
 use crate::provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
     ProviderSessionRuntimeHandles, ProviderSteeringOutcome, run_provider_session,
 };
-use crate::provider_tool_call_registry::{ProviderToolCallRegistry, ToolCallOwnershipHandler};
 use crate::{AcpProtocolVersion, InteractionPort, SessionEventSink};
 use agent_client_protocol::schema::ProtocolVersion;
 #[cfg(any(test, feature = "test-observation"))]

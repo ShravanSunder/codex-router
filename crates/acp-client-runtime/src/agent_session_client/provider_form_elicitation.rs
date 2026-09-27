@@ -195,9 +195,9 @@ fn elicitation_answer(response: QuestionResponse, fields: &QuestionFields) -> Va
                         content.get(field_id).and_then(|value| match value {
                             QuestionAnswerValue::SelectedOptions {
                                 selected_option_ids,
-                            } if selected_option_ids.len() == 1 => {
-                                selected_option_ids.first().map(|option_id| json!(option_id))
-                            }
+                            } if selected_option_ids.len() == 1 => selected_option_ids
+                                .first()
+                                .map(|option_id| json!(option_id)),
                             _ => None,
                         }),
                     ),

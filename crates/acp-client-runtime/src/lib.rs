@@ -38,6 +38,7 @@ mod approval_presentation;
 mod external_permission_options;
 mod interaction_port;
 mod provider_capability_report;
+mod provider_connection_activity;
 mod provider_item_projection;
 mod provider_persistence_target;
 mod provider_prompt_content;
@@ -47,7 +48,6 @@ mod provider_session_actor;
 mod provider_session_setting_update;
 mod provider_session_settings;
 mod provider_settings_catalog_codec;
-mod provider_tool_call_registry;
 mod provider_update_kind;
 mod session_event_sink;
 

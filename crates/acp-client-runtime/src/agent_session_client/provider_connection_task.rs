@@ -49,10 +49,12 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             crate::ProviderSettingKind,
         >::new()));
         let task_settings_unresolved = Arc::clone(&settings_unresolved);
-        let tool_registry = Arc::new(ProviderToolCallRegistry::default());
+        let tool_registry = Arc::new(ProviderConnectionActivity::default());
         let task_tool_registry = Arc::clone(&tool_registry);
+        let retirement_registry = Arc::clone(&tool_registry);
         let todo_state = Arc::new(CursorPlanItems::default());
         let task_todo_state = Arc::clone(&todo_state);
+        let retirement_todos = Arc::clone(&todo_state);
         let task_runtime_handles = ProviderSessionRuntimeHandles {
             event_sink: Arc::clone(&event_sink),
             tool_registry: Arc::clone(&tool_registry),
@@ -62,6 +64,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             settings_unresolved: Arc::clone(&task_settings_unresolved),
         };
         let task_event_sink = Arc::clone(&event_sink);
+        let retirement_event_sink = Arc::clone(&event_sink);
         #[cfg(any(test, feature = "test-observation"))]
         let permission_request_count = Arc::new(AtomicU64::new(0));
         #[cfg(any(test, feature = "test-observation"))]
@@ -552,6 +555,18 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 _result = connection => false,
                 _status = child.status() => true,
             };
+            for (session_id, turn_id) in retirement_registry.drain_running_turns() {
+                let _result = retirement_event_sink.publish(
+                    &session_id,
+                    session_event_model::SessionEvent::TurnEnded {
+                        turn_id,
+                        outcome: session_event_model::TurnOutcome::Lost {
+                            reason: "providerRetired".to_owned(),
+                        },
+                    },
+                );
+                retirement_todos.forget_session(&session_id);
+            }
             connection_retirement.cancel();
             final_interaction_port.cancel_retired().await;
             #[cfg(unix)]

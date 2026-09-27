@@ -15,7 +15,7 @@ use session_event_model::{
 use tokio_util::sync::CancellationToken;
 
 use super::ActiveApprovalContext;
-use crate::{InteractionPort, provider_tool_call_registry::ProviderToolCallRegistry};
+use crate::{InteractionPort, provider_connection_activity::ProviderConnectionActivity};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,14 +42,14 @@ struct CursorChoice {
 }
 
 pub(super) struct ProviderCursorQuestionHandler<P: InteractionPort> {
-    tool_registry: Arc<ProviderToolCallRegistry>,
+    tool_registry: Arc<ProviderConnectionActivity>,
     approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
     interaction_port: Arc<P>,
 }
 
 impl<P: InteractionPort> ProviderCursorQuestionHandler<P> {
     pub(super) fn new(
-        tool_registry: Arc<ProviderToolCallRegistry>,
+        tool_registry: Arc<ProviderConnectionActivity>,
         approval_contexts: Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
         interaction_port: Arc<P>,
     ) -> Self {
