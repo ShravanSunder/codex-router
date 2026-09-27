@@ -166,6 +166,8 @@ pub struct ApprovalDecideParams {
     pub decision: Option<ApprovalDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub option_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub acknowledge_persistent: bool,
     #[serde(deserialize_with = "crate::interaction_actor::deserialize_interaction_actor")]

@@ -4,17 +4,20 @@ use codex_router_host::{
 };
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecision, CodexGeneration, ConversationAdmissionState,
-    ConversationCancelRequest, ConversationCreateRequest, ConversationLoadRequest,
-    ConversationOperationFailureKind, ConversationOperationReconcileRequest,
-    ConversationOperationSettlement, ConversationOperationShowRequest,
-    ConversationOperationWaitOutput, ConversationOperationWaitRequest, ConversationPromptRequest,
+    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
+    ConversationLoadRequest, ConversationOperationFailureKind,
+    ConversationOperationReconcileRequest, ConversationOperationSettlement,
+    ConversationOperationShowRequest, ConversationOperationWaitOutput,
+    ConversationOperationWaitRequest, ConversationPromptRequest, ConversationResumeRequest,
     EndpointDescription, EndpointId, EndpointRef, GenerationNumber, MessageContent, MessageText,
     NonEmptyText, OperationId, PositiveSeconds, ProviderBindingId, ProviderBindingIdentity,
     ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationStage,
     ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
-    ProviderRuntimeIdentity, ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId,
-    SessionRef, UuidIdentity,
+    ProviderRequestedSettings, ProviderRuntimeIdentity, ProviderSessionInspectRequest,
+    ProviderSettingName, ProviderSettingsAcceptRequest, ProviderSettingsFailureKind,
+    ProviderSettingsSetRequest, ProviderTransport, ProviderWorkingDirectory, RouterAccess,
+    SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, NativeGenerationGate, ProviderConversationBackend,
@@ -122,6 +125,206 @@ fn launch(script: &str) -> ExternalProviderLaunch {
     }
 }
 
+const SETTINGS_CREATE_FIXTURE: &str = r#"
+import json,sys
+mode='__MODE__'
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+def option(id,current,values):
+    return {'id':id,'name':id,'category':id,'type':'select','currentValue':current,
+            'options':[{'value':value,'name':value} for value in values]}
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{
+    'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'close':{}}},
+    'agentInfo':{'name':'supervisor-settings','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+current={'mode':'auto','model':'a'}
+def options(): return [option('mode',current['mode'],['auto','ask']),option('model',current['model'],['a','b'])]
+send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'settings-session','configOptions':options()}})
+if mode=='invalid':
+    request=read()
+    assert request['method']=='session/close',request
+    send({'jsonrpc':'2.0','id':request['id'],'result':{}})
+else:
+    request=read()
+    assert request['method']=='session/set_config_option' and request['params']['configId']=='mode'
+    current['mode']='ask'
+    send({'jsonrpc':'2.0','id':request['id'],'result':{'configOptions':options()}})
+    request=read()
+    assert request['method']=='session/set_config_option' and request['params']['configId']=='model'
+    if mode=='partial':
+        send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32603,'message':'private detail'}})
+    else:
+        current['model']='b'
+        send({'jsonrpc':'2.0','id':request['id'],'result':{'configOptions':options()}})
+sys.stdin.read()
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn provider_create_projects_effective_partial_and_invalid_settings() -> TestResult {
+    for mode in ["success", "partial", "invalid"] {
+        let root = tempfile::tempdir()?;
+        let provider_endpoint = endpoint("cursor-local")?;
+        let creator = actor(provider_endpoint.clone(), "creator")?;
+        let script = SETTINGS_CREATE_FIXTURE.replace("__MODE__", mode);
+        let runtime = ExternalProviderRuntime::initialize(launch(&script)).await?;
+        let backend = supervisor(
+            &root,
+            vec![(binding(provider_endpoint.clone(), "cursor")?, runtime)],
+        )
+        .await?;
+        let mut models = backend
+            .provider_model_catalog(&provider_endpoint)
+            .ok_or("provider model watch missing")?;
+        let default_models = models.borrow().clone();
+        ensure_eq!(
+            default_models.as_slice(),
+            &[collaboration_service::ProviderModelEntry::try_new(
+                "provider-default".into(),
+                "provider default".into(),
+                "The provider selects its default model".into(),
+            )?]
+        );
+        let operation_id = OperationId::generate();
+        operation(
+            backend
+                .create(ConversationCreateRequest {
+                    settings: Some(ProviderRequestedSettings {
+                        mode: Some(if mode == "invalid" { "wrong" } else { "ask" }.to_owned()),
+                        model: (mode != "invalid").then(|| "b".to_owned()),
+                        effort: None,
+                    }),
+                    operation_id: operation_id.clone(),
+                    endpoint: provider_endpoint.clone(),
+                    generation: Some(generation()?),
+                    working_directory: working_directory()?,
+                    created_by: (creator.clone()).into(),
+                    approver: (creator.clone()).into(),
+                    requested_policy: policy(),
+                })
+                .await,
+        )?;
+        match mode {
+            "success" => {
+                let settled = operation(wait(&backend, operation_id).await)?;
+                let ConversationOperationWaitOutput::Available {
+                    settlement:
+                        ConversationOperationSettlement::Created {
+                            target,
+                            effective_settings,
+                            ..
+                        },
+                } = settled.output
+                else {
+                    return Err("expected created settlement".into());
+                };
+                ensure_eq!(effective_settings.mode.as_deref(), Some("ask"));
+                ensure_eq!(effective_settings.model.as_deref(), Some("b"));
+                tokio::time::timeout(std::time::Duration::from_secs(2), models.changed()).await??;
+                ensure_eq!(models.borrow().len(), 2);
+                let advertised_models = models.borrow().clone();
+                ensure_eq!(
+                    advertised_models.as_slice(),
+                    &[
+                        collaboration_service::ProviderModelEntry::try_new(
+                            "a".into(),
+                            "a".into(),
+                            "Advertised by the provider".into()
+                        )?,
+                        collaboration_service::ProviderModelEntry::try_new(
+                            "b".into(),
+                            "b".into(),
+                            "Advertised by the provider".into()
+                        )?,
+                    ]
+                );
+                let inspected = backend
+                    .inspect_session(ProviderSessionInspectRequest { target })
+                    .await
+                    .map_err(|error| error.message)?;
+                ensure_eq!(
+                    inspected.capabilities.auth_status,
+                    session_event_model::ProviderAuthStatus::NotReported
+                );
+                ensure_eq!(
+                    inspected
+                        .settings_catalog
+                        .as_ref()
+                        .and_then(|catalog| catalog.current_mode.as_deref()),
+                    Some("ask")
+                );
+            }
+            "partial" => {
+                let settled = operation(wait(&backend, operation_id).await)?;
+                let ConversationOperationWaitOutput::Available {
+                    settlement:
+                        ConversationOperationSettlement::CreatedWithoutSettings {
+                            target,
+                            applied,
+                            failed,
+                        },
+                } = settled.output
+                else {
+                    return Err("expected partial settings settlement".into());
+                };
+                ensure_eq!(applied.len(), 1);
+                ensure_eq!(failed.len(), 1);
+                let mut store =
+                    ProviderOperationStore::open(&root.path().join("provider-operations.sqlite"))
+                        .await?;
+                ensure!(store.session_record(&target).await?.is_some());
+                let wrong_actor = actor(provider_endpoint.clone(), "stranger")?;
+                let denied = backend
+                    .settings_set(ProviderSettingsSetRequest {
+                        target: target.clone(),
+                        actor: (wrong_actor).into(),
+                        setting: ProviderSettingName::Model,
+                        value: "b".into(),
+                    })
+                    .await
+                    .expect_err("actor must be creator or Approver");
+                ensure_eq!(denied.kind, ProviderSettingsFailureKind::WrongActor);
+                let accepted = backend
+                    .settings_accept(ProviderSettingsAcceptRequest {
+                        target: target.clone(),
+                        actor: (creator.clone()).into(),
+                    })
+                    .await
+                    .map_err(|error| error.message)?;
+                ensure_eq!(accepted.target, target);
+                ensure_eq!(accepted.effective_settings.mode.as_deref(), Some("ask"));
+            }
+            "invalid" => {
+                let failure = wait(&backend, operation_id)
+                    .await
+                    .expect_err("invalid setting");
+                ensure_eq!(
+                    failure.kind,
+                    ConversationOperationFailureKind::InvalidSetting
+                );
+                let detail = failure
+                    .invalid_setting
+                    .ok_or("missing invalid-setting detail")?;
+                ensure_eq!(detail.value, "wrong");
+                ensure_eq!(detail.advertised, vec!["auto".to_owned(), "ask".to_owned()]);
+                ensure_eq!(
+                    detail.session_disposition,
+                    collaboration_protocol::InvalidSettingSessionDisposition::Closed
+                );
+            }
+            _ => return Err("unknown fixture case".into()),
+        }
+        backend
+            .shutdown()
+            .await
+            .map_err(|message| message.to_owned())?;
+    }
+    Ok(())
+}
+
 fn cancel_fixture(dispatch_log: &std::path::Path) -> ExternalProviderLaunch {
     let script = format!(
         r#"
@@ -156,6 +359,28 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
 request=json.loads(sys.stdin.readline())
 assert request['method']=='session/load'
 print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}})); sys.stdout.flush()
+sys.stdin.read()
+"#,
+    )
+}
+
+fn resume_close_fixture() -> ExternalProviderLaunch {
+    launch(
+        r#"
+import json,sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,
+    'agentCapabilities':{'sessionCapabilities':{'resume':{},'close':{}}},
+    'agentInfo':{'name':'lifecycle-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/resume',request
+send({'jsonrpc':'2.0','id':request['id'],'result':{}})
+request=read()
+assert request['method']=='session/close',request
+send({'jsonrpc':'2.0','id':request['id'],'result':{}})
 sys.stdin.read()
 "#,
     )
@@ -487,12 +712,13 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
     let requester = actor(endpoint.clone(), "requester")?;
     let operation_id = OperationId::generate();
     let create_request = ConversationCreateRequest {
+        settings: None,
         operation_id: operation_id.clone(),
         endpoint: endpoint.clone(),
         generation: Some(generation()?),
         working_directory: working_directory()?,
-        created_by: requester.clone(),
-        approver: requester.clone(),
+        created_by: (requester.clone()).into(),
+        approver: (requester.clone()).into(),
         requested_policy: policy(),
     };
     let detached_create = backend.create(create_request.clone());
@@ -513,19 +739,20 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
         .session_record(&target)
         .await?
         .ok_or("created session record missing")?;
-    ensure_eq!(session_record.created_by, requester);
-    ensure_eq!(session_record.approver, requester);
+    ensure_eq!(session_record.created_by, requester.clone().into());
+    ensure_eq!(session_record.approver, requester.clone().into());
     stored.close().await?;
 
     let prompt_operation_id = OperationId::generate();
     let prompt = operation(
         backend
             .prompt(ConversationPromptRequest {
+                input_id: None,
                 operation_id: prompt_operation_id.clone(),
                 target: target.clone(),
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester.clone(),
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("hold".to_owned())?,
                 },
@@ -543,8 +770,8 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 target_operation_id: prompt_operation_id.clone(),
                 target: target.clone(),
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester.clone(),
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
             })
             .await,
     )?;
@@ -576,8 +803,8 @@ async fn supplied_id_is_admitted_once_and_cancelled_prompt_settles_after_detach(
                 target_operation_id: prompt_operation_id,
                 target,
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester.clone(),
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
             })
             .await,
     )?;
@@ -606,12 +833,13 @@ async fn supervisor_shutdown_joins_runtime_and_settles_held_work() -> TestResult
     operation(
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: create_id.clone(),
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -627,11 +855,12 @@ async fn supervisor_shutdown_joins_runtime_and_settles_held_work() -> TestResult
     operation(
         backend
             .prompt(ConversationPromptRequest {
+                input_id: None,
                 operation_id: prompt_id.clone(),
                 target,
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester,
+                requested_by: (requester.clone()).into(),
+                approver: (requester).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("hold".to_owned())?,
                 },
@@ -679,8 +908,8 @@ async fn supervisor_shutdown_drains_saturated_load_completions_and_preserves_unk
                     target: actor(provider_endpoint.clone(), &format!("held-load-{index}"))?,
                     generation: Some(generation()?),
                     working_directory: working_directory()?,
-                    requested_by: requester.clone(),
-                    approver: requester.clone(),
+                    requested_by: (requester.clone()).into(),
+                    approver: (requester.clone()).into(),
                     requested_policy: policy(),
                 })
                 .await,
@@ -737,12 +966,13 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
     operation(
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: create_operation_id.clone(),
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: approver.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (approver.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -759,11 +989,12 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
     operation(
         backend
             .prompt(ConversationPromptRequest {
+                input_id: None,
                 operation_id: prompt_operation_id.clone(),
                 target,
                 generation: Some(generation()?),
-                requested_by: requester,
-                approver: approver.clone(),
+                requested_by: (requester).into(),
+                approver: (approver.clone()).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("request permission".to_owned())?,
                 },
@@ -811,6 +1042,7 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
             decision: Some(ApprovalDecision::Allow),
             option_id: None,
             acknowledge_persistent: false,
+            note: None,
             actor: serde_json::from_value(json!({"kind":"session","session":approver.clone()}))?,
         })
         .await
@@ -852,12 +1084,13 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
     operation(
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: create_operation_id.clone(),
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: approver.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (approver.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -873,11 +1106,12 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
     operation(
         backend
             .prompt(ConversationPromptRequest {
+                input_id: None,
                 operation_id: prompt_operation_id.clone(),
                 target,
                 generation: Some(generation()?),
-                requested_by: requester,
-                approver: approver.clone(),
+                requested_by: (requester).into(),
+                approver: (approver.clone()).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("request permission".to_owned())?,
                 },
@@ -922,6 +1156,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
                 decision: Some(ApprovalDecision::Allow),
                 option_id: None,
                 acknowledge_persistent: false,
+                note: None,
                 actor: serde_json::from_value(json!({"kind":"session","session":approver}))?,
             })
             .await,
@@ -972,8 +1207,8 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
                 target: target.clone(),
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                requested_by: requester.clone(),
-                approver: requester.clone(),
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -991,9 +1226,95 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
         .session_record(&target)
         .await?
         .ok_or("loaded session record missing")?;
-    ensure_eq!(session_record.created_by, requester);
-    ensure_eq!(session_record.approver, requester);
+    ensure_eq!(session_record.created_by, requester.clone().into());
+    ensure_eq!(session_record.approver, requester.into());
     stored.close().await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resume_and_close_are_durable_operations_and_resume_requires_advertisement() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let provider_endpoint = endpoint("cursor-local")?;
+    let requester = actor(provider_endpoint.clone(), "requester")?;
+    let target = actor(provider_endpoint.clone(), "restored-session")?;
+    let unsupported = supervisor(
+        &root,
+        vec![(
+            binding(provider_endpoint.clone(), "cursor")?,
+            ExternalProviderRuntime::initialize(load_fixture()).await?,
+        )],
+    )
+    .await?;
+    let unsupported_result = unsupported
+        .resume(ConversationResumeRequest {
+            operation_id: OperationId::generate(),
+            target: target.clone(),
+            generation: Some(generation()?),
+            working_directory: working_directory()?,
+            requested_by: (requester.clone()).into(),
+            approver: (requester.clone()).into(),
+            requested_policy: policy(),
+        })
+        .await;
+    ensure!(
+        matches!(unsupported_result, Err(failure) if failure.kind == ConversationOperationFailureKind::UnsupportedCapability)
+    );
+    unsupported.shutdown().await?;
+
+    let root = tempfile::tempdir()?;
+    let backend = supervisor(
+        &root,
+        vec![(
+            binding(provider_endpoint, "cursor")?,
+            ExternalProviderRuntime::initialize(resume_close_fixture()).await?,
+        )],
+    )
+    .await?;
+    let resume_id = OperationId::generate();
+    operation(
+        backend
+            .resume(ConversationResumeRequest {
+                operation_id: resume_id.clone(),
+                target: target.clone(),
+                generation: Some(generation()?),
+                working_directory: working_directory()?,
+                requested_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
+                requested_policy: policy(),
+            })
+            .await,
+    )?;
+    let resumed = operation(wait(&backend, resume_id).await)?;
+    ensure!(matches!(
+        resumed.output,
+        ConversationOperationWaitOutput::Available {
+            settlement: ConversationOperationSettlement::Resumed {
+                history: collaboration_protocol::ProviderHistoryAvailability::HistoryUnavailable,
+                ..
+            }
+        }
+    ));
+    let close_id = OperationId::generate();
+    operation(
+        backend
+            .close(ConversationCloseRequest {
+                operation_id: close_id.clone(),
+                target: target.clone(),
+                generation: Some(generation()?),
+                requested_by: (requester.clone()).into(),
+                approver: (requester).into(),
+            })
+            .await,
+    )?;
+    let closed = operation(wait(&backend, close_id).await)?;
+    ensure!(
+        matches!(closed.output, ConversationOperationWaitOutput::Available {
+        settlement: ConversationOperationSettlement::Closed { target: closed_target }
+    } if closed_target == target)
+    );
+    backend.shutdown().await?;
     Ok(())
 }
 
@@ -1017,12 +1338,13 @@ sys.stdin.readline()
     operation(
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: operation_id.clone(),
                 endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester,
+                created_by: (requester.clone()).into(),
+                approver: (requester).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1076,12 +1398,13 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
     operation(
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: first_id.clone(),
                 endpoint: provider_endpoint.clone(),
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1097,12 +1420,13 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
     let duplicate = operation(
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: first_id,
                 endpoint: provider_endpoint.clone(),
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1112,12 +1436,13 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
     operation(
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: second_id.clone(),
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester,
+                created_by: (requester.clone()).into(),
+                approver: (requester).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1153,12 +1478,13 @@ async fn prompt_authentication_required_is_no_effect_and_fresh_prompt_retains_fi
     operation(
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: create_id.clone(),
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1173,11 +1499,12 @@ async fn prompt_authentication_required_is_no_effect_and_fresh_prompt_retains_fi
 
     let first_id = OperationId::generate();
     let prompt_request = |operation_id: OperationId| ConversationPromptRequest {
+        input_id: None,
         operation_id,
         target: target.clone(),
         generation: Some(generation().expect("generation")),
-        requested_by: requester.clone(),
-        approver: requester.clone(),
+        requested_by: (requester.clone()).into(),
+        approver: (requester.clone()).into(),
         prompt: MessageContent::HumanUser {
             text: MessageText::try_from("continue".to_owned()).expect("prompt"),
         },
@@ -1230,12 +1557,13 @@ async fn provider_prompt_error_text_cannot_become_a_local_no_effect_rejection() 
     operation(
         backend
             .create(ConversationCreateRequest {
+                settings: None,
                 operation_id: create_id.clone(),
                 endpoint: provider_endpoint,
                 generation: Some(generation()?),
                 working_directory: working_directory()?,
-                created_by: requester.clone(),
-                approver: requester.clone(),
+                created_by: (requester.clone()).into(),
+                approver: (requester.clone()).into(),
                 requested_policy: policy(),
             })
             .await,
@@ -1251,11 +1579,12 @@ async fn provider_prompt_error_text_cannot_become_a_local_no_effect_rejection() 
     operation(
         backend
             .prompt(ConversationPromptRequest {
+                input_id: None,
                 operation_id: prompt_id.clone(),
                 target,
                 generation: Some(generation()?),
-                requested_by: requester.clone(),
-                approver: requester,
+                requested_by: (requester.clone()).into(),
+                approver: (requester).into(),
                 prompt: MessageContent::HumanUser {
                     text: MessageText::try_from("continue".to_owned())?,
                 },

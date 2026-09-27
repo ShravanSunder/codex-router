@@ -260,8 +260,8 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -340,8 +340,8 @@ async fn cursor_auto_queues_behind_a_running_prompt() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -543,8 +543,8 @@ async fn provider_load_auth_rejection_is_typed_without_session_new() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -614,8 +614,8 @@ async fn unadvertised_load_settles_not_submitted_without_sending_load() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -687,8 +687,8 @@ async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text
                 requested_policy: ProviderRequestedPolicy {
                     access: RouterAccess::WriteRestricted,
                 },
-                created_by: target.clone(),
-                approver: target.clone(),
+                created_by: (target.clone()).into(),
+                approver: (target.clone()).into(),
                 updated_at_ms: 1,
             })
             .await
@@ -771,8 +771,8 @@ async fn provider_process_transport_failure_remains_retryable() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -855,8 +855,8 @@ async fn live_peer_recheck_prevents_provider_load() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await

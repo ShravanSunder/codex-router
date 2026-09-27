@@ -248,21 +248,50 @@ pub struct QueueCancelResult {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProfileState {
+    Unloaded,
     Running,
     Idle,
-    RequiresAction {
-        kind: InteractionKind,
-    },
-    Lost {
-        reason: String,
-        stop_reason: Option<String>,
-    },
+    RequiresAction { kind: InteractionKind },
+    AuthenticationRequired,
+    Closed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateNotification {
     pub session_id: String,
     pub state: ProfileState,
+    pub turn: Option<ProfileTurn>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ProfileTurn {
+    Running {
+        turn_id: String,
+    },
+    Completed {
+        turn_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+    },
+    Interrupted {
+        turn_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+    },
+    Failed {
+        turn_id: String,
+        reason: String,
+    },
+    Lost {
+        turn_id: String,
+        reason: String,
+    },
 }
 
 impl StateNotification {
@@ -280,44 +309,35 @@ struct StateNotificationWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     requires_action: Option<InteractionKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    stop_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
+    turn: Option<ProfileTurn>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StateName {
+    Unloaded,
     Running,
     Idle,
     RequiresAction,
-    Lost,
+    AuthenticationRequired,
+    Closed,
 }
 
 impl Serialize for StateNotification {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let (state, requires_action, stop_reason, reason) = match &self.state {
-            ProfileState::Running => (StateName::Running, None, None, None),
-            ProfileState::Idle => (StateName::Idle, None, None, None),
-            ProfileState::RequiresAction { kind } => {
-                (StateName::RequiresAction, Some(*kind), None, None)
-            }
-            ProfileState::Lost {
-                reason,
-                stop_reason,
-            } => (
-                StateName::Lost,
-                None,
-                stop_reason.clone(),
-                Some(reason.clone()),
-            ),
+        let (state, requires_action) = match &self.state {
+            ProfileState::Unloaded => (StateName::Unloaded, None),
+            ProfileState::Running => (StateName::Running, None),
+            ProfileState::Idle => (StateName::Idle, None),
+            ProfileState::RequiresAction { kind } => (StateName::RequiresAction, Some(*kind)),
+            ProfileState::AuthenticationRequired => (StateName::AuthenticationRequired, None),
+            ProfileState::Closed => (StateName::Closed, None),
         };
         StateNotificationWire {
             session_id: self.session_id.clone(),
             state,
             requires_action,
-            stop_reason,
-            reason,
+            turn: self.turn.clone(),
         }
         .serialize(serializer)
     }
@@ -326,26 +346,19 @@ impl Serialize for StateNotification {
 impl<'de> Deserialize<'de> for StateNotification {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = StateNotificationWire::deserialize(deserializer)?;
-        let state = match (
-            wire.state,
-            wire.requires_action,
-            wire.stop_reason,
-            wire.reason,
-        ) {
-            (StateName::Running, None, None, None) => ProfileState::Running,
-            (StateName::Idle, None, None, None) => ProfileState::Idle,
-            (StateName::RequiresAction, Some(kind), None, None) => {
-                ProfileState::RequiresAction { kind }
-            }
-            (StateName::Lost, None, stop_reason, Some(reason)) => ProfileState::Lost {
-                reason,
-                stop_reason,
-            },
+        let state = match (wire.state, wire.requires_action) {
+            (StateName::Unloaded, None) => ProfileState::Unloaded,
+            (StateName::Running, None) => ProfileState::Running,
+            (StateName::Idle, None) => ProfileState::Idle,
+            (StateName::RequiresAction, Some(kind)) => ProfileState::RequiresAction { kind },
+            (StateName::AuthenticationRequired, None) => ProfileState::AuthenticationRequired,
+            (StateName::Closed, None) => ProfileState::Closed,
             _ => return Err(serde::de::Error::custom("invalid session state fields")),
         };
         Ok(Self {
             session_id: wire.session_id,
             state,
+            turn: wire.turn,
         })
     }
 }

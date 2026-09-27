@@ -135,6 +135,32 @@ async fn front_door_inputs_keep_arrival_order() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn unobservable_steer_end_returns_the_live_session_to_idle() -> TestResult {
+    let (_root, hub) = hub(8).await?;
+    let target = session()?;
+    hub.publish(
+        target.clone(),
+        SessionEvent::TurnStarted {
+            turn_id: "steer-turn".into(),
+            input_id: session_event_model::InputId::new("steer-input")?,
+        },
+    )
+    .await?;
+    hub.publish(
+        target.clone(),
+        SessionEvent::TurnEnded {
+            turn_id: "steer-turn".into(),
+            outcome: TurnOutcome::Lost {
+                reason: "endNotObservable".into(),
+            },
+        },
+    )
+    .await?;
+    ensure_eq!(hub.state(target).await?, SessionState::Idle);
+    Ok(())
+}
+
 // R25: pending approval and question requests remain visible on later attach.
 #[tokio::test]
 async fn late_attach_replays_pending_approval_and_question() -> TestResult {
@@ -203,8 +229,8 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: stored_target.clone(),
-            approver: stored_target,
+            created_by: stored_target.clone().into(),
+            approver: stored_target.into(),
             updated_at_ms: 3_000,
         })
         .await?;
@@ -255,6 +281,40 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
     ensure_eq!(restarted.len(), 1);
     ensure_eq!(restarted[0].state, SessionState::Unloaded);
     ensure_eq!(restarted[0].approver, live[0].approver);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sessions_inventory_preserves_human_approver_after_restart() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("operations.sqlite");
+    let mut store = ProviderOperationStore::open(&path).await?;
+    let target = session()?;
+    let stored_target: collaboration_protocol::SessionRef =
+        serde_json::from_value(serde_json::to_value(&target)?)?;
+    let human: collaboration_protocol::ProviderIdentity =
+        serde_json::from_value(serde_json::json!({"humanId":"owner"}))?;
+    store
+        .record_session(&ProviderSessionRecord {
+            target: stored_target,
+            working_directory: ProviderWorkingDirectory::try_from(
+                root.path().display().to_string(),
+            )?,
+            requested_policy: ProviderRequestedPolicy {
+                access: RouterAccess::WriteRestricted,
+            },
+            created_by: human.clone(),
+            approver: human,
+            updated_at_ms: 3_000,
+        })
+        .await?;
+    store.close().await?;
+    let reopened = ProviderOperationStore::open(&path).await?;
+    let hub = ProviderSessionEventHub::new(Arc::new(Mutex::new(reopened)));
+    let rows = hub.sessions(target.endpoint).await?;
+    ensure_eq!(rows.len(), 1);
+    ensure!(matches!(&rows[0].approver,
+        message_board::Identity::Human { human_id } if human_id.as_str() == "owner"));
     Ok(())
 }
 
@@ -337,5 +397,24 @@ async fn replay_reset_replaces_lost_history_and_resyncs_old_subscribers() -> Tes
             .iter()
             .all(|item| { !matches!(&item.event, SessionEvent::InteractionRequested { .. }) })
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_without_replay_invalidates_old_history_and_subscribers() -> TestResult {
+    let (_root, hub) = hub(8).await?;
+    let target = session()?;
+    hub.publish(target.clone(), user_item("old-message"))
+        .await?;
+    let mut stale = hub.attach(target.clone()).await?;
+
+    ensure_eq!(hub.begin_history_unavailable(target.clone()).await?, 1);
+    ensure_eq!(
+        receive_hub_event(&mut stale.receiver).await,
+        Err(HubReceiveError::ResyncRequired)
+    );
+    let current = hub.attach(target.clone()).await?;
+    ensure!(current.snapshot.is_empty());
+    ensure_eq!(hub.state(target).await?, SessionState::Idle);
     Ok(())
 }

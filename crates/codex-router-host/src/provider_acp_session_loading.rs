@@ -231,8 +231,8 @@ sys.stdin.read()
                 requested_policy: ProviderRequestedPolicy {
                     access: RouterAccess::WriteRestricted,
                 },
-                created_by: target.clone(),
-                approver: target.clone(),
+                created_by: (target.clone()).into(),
+                approver: (target.clone()).into(),
                 updated_at_ms: 1,
             })
             .await
@@ -290,8 +290,8 @@ sys.stdin.read()
                 requested_policy: ProviderRequestedPolicy {
                     access: RouterAccess::WriteRestricted,
                 },
-                created_by: target.clone(),
-                approver: target.clone(),
+                created_by: (target.clone()).into(),
+                approver: (target.clone()).into(),
                 updated_at_ms: 1,
             })
             .await
@@ -343,8 +343,8 @@ sys.stdin.read()
                 requested_policy: ProviderRequestedPolicy {
                     access: RouterAccess::WriteRestricted,
                 },
-                created_by: target.clone(),
-                approver: target.clone(),
+                created_by: (target.clone()).into(),
+                approver: (target.clone()).into(),
                 updated_at_ms: 1,
             })
             .await

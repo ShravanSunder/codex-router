@@ -18,6 +18,8 @@ mod provider_acp_delivery_route;
 mod provider_acp_message_fifo;
 mod provider_acp_route_claim;
 mod provider_queue_operation_registry;
+pub use provider_queue_operation_registry::{ProviderQueueCancellationError, ProviderQueuedInput};
+mod provider_model_catalog;
 mod provider_session_event_sink;
 pub use provider_acp_delivery_route::ProviderAcpDeliveryRoute;
 mod provider_acp_scheduled_runs;

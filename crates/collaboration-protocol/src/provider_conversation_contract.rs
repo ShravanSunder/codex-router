@@ -1,7 +1,7 @@
 //! Provider-neutral external ACP conversation and operation contracts.
 use crate::{
     CodexGeneration, EndpointRef, MessageContent, MessageText, NonEmptyText, ObservationTimestamp,
-    PositiveSeconds, RouterAccess, SessionRef,
+    PositiveSeconds, ProviderIdentity, RouterAccess, SessionRef,
 };
 use agent_automation::OperationId;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
@@ -281,6 +281,62 @@ pub struct EffectiveProviderSettings {
     pub provider_permission_mode: Option<NonEmptyText>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_outcome: Option<ProviderPermissionOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderRequestedSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderSettingName {
+    Mode,
+    Model,
+    Effort,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppliedProviderSetting {
+    pub setting: ProviderSettingName,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FailedProviderSetting {
+    pub setting: ProviderSettingName,
+    pub value: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InvalidSettingSessionDisposition {
+    Closed,
+    RemainsCreated,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InvalidProviderSetting {
+    pub setting: ProviderSettingName,
+    pub value: String,
+    pub advertised: Vec<String>,
+    pub session_disposition: InvalidSettingSessionDisposition,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -288,6 +344,8 @@ pub struct EffectiveProviderSettings {
 pub enum ProviderOperationKind {
     ConversationCreate,
     ConversationLoad,
+    ConversationResume,
+    ConversationClose,
     ConversationPrompt,
     ConversationCancel,
 }
@@ -349,6 +407,8 @@ pub struct ConversationOperationSnapshot {
     pub terminal_stop_reason: Option<ProviderPromptStopReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_state: Option<ConversationOperationQueueState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<session_event_model::InputId>,
     pub admitted_at: ObservationTimestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_at: Option<ObservationTimestamp>,
@@ -376,9 +436,11 @@ pub struct ConversationCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
     pub working_directory: ProviderWorkingDirectory,
-    pub created_by: SessionRef,
-    pub approver: SessionRef,
+    pub created_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub requested_policy: ProviderRequestedPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<ProviderRequestedSettings>,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
@@ -389,20 +451,46 @@ pub struct ConversationLoadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
     pub working_directory: ProviderWorkingDirectory,
-    pub requested_by: SessionRef,
-    pub approver: SessionRef,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub requested_policy: ProviderRequestedPolicy,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationResumeRequest {
+    pub operation_id: OperationId,
+    pub target: SessionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<CodexGeneration>,
+    pub working_directory: ProviderWorkingDirectory,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
+    pub requested_policy: ProviderRequestedPolicy,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationCloseRequest {
+    pub operation_id: OperationId,
+    pub target: SessionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<CodexGeneration>,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationPromptRequest {
     pub operation_id: OperationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<session_event_model::InputId>,
     pub target: SessionRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
-    pub requested_by: SessionRef,
-    pub approver: SessionRef,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub prompt: MessageContent,
 }
 
@@ -414,8 +502,8 @@ pub struct ConversationCancelRequest {
     pub target: SessionRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
-    pub requested_by: SessionRef,
-    pub approver: SessionRef,
+    pub requested_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
@@ -437,7 +525,7 @@ pub struct ConversationOperationReconcileRequest {
     pub operation_id: OperationId,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPromptStopReason {
     EndTurn,
@@ -445,6 +533,7 @@ pub enum ProviderPromptStopReason {
     MaxTurnRequests,
     Refusal,
     Cancelled,
+    Unknown(String),
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
@@ -459,9 +548,22 @@ pub enum ConversationOperationSettlement {
         target: SessionRef,
         effective_settings: EffectiveProviderSettings,
     },
+    CreatedWithoutSettings {
+        target: SessionRef,
+        applied: Vec<AppliedProviderSetting>,
+        failed: Vec<FailedProviderSetting>,
+    },
     Loaded {
         target: SessionRef,
         effective_settings: EffectiveProviderSettings,
+    },
+    Resumed {
+        target: SessionRef,
+        effective_settings: EffectiveProviderSettings,
+        history: crate::ProviderHistoryAvailability,
+    },
+    Closed {
+        target: SessionRef,
     },
     PromptCompleted {
         target: SessionRef,
@@ -510,6 +612,8 @@ pub struct ConversationOperationWaitResult {
 #[serde(rename_all = "camelCase")]
 pub enum ConversationOperationFailureKind {
     InvalidRequest,
+    InvalidSetting,
+    SettingsUnresolved,
     UnsupportedCapability,
     AuthenticationRequired,
     PermissionRejected,
@@ -531,6 +635,8 @@ pub struct ConversationOperationFailure {
     pub effect: ProviderOperationEffect,
     pub message: NonEmptyText,
     pub operation_id: OperationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_setting: Option<InvalidProviderSetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_code: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

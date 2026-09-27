@@ -110,6 +110,7 @@ impl ProviderAcpScheduledRuns {
         let submitted = self
             .supervisor
             .submit_delivery_prompt(ConversationPromptRequest {
+                input_id: None,
                 operation_id: operation_id.clone(),
                 target: run.target.clone(),
                 generation: Some(binding.generation),

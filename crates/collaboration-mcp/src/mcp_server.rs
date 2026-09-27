@@ -6,12 +6,15 @@ use collaboration_client::{
 };
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult,
-    ApprovalDetailedListResult, ApprovalListParams, ConversationCreateOutcome,
-    ConversationOperationSubmission, DeliveryOutcome, DeliveryReceipt, EndpointInventory,
-    JournalPage, JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
-    NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
-    NativeSessionListParams, NativeSessionListResult, OperationId, ProviderSessionListParams,
-    ProviderSessionListResult, RouterExecutableRelation, router_build_warning,
+    ApprovalDetailedListResult, ApprovalListParams, ConversationCloseRequest,
+    ConversationCreateOutcome, ConversationOperationSubmission, ConversationResumeRequest,
+    DeliveryOutcome, DeliveryReceipt, EndpointInventory, JournalPage, JournalReadParams,
+    JournalStatus, NativeInspectParams, NativeInspectResult, NativeInterruptParams,
+    NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
+    NativeSessionListResult, OperationId, ProviderInspectFailure, ProviderSessionInspectRequest,
+    ProviderSessionInspectResult, ProviderSessionListParams, ProviderSessionListResult,
+    ProviderSettingsAcceptRequest, ProviderSettingsFailure, ProviderSettingsResult,
+    ProviderSettingsSetRequest, RouterExecutableRelation, router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -259,6 +262,35 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::None)
     }
 
+    #[tool(name = "provider_session_inspect", description = "Inspects one Router-owned provider Session, including live state, capability report, authentication status, and last advertised settings options.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSessionInspectResult>())]
+    async fn provider_session_inspect(
+        &self,
+        Parameters(request): Parameters<ProviderSessionInspectRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.inspect_provider_session(request).await;
+        let _closed = client.close().await;
+        match result {
+            Ok(value) => structured_result(Ok(value), OperationEffect::None),
+            Err(error @ ClientError::Rejected { .. }) => {
+                let typed = match &error {
+                    ClientError::Rejected {
+                        data: Some(data), ..
+                    } => serde_json::from_value::<ProviderInspectFailure>(data.clone()).ok(),
+                    _ => None,
+                };
+                typed
+                    .and_then(|value| serde_json::to_value(value).ok())
+                    .map(CallToolResult::structured_error)
+                    .unwrap_or_else(|| failure(error, OperationEffect::None))
+            }
+            Err(error) => failure(error, OperationEffect::None),
+        }
+    }
+
     #[tool(name = "session_inspect", description = "Inspects one exact conversation target without changing its identity. Attachment or backend failures retain structured target/effect evidence.", output_schema = rmcp::handler::server::tool::schema_for_type::<NativeInspectResult>())]
     async fn session_inspect(
         &self,
@@ -369,7 +401,7 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::None)
     }
 
-    #[tool(name = "question_answer", description = "Answers, declines, or cancels one question as its Approver.", output_schema = rmcp::handler::server::tool::schema_for_type::<collaboration_protocol::QuestionAnswerResult>())]
+    #[tool(name = "question_answer", description = "Answers, declines, or cancels one question as its Approver. Choice answers carry selectedOptionIds from the offered options; labels are display text.", output_schema = rmcp::handler::server::tool::schema_for_type::<collaboration_protocol::QuestionAnswerResult>())]
     async fn question_answer(
         &self,
         Parameters(request): Parameters<collaboration_protocol::QuestionAnswerParams>,
@@ -387,6 +419,62 @@ impl CollaborationMcpServer {
                 operation_error_result(failure, target, turn_id)
             }
         }
+    }
+
+    #[tool(name = "conversation_settings_set", description = "Sets one advertised provider Session mode, model, or effort as its creator or Approver. An ambiguous provider response leaves settings gated.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSettingsResult>())]
+    async fn conversation_settings_set(
+        &self,
+        Parameters(request): Parameters<ProviderSettingsSetRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.set_provider_conversation_setting(request).await;
+        let _ = client.close().await;
+        provider_settings_tool_result(result, OperationEffect::Unknown)
+    }
+
+    #[tool(name = "conversation_settings_accept", description = "Accepts the provider Session's currently reported settings as its creator or Approver and clears the prompt gate without an agent RPC.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSettingsResult>())]
+    async fn conversation_settings_accept(
+        &self,
+        Parameters(request): Parameters<ProviderSettingsAcceptRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.accept_provider_conversation_settings(request).await;
+        let _ = client.close().await;
+        provider_settings_tool_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "conversation_resume", description = "Resumes one advertised provider Session as an inspectable operation. The agent supplies no history replay; inspect the operation ID after an uncertain response.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationOperationSubmission>())]
+    async fn conversation_resume(
+        &self,
+        Parameters(request): Parameters<ConversationResumeRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.resume_provider_conversation(request).await;
+        let _ = client.close().await;
+        structured_result(result, OperationEffect::Unknown)
+    }
+
+    #[tool(name = "conversation_close", description = "Closes one provider Session after its running Turn settles. The operation ID remains inspectable after an uncertain response.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationOperationSubmission>())]
+    async fn conversation_close(
+        &self,
+        Parameters(request): Parameters<ConversationCloseRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.close_provider_conversation(request).await;
+        let _ = client.close().await;
+        structured_result(result, OperationEffect::Unknown)
     }
 
     #[tool(name = "journal_status", description = "Reads lifecycle-journal availability and bounds without mutating state.", output_schema = rmcp::handler::server::tool::schema_for_type::<JournalStatus>())]
@@ -510,7 +598,7 @@ impl CollaborationMcpServer {
         }
     }
 
-    #[tool(name = "conversation_create", description = "Creates one conversation through its advertised client. Requires a caller UUIDv7 operationId and exact endpoint, working directory, access, and creator; approver defaults to creator. model and effort are required for Codex endpoints and rejected for provider endpoints. fork and rootMessageId are Codex-only and rejected for provider endpoints. Returns created with target or pending with the inspectable operation ID.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreateOutcome>())]
+    #[tool(name = "conversation_create", description = "Creates one conversation through its advertised client. Requires a caller UUIDv7 operationId and exact endpoint, working directory, access, and creator; approver defaults to creator. model and effort are required for Codex endpoints; provider endpoints accept advertised mode, model and effort values. fork and rootMessageId are Codex-only and rejected for provider endpoints. Returns created with target or pending with the inspectable operation ID.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreateOutcome>())]
     async fn conversation_create(
         &self,
         Parameters(mut request): Parameters<ConversationCreateToolRequest>,
@@ -675,7 +763,7 @@ impl CollaborationMcpServer {
         conversation_tool_result(result, Some(operation_id))
     }
 
-    #[tool(name = "conversation_create_and_prompt", description = "Creates a fresh conversation and prompts it through the advertised client. model and effort are required for Codex endpoints and rejected for provider endpoints. fork and rootMessageId are Codex-only and rejected for provider endpoints. The create operation ID is inspectable; provider prompt requires a second caller UUIDv7 ID, while Codex prompt omits it because it is not inspectable. The result names a pending create or the prompt settlement. A completed turn is not an assignment verdict or peer reply; cancellation never silently replays a submission.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreatePromptOutcome>())]
+    #[tool(name = "conversation_create_and_prompt", description = "Creates a fresh conversation and prompts it through the advertised client. model and effort are required for Codex endpoints; provider endpoints accept advertised mode, model and effort values. fork and rootMessageId are Codex-only and rejected for provider endpoints. The create operation ID is inspectable; provider prompt requires a second caller UUIDv7 ID, while Codex prompt omits it because it is not inspectable. The result names a pending create or the prompt settlement. A completed turn is not an assignment verdict or peer reply; cancellation never silently replays a submission.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationCreatePromptOutcome>())]
     async fn conversation_create_and_prompt(
         &self,
         Parameters(mut request): Parameters<ConversationCreatePromptToolRequest>,
@@ -720,6 +808,28 @@ fn structured_result<TValue: serde::Serialize>(
         Ok(value) => serde_json::to_value(value)
             .map(CallToolResult::structured)
             .unwrap_or_else(|_| validation_failure("collaboration result encoding failed")),
+        Err(error) => failure(error, possible_effect),
+    }
+}
+
+fn provider_settings_tool_result(
+    result: Result<ProviderSettingsResult, ClientError>,
+    possible_effect: OperationEffect,
+) -> CallToolResult {
+    match result {
+        Ok(value) => structured_result(Ok(value), OperationEffect::None),
+        Err(error @ ClientError::Rejected { .. }) => {
+            let typed = match &error {
+                ClientError::Rejected {
+                    data: Some(data), ..
+                } => serde_json::from_value::<ProviderSettingsFailure>(data.clone()).ok(),
+                _ => None,
+            };
+            typed
+                .and_then(|failure| serde_json::to_value(failure).ok())
+                .map(CallToolResult::structured_error)
+                .unwrap_or_else(|| failure(error, possible_effect))
+        }
         Err(error) => failure(error, possible_effect),
     }
 }

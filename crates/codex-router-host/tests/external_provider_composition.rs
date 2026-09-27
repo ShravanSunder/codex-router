@@ -92,6 +92,7 @@ sys.stdin.read()
     let create_operation = OperationId::generate();
     client
         .create_provider_conversation(ConversationCreateRequest {
+            settings: None,
             operation_id: create_operation.clone(),
             endpoint: provider_endpoint.endpoint.clone(),
             generation: Some(generation.clone()),
@@ -99,8 +100,8 @@ sys.stdin.read()
                 root.path().display().to_string(),
             )
             .expect("working directory"),
-            created_by: actor.clone(),
-            approver: actor.clone(),
+            created_by: actor.clone().into(),
+            approver: actor.clone().into(),
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
@@ -124,11 +125,12 @@ sys.stdin.read()
     let prompt_operation = OperationId::generate();
     client
         .prompt_provider_conversation(ConversationPromptRequest {
+            input_id: None,
             operation_id: prompt_operation.clone(),
             target: target.clone(),
             generation: Some(generation),
-            requested_by: actor.clone(),
-            approver: actor.clone(),
+            requested_by: actor.clone().into(),
+            approver: actor.clone().into(),
             prompt: MessageContent::Agent {
                 sender: actor,
                 text: MessageText::try_from("composition prompt".to_owned()).expect("prompt"),
@@ -229,6 +231,7 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
     .expect("provider retirement published");
     let failure = client
         .create_provider_conversation(ConversationCreateRequest {
+            settings: None,
             operation_id: OperationId::generate(),
             endpoint: provider_endpoint.endpoint,
             generation: Some(CodexGeneration {
@@ -245,14 +248,16 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
                     endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("endpoint"),
                 },
                 session_id: SessionId::try_from("caller".to_owned()).expect("session"),
-            },
+            }
+            .into(),
             approver: SessionRef {
                 endpoint: EndpointRef {
                     service_id,
                     endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("endpoint"),
                 },
                 session_id: SessionId::try_from("caller".to_owned()).expect("session"),
-            },
+            }
+            .into(),
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },

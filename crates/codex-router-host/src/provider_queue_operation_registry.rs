@@ -2,14 +2,35 @@
 
 use collaboration_protocol::{
     ConversationBindingIdentity, ConversationOperationQueueState, ConversationOperationSnapshot,
-    ObservationTimestamp, OperationId, ProviderBindingIdentity, ProviderOperationEffect,
-    ProviderOperationKind, ProviderOperationStage, ProviderReconciliationState, SessionRef,
+    MessageContent, ObservationTimestamp, OperationId, ProviderBindingIdentity,
+    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
+    ProviderReconciliationState, SessionRef,
 };
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 #[derive(Default)]
 pub(crate) struct ProviderQueueOperationRegistry {
     operations: Mutex<HashMap<OperationId, QueuedProviderOperation>>,
+    next_sequence: AtomicU64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderQueuedInput {
+    pub input_id: session_event_model::InputId,
+    pub position: u64,
+    pub preview: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ProviderQueueCancellationError {
+    #[error("notQueued")]
+    NotQueued,
 }
 
 #[derive(Clone)]
@@ -19,6 +40,10 @@ struct QueuedProviderOperation {
     queued_at_ms: i64,
     state: ConversationOperationQueueState,
     terminal_at_ms: Option<i64>,
+    input_id: session_event_model::InputId,
+    preview: String,
+    sequence: u64,
+    started: bool,
 }
 
 impl ProviderQueueOperationRegistry {
@@ -27,6 +52,8 @@ impl ProviderQueueOperationRegistry {
         operation_id: OperationId,
         target: SessionRef,
         binding: ProviderBindingIdentity,
+        input_id: session_event_model::InputId,
+        message: &MessageContent,
     ) {
         self.operations
             .lock()
@@ -39,8 +66,75 @@ impl ProviderQueueOperationRegistry {
                     queued_at_ms: now_ms(),
                     state: ConversationOperationQueueState::RouterQueued,
                     terminal_at_ms: None,
+                    input_id,
+                    preview: sanitized_preview(message),
+                    sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+                    started: false,
                 },
             );
+    }
+
+    pub(crate) fn list(&self, target: &SessionRef) -> Vec<ProviderQueuedInput> {
+        let operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut pending = operations
+            .values()
+            .filter(|operation| {
+                &operation.target == target
+                    && !operation.started
+                    && operation.state == ConversationOperationQueueState::RouterQueued
+            })
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|operation| operation.sequence);
+        pending
+            .into_iter()
+            .enumerate()
+            .map(|(index, operation)| ProviderQueuedInput {
+                input_id: operation.input_id.clone(),
+                position: u64::try_from(index + 1).unwrap_or(u64::MAX),
+                preview: operation.preview.clone(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn cancel(
+        &self,
+        target: &SessionRef,
+        input_id: &session_event_model::InputId,
+    ) -> Result<(), ProviderQueueCancellationError> {
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let operation = operations
+            .values_mut()
+            .find(|operation| &operation.target == target && &operation.input_id == input_id)
+            .ok_or(ProviderQueueCancellationError::NotQueued)?;
+        if operation.started || operation.state != ConversationOperationQueueState::RouterQueued {
+            return Err(ProviderQueueCancellationError::NotQueued);
+        }
+        operation.state = ConversationOperationQueueState::NotSubmitted {
+            reason: "queueCancelled".into(),
+        };
+        operation.terminal_at_ms = Some(now_ms());
+        Ok(())
+    }
+
+    pub(crate) fn try_start(&self, operation_id: &OperationId) -> bool {
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(operation) = operations.get_mut(operation_id) else {
+            return false;
+        };
+        if operation.started || operation.state != ConversationOperationQueueState::RouterQueued {
+            return false;
+        }
+        operation.started = true;
+        true
     }
 
     pub(crate) fn mark_not_submitted(&self, operation_id: &OperationId, reason: impl Into<String>) {
@@ -102,10 +196,26 @@ impl ProviderQueueOperationRegistry {
             },
             terminal_stop_reason: None,
             queue_state: Some(operation.state),
+            input_id: Some(operation.input_id),
             admitted_at,
             terminal_at,
         }))
     }
+}
+
+fn sanitized_preview(message: &MessageContent) -> String {
+    let text = match message {
+        MessageContent::Agent { text, .. }
+        | MessageContent::HumanUser { text }
+        | MessageContent::Router { text } => text.as_str(),
+    };
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(80)
+        .collect()
 }
 
 fn timestamp_from_millis(milliseconds: i64) -> Result<ObservationTimestamp, &'static str> {
@@ -118,4 +228,111 @@ fn timestamp_from_millis(milliseconds: i64) -> Result<ObservationTimestamp, &'st
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn fixture() -> (SessionRef, ProviderBindingIdentity) {
+        let target: SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"cursor-local"},
+            "sessionId":"provider-session"
+        })).expect("target");
+        let binding = serde_json::from_value(serde_json::json!({
+            "endpoint":target.endpoint,"bindingId":"binding",
+            "runtime":{"provider":"cursor","runtimeName":"fixture"},
+            "transport":"stdioAcp","generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":1},
+            "capabilities":[{"name":"prompt","status":"supported","evidence":"advertised"}]
+        })).expect("binding");
+        (target, binding)
+    }
+
+    fn message(text: &str) -> MessageContent {
+        MessageContent::Router {
+            text: text.to_owned().try_into().expect("message"),
+        }
+    }
+
+    #[test]
+    fn list_keeps_admission_order_and_cancel_excludes_only_one_input() {
+        let registry = ProviderQueueOperationRegistry::default();
+        let (target, binding) = fixture();
+        let first = (
+            OperationId::generate(),
+            session_event_model::InputId::generate(),
+        );
+        let second = (
+            OperationId::generate(),
+            session_event_model::InputId::generate(),
+        );
+        registry.record_queued(
+            first.0.clone(),
+            target.clone(),
+            binding.clone(),
+            first.1.clone(),
+            &message("first\n  item"),
+        );
+        registry.record_queued(
+            second.0.clone(),
+            target.clone(),
+            binding,
+            second.1.clone(),
+            &message("second item"),
+        );
+        let listed = registry.list(&target);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|item| (&item.input_id, item.position))
+                .collect::<Vec<_>>(),
+            vec![(&first.1, 1), (&second.1, 2)]
+        );
+        assert_eq!(listed[0].preview, "first item");
+        registry.cancel(&target, &first.1).expect("cancel first");
+        assert_eq!(
+            registry.cancel(&target, &first.1),
+            Err(ProviderQueueCancellationError::NotQueued)
+        );
+        assert!(!registry.try_start(&first.0));
+        assert_eq!(registry.list(&target)[0].input_id, second.1);
+    }
+
+    #[test]
+    fn cancel_and_start_race_has_one_winner() {
+        let registry = Arc::new(ProviderQueueOperationRegistry::default());
+        let (target, binding) = fixture();
+        let operation_id = OperationId::generate();
+        let input_id = session_event_model::InputId::generate();
+        registry.record_queued(
+            operation_id.clone(),
+            target.clone(),
+            binding,
+            input_id.clone(),
+            &message("racing input"),
+        );
+        let barrier = Arc::new(Barrier::new(3));
+        let started = {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                registry.try_start(&operation_id)
+            })
+        };
+        let cancelled = {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                registry.cancel(&target, &input_id).is_ok()
+            })
+        };
+        barrier.wait();
+        assert_ne!(
+            started.join().expect("start result"),
+            cancelled.join().expect("cancel result")
+        );
+    }
 }

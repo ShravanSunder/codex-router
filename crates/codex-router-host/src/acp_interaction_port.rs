@@ -10,7 +10,9 @@ use collaboration_service::{
     RefusedApprovalOption, RefusedTypedApproval, ServiceInteractionBroker,
 };
 use message_board::{Identity, SessionRef as BoardSessionRef};
-use session_event_model::{ApprovalRequest, PendingInteraction, SessionEvent};
+use session_event_model::{
+    ApprovalRequest, PendingInteraction, QuestionRequest, QuestionResponse, SessionEvent,
+};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -141,6 +143,76 @@ impl InteractionPort for HostInteractionPort {
         })
     }
 
+    fn request_question(
+        &self,
+        context: Self::Context,
+        request: QuestionRequest,
+        turn_cancellation: CancellationToken,
+        agent_cancellation: CancellationToken,
+    ) -> InteractionFuture<'_, QuestionResponse> {
+        Box::pin(async move {
+            let Some(broker) = self.broker().await else {
+                return QuestionResponse::Cancelled;
+            };
+            let Some((requester, approver)) = typed_participants(&context) else {
+                return QuestionResponse::Cancelled;
+            };
+            if turn_cancellation.is_cancelled()
+                || agent_cancellation.is_cancelled()
+                || context.binding_retirement.is_cancelled()
+            {
+                return QuestionResponse::Cancelled;
+            }
+            let request_id = request.request_id.clone();
+            let session_id = String::from(context.target.session_id.clone());
+            let pending_event = SessionEvent::InteractionRequested {
+                interaction: PendingInteraction::Question {
+                    approver: approver.clone(),
+                    request: Box::new(request.clone()),
+                },
+            };
+            let receiver = match broker.request_question(requester, approver, request).await {
+                Ok(receiver) => receiver,
+                Err(error) => {
+                    tracing::error!(%error, "provider question could not be admitted");
+                    return QuestionResponse::Cancelled;
+                }
+            };
+            if !self.publish(&session_id, pending_event).await {
+                let _ = broker
+                    .cancel_question(&request_id, "eventPublicationFailed")
+                    .await;
+                return QuestionResponse::Cancelled;
+            }
+            tokio::pin!(receiver);
+            let (response, resolved_here) = tokio::select! {
+                biased;
+                () = turn_cancellation.cancelled() => {
+                    let settled = broker.cancel_question(&request_id, "turnCancelled").await.is_ok();
+                    (receiver.await.unwrap_or(QuestionResponse::Cancelled), settled)
+                }
+                () = context.binding_retirement.cancelled() => {
+                    let settled = broker.cancel_question(&request_id, "providerRetired").await.is_ok();
+                    (receiver.await.unwrap_or(QuestionResponse::Cancelled), settled)
+                }
+                () = agent_cancellation.cancelled() => {
+                    let settled = broker.cancel_question(&request_id, "agentCancelled").await.is_ok();
+                    (receiver.await.unwrap_or(QuestionResponse::Cancelled), settled)
+                }
+                settled = &mut receiver => (settled.unwrap_or(QuestionResponse::Cancelled), true),
+            };
+            if resolved_here {
+                let _ = self
+                    .publish(
+                        &session_id,
+                        SessionEvent::InteractionResolved { request_id },
+                    )
+                    .await;
+            }
+            response
+        })
+    }
+
     fn record_refusal(
         &self,
         context: Self::Context,
@@ -245,8 +317,8 @@ fn typed_participants(
     context: &ExternalProviderApprovalContext,
 ) -> Option<(BoardSessionRef, Identity)> {
     let requester = board_session_ref(&context.target)?;
-    let approver = board_session_ref(&context.approver)?;
-    Some((requester, Identity::Session { session: approver }))
+    let approver = context.approver.to_board_identity().ok()?;
+    Some((requester, approver))
 }
 
 fn board_session_ref(value: &collaboration_protocol::SessionRef) -> Option<BoardSessionRef> {
@@ -256,11 +328,15 @@ fn board_session_ref(value: &collaboration_protocol::SessionRef) -> Option<Board
 }
 
 fn approval_receiver_outcome(
-    selected: Result<session_event_model::OfferedOptionId, tokio::sync::oneshot::error::RecvError>,
+    selected: Result<
+        collaboration_service::TypedApprovalSelection,
+        tokio::sync::oneshot::error::RecvError,
+    >,
 ) -> ApprovalPortOutcome {
     match selected {
-        Ok(option_id) => ApprovalPortOutcome::Selected {
-            option_id: option_id.as_str().to_owned(),
+        Ok(selected) => ApprovalPortOutcome::Selected {
+            option_id: selected.option_id.as_str().to_owned(),
+            note: selected.note,
         },
         Err(_) => ApprovalPortOutcome::Cancelled,
     }
@@ -281,7 +357,34 @@ impl SessionEventSink for NoopSessionEventSink {
         &self,
         _session_id: &str,
         _event: session_event_model::SessionEvent,
-    ) -> Result<(), acp_client_runtime::EventSinkOverflow> {
+    ) -> Result<(), acp_client_runtime::EventSinkClosed> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod provider_actor_tests {
+    use super::*;
+
+    #[test]
+    fn human_approver_reaches_typed_broker_without_a_synthetic_session() {
+        let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"cursor-local"},
+            "sessionId":"provider-session"
+        })).expect("target");
+        let context = ExternalProviderApprovalContext {
+            requester: target.clone().into(),
+            approver: serde_json::from_value(serde_json::json!({"humanId":"owner"}))
+                .expect("human"),
+            target,
+            operation_id: collaboration_protocol::OperationId::generate(),
+            binding_generation: serde_json::from_value(serde_json::json!({
+                "serviceEpoch":"1ff962c5-7fa3-4c18-a5ca-1bbe8db09e80","generation":1
+            }))
+            .expect("generation"),
+            binding_retirement: CancellationToken::new(),
+        };
+        let (_, approver) = typed_participants(&context).expect("broker participants");
+        assert!(matches!(approver, Identity::Human { human_id } if human_id.as_str() == "owner"));
     }
 }

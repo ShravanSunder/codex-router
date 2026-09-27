@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize,
+)]
 #[serde(try_from = "String", into = "String")]
 pub struct InputId(String);
 

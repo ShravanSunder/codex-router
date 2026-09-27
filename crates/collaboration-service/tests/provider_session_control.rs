@@ -45,8 +45,8 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: creator.clone(),
-            approver: creator.clone(),
+            created_by: creator.clone().into(),
+            approver: creator.clone().into(),
             updated_at_ms: 3_000,
         })
         .await
@@ -67,8 +67,8 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: creator.clone(),
-            approver: creator.clone(),
+            created_by: creator.clone().into(),
+            approver: creator.clone().into(),
             updated_at_ms: 2_000,
         })
         .await
@@ -121,7 +121,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
     assert_eq!(cold.sessions[0].target, target);
     assert_eq!(cold.sessions[0].state, ProviderSessionState::Unloaded);
     assert_eq!(cold.sessions[0].updated_at, 3);
-    assert_eq!(cold.sessions[0].created_by, creator);
+    assert_eq!(cold.sessions[0].created_by, creator.clone().into());
     let wire = serde_json::to_value(&cold.sessions[0]).expect("row JSON");
     assert_eq!(
         wire["approver"],

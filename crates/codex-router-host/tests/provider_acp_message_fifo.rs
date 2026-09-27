@@ -48,8 +48,8 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -77,11 +77,12 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
     let first = collaboration_service::ProviderConversationBackend::prompt(
         supervisor.as_ref(),
         collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: first_operation_id,
             target: target.clone(),
             generation: Some(binding.generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("first".to_owned()).expect("prompt"),
             },
@@ -125,6 +126,11 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
         queued_snapshot.queue_state,
         Some(collaboration_protocol::ConversationOperationQueueState::RouterQueued)
     );
+    let queued_input_id = queued_snapshot.input_id.clone().expect("queued InputId");
+    let listed = route.queue_list(&target);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].input_id, queued_input_id);
+    assert_eq!(listed[0].preview, "second");
 
     let blocker_id = collaboration_protocol::OperationId::generate();
     {
@@ -198,6 +204,10 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
     .expect("submitted operation uses provider operation record");
     assert_eq!(submitted_snapshot.queue_state, None);
     assert_eq!(
+        route.queue_cancel(&target, &queued_input_id),
+        Err(codex_router_host::ProviderQueueCancellationError::NotQueued)
+    );
+    assert_eq!(
         submitted_snapshot.stage,
         collaboration_protocol::ProviderOperationStage::MayHaveDispatched
     );
@@ -260,8 +270,8 @@ async fn permanent_queued_load_failure_is_inspectable_and_does_not_stop_fifo() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -388,8 +398,8 @@ async fn failed_queued_prompt_advances_to_the_next_accepted_item() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -407,11 +417,12 @@ async fn failed_queued_prompt_advances_to_the_next_accepted_item() {
     let active_prompt = collaboration_service::ProviderConversationBackend::prompt(
         supervisor.as_ref(),
         collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: collaboration_protocol::OperationId::generate(),
             target: target.clone(),
             generation: Some(binding.generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("active prompt".to_owned()).expect("prompt"),
             },
@@ -583,8 +594,8 @@ async fn provider_retirement_marks_queued_items_not_submitted() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -610,11 +621,12 @@ async fn provider_retirement_marks_queued_items_not_submitted() {
     let first = collaboration_service::ProviderConversationBackend::prompt(
         supervisor.as_ref(),
         collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: collaboration_protocol::OperationId::generate(),
             target: target.clone(),
             generation: Some(binding.generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("active".to_owned()).expect("prompt"),
             },

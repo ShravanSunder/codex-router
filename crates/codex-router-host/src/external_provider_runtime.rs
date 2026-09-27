@@ -6,7 +6,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use acp_client_runtime::AgentSessionClient;
 pub(crate) use acp_client_runtime::ProviderPromptDispatchObservation;
-use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
+use collaboration_protocol::{
+    CodexGeneration, OperationId, ProviderIdentity, ProviderPromptStopReason, SessionRef,
+};
 use collaboration_service::ProviderSessionEventHub;
 use collaboration_service::ServiceInteractionBroker;
 use message_board::SessionEndpointRef;
@@ -34,8 +36,8 @@ pub use acp_client_runtime::{
 
 #[derive(Clone, Debug)]
 pub struct ExternalProviderApprovalContext {
-    pub requester: SessionRef,
-    pub approver: SessionRef,
+    pub requester: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub target: SessionRef,
     pub operation_id: OperationId,
     pub binding_generation: CodexGeneration,
@@ -61,7 +63,17 @@ fn host_prompt_outcome(
         session_event_model::StopReason::Refusal => ProviderPromptStopReason::Refusal,
         session_event_model::StopReason::Cancelled => ProviderPromptStopReason::Cancelled,
         session_event_model::StopReason::Unknown(value) => {
-            return Err(ExternalProviderRuntimeError::unknown_stop_reason(&value));
+            let safe_value = if !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            {
+                value
+            } else {
+                "unrecognized".to_owned()
+            };
+            ProviderPromptStopReason::Unknown(safe_value)
         }
     };
     Ok(ExternalProviderPromptOutcome {
@@ -76,18 +88,18 @@ mod prompt_projection_tests {
     use super::*;
 
     #[test]
-    fn unknown_stop_reason_keeps_only_its_safe_suffix() {
+    fn unknown_stop_reason_keeps_output_and_safe_value() {
         let outcome = acp_client_runtime::ExternalProviderPromptOutcome {
             output: "known output".to_owned(),
             stop_reason: session_event_model::StopReason::Unknown("future_stop".to_owned()),
             permission_refusal_reason: None,
         };
-        let error = host_prompt_outcome(outcome).expect_err("unknown stop reason");
-        assert!(matches!(
-            error,
-            ExternalProviderRuntimeError::UnknownStopReason { suffix }
-                if suffix == " (future_stop)"
-        ));
+        let projected = host_prompt_outcome(outcome).expect("unknown reason is a terminal outcome");
+        assert_eq!(projected.output, "known output");
+        assert_eq!(
+            projected.stop_reason,
+            ProviderPromptStopReason::Unknown("future_stop".into())
+        );
 
         let untrusted = acp_client_runtime::ExternalProviderPromptOutcome {
             output: String::new(),
@@ -96,9 +108,9 @@ mod prompt_projection_tests {
         };
         assert_eq!(
             host_prompt_outcome(untrusted)
-                .expect_err("unknown stop reason")
-                .to_string(),
-            "agent ended the turn with an unrecognized stop reason"
+                .expect("terminal outcome")
+                .stop_reason,
+            ProviderPromptStopReason::Unknown("unrecognized".into())
         );
     }
 }
@@ -227,6 +239,15 @@ impl ExternalProviderRuntime {
         self.client.capability_report(provider_session_id).await
     }
 
+    pub(crate) fn install_catalog_refresh(
+        &self,
+        sender: tokio::sync::mpsc::UnboundedSender<String>,
+    ) {
+        if let Some(event_sink) = &self.event_sink {
+            event_sink.install_catalog_refresh(sender);
+        }
+    }
+
     pub fn retirement(&self) -> CancellationToken {
         self.client.retirement()
     }
@@ -249,6 +270,47 @@ impl ExternalProviderRuntime {
         self.client.create_session_with_observation(cwd).await
     }
 
+    pub async fn create_session_with_settings(
+        &self,
+        cwd: PathBuf,
+        settings: acp_client_runtime::RequestedProviderSettings,
+    ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
+        self.client
+            .create_session_with_settings(cwd, settings)
+            .await
+    }
+
+    pub async fn settings_unresolved(&self, provider_session_id: &str) -> bool {
+        self.client.settings_unresolved(provider_session_id).await
+    }
+
+    pub async fn set_setting(
+        &self,
+        provider_session_id: String,
+        kind: acp_client_runtime::ProviderSettingKind,
+        value: String,
+    ) -> Result<acp_client_runtime::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        self.client
+            .set_setting(provider_session_id, kind, value)
+            .await
+    }
+
+    pub async fn accept_session_settings(
+        &self,
+        provider_session_id: String,
+    ) -> Result<acp_client_runtime::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        self.client
+            .accept_session_settings(provider_session_id)
+            .await
+    }
+
+    pub async fn settings_catalog(
+        &self,
+        provider_session_id: &str,
+    ) -> Option<acp_client_runtime::ProviderSettingsCatalog> {
+        self.client.settings_catalog(provider_session_id).await
+    }
+
     pub async fn load_session(
         &self,
         provider_session_id: String,
@@ -257,12 +319,60 @@ impl ExternalProviderRuntime {
         self.client.load_session(provider_session_id, cwd).await
     }
 
+    pub async fn resume_session(
+        &self,
+        provider_session_id: String,
+        cwd: PathBuf,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        self.client
+            .resume_session(provider_session_id.clone(), cwd)
+            .await?;
+        if let Some(event_sink) = &self.event_sink {
+            event_sink
+                .begin_history_unavailable(&provider_session_id)
+                .await
+                .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+        }
+        Ok(())
+    }
+
+    pub async fn close_session(
+        &self,
+        provider_session_id: String,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        self.client
+            .close_session(provider_session_id.clone())
+            .await?;
+        if let Some(event_sink) = &self.event_sink {
+            acp_client_runtime::SessionEventSink::publish(
+                event_sink.as_ref(),
+                &provider_session_id,
+                session_event_model::SessionEvent::StateChanged {
+                    state: session_event_model::SessionState::Closed,
+                },
+            )
+            .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+        }
+        Ok(())
+    }
+
     pub async fn steer_session(
         &self,
         provider_session_id: String,
         prompt: String,
     ) -> Result<crate::ProviderSteeringOutcome, ExternalProviderRuntimeError> {
         self.client.steer_session(provider_session_id, prompt).await
+    }
+
+    pub async fn steer_session_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: session_event_model::InputId,
+        prompt: String,
+    ) -> Result<crate::ProviderSteeringOutcome, ExternalProviderRuntimeError> {
+        self.client
+            .steer_with_input(provider_session_id, input_id, prompt)
+            .await
     }
 
     pub async fn session_activity(
@@ -361,16 +471,42 @@ impl ExternalProviderRuntime {
         )
     }
 
-    pub(crate) async fn prompt_with_approval_dispatch(
+    pub async fn prompt_with_approval_context_for_input(
         &self,
         provider_session_id: String,
+        input_id: session_event_model::InputId,
+        prompt: String,
+        context: ExternalProviderApprovalContext,
+    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
+        host_prompt_outcome(
+            self.client
+                .prompt_with_approval_context_for_input(
+                    provider_session_id,
+                    input_id,
+                    prompt,
+                    context,
+                )
+                .await?,
+        )
+    }
+
+    pub(crate) async fn prompt_with_approval_dispatch_for_input(
+        &self,
+        provider_session_id: String,
+        input_id: session_event_model::InputId,
         prompt: String,
         context: ExternalProviderApprovalContext,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
         host_prompt_outcome(
             self.client
-                .prompt_with_approval_dispatch(provider_session_id, prompt, context, dispatch)
+                .prompt_with_approval_dispatch_for_input(
+                    provider_session_id,
+                    input_id,
+                    prompt,
+                    context,
+                    dispatch,
+                )
                 .await?,
         )
     }

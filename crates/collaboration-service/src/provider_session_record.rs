@@ -1,9 +1,10 @@
 //! Durable provider session metadata needed for load-on-demand and approvals.
 use crate::{ProviderOperationStore, ProviderOperationStoreError};
 use collaboration_protocol::{
-    ConversationBindingIdentity, EndpointRef, OperationId, ProviderOperationEffect,
-    ProviderOperationKind, ProviderOperationStage, ProviderReconciliationState,
-    ProviderRequestedPolicy, ProviderWorkingDirectory, SessionId, SessionRef,
+    ConversationBindingIdentity, EndpointRef, OperationId, ProviderIdentity,
+    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
+    ProviderReconciliationState, ProviderRequestedPolicy, ProviderWorkingDirectory, SessionId,
+    SessionRef,
 };
 use sqlx::Connection;
 
@@ -12,8 +13,8 @@ pub struct ProviderSessionRecord {
     pub target: SessionRef,
     pub working_directory: ProviderWorkingDirectory,
     pub requested_policy: ProviderRequestedPolicy,
-    pub created_by: SessionRef,
-    pub approver: SessionRef,
+    pub created_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub updated_at_ms: i64,
 }
 
@@ -21,8 +22,12 @@ impl ProviderSessionRecord {
     fn validate(&self) -> Result<(), ProviderOperationStoreError> {
         let endpoint_id = String::from(self.target.endpoint.endpoint_id.clone());
         if !matches!(endpoint_id.as_str(), "claude-local" | "cursor-local")
-            || self.created_by.endpoint.service_id != self.target.endpoint.service_id
-            || self.approver.endpoint.service_id != self.target.endpoint.service_id
+            || self.created_by.session().is_some_and(|session| {
+                session.endpoint.service_id != self.target.endpoint.service_id
+            })
+            || self.approver.session().is_some_and(|session| {
+                session.endpoint.service_id != self.target.endpoint.service_id
+            })
             || self.updated_at_ms < 0
         {
             return Err(ProviderOperationStoreError::InvalidRecord);
@@ -32,7 +37,7 @@ impl ProviderSessionRecord {
 }
 
 impl ProviderOperationStore {
-    /// Atomically settle create/load and make its target loadable after a restart.
+    /// Atomically settle create/load/resume and make its target loadable after a restart.
     pub async fn settle_session_operation(
         &mut self,
         operation_id: &OperationId,
@@ -66,7 +71,7 @@ impl ProviderOperationStore {
                 stage=?,effect=?,reconciliation_state=?,
                 terminal_at_ms=MAX(admitted_at_ms,?),
                 updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)
-             WHERE operation_id=? AND stage=? AND operation_kind IN (?,?)
+             WHERE operation_id=? AND stage=? AND operation_kind IN (?,?,?)
              AND (target_session_id IS NULL OR
                  (target_service_id=? AND target_endpoint_id=? AND target_session_id=?))",
             target_service_id,
@@ -85,6 +90,9 @@ impl ProviderOperationStore {
                 ProviderOperationKind::ConversationCreate
             )?,
             super::provider_operation_store::encode_enum(ProviderOperationKind::ConversationLoad)?,
+            super::provider_operation_store::encode_enum(
+                ProviderOperationKind::ConversationResume
+            )?,
             target_service_id,
             target_endpoint_id,
             target_session_id,

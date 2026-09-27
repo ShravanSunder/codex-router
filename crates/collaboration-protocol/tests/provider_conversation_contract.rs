@@ -1,5 +1,6 @@
 use collaboration_protocol::{
-    ConversationBindingIdentity, ConversationCreateOutcome, ConversationOperationFailure,
+    ConversationBindingIdentity, ConversationCreateOutcome, ConversationCreateRequest,
+    ConversationOperationFailure, ConversationOperationSettlement, ConversationPromptRequest,
     control_error_is_valid, control_schema_document,
 };
 use serde_json::{Value, json};
@@ -107,6 +108,9 @@ fn conversation_create_outcome_keeps_caller_operation_identity()
 -> Result<(), Box<dyn std::error::Error>> {
     for value in [
         json!({"kind":"created","operationId":"019f0000-0000-7000-8000-000000000011","target":session("created")}),
+        json!({"kind":"created","operationId":"019f0000-0000-7000-8000-000000000011","target":session("created"),
+            "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},
+                "mappingStatus":"verified","authentication":"authenticated","mode":"ask","model":"provider-model","effort":"high"}}),
         json!({"kind":"pending","operationId":"019f0000-0000-7000-8000-000000000011"}),
     ] {
         let outcome: ConversationCreateOutcome = serde_json::from_value(value.clone())?;
@@ -181,6 +185,74 @@ fn mutations_require_caller_operation_identity_and_allow_unpinned_generation() {
         .unwrap_or_else(|| panic!("params"))
         .remove("generation");
     assert!(create_validator.is_valid(&request));
+}
+
+#[test]
+fn provider_create_settings_and_partial_settlement_have_additive_typed_shapes() {
+    let request = json!({
+        "operationId":"019f0000-0000-7000-8000-000000000010",
+        "endpoint":endpoint(),
+        "workingDirectory":"/tmp/provider-work",
+        "createdBy":session("creator"),
+        "approver":session("approver"),
+        "requestedPolicy":{"access":"workspace-write"},
+        "settings":{"mode":"plan","model":"provider-model","effort":"high"}
+    });
+    let decoded: ConversationCreateRequest =
+        serde_json::from_value(request.clone()).expect("provider settings request");
+    assert_eq!(serde_json::to_value(decoded).expect("round trip"), request);
+    let settlement = json!({
+        "kind":"createdWithoutSettings", "target":session("created"),
+        "applied":[{"setting":"mode","value":"plan"}],
+        "failed":[{"setting":"model","value":"provider-model","reason":"agent refused"}]
+    });
+    let decoded: ConversationOperationSettlement =
+        serde_json::from_value(settlement.clone()).expect("partial settlement");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("round trip"),
+        settlement
+    );
+}
+
+#[test]
+fn invalid_setting_failure_names_advertised_values_and_session_disposition() {
+    let failure = json!({
+        "kind":"invalidSetting", "stage":"settlement", "effect":"none",
+        "message":"mode value invalid; advertised: plan, default; Session closed",
+        "operationId":"019f0000-0000-7000-8000-000000000011",
+        "invalidSetting":{
+            "setting":"mode", "value":"wrong", "advertised":["plan","default"],
+            "sessionDisposition":"closed"
+        }
+    });
+    let decoded: ConversationOperationFailure =
+        serde_json::from_value(failure.clone()).expect("typed invalid setting");
+    assert_eq!(serde_json::to_value(decoded).expect("round trip"), failure);
+}
+
+#[test]
+fn provider_prompt_input_id_is_additive_and_kept_verbatim() {
+    let base = json!({
+        "operationId":"019f0000-0000-7000-8000-000000000011",
+        "target":session("provider-session"),
+        "requestedBy":session("creator"),
+        "approver":session("approver"),
+        "prompt":{"kind":"router","text":"hello"}
+    });
+    let old: ConversationPromptRequest = serde_json::from_value(base.clone()).expect("old prompt");
+    assert_eq!(serde_json::to_value(old).expect("old round trip"), base);
+    let mut with_id = base;
+    with_id["inputId"] = json!("input-from-front-door");
+    let prompt: ConversationPromptRequest =
+        serde_json::from_value(with_id.clone()).expect("typed Input ID");
+    assert_eq!(
+        prompt
+            .input_id
+            .as_ref()
+            .map(session_event_model::InputId::as_str),
+        Some("input-from-front-door")
+    );
+    assert_eq!(serde_json::to_value(prompt).expect("round trip"), with_id);
 }
 
 #[test]
@@ -312,5 +384,21 @@ fn validated_provider_collections_and_paths_reject_ambiguous_values() {
             "relative/path"
         ))
         .is_err()
+    );
+}
+
+#[test]
+fn unknown_stop_reason_round_trips_with_completed_prompt_output() {
+    let settlement = json!({
+        "kind":"promptCompleted",
+        "target":session("provider-conversation"),
+        "stopReason":{"unknown":"future_reason"},
+        "response":"first second"
+    });
+    let decoded: collaboration_protocol::ConversationOperationSettlement =
+        serde_json::from_value(settlement.clone()).expect("typed unknown settlement");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("encode settlement"),
+        settlement
     );
 }

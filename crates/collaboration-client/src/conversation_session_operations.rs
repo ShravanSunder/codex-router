@@ -83,8 +83,8 @@ impl ConversationClient {
                     target: target.clone(),
                     generation: input.generation,
                     working_directory,
-                    requested_by: input.requested_by.clone(),
-                    approver: input.approver.unwrap_or(input.requested_by),
+                    requested_by: input.requested_by.clone().into(),
+                    approver: input.approver.unwrap_or(input.requested_by).into(),
                     requested_policy: ProviderRequestedPolicy {
                         access: input.access,
                     },
@@ -204,10 +204,11 @@ impl ConversationClient {
                 }
                 let request = ProviderPromptRequest {
                     operation_id: operation_id.clone(),
+                    input_id: None,
                     target: target.clone(),
                     generation: input.generation,
-                    requested_by: input.requested_by.clone(),
-                    approver: input.approver.unwrap_or(input.requested_by),
+                    requested_by: input.requested_by.clone().into(),
+                    approver: input.approver.unwrap_or(input.requested_by).into(),
                     prompt: input.message.into(),
                 };
                 let wait_seconds = provider_wait_seconds(timeout)?;
@@ -259,8 +260,8 @@ impl ConversationClient {
                     target_operation_id: input.target_operation_id,
                     target: input.target,
                     generation: input.generation,
-                    requested_by: input.requested_by.clone(),
-                    approver: input.approver.unwrap_or(input.requested_by),
+                    requested_by: input.requested_by.clone().into(),
+                    approver: input.approver.unwrap_or(input.requested_by).into(),
                 })
                 .await?),
         }
@@ -379,6 +380,7 @@ fn provider_stop_reason(reason: ProviderPromptStopReason) -> ConversationStopRea
         ProviderPromptStopReason::MaxTurnRequests => ConversationStopReason::MaxTurnRequests,
         ProviderPromptStopReason::Refusal => ConversationStopReason::Refusal,
         ProviderPromptStopReason::Cancelled => ConversationStopReason::Cancelled,
+        ProviderPromptStopReason::Unknown(value) => ConversationStopReason::Unknown(value),
     }
 }
 
@@ -408,6 +410,7 @@ fn operation_settlement_failure(
         effect,
         message,
         operation_id,
+        invalid_setting: None,
         provider_code: None,
         target: Some(target),
         endpoint: None,

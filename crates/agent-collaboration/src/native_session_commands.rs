@@ -28,7 +28,7 @@ enum NativeControlCommand {
 }
 #[derive(Subcommand)]
 enum SessionOperation {
-    /// Read native metadata without loading or resuming the thread.
+    /// Read Codex metadata or a provider Session's state, capabilities and settings.
     Inspect(TargetArguments),
     /// Set the explicit persisted Codex thread name without resuming it.
     Rename {
@@ -141,7 +141,31 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
             .resolve(&client.identity().service_id)
             .map_err(|_| ClientError::Protocol("invalid session target"))?;
         let result = match operation {
-            RequestedOperation::Inspect => json!(client.inspect_session(&target).await?),
+            RequestedOperation::Inspect => {
+                let inventory = client.list_endpoints().await?;
+                let provider = inventory
+                    .endpoints
+                    .iter()
+                    .find(|entry| entry.endpoint == target.endpoint)
+                    .is_some_and(|entry| {
+                        entry.channels.iter().any(|channel| {
+                            matches!(channel, ChannelDescription::ExternalProvider { .. })
+                        })
+                    });
+                if provider {
+                    json!(
+                        client
+                            .inspect_provider_session(
+                                collaboration_client::protocol::ProviderSessionInspectRequest {
+                                    target
+                                }
+                            )
+                            .await?
+                    )
+                } else {
+                    json!(client.inspect_session(&target).await?)
+                }
+            }
             RequestedOperation::Rename(name) => {
                 mutation_started = true;
                 json!(

@@ -9,11 +9,11 @@ use std::{
 };
 
 use acp_client_runtime::{
-    EventSinkOverflow, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,
+    EventSinkClosed, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,
 };
 use collaboration_service::ProviderSessionEventHub;
 use message_board::{SessionEndpointRef, SessionId, SessionRef};
-use session_event_model::SessionEvent;
+use session_event_model::{SessionEvent, SessionItemKind};
 use tokio::{
     sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
@@ -28,6 +28,10 @@ enum HubCommand {
         session: SessionRef,
         completion: oneshot::Sender<Result<(), HistoryReplayUnavailable>>,
     },
+    BeginUnavailable {
+        session: SessionRef,
+        completion: oneshot::Sender<Result<(), HistoryReplayUnavailable>>,
+    },
 }
 
 /// One provider connection has one queue and one consumer. The synchronous ACP
@@ -39,6 +43,7 @@ pub(crate) struct HubSessionEventSink {
     backlog: Arc<AtomicUsize>,
     backlog_warned: StdMutex<HashSet<String>>,
     not_publishing: Arc<StdMutex<HashSet<String>>>,
+    catalog_refresh: StdMutex<Option<mpsc::UnboundedSender<String>>>,
 }
 
 impl HubSessionEventSink {
@@ -75,6 +80,20 @@ impl HubSessionEventSink {
                             });
                         let _ = completion.send(result);
                     }
+                    HubCommand::BeginUnavailable {
+                        session,
+                        completion,
+                    } => {
+                        let result = hub
+                            .begin_history_unavailable(session.clone())
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| {
+                                tracing::error!(%error, session_id = %session.session_id.as_str(), "provider Session history invalidation failed");
+                                HistoryReplayUnavailable
+                            });
+                        let _ = completion.send(result);
+                    }
                 }
             }
         });
@@ -85,6 +104,7 @@ impl HubSessionEventSink {
             backlog,
             backlog_warned: StdMutex::new(HashSet::new()),
             not_publishing,
+            catalog_refresh: StdMutex::new(None),
         }
     }
 
@@ -97,14 +117,14 @@ impl HubSessionEventSink {
         })
     }
 
-    fn enqueue(&self, session_id: &str, command: HubCommand) -> Result<(), EventSinkOverflow> {
+    fn enqueue(&self, session_id: &str, command: HubCommand) -> Result<(), EventSinkClosed> {
         if self
             .not_publishing
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(session_id)
         {
-            return Err(EventSinkOverflow);
+            return Err(EventSinkClosed);
         }
         self.backlog.fetch_add(1, Ordering::Relaxed);
         let sent = self
@@ -120,7 +140,7 @@ impl HubSessionEventSink {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(session_id.to_owned());
             tracing::error!(session_id, "provider Session event consumer is unavailable");
-            return Err(EventSinkOverflow);
+            return Err(EventSinkClosed);
         }
         if self.backlog.load(Ordering::Relaxed) > 10_000
             && self
@@ -135,6 +155,10 @@ impl HubSessionEventSink {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), HistoryReplayUnavailable> {
+        self.catalog_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         self.sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -143,6 +167,30 @@ impl HubSessionEventSink {
             consumer.await.map_err(|_| HistoryReplayUnavailable)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn install_catalog_refresh(&self, sender: mpsc::UnboundedSender<String>) {
+        *self
+            .catalog_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
+    }
+
+    pub(crate) async fn begin_history_unavailable(
+        &self,
+        session_id: &str,
+    ) -> Result<(), HistoryReplayUnavailable> {
+        let session = self.session(session_id)?;
+        let (completion, result) = oneshot::channel();
+        self.enqueue(
+            session_id,
+            HubCommand::BeginUnavailable {
+                session,
+                completion,
+            },
+        )
+        .map_err(|_| HistoryReplayUnavailable)?;
+        result.await.map_err(|_| HistoryReplayUnavailable)?
     }
 }
 
@@ -165,9 +213,25 @@ impl SessionEventSink for HubSessionEventSink {
         })
     }
 
-    fn publish(&self, session_id: &str, event: SessionEvent) -> Result<(), EventSinkOverflow> {
-        let session = self.session(session_id).map_err(|_| EventSinkOverflow)?;
-        self.enqueue(session_id, HubCommand::Publish { session, event })
+    fn publish(&self, session_id: &str, event: SessionEvent) -> Result<(), EventSinkClosed> {
+        let changes_config = matches!(
+            &event,
+            SessionEvent::ItemStarted { item }
+                | SessionEvent::ItemUpdated { item }
+                if matches!(item.kind, SessionItemKind::ConfigChange)
+        );
+        let session = self.session(session_id).map_err(|_| EventSinkClosed)?;
+        self.enqueue(session_id, HubCommand::Publish { session, event })?;
+        if changes_config
+            && let Some(sender) = self
+                .catalog_refresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+        {
+            let _ = sender.send(session_id.to_owned());
+        }
+        Ok(())
     }
 }
 
@@ -190,7 +254,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     #[tokio::test]
-    async fn typed_broker_request_and_decision_publish_pending_and_resolution_in_order() {
+    async fn typed_broker_interactions_publish_pending_and_resolution_in_order() {
         let root = tempfile::tempdir().expect("temporary store");
         let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
             .expect("service ID");
@@ -254,11 +318,12 @@ mod tests {
             ]
         }))
         .expect("approval request");
+        let question_target = target.clone();
         let request_task = tokio::spawn({
             let port = Arc::clone(&port);
             let context = crate::ExternalProviderApprovalContext {
-                requester: approver.clone(),
-                approver: approver.clone(),
+                requester: (approver.clone()).into(),
+                approver: (approver.clone()).into(),
                 target,
                 operation_id: OperationId::generate(),
                 binding_generation: CodexGeneration {
@@ -297,18 +362,76 @@ mod tests {
                 .expect("actor"),
         };
         broker
-            .decide_typed_interaction("approval-one", &actor, "allow-once", false)
+            .decide_typed_interaction(
+                "approval-one",
+                &actor,
+                "allow-once",
+                false,
+                Some("note".into()),
+            )
             .await
             .expect("approver decision");
         assert_eq!(
             request_task.await.expect("port task"),
             ApprovalPortOutcome::Selected {
                 option_id: "allow-once".into(),
+                note: Some("note".into()),
             }
         );
+        let question = serde_json::from_value(serde_json::json!({
+            "requestId":"question-one","prompt":"Choose count","fields":[
+                {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true}
+            ]
+        })).expect("question request");
+        let question_task = tokio::spawn({
+            let port = Arc::clone(&port);
+            let context = crate::ExternalProviderApprovalContext {
+                requester: (approver.clone()).into(),
+                approver: (approver.clone()).into(),
+                target: question_target,
+                operation_id: OperationId::generate(),
+                binding_generation: CodexGeneration {
+                    service_epoch: UuidIdentity::try_from(
+                        "00000000-0000-4000-8000-000000000001".to_owned(),
+                    )
+                    .expect("epoch"),
+                    generation: GenerationNumber::try_from(1).expect("generation"),
+                },
+                binding_retirement: tokio_util::sync::CancellationToken::new(),
+            };
+            async move {
+                port.request_question(
+                    context,
+                    question,
+                    tokio_util::sync::CancellationToken::new(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(attached) = hub.attach(session.clone()).await
+                    && attached.snapshot.len() == 4
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pending question published");
+        let response = session_event_model::QuestionResponse::Answered {
+            content: serde_json::from_value(serde_json::json!({"count":3})).expect("answer"),
+        };
+        broker
+            .respond_question("question-one", &actor, response.clone())
+            .await
+            .expect("question answer");
+        assert_eq!(question_task.await.expect("question task"), response);
         sink.shutdown().await.expect("drain");
         let attached = hub.attach(session).await.expect("attach history");
-        assert_eq!(attached.snapshot.len(), 3);
+        assert_eq!(attached.snapshot.len(), 5);
         assert!(matches!(
             &attached.snapshot[0].event,
             SessionEvent::TurnStarted { .. }
@@ -319,6 +442,14 @@ mod tests {
         ));
         assert!(matches!(
             &attached.snapshot[2].event,
+            SessionEvent::InteractionResolved { .. }
+        ));
+        assert!(matches!(
+            &attached.snapshot[3].event,
+            SessionEvent::InteractionRequested { .. }
+        ));
+        assert!(matches!(
+            &attached.snapshot[4].event,
             SessionEvent::InteractionResolved { .. }
         ));
     }
@@ -377,5 +508,41 @@ mod tests {
             &attached.snapshot[0].event,
             SessionEvent::TurnStarted { turn_id, .. } if turn_id == "replayed-turn"
         ));
+    }
+
+    #[tokio::test]
+    async fn idle_config_change_notifies_provider_catalog_worker() {
+        let root = tempfile::tempdir().expect("temporary store");
+        let store = ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("provider store");
+        let hub = Arc::new(ProviderSessionEventHub::new(Arc::new(Mutex::new(store))));
+        let endpoint = SessionEndpointRef {
+            service_id: ServiceId::try_from("00000000-0000-4000-8000-000000000001".to_owned())
+                .expect("service"),
+            endpoint_id: EndpointId::try_from("fixture-provider".to_owned()).expect("endpoint"),
+        };
+        let sink = HubSessionEventSink::new(hub, endpoint);
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        sink.install_catalog_refresh(sender);
+        sink.publish(
+            "session-one",
+            SessionEvent::ItemStarted {
+                item: session_event_model::SessionItem {
+                    item_id: "config-1".into(),
+                    kind: SessionItemKind::ConfigChange,
+                    text: Some("model options updated".into()),
+                },
+            },
+        )
+        .expect("publish config update");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+                .await
+                .expect("catalog notification")
+                .as_deref(),
+            Some("session-one")
+        );
+        sink.shutdown().await.expect("drain");
     }
 }

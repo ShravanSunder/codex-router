@@ -267,6 +267,7 @@ pub(super) async fn create_provider_target(
     let operation_id = OperationId::generate();
     client
         .create_provider_conversation(ConversationCreateRequest {
+            settings: None,
             operation_id: operation_id.clone(),
             endpoint,
             generation: Some(collaboration_protocol::CodexGeneration {
@@ -277,8 +278,8 @@ pub(super) async fn create_provider_target(
                 working_directory.display().to_string(),
             )
             .expect("working directory"),
-            created_by: actor.clone(),
-            approver: actor,
+            created_by: (actor.clone()).into(),
+            approver: (actor).into(),
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
@@ -377,14 +378,15 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
     let operation_id = OperationId::generate();
     client
         .prompt_provider_conversation(ConversationPromptRequest {
+            input_id: None,
             operation_id: operation_id.clone(),
             target: requester.clone(),
             generation: Some(collaboration_protocol::CodexGeneration {
                 service_epoch: inventory.service_epoch,
                 generation: generation_number,
             }),
-            requested_by: requester,
-            approver: approver.clone(),
+            requested_by: (requester).into(),
+            approver: (approver.clone()).into(),
             prompt: MessageContent::HumanUser {
                 text: MessageText::try_from("request permission".to_owned())
                     .expect("permission prompt"),
@@ -407,6 +409,7 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
             decision: Some(ApprovalDecision::Allow),
             option_id: None,
             acknowledge_persistent: false,
+            note: None,
             actor: serde_json::from_value(json!({"kind":"session","session":approver}))
                 .expect("approver identity"),
         })
