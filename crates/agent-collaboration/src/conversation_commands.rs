@@ -90,8 +90,11 @@ struct CreateArguments {
     #[arg(long)]
     from: Option<String>,
     /// SessionRef or typed Identity JSON for the Approver. Defaults to this creator.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "approver_owner")]
     approver: Option<String>,
+    /// Use the local OS owner as the Human Approver for a provider Session.
+    #[arg(long, conflicts_with = "approver")]
+    approver_owner: bool,
     #[arg(long)]
     root_message_id: Option<String>,
     #[arg(long)]

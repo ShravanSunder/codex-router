@@ -2,7 +2,7 @@
 
 ## Unreleased - 2026-09-24
 
-- Invalid `conversation create --from` identity JSON now exits 2 with `invalidField`; provider creates also accept explicitly selected Human creators and Approvers.
+- Invalid `conversation create --from` identity JSON now exits 2 with `invalidField`; provider creates accept Human creators and Approvers, including an owner-selected `--approver-owner` shortcut.
 - Isolated Hosts now work in release builds and accept `--require-debug-isolation` with home-default mode; a forged `HOME` cannot reach launchctl and must satisfy isolated debug-profile and socket checks.
 - Advertise an additive MCP tool output union that validates both unchanged successful structured receipts and typed structured errors. Reconnect existing MCP clients after a Host upgrade to refresh cached tool schemas.
 - Enable configured Claude and Cursor ACP providers by default from owner-editable `providers.json`. A failed provider reports endpoint-specific reason and fix without taking down the other endpoints.

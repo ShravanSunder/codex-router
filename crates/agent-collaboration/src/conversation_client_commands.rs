@@ -136,19 +136,35 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
                 }
             },
         };
-        let approver = match args.approver.as_deref() {
-            Some(value) => match serde_json::from_str::<ConversationCreateActor>(value) {
-                Ok(value) => Some(value),
+        let approver = if args.approver_owner {
+            match collaboration_client::resolve_owner_human_id().await {
+                Ok(human_id) => Some(ConversationCreateActor::Typed(
+                    message_board::Identity::Human { human_id },
+                )),
                 Err(_) => {
                     return crate::endpoint_commands::report_failure(
-                        "invalidField",
-                        "--approver must be a SessionRef or typed Identity JSON",
-                        2,
+                        "unavailable",
+                        "owner identity lookup failed; use explicit --approver Identity JSON or retry",
+                        3,
                         args.json,
                     );
                 }
-            },
-            None => Some(creator.clone()),
+            }
+        } else {
+            match args.approver.as_deref() {
+                Some(value) => match serde_json::from_str::<ConversationCreateActor>(value) {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        return crate::endpoint_commands::report_failure(
+                            "invalidField",
+                            "--approver must be a SessionRef or typed Identity JSON",
+                            2,
+                            args.json,
+                        );
+                    }
+                },
+                None => Some(creator.clone()),
+            }
         };
         let root_message_id = match args.root_message_id.map(TryInto::try_into).transpose() {
             Ok(value) => value,

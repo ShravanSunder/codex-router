@@ -56,6 +56,7 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: None,
+            owner_human_id: None,
         },
         vec![ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::claude(provider_path, vec![])?,
@@ -253,6 +254,63 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
     };
     assert!(matches!(created_by, ProviderIdentity::Human { .. }));
     assert!(matches!(approver, ProviderIdentity::Human { .. }));
+
+    let owner_lookup = std::process::Command::new("/usr/bin/id")
+        .arg("-un")
+        .output()?;
+    assert!(owner_lookup.status.success());
+    let expected_owner = String::from_utf8(owner_lookup.stdout)?;
+    let owner_created = run_cli(
+        root.path(),
+        &[
+            "conversation",
+            "create",
+            "--endpoint",
+            "claude-local",
+            "--cwd",
+        ],
+        &[
+            root.path().display().to_string(),
+            "--access".into(),
+            "workspace-write".into(),
+            "--from".into(),
+            creator.to_string(),
+            "--approver-owner".into(),
+            "--json".into(),
+        ],
+    )
+    .await?;
+    assert_eq!(
+        owner_created.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&owner_created.stdout),
+        String::from_utf8_lossy(&owner_created.stderr)
+    );
+    let owner_target: SessionRef =
+        serde_json::from_value(output_line(&owner_created.stdout, "created")?["target"].clone())?;
+    let listed = observer
+        .list_provider_sessions(ProviderSessionListParams {
+            endpoint: owner_target.endpoint.clone(),
+            view: NativeSessionView::Stored,
+            scope: NativeSessionScope::Any,
+            source: NativeSessionSource::All,
+            query: None,
+            page_size: 10,
+            cursor: None,
+        })
+        .await?;
+    let owner_record = listed
+        .sessions
+        .iter()
+        .find(|record| record.target() == &owner_target)
+        .ok_or("owner-Approver Session not listed")?;
+    let ProviderSessionSummary::HostedProvider { approver, .. } = owner_record else {
+        return Err("owner-Approver Session had an interactive registry shape".into());
+    };
+    assert!(matches!(approver,
+        ProviderIdentity::Human { human_id } if human_id.as_str() == expected_owner.trim()
+    ));
     runtime.shutdown().await?;
     Ok(())
 }
@@ -268,7 +326,10 @@ async fn run_cli(
         .args(suffix)
         .args(["--service-directory"])
         .arg(root);
-    Ok(tokio::time::timeout(Duration::from_secs(10), command.output()).await??)
+    tokio::time::timeout(Duration::from_secs(30), command.output())
+        .await
+        .map_err(|_| format!("CLI {prefix:?} timed out"))?
+        .map_err(Into::into)
 }
 
 async fn decide(root: &Path, request_id: &str, actor: &Value) -> TestResult<std::process::Output> {
