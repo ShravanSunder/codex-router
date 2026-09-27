@@ -48,6 +48,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
             actor.clone(),
             Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
             Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+            tokio::sync::watch::channel(Vec::new()).1,
         )
         .with_interaction_broker(Arc::clone(&broker)),
     );
@@ -184,6 +185,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
             other,
             Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
             Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+            tokio::sync::watch::channel(Vec::new()).1,
         )
         .with_interaction_broker(Arc::clone(&broker)),
     );

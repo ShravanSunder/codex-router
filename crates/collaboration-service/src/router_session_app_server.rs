@@ -41,8 +41,8 @@ impl RouterSessionAppServerContext {
         actor: Identity,
         commands: Arc<dyn SessionCommandPort>,
         events: Arc<dyn SessionEventHub>,
+        model_catalog: watch::Receiver<Vec<ProviderModelEntry>>,
     ) -> Self {
-        let (_, model_catalog) = watch::channel(Vec::new());
         Self {
             endpoint,
             actor,
@@ -51,15 +51,6 @@ impl RouterSessionAppServerContext {
             model_catalog,
             interaction_broker: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_model_catalog(
-        mut self,
-        model_catalog: watch::Receiver<Vec<ProviderModelEntry>>,
-    ) -> Self {
-        self.model_catalog = model_catalog;
-        self
     }
 
     #[must_use]

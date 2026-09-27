@@ -46,6 +46,7 @@ async fn startup_methods_have_the_exact_remote_wire_shapes()
         ScriptedSessionBackend::actor()?,
         Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        tokio::sync::watch::channel(Vec::new()).1,
     ));
     let server = tokio::spawn(async move {
         for _ in 0..9 {
@@ -437,6 +438,7 @@ async fn listener_serves_a_private_provider_socket() -> Result<(), Box<dyn std::
         ScriptedSessionBackend::actor()?,
         Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        tokio::sync::watch::channel(Vec::new()).1,
     ));
     let listener = RouterSessionAppServerListener::bind(&socket_path, context)?;
     let shutdown = CancellationToken::new();
@@ -477,6 +479,7 @@ async fn pinned_codex_tui_boots_and_starts_a_provider_thread()
         ScriptedSessionBackend::actor()?,
         Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        tokio::sync::watch::channel(Vec::new()).1,
     ));
     let listener = RouterSessionAppServerListener::bind(&socket_path, context)?;
     let shutdown = CancellationToken::new();
@@ -522,6 +525,7 @@ async fn web_socket_streams_turn_start_and_interrupt_from_hub()
         ScriptedSessionBackend::actor()?,
         Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        tokio::sync::watch::channel(Vec::new()).1,
     ));
     let listener = RouterSessionAppServerListener::bind(&socket_path, context)?;
     let shutdown = CancellationToken::new();
@@ -631,15 +635,13 @@ async fn model_list_reads_the_current_supervisor_catalog() -> Result<(), Box<dyn
     let socket_path = directory.path().join("claude.sock");
     let backend = ScriptedSessionBackend::new()?;
     let (catalog_writer, catalog_reader) = watch::channel(Vec::new());
-    let context = Arc::new(
-        RouterSessionAppServerContext::new(
-            backend.endpoint.clone(),
-            ScriptedSessionBackend::actor()?,
-            Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
-            Arc::clone(&backend) as Arc<dyn SessionEventHub>,
-        )
-        .with_model_catalog(catalog_reader),
-    );
+    let context = Arc::new(RouterSessionAppServerContext::new(
+        backend.endpoint.clone(),
+        ScriptedSessionBackend::actor()?,
+        Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
+        Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        catalog_reader,
+    ));
     let listener = RouterSessionAppServerListener::bind(&socket_path, context)?;
     let shutdown = CancellationToken::new();
     let running = tokio::spawn(listener.run(shutdown.clone()));
