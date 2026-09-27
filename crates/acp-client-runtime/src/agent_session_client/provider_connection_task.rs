@@ -78,6 +78,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             ProviderCapabilityReport,
         >::new()));
         let task_session_capabilities = Arc::clone(&session_capabilities);
+        let task_event_sink = Arc::clone(&event_sink);
         #[cfg(any(test, feature = "test-observation"))]
         let permission_request_count = Arc::new(AtomicU64::new(0));
         #[cfg(any(test, feature = "test-observation"))]
@@ -341,13 +342,22 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 let pending_connection = connection.clone();
                                                 let pending_shutdown = task_shutdown.clone();
                                                 let pending_admission_tx = admission_tx.clone();
+                                                let pending_event_sink = Arc::clone(&task_event_sink);
                                                 admission_tasks.spawn(async move {
-                                                    let result = tokio::select! {
+                                                    let replay_started = tokio::select! {
                                                         () = pending_shutdown.cancelled() => Err(ExternalProviderRuntimeError::TransportFailure),
-                                                        result = pending_connection
-                                                        .load_session_from(request)
-                                                        .block_task()
-                                                        .start_session() => result.map(|restored| restored.into_session()).map_err(acp_load_session_error),
+                                                        result = pending_event_sink.begin_history_replay(&provider_session_id) =>
+                                                            result.map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable),
+                                                    };
+                                                    let result = match replay_started {
+                                                        Ok(()) => tokio::select! {
+                                                            () = pending_shutdown.cancelled() => Err(ExternalProviderRuntimeError::TransportFailure),
+                                                            result = pending_connection
+                                                            .load_session_from(request)
+                                                            .block_task()
+                                                            .start_session() => result.map(|restored| restored.into_session()).map_err(acp_load_session_error),
+                                                        },
+                                                        Err(error) => Err(error),
                                                     };
                                                     publish_pending_session_admission(
                                                         &pending_admission_tx,

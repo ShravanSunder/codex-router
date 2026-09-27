@@ -58,7 +58,9 @@ pub use provider_prompt_content::ProviderPromptContent;
 pub use provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSteeringOutcome,
 };
-pub use session_event_sink::{EventSinkOverflow, SessionEventSink};
+pub use session_event_sink::{
+    EventSinkOverflow, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,
+};
 
 #[cfg(feature = "test-observation")]
 pub const MAX_ACP_FRAME_BYTES: usize = agent_session_client::MAX_ACP_FRAME_BYTES;
