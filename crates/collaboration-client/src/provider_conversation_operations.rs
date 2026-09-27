@@ -6,7 +6,7 @@ use collaboration_protocol::{
     ConversationOperationReconcileRequest, ConversationOperationShowRequest,
     ConversationOperationSnapshot, ConversationOperationSubmission,
     ConversationOperationWaitRequest, ConversationOperationWaitResult, ConversationPromptRequest,
-    OperationId,
+    OperationId, ProviderSettingsAcceptRequest, ProviderSettingsResult, ProviderSettingsSetRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
@@ -14,6 +14,22 @@ use std::time::Duration;
 const PROVIDER_WAIT_TRANSPORT_ALLOWANCE: Duration = Duration::from_secs(5);
 
 impl ControlClient {
+    pub async fn set_provider_conversation_setting(
+        &mut self,
+        request: ProviderSettingsSetRequest,
+    ) -> Result<ProviderSettingsResult, ClientError> {
+        self.call_provider_operation("conversation/settingsSet", request)
+            .await
+    }
+
+    pub async fn accept_provider_conversation_settings(
+        &mut self,
+        request: ProviderSettingsAcceptRequest,
+    ) -> Result<ProviderSettingsResult, ClientError> {
+        self.call_provider_operation("conversation/settingsAccept", request)
+            .await
+    }
+
     pub async fn create_provider_conversation(
         &mut self,
         request: ConversationCreateRequest,

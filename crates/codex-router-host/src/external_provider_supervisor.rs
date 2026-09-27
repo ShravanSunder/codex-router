@@ -1,6 +1,7 @@
 //! Host-owned admission and settlement for external ACP provider operations.
 
 mod provider_operation_failure;
+mod provider_settings_control;
 use provider_operation_failure::{
     admission_failure, invalid_setting_failure, prompt_runtime_failure, runtime_failure,
 };
@@ -21,12 +22,13 @@ use collaboration_protocol::{
     ConversationOperationWaitRequest, ConversationOperationWaitResult,
     ConversationOutputUnavailableReason, ConversationPromptRequest, EndpointRef, NonEmptyText,
     OperationId, ProviderBindingIdentity, ProviderOperationEffect, ProviderOperationKind,
-    ProviderOperationStage, ProviderReconciliationState, SessionId, SessionRef, render_message,
+    ProviderOperationStage, ProviderReconciliationState, ProviderSettingsAcceptRequest,
+    ProviderSettingsSetRequest, SessionId, SessionRef, render_message,
 };
 use collaboration_service::{
     ProviderConversationBackend, ProviderConversationFuture, ProviderOperationAdmission,
     ProviderOperationAdmissionResult, ProviderOperationRecord, ProviderOperationStore,
-    conversation_operation_snapshot as snapshot_from_record,
+    ProviderSettingsFuture, conversation_operation_snapshot as snapshot_from_record,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -504,6 +506,17 @@ where
 }
 
 impl ProviderConversationBackend for ExternalProviderSupervisor {
+    fn settings_set(&self, request: ProviderSettingsSetRequest) -> ProviderSettingsFuture<'_> {
+        Box::pin(provider_settings_control::set(self, request))
+    }
+
+    fn settings_accept(
+        &self,
+        request: ProviderSettingsAcceptRequest,
+    ) -> ProviderSettingsFuture<'_> {
+        Box::pin(provider_settings_control::accept(self, request))
+    }
+
     fn binding(&self, endpoint: &EndpointRef) -> Option<ProviderBindingIdentity> {
         self.inner
             .bindings

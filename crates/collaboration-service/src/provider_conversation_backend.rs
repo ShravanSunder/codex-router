@@ -5,17 +5,31 @@ use collaboration_protocol::{
     ConversationOperationShowRequest, ConversationOperationSnapshot,
     ConversationOperationSubmission, ConversationOperationWaitRequest,
     ConversationOperationWaitResult, ConversationPromptRequest, EndpointRef,
-    ProviderBindingIdentity,
+    ProviderBindingIdentity, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
+    ProviderSettingsFailureKind, ProviderSettingsResult, ProviderSettingsSetRequest,
 };
 use std::{future::Future, pin::Pin};
 
 pub type ProviderConversationFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ConversationOperationFailure>> + Send + 'a>>;
 
+pub type ProviderSettingsFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<ProviderSettingsResult, ProviderSettingsFailure>> + Send + 'a>,
+>;
+
 /// Host-owned provider work. Dropping one returned future only detaches its caller;
 /// implementations retain ownership of admitted provider operations.
 pub trait ProviderConversationBackend: Send + Sync {
     fn binding(&self, endpoint: &EndpointRef) -> Option<ProviderBindingIdentity>;
+    fn settings_set(&self, request: ProviderSettingsSetRequest) -> ProviderSettingsFuture<'_> {
+        Box::pin(async move { Err(settings_unavailable(request.target)) })
+    }
+    fn settings_accept(
+        &self,
+        request: ProviderSettingsAcceptRequest,
+    ) -> ProviderSettingsFuture<'_> {
+        Box::pin(async move { Err(settings_unavailable(request.target)) })
+    }
     fn lookup_existing(
         &self,
         _operation_id: collaboration_protocol::OperationId,
@@ -50,4 +64,15 @@ pub trait ProviderConversationBackend: Send + Sync {
         &self,
         request: ConversationOperationReconcileRequest,
     ) -> ProviderConversationFuture<'_, ConversationOperationSnapshot>;
+}
+
+fn settings_unavailable(target: collaboration_protocol::SessionRef) -> ProviderSettingsFailure {
+    ProviderSettingsFailure {
+        kind: ProviderSettingsFailureKind::Unavailable,
+        target,
+        message: "provider settings are unavailable".into(),
+        setting: None,
+        value: None,
+        advertised: Vec::new(),
+    }
 }

@@ -11,7 +11,9 @@ use collaboration_protocol::{
     JournalPage, JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
     NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
     NativeSessionListParams, NativeSessionListResult, OperationId, ProviderSessionListParams,
-    ProviderSessionListResult, RouterExecutableRelation, router_build_warning,
+    ProviderSessionListResult, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
+    ProviderSettingsResult, ProviderSettingsSetRequest, RouterExecutableRelation,
+    router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -389,6 +391,34 @@ impl CollaborationMcpServer {
         }
     }
 
+    #[tool(name = "conversation_settings_set", description = "Sets one advertised provider Session mode, model, or effort as its creator or Approver. An ambiguous provider response leaves settings gated.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSettingsResult>())]
+    async fn conversation_settings_set(
+        &self,
+        Parameters(request): Parameters<ProviderSettingsSetRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.set_provider_conversation_setting(request).await;
+        let _ = client.close().await;
+        provider_settings_tool_result(result, OperationEffect::Unknown)
+    }
+
+    #[tool(name = "conversation_settings_accept", description = "Accepts the provider Session's currently reported settings as its creator or Approver and clears the prompt gate without an agent RPC.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSettingsResult>())]
+    async fn conversation_settings_accept(
+        &self,
+        Parameters(request): Parameters<ProviderSettingsAcceptRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.accept_provider_conversation_settings(request).await;
+        let _ = client.close().await;
+        provider_settings_tool_result(result, OperationEffect::None)
+    }
+
     #[tool(name = "journal_status", description = "Reads lifecycle-journal availability and bounds without mutating state.", output_schema = rmcp::handler::server::tool::schema_for_type::<JournalStatus>())]
     async fn journal_status(
         &self,
@@ -720,6 +750,28 @@ fn structured_result<TValue: serde::Serialize>(
         Ok(value) => serde_json::to_value(value)
             .map(CallToolResult::structured)
             .unwrap_or_else(|_| validation_failure("collaboration result encoding failed")),
+        Err(error) => failure(error, possible_effect),
+    }
+}
+
+fn provider_settings_tool_result(
+    result: Result<ProviderSettingsResult, ClientError>,
+    possible_effect: OperationEffect,
+) -> CallToolResult {
+    match result {
+        Ok(value) => structured_result(Ok(value), OperationEffect::None),
+        Err(error @ ClientError::Rejected { .. }) => {
+            let typed = match &error {
+                ClientError::Rejected {
+                    data: Some(data), ..
+                } => serde_json::from_value::<ProviderSettingsFailure>(data.clone()).ok(),
+                _ => None,
+            };
+            typed
+                .and_then(|failure| serde_json::to_value(failure).ok())
+                .map(CallToolResult::structured_error)
+                .unwrap_or_else(|| failure(error, possible_effect))
+        }
         Err(error) => failure(error, possible_effect),
     }
 }

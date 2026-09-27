@@ -410,6 +410,7 @@ impl ConversationClient {
                     Ok(Ok(target)) => Ok(ConversationCreateOutcome::Created {
                         operation_id,
                         target,
+                        effective_settings: None,
                     }),
                     Ok(Err(error)) => Err(error.into()),
                     Err(_) => Ok(ConversationCreateOutcome::Pending { operation_id }),
@@ -472,16 +473,8 @@ impl ConversationClient {
                     .ok_or(ConversationClientError::InvalidInput(
                         "create timeout must be whole seconds within the supported range",
                     ))?;
-                let requested_settings = request.settings.is_some();
                 let submitted = tokio::time::timeout(timeout, async {
-                    let admitted = control.create_provider_conversation(request).await?;
-                    if !requested_settings && let Some(target) = created_target(&admitted.operation)
-                    {
-                        return Ok(ConversationCreateOutcome::Created {
-                            operation_id: operation_id.clone(),
-                            target,
-                        });
-                    }
+                    control.create_provider_conversation(request).await?;
                     let settled = control
                         .wait_for_provider_conversation_operation(
                             ConversationOperationWaitRequest {
@@ -492,11 +485,16 @@ impl ConversationClient {
                         .await?;
                     match settled.output {
                         ConversationOperationWaitOutput::Available {
-                            settlement: ConversationOperationSettlement::Created { target, .. },
+                            settlement:
+                                ConversationOperationSettlement::Created {
+                                    target,
+                                    effective_settings,
+                                },
                         } => {
                             return Ok(ConversationCreateOutcome::Created {
                                 operation_id: operation_id.clone(),
                                 target,
+                                effective_settings: Some(effective_settings),
                             });
                         }
                         ConversationOperationWaitOutput::Available {
@@ -515,13 +513,6 @@ impl ConversationClient {
                             });
                         }
                         _ => {}
-                    }
-                    if !requested_settings && let Some(target) = created_target(&settled.operation)
-                    {
-                        return Ok(ConversationCreateOutcome::Created {
-                            operation_id: operation_id.clone(),
-                            target,
-                        });
                     }
                     if settled.operation.stage == ProviderOperationStage::Terminal {
                         let effect = settled.operation.effect;
@@ -566,18 +557,6 @@ impl ConversationClient {
                 }
             }
         }
-    }
-}
-
-fn created_target(
-    snapshot: &collaboration_protocol::ConversationOperationSnapshot,
-) -> Option<SessionRef> {
-    if snapshot.stage == ProviderOperationStage::Terminal
-        && snapshot.effect == ProviderOperationEffect::Applied
-    {
-        snapshot.target.clone()
-    } else {
-        None
     }
 }
 

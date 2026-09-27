@@ -10,7 +10,8 @@ use collaboration_protocol::{
     ConversationOperationFailureStage, ConversationOperationReconcileRequest,
     ConversationOperationShowRequest, ConversationOperationWaitRequest, ConversationPromptRequest,
     EndpointAvailability, EndpointRef, NonEmptyText, OperationId, ProviderBindingIdentity,
-    ProviderOperationEffect, SessionRef,
+    ProviderOperationEffect, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
+    ProviderSettingsFailureKind, ProviderSettingsSetRequest, SessionRef,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -26,6 +27,10 @@ pub(crate) async fn dispatch(
         "conversation/load" => dispatch_load(id, parse(params), identity).await,
         "conversation/prompt" => dispatch_prompt(id, parse(params), identity).await,
         "conversation/cancel" => dispatch_cancel(id, parse(params), identity).await,
+        "conversation/settingsSet" => dispatch_settings_set(id, parse(params), identity).await,
+        "conversation/settingsAccept" => {
+            dispatch_settings_accept(id, parse(params), identity).await
+        }
         "conversation/operationShow" => {
             let request = parse::<ConversationOperationShowRequest>(params);
             if let Ok(request) = &request {
@@ -96,6 +101,31 @@ pub(crate) async fn dispatch(
 }
 
 pub(crate) fn overloaded(id: Value, method: &str, params: Value) -> Value {
+    if matches!(
+        method,
+        "conversation/settingsSet" | "conversation/settingsAccept"
+    ) {
+        let target = match method {
+            "conversation/settingsSet" => {
+                parse::<ProviderSettingsSetRequest>(params).map(|request| request.target)
+            }
+            _ => parse::<ProviderSettingsAcceptRequest>(params).map(|request| request.target),
+        };
+        return match target {
+            Ok(target) => settings_failure_response(
+                id,
+                ProviderSettingsFailure {
+                    kind: ProviderSettingsFailureKind::Unavailable,
+                    target,
+                    message: "provider settings service is overloaded".into(),
+                    setting: None,
+                    value: None,
+                    advertised: Vec::new(),
+                },
+            ),
+            Err(()) => invalid_params(id),
+        };
+    }
     let operation = match method {
         "conversation/create" => {
             parse::<ConversationCreateRequest>(params).map(|request| (request.operation_id, None))
@@ -118,6 +148,59 @@ pub(crate) fn overloaded(id: Value, method: &str, params: Value) -> Value {
         return invalid_params(id);
     };
     local_failure_response(id, LocalFailure::Busy, operation_id, target)
+}
+
+async fn dispatch_settings_set(
+    id: Value,
+    request: Result<ProviderSettingsSetRequest, ()>,
+    identity: &ServiceIdentity,
+) -> Value {
+    let Ok(request) = request else {
+        return invalid_params(id);
+    };
+    let Some(backend) = identity.provider_conversations.as_deref() else {
+        return settings_failure_response(id, settings_unavailable(request.target));
+    };
+    settings_result_response(id, backend.settings_set(request).await)
+}
+
+async fn dispatch_settings_accept(
+    id: Value,
+    request: Result<ProviderSettingsAcceptRequest, ()>,
+    identity: &ServiceIdentity,
+) -> Value {
+    let Ok(request) = request else {
+        return invalid_params(id);
+    };
+    let Some(backend) = identity.provider_conversations.as_deref() else {
+        return settings_failure_response(id, settings_unavailable(request.target));
+    };
+    settings_result_response(id, backend.settings_accept(request).await)
+}
+
+fn settings_unavailable(target: SessionRef) -> ProviderSettingsFailure {
+    ProviderSettingsFailure {
+        kind: ProviderSettingsFailureKind::Unavailable,
+        target,
+        message: "provider settings service is unavailable".into(),
+        setting: None,
+        value: None,
+        advertised: Vec::new(),
+    }
+}
+
+fn settings_result_response(
+    id: Value,
+    result: Result<collaboration_protocol::ProviderSettingsResult, ProviderSettingsFailure>,
+) -> Value {
+    match result {
+        Ok(result) => success(id, result),
+        Err(failure) => settings_failure_response(id, failure),
+    }
+}
+
+fn settings_failure_response(id: Value, failure: ProviderSettingsFailure) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":failure.message,"data":failure}})
 }
 
 fn parse<T: DeserializeOwned>(params: Value) -> Result<T, ()> {

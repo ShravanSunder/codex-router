@@ -13,8 +13,9 @@ use collaboration_protocol::{
     ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationStage,
     ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
-    ProviderRequestedSettings, ProviderRuntimeIdentity, ProviderTransport,
-    ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef, UuidIdentity,
+    ProviderRequestedSettings, ProviderRuntimeIdentity, ProviderSettingName,
+    ProviderSettingsAcceptRequest, ProviderSettingsFailureKind, ProviderSettingsSetRequest,
+    ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, NativeGenerationGate, ProviderConversationBackend,
@@ -183,11 +184,11 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                         effort: None,
                     }),
                     operation_id: operation_id.clone(),
-                    endpoint: provider_endpoint,
+                    endpoint: provider_endpoint.clone(),
                     generation: Some(generation()?),
                     working_directory: working_directory()?,
                     created_by: creator.clone(),
-                    approver: creator,
+                    approver: creator.clone(),
                     requested_policy: policy(),
                 })
                 .await,
@@ -226,6 +227,26 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                     ProviderOperationStore::open(&root.path().join("provider-operations.sqlite"))
                         .await?;
                 ensure!(store.session_record(&target).await?.is_some());
+                let wrong_actor = actor(provider_endpoint.clone(), "stranger")?;
+                let denied = backend
+                    .settings_set(ProviderSettingsSetRequest {
+                        target: target.clone(),
+                        actor: wrong_actor,
+                        setting: ProviderSettingName::Model,
+                        value: "b".into(),
+                    })
+                    .await
+                    .expect_err("actor must be creator or Approver");
+                ensure_eq!(denied.kind, ProviderSettingsFailureKind::WrongActor);
+                let accepted = backend
+                    .settings_accept(ProviderSettingsAcceptRequest {
+                        target: target.clone(),
+                        actor: creator.clone(),
+                    })
+                    .await
+                    .map_err(|error| error.message)?;
+                ensure_eq!(accepted.target, target);
+                ensure_eq!(accepted.effective_settings.mode.as_deref(), Some("ask"));
             }
             "invalid" => {
                 let failure = wait(&backend, operation_id)
@@ -245,7 +266,7 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                     collaboration_protocol::InvalidSettingSessionDisposition::Closed
                 );
             }
-            _ => unreachable!("fixture case is known"),
+            _ => return Err("unknown fixture case".into()),
         }
         backend
             .shutdown()

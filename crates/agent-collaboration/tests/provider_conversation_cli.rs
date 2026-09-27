@@ -339,6 +339,97 @@ async fn common_create_waits_for_provider_target_and_prints_operation_first() {
 }
 
 #[tokio::test]
+async fn provider_settings_set_and_accept_use_immediate_control_methods() {
+    let root = fixture_directory("provider-settings-actions");
+    let listener = publish_fixture(&root);
+    let fixture = tokio::spawn(async move {
+        serve_one(&listener, "conversation/settingsSet", |request| {
+            assert_eq!(request["params"]["target"], target());
+            assert_eq!(
+                request["params"]["actor"],
+                json!(serde_json::from_str::<Value>(&actor()).expect("actor"))
+            );
+            assert_eq!(request["params"]["setting"], "mode");
+            assert_eq!(request["params"]["value"], "ask");
+            assert!(request["params"].get("operationId").is_none());
+            settings_result()
+        })
+        .await;
+        serve_one(&listener, "conversation/settingsAccept", |request| {
+            assert_eq!(request["params"]["target"], target());
+            assert!(request["params"].get("operationId").is_none());
+            settings_result()
+        })
+        .await;
+    });
+    let target_json = target().to_string();
+    let actor_json = actor();
+    let set = run_cli(
+        &root,
+        vec![
+            "conversation",
+            "settings",
+            "set",
+            "--target",
+            &target_json,
+            "--actor",
+            &actor_json,
+            "--setting",
+            "mode",
+            "--value",
+            "ask",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(
+        set.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&set.stdout)
+    );
+    let set_result: Value = serde_json::from_slice(&set.stdout).expect("set result");
+    assert_eq!(set_result["result"]["effectiveSettings"]["mode"], "ask");
+    let accept = run_cli(
+        &root,
+        vec![
+            "conversation",
+            "settings",
+            "accept",
+            "--target",
+            &target_json,
+            "--actor",
+            &actor_json,
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(
+        accept.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&accept.stdout)
+    );
+    let accept_result: Value = serde_json::from_slice(&accept.stdout).expect("accept result");
+    assert_eq!(accept_result["result"]["target"], target());
+    fixture.await.expect("fixture");
+    cleanup_fixture(&root);
+}
+
+fn settings_result() -> Value {
+    json!({"target":target(),"effectiveSettings":{
+        "requestedPolicy":{"access":"workspace-write"},
+        "mappingStatus":"verified","authentication":"authenticated","mode":"ask"
+    }})
+}
+
+#[tokio::test]
 async fn codex_create_missing_model_and_effort_fails_before_start_record() {
     let root = fixture_directory("codex-create-missing-inputs");
     let output = run_cli(

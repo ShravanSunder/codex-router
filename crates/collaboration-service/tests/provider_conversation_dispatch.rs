@@ -4,10 +4,11 @@ use collaboration_protocol::{
     ConversationOperationShowRequest, ConversationOperationSnapshot,
     ConversationOperationSubmission, ConversationOperationWaitRequest,
     ConversationOperationWaitResult, ConversationPromptRequest, EndpointDescription, EndpointRef,
-    ProviderBindingIdentity,
+    ProviderBindingIdentity, ProviderSettingsAcceptRequest, ProviderSettingsResult,
+    ProviderSettingsSetRequest,
 };
 use collaboration_service::{
-    ProviderConversationBackend, ServiceIdentity, serve_control_connection,
+    ProviderConversationBackend, ProviderSettingsFuture, ServiceIdentity, serve_control_connection,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -36,6 +37,27 @@ struct RecordingBackend {
 }
 
 impl ProviderConversationBackend for RecordingBackend {
+    fn settings_set(&self, request: ProviderSettingsSetRequest) -> ProviderSettingsFuture<'_> {
+        let calls = Arc::clone(&self.calls);
+        Box::pin(async move {
+            let target = request.target.clone();
+            calls.lock().await.push(("settingsSet", json!(request)));
+            Ok(settings_result(target))
+        })
+    }
+
+    fn settings_accept(
+        &self,
+        request: ProviderSettingsAcceptRequest,
+    ) -> ProviderSettingsFuture<'_> {
+        let calls = Arc::clone(&self.calls);
+        Box::pin(async move {
+            let target = request.target.clone();
+            calls.lock().await.push(("settingsAccept", json!(request)));
+            Ok(settings_result(target))
+        })
+    }
+
     fn binding(&self, endpoint: &EndpointRef) -> Option<ProviderBindingIdentity> {
         self.bindings
             .iter()
@@ -92,6 +114,68 @@ impl ProviderConversationBackend for RecordingBackend {
     ) -> BackendFuture<'_, ConversationOperationSnapshot> {
         self.record("reconcile", request, self.snapshot.clone())
     }
+}
+
+fn settings_result(target: collaboration_protocol::SessionRef) -> ProviderSettingsResult {
+    ProviderSettingsResult {
+        target,
+        effective_settings: collaboration_protocol::EffectiveProviderSettings {
+            requested_policy: collaboration_protocol::ProviderRequestedPolicy {
+                access: collaboration_protocol::RouterAccess::WorkspaceWrite,
+            },
+            mapping_status: collaboration_protocol::ProviderSettingsMappingStatus::Verified,
+            authentication: collaboration_protocol::ProviderAuthenticationState::Authenticated,
+            provider_permission_mode: None,
+            permission_outcome: None,
+            mode: Some("ask".into()),
+            model: None,
+            effort: None,
+        },
+    }
+}
+
+#[tokio::test]
+async fn settings_methods_forward_typed_actor_without_operation_id() -> TestResult {
+    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let set = json!({"target":session("provider-conversation"),"actor":actor("creator"),"setting":"mode","value":"ask"});
+    let set_response = call(
+        &mut writer,
+        &mut reader,
+        "set",
+        "conversation/settingsSet",
+        set.clone(),
+    )
+    .await?;
+    ensure(
+        set_response["result"]["effectiveSettings"]["mode"] == "ask",
+        format!("set: {set_response}"),
+    )?;
+    let accept = json!({"target":session("provider-conversation"),"actor":actor("approver")});
+    let accept_response = call(
+        &mut writer,
+        &mut reader,
+        "accept",
+        "conversation/settingsAccept",
+        accept.clone(),
+    )
+    .await?;
+    ensure(
+        accept_response["result"]["target"] == session("provider-conversation"),
+        format!("accept: {accept_response}"),
+    )?;
+    let invalid = call(&mut writer, &mut reader, "invalid", "conversation/settingsSet", json!({
+        "target":session("provider-conversation"),"actor":actor("creator"),"setting":"mode","value":"ask",
+        "operationId":operation_id()
+    })).await?;
+    ensure(
+        invalid["error"]["code"] == -32602,
+        format!("operation ID admitted: {invalid}"),
+    )?;
+    ensure(
+        *backend.calls.lock().await == vec![("settingsSet", set), ("settingsAccept", accept)],
+        "settings calls changed".into(),
+    )?;
+    Ok(())
 }
 
 impl RecordingBackend {

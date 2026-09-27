@@ -244,7 +244,9 @@ fn validate_question_content(
                 required, options, ..
             } => (
                 *required,
-                matches!(content.get(field_id), Some(QuestionAnswerValue::SelectedOptions { selected_option_ids }) if selected_option_ids.len() == 1 && options.iter().any(|option| option.option_id == selected_option_ids[0])),
+                matches!(content.get(field_id), Some(QuestionAnswerValue::SelectedOptions { selected_option_ids })
+                    if selected_option_ids.len() == 1
+                    && selected_option_ids.first().is_some_and(|selected| options.iter().any(|option| &option.option_id == selected))),
             ),
             QuestionField::MultiChoice {
                 required,

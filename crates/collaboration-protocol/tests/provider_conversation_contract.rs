@@ -108,6 +108,9 @@ fn conversation_create_outcome_keeps_caller_operation_identity()
 -> Result<(), Box<dyn std::error::Error>> {
     for value in [
         json!({"kind":"created","operationId":"019f0000-0000-7000-8000-000000000011","target":session("created")}),
+        json!({"kind":"created","operationId":"019f0000-0000-7000-8000-000000000011","target":session("created"),
+            "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},
+                "mappingStatus":"verified","authentication":"authenticated","mode":"ask","model":"provider-model","effort":"high"}}),
         json!({"kind":"pending","operationId":"019f0000-0000-7000-8000-000000000011"}),
     ] {
         let outcome: ConversationCreateOutcome = serde_json::from_value(value.clone())?;

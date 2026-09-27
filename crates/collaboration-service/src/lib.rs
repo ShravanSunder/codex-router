@@ -54,7 +54,9 @@ mod session_delivery_router;
 mod stored_delivery_receipt;
 mod stored_run_receipt;
 pub use collaboration_protocol::{DeliveryClientReceipt, DeliveryReceipt};
-pub use provider_conversation_backend::{ProviderConversationBackend, ProviderConversationFuture};
+pub use provider_conversation_backend::{
+    ProviderConversationBackend, ProviderConversationFuture, ProviderSettingsFuture,
+};
 pub use scheduled_run_contract::{
     FreshSessionRequest, NativeTurnRef, PreparationEvidenceSink, PreparedTarget, RunAcceptance,
     RunEvidenceDisposition, RunEvidenceSink, RunObservationContext, RunReconciliation,

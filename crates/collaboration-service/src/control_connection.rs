@@ -145,6 +145,8 @@ pub async fn serve_control_connection(
                             | "conversation/load"
                             | "conversation/prompt"
                             | "conversation/cancel"
+                            | "conversation/settingsSet"
+                            | "conversation/settingsAccept"
                             | "conversation/operationShow"
                             | "conversation/operationWait"
                             | "conversation/operationReconcile"

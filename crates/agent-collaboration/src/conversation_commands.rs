@@ -51,6 +51,8 @@ enum ConversationCommand {
     Load(LoadArguments),
     /// Cancel one exact active provider operation.
     Cancel(CancelArguments),
+    /// Set or accept the effective settings of a provider Session.
+    Settings(crate::conversation_settings_commands::SettingsArguments),
     /// Inspect, wait for, or reconcile one exact conversation operation.
     Operation {
         #[command(subcommand)]
@@ -214,6 +216,7 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
         ConversationCommand::Prompt(args) => run_prompt(args),
         ConversationCommand::Load(args) => client_commands::run_load(args),
         ConversationCommand::Cancel(args) => client_commands::run_cancel(args),
+        ConversationCommand::Settings(args) => crate::conversation_settings_commands::run(args),
         ConversationCommand::Operation { command } => {
             crate::conversation_operation_commands::run_conversation_operation_command(command)
         }
@@ -779,6 +782,7 @@ mod tests {
             ConversationCommand::Prompt(_)
             | ConversationCommand::Load(_)
             | ConversationCommand::Cancel(_)
+            | ConversationCommand::Settings(_)
             | ConversationCommand::Operation { .. } => {
                 panic!("create parse selected another command")
             }
