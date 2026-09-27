@@ -260,14 +260,20 @@ impl ExternalProviderRuntime {
         &self,
         cwd: PathBuf,
     ) -> Result<String, ExternalProviderRuntimeError> {
-        self.client.create_session(cwd).await
+        self.create_session_with_observation(cwd)
+            .await
+            .map(|created| created.provider_session_id)
     }
 
     pub async fn create_session_with_observation(
         &self,
         cwd: PathBuf,
     ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
-        self.client.create_session_with_observation(cwd).await
+        self.create_session_with_settings(
+            cwd,
+            acp_client_runtime::RequestedProviderSettings::default(),
+        )
+        .await
     }
 
     pub async fn create_session_with_settings(
@@ -275,9 +281,27 @@ impl ExternalProviderRuntime {
         cwd: PathBuf,
         settings: acp_client_runtime::RequestedProviderSettings,
     ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
-        self.client
+        let created = self
+            .client
             .create_session_with_settings(cwd, settings)
-            .await
+            .await;
+        let active_session = match &created {
+            Ok(created) => Some(created.provider_session_id.as_str()),
+            Err(ExternalProviderRuntimeError::CreatedWithoutSettings {
+                provider_session_id,
+                ..
+            }) => Some(provider_session_id.as_str()),
+            Err(ExternalProviderRuntimeError::InvalidSetting {
+                provider_session_id,
+                disposition: acp_client_runtime::InvalidSettingSessionDisposition::RemainsCreated,
+                ..
+            }) => Some(provider_session_id.as_str()),
+            _ => None,
+        };
+        if let Some(session_id) = active_session {
+            self.publish_active_session(session_id).await?;
+        }
+        created
     }
 
     pub async fn settings_unresolved(&self, provider_session_id: &str) -> bool {
@@ -316,7 +340,10 @@ impl ExternalProviderRuntime {
         provider_session_id: String,
         cwd: PathBuf,
     ) -> Result<(), ExternalProviderRuntimeError> {
-        self.client.load_session(provider_session_id, cwd).await
+        self.client
+            .load_session(provider_session_id.clone(), cwd)
+            .await?;
+        self.publish_active_session(&provider_session_id).await
     }
 
     pub async fn resume_session(
@@ -332,6 +359,30 @@ impl ExternalProviderRuntime {
                 .begin_history_unavailable(&provider_session_id)
                 .await
                 .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+        }
+        self.publish_active_session(&provider_session_id).await
+    }
+
+    async fn publish_active_session(
+        &self,
+        provider_session_id: &str,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        if let Some(event_sink) = &self.event_sink {
+            let capabilities = self
+                .client
+                .capability_report(provider_session_id)
+                .await
+                .to_session_model();
+            acp_client_runtime::SessionEventSink::publish(
+                event_sink.as_ref(),
+                provider_session_id,
+                session_event_model::SessionEvent::CapabilitiesChanged { capabilities },
+            )
+            .map_err(|_| ExternalProviderRuntimeError::SinkClosed)?;
+            event_sink
+                .publish_idle(provider_session_id)
+                .await
+                .map_err(|_| ExternalProviderRuntimeError::SinkClosed)?;
         }
         Ok(())
     }
@@ -361,7 +412,12 @@ impl ExternalProviderRuntime {
         provider_session_id: String,
         prompt: String,
     ) -> Result<crate::ProviderSteeringOutcome, ExternalProviderRuntimeError> {
-        self.client.steer_session(provider_session_id, prompt).await
+        self.steer_session_with_input(
+            provider_session_id,
+            session_event_model::InputId::generate(),
+            prompt,
+        )
+        .await
     }
 
     pub async fn steer_session_with_input(
@@ -371,7 +427,18 @@ impl ExternalProviderRuntime {
         prompt: String,
     ) -> Result<crate::ProviderSteeringOutcome, ExternalProviderRuntimeError> {
         self.client
-            .steer_with_input(provider_session_id, input_id, prompt)
+            .steer_contents_with_input(provider_session_id, input_id, text_contents(prompt)?)
+            .await
+    }
+
+    pub async fn steer_session_contents_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: session_event_model::InputId,
+        contents: Vec<session_event_model::PromptContent>,
+    ) -> Result<crate::ProviderSteeringOutcome, ExternalProviderRuntimeError> {
+        self.client
+            .steer_contents_with_input(provider_session_id, input_id, contents)
             .await
     }
 
@@ -380,6 +447,15 @@ impl ExternalProviderRuntime {
         provider_session_id: String,
     ) -> Result<crate::ProviderSessionActivity, ExternalProviderRuntimeError> {
         self.client.session_activity(provider_session_id).await
+    }
+
+    pub async fn active_prompt_operation(
+        &self,
+        provider_session_id: String,
+    ) -> Result<Option<OperationId>, ExternalProviderRuntimeError> {
+        self.client
+            .active_prompt_operation(provider_session_id)
+            .await
     }
 
     pub async fn wait_session_idle(
@@ -450,12 +526,18 @@ impl ExternalProviderRuntime {
         self.client.abort_owner_for_test().await;
     }
 
+    #[cfg(test)]
     pub async fn prompt(
         &self,
         provider_session_id: String,
         prompt: String,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        host_prompt_outcome(self.client.prompt(provider_session_id, prompt).await?)
+        self.prompt_with_approval_context(
+            provider_session_id.clone(),
+            prompt,
+            test_approval_context(&provider_session_id, None),
+        )
+        .await
     }
 
     pub async fn prompt_with_approval_context(
@@ -464,11 +546,13 @@ impl ExternalProviderRuntime {
         prompt: String,
         context: ExternalProviderApprovalContext,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        host_prompt_outcome(
-            self.client
-                .prompt_with_approval_context(provider_session_id, prompt, context)
-                .await?,
+        self.prompt_with_approval_context_for_input(
+            provider_session_id,
+            session_event_model::InputId::generate(),
+            prompt,
+            context,
         )
+        .await
     }
 
     pub async fn prompt_with_approval_context_for_input(
@@ -478,32 +562,30 @@ impl ExternalProviderRuntime {
         prompt: String,
         context: ExternalProviderApprovalContext,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        host_prompt_outcome(
-            self.client
-                .prompt_with_approval_context_for_input(
-                    provider_session_id,
-                    input_id,
-                    prompt,
-                    context,
-                )
-                .await?,
+        self.prompt_contents_with_approval_dispatch_for_input(
+            provider_session_id,
+            input_id,
+            text_contents(prompt)?,
+            context,
+            None,
         )
+        .await
     }
 
-    pub(crate) async fn prompt_with_approval_dispatch_for_input(
+    pub(crate) async fn prompt_contents_with_approval_dispatch_for_input(
         &self,
         provider_session_id: String,
         input_id: session_event_model::InputId,
-        prompt: String,
+        contents: Vec<session_event_model::PromptContent>,
         context: ExternalProviderApprovalContext,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
         host_prompt_outcome(
             self.client
-                .prompt_with_approval_dispatch_for_input(
+                .prompt_contents_with_approval_dispatch_for_input(
                     provider_session_id,
                     input_id,
-                    prompt,
+                    contents,
                     context,
                     dispatch,
                 )
@@ -519,11 +601,46 @@ impl ExternalProviderRuntime {
         prompt: String,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        host_prompt_outcome(
-            self.client
-                .prompt_for_operation(provider_session_id, operation_id, prompt, dispatch)
-                .await?,
+        self.prompt_contents_with_approval_dispatch_for_input(
+            provider_session_id.clone(),
+            session_event_model::InputId::generate(),
+            text_contents(prompt)?,
+            test_approval_context(&provider_session_id, operation_id),
+            dispatch,
         )
+        .await
+    }
+}
+
+fn text_contents(
+    prompt: String,
+) -> Result<Vec<session_event_model::PromptContent>, ExternalProviderRuntimeError> {
+    session_event_model::PromptContent::text(prompt)
+        .map(|content| vec![content])
+        .map_err(|_| ExternalProviderRuntimeError::Operation("invalid prompt text".to_owned()))
+}
+
+#[cfg(test)]
+fn test_approval_context(
+    provider_session_id: &str,
+    operation_id: Option<OperationId>,
+) -> ExternalProviderApprovalContext {
+    let service_id = "0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89";
+    let target: SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint": {"serviceId": service_id, "endpointId": "cursor-local"},
+        "sessionId": provider_session_id,
+    }))
+    .expect("test provider target");
+    ExternalProviderApprovalContext {
+        requester: target.clone().into(),
+        approver: target.clone().into(),
+        target,
+        operation_id: operation_id.unwrap_or_else(OperationId::generate),
+        binding_generation: serde_json::from_value(serde_json::json!({
+            "serviceEpoch": service_id, "generation": 1
+        }))
+        .expect("test generation"),
+        binding_retirement: CancellationToken::new(),
     }
 }
 

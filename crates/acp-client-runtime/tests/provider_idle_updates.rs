@@ -133,7 +133,11 @@ async fn idle_mode_config_unknown_and_late_tool_updates_are_projected() {
 
     let initial_events = tokio::time::timeout(Duration::from_secs(2), async {
         let mut observed = Vec::new();
-        while observed.len() < 6 {
+        while !observed.iter().any(|event| {
+            matches!(event,
+            SessionEvent::ItemStarted { item } if matches!(&item.kind,
+                SessionItemKind::Unknown { source_kind } if source_kind == "future_idle_kind"))
+        }) {
             observed.push(events.recv().await.expect("event sink remains open"));
         }
         observed
@@ -147,6 +151,14 @@ async fn idle_mode_config_unknown_and_late_tool_updates_are_projected() {
     assert!(initial_events.iter().any(|event| matches!(event,
         SessionEvent::ItemStarted { item } if matches!(&item.kind,
             SessionItemKind::Unknown { source_kind } if source_kind == "future_idle_kind"))));
+    assert_eq!(
+        initial_events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CapabilitiesChanged { .. }))
+            .count(),
+        2,
+        "mode and config updates each publish current capabilities"
+    );
     let catalog = client
         .settings_catalog(&session_id)
         .await
@@ -155,14 +167,23 @@ async fn idle_mode_config_unknown_and_late_tool_updates_are_projected() {
     assert_eq!(catalog.effective_settings().model.as_deref(), Some("b"));
 
     client
-        .prompt(session_id.clone(), "Run".to_owned())
+        .prompt_contents_with_approval_dispatch_for_input(
+            session_id.clone(),
+            session_event_model::InputId::generate(),
+            vec![session_event_model::PromptContent::text("Run".to_owned()).expect("text prompt")],
+            (),
+            None,
+        )
         .await
         .expect("prompt ends");
     let steering = client
-        .steer_with_input(
+        .steer_contents_with_input(
             session_id,
             session_event_model::InputId::generate(),
-            "Continue".to_owned(),
+            vec![
+                session_event_model::PromptContent::text("Continue".to_owned())
+                    .expect("text steer"),
+            ],
         )
         .await
         .expect("idle steer");

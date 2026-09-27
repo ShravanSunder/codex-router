@@ -23,6 +23,7 @@ enum HubCommand {
     Publish {
         session: SessionRef,
         event: SessionEvent,
+        completion: Option<oneshot::Sender<Result<(), EventSinkClosed>>>,
     },
     BeginReplay {
         session: SessionRef,
@@ -57,13 +58,21 @@ impl HubSessionEventSink {
             while let Some(command) = receiver.recv().await {
                 consumer_backlog.fetch_sub(1, Ordering::Relaxed);
                 match command {
-                    HubCommand::Publish { session, event } => {
-                        if let Err(error) = hub.publish(session.clone(), event).await {
+                    HubCommand::Publish {
+                        session,
+                        event,
+                        completion,
+                    } => {
+                        let result = hub.publish(session.clone(), event).await.map(|_| ()).map_err(|error| {
                             tracing::error!(%error, session_id = %session.session_id.as_str(), "provider Session event publication failed");
                             consumer_failures
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .insert(session.session_id.as_str().to_owned());
+                            EventSinkClosed
+                        });
+                        if let Some(completion) = completion {
+                            let _ = completion.send(result);
                         }
                     }
                     HubCommand::BeginReplay {
@@ -192,6 +201,22 @@ impl HubSessionEventSink {
         .map_err(|_| HistoryReplayUnavailable)?;
         result.await.map_err(|_| HistoryReplayUnavailable)?
     }
+
+    pub(crate) async fn publish_idle(&self, session_id: &str) -> Result<(), EventSinkClosed> {
+        let session = self.session(session_id).map_err(|_| EventSinkClosed)?;
+        let (completion, result) = oneshot::channel();
+        self.enqueue(
+            session_id,
+            HubCommand::Publish {
+                session,
+                event: SessionEvent::StateChanged {
+                    state: session_event_model::SessionState::Idle,
+                },
+                completion: Some(completion),
+            },
+        )?;
+        result.await.map_err(|_| EventSinkClosed)?
+    }
 }
 
 impl SessionEventSink for HubSessionEventSink {
@@ -221,7 +246,14 @@ impl SessionEventSink for HubSessionEventSink {
                 if matches!(item.kind, SessionItemKind::ConfigChange)
         );
         let session = self.session(session_id).map_err(|_| EventSinkClosed)?;
-        self.enqueue(session_id, HubCommand::Publish { session, event })?;
+        self.enqueue(
+            session_id,
+            HubCommand::Publish {
+                session,
+                event,
+                completion: None,
+            },
+        )?;
         if changes_config
             && let Some(sender) = self
                 .catalog_refresh
@@ -546,3 +578,7 @@ mod tests {
         sink.shutdown().await.expect("drain");
     }
 }
+
+#[cfg(test)]
+#[path = "provider_session_event_sink/lifecycle_tests.rs"]
+mod lifecycle_tests;

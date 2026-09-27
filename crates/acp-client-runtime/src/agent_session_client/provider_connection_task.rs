@@ -531,6 +531,13 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             };
                                             let _result = session.send(ProviderSessionCommand::Inspect { reply }).await;
                                         }
+                                        ProviderCommand::InspectActiveOperation { provider_session_id, reply } => {
+                                            let Some(session) = sessions.get(&provider_session_id) else {
+                                                let _result = reply.send(None);
+                                                continue;
+                                            };
+                                            let _result = session.send(ProviderSessionCommand::InspectActiveOperation { reply }).await;
+                                        }
                                         ProviderCommand::WaitSessionIdle { provider_session_id, reply } => {
                                             let Some(session) = sessions.get(&provider_session_id) else {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));

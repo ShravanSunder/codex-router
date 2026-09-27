@@ -55,23 +55,75 @@ impl ProviderQueueOperationRegistry {
         input_id: session_event_model::InputId,
         message: &MessageContent,
     ) {
-        self.operations
+        let _queued = self.record_queued_with_preview(
+            operation_id,
+            target,
+            binding,
+            input_id,
+            sanitized_preview(message),
+        );
+    }
+
+    pub(crate) fn record_queued_contents(
+        &self,
+        operation_id: OperationId,
+        target: SessionRef,
+        binding: ProviderBindingIdentity,
+        input_id: session_event_model::InputId,
+        contents: &[session_event_model::PromptContent],
+    ) -> ProviderQueuedInput {
+        let preview = contents
+            .iter()
+            .find_map(|content| match content {
+                session_event_model::PromptContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .map(sanitized_text_preview)
+            .unwrap_or_default();
+        self.record_queued_with_preview(operation_id, target, binding, input_id, preview)
+    }
+
+    fn record_queued_with_preview(
+        &self,
+        operation_id: OperationId,
+        target: SessionRef,
+        binding: ProviderBindingIdentity,
+        input_id: session_event_model::InputId,
+        preview: String,
+    ) -> ProviderQueuedInput {
+        let mut operations = self
+            .operations
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                operation_id,
-                QueuedProviderOperation {
-                    target,
-                    binding,
-                    queued_at_ms: now_ms(),
-                    state: ConversationOperationQueueState::RouterQueued,
-                    terminal_at_ms: None,
-                    input_id,
-                    preview: sanitized_preview(message),
-                    sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
-                    started: false,
-                },
-            );
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let position = operations
+            .values()
+            .filter(|operation| {
+                operation.target == target
+                    && !operation.started
+                    && operation.state == ConversationOperationQueueState::RouterQueued
+            })
+            .count()
+            .saturating_add(1);
+        let queued = ProviderQueuedInput {
+            input_id: input_id.clone(),
+            position: u64::try_from(position).unwrap_or(u64::MAX),
+            preview: preview.clone(),
+        };
+        operations.insert(
+            operation_id,
+            QueuedProviderOperation {
+                target,
+                binding,
+                queued_at_ms: now_ms(),
+                state: ConversationOperationQueueState::RouterQueued,
+                terminal_at_ms: None,
+                input_id,
+                preview,
+                sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+                started: false,
+            },
+        );
+        queued
     }
 
     pub(crate) fn list(&self, target: &SessionRef) -> Vec<ProviderQueuedInput> {
@@ -209,6 +261,10 @@ fn sanitized_preview(message: &MessageContent) -> String {
         | MessageContent::HumanUser { text }
         | MessageContent::Router { text } => text.as_str(),
     };
+    sanitized_text_preview(text)
+}
+
+fn sanitized_text_preview(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -297,6 +353,32 @@ mod tests {
         );
         assert!(!registry.try_start(&first.0));
         assert_eq!(registry.list(&target)[0].input_id, second.1);
+    }
+
+    #[test]
+    fn content_preview_uses_first_text_block_after_non_text_content() {
+        let registry = ProviderQueueOperationRegistry::default();
+        let (target, binding) = fixture();
+        let input_id = session_event_model::InputId::generate();
+        let contents = vec![
+            session_event_model::PromptContent::resource_link(
+                "https://example.test/context".into(),
+                "context".into(),
+                None,
+            )
+            .expect("resource link"),
+            session_event_model::PromptContent::text("  first\n  text\tblock  ".into())
+                .expect("text"),
+            session_event_model::PromptContent::text("second text".into()).expect("text"),
+        ];
+        registry.record_queued_contents(
+            OperationId::generate(),
+            target.clone(),
+            binding,
+            input_id,
+            &contents,
+        );
+        assert_eq!(registry.list(&target)[0].preview, "first text block");
     }
 
     #[test]

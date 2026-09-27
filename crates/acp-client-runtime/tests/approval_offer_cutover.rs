@@ -147,7 +147,15 @@ async fn run_permission_fixture(mode: &str) -> (Arc<CaptureInteractionPort>, ser
         .await
         .expect("session opens");
     let result = client
-        .prompt_with_approval_context("fixture-session".to_owned(), "Run it".to_owned(), ())
+        .prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Run it".to_owned()).expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await;
     client.shutdown().await;
     assert!(result.is_ok(), "prompt result: {result:?}");

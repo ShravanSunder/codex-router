@@ -5,46 +5,11 @@ use super::{
     ExternalProviderRuntimeError, ProviderPromptDispatchObservation,
 };
 use crate::provider_prompt_content::acp_blocks_from_prompt_content;
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::schema::v1::ContentBlock;
 use session_event_model::{InputId, PromptContent};
 use std::sync::Arc;
 
 impl<P: crate::InteractionPort> AgentSessionClient<P> {
-    pub async fn prompt_with_approval_dispatch(
-        &self,
-        provider_session_id: String,
-        prompt: String,
-        context: P::Context,
-        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_with_approval_dispatch_for_input(
-            provider_session_id,
-            InputId::generate(),
-            prompt,
-            context,
-            dispatch,
-        )
-        .await
-    }
-
-    pub async fn prompt_with_approval_dispatch_for_input(
-        &self,
-        provider_session_id: String,
-        input_id: InputId,
-        prompt: String,
-        context: P::Context,
-        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_with_approval_dispatch_blocks_for_input(
-            provider_session_id,
-            input_id,
-            vec![ContentBlock::Text(TextContent::new(prompt))],
-            context,
-            dispatch,
-        )
-        .await
-    }
-
     /// Preserve the typed approval context for a multi-block delivery turn.
     pub async fn prompt_contents_with_approval_dispatch_for_input(
         &self,

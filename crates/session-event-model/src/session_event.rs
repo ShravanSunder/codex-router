@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CapabilityReport, PendingInteraction, SessionState};
+use crate::{CapabilityReport, PendingInteraction, SessionSettings, SessionState};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +114,9 @@ pub enum SessionEvent {
     },
     CapabilitiesChanged {
         capabilities: CapabilityReport,
+    },
+    SettingsChanged {
+        settings: SessionSettings,
     },
     /// Control event on an obsolete subscription when history replay resets.
     ResyncRequired {

@@ -165,6 +165,10 @@ enum ProviderCommand<P: InteractionPort> {
         provider_session_id: String,
         reply: tokio::sync::oneshot::Sender<ProviderSessionActivity>,
     },
+    InspectActiveOperation {
+        provider_session_id: String,
+        reply: tokio::sync::oneshot::Sender<Option<P::OperationId>>,
+    },
     WaitSessionIdle {
         provider_session_id: String,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,

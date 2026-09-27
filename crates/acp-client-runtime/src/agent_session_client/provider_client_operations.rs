@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::provider_prompt_content::acp_blocks_from_prompt_content;
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::schema::v1::ContentBlock;
 use session_event_model::PromptContent;
 
 impl<P: InteractionPort> AgentSessionClient<P> {
@@ -170,38 +170,6 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         }
     }
 
-    pub async fn prompt_with_approval_context(
-        &self,
-        provider_session_id: String,
-        prompt: String,
-        context: P::Context,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_with_approval_context_for_input(
-            provider_session_id,
-            InputId::generate(),
-            prompt,
-            context,
-        )
-        .await
-    }
-
-    pub async fn prompt_with_approval_context_for_input(
-        &self,
-        provider_session_id: String,
-        input_id: InputId,
-        prompt: String,
-        context: P::Context,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_with_approval_dispatch_for_input(
-            provider_session_id,
-            input_id,
-            prompt,
-            context,
-            None,
-        )
-        .await
-    }
-
     pub async fn create_session(
         &self,
         cwd: PathBuf,
@@ -337,29 +305,6 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         result.await.map_err(|_| self.retired_operation_error())?
     }
 
-    pub async fn steer_session(
-        &self,
-        provider_session_id: String,
-        prompt: String,
-    ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
-        self.steer_with_input(provider_session_id, InputId::generate(), prompt)
-            .await
-    }
-
-    pub async fn steer_with_input(
-        &self,
-        provider_session_id: String,
-        input_id: InputId,
-        prompt: String,
-    ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
-        self.steer_acp_blocks_with_input(
-            provider_session_id,
-            input_id,
-            vec![ContentBlock::Text(TextContent::new(prompt))],
-        )
-        .await
-    }
-
     /// Steer with the same validated Session vocabulary used for prompts.
     /// Optional ACP content types are checked before any command is queued.
     pub async fn steer_contents_with_input(
@@ -407,6 +352,22 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
             .send(ProviderCommand::InspectSession {
+                provider_session_id,
+                reply,
+            })
+            .await
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())
+    }
+
+    /// Resolve the operation owned by the currently running Session turn.
+    pub async fn active_prompt_operation(
+        &self,
+        provider_session_id: String,
+    ) -> Result<Option<P::OperationId>, ExternalProviderRuntimeError> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::InspectActiveOperation {
                 provider_session_id,
                 reply,
             })

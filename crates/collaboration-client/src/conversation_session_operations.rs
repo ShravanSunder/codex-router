@@ -409,7 +409,7 @@ fn operation_settlement_failure(
         stage: ConversationOperationFailureStage::Settlement,
         effect,
         message,
-        operation_id,
+        operation_id: Some(operation_id),
         invalid_setting: None,
         provider_code: None,
         target: Some(target),

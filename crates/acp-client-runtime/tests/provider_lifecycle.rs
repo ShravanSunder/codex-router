@@ -174,7 +174,15 @@ async fn advertised_list_resume_and_idle_close_keep_wire_order() {
         .expect("resume");
     assert_eq!(sink.0.load(Ordering::Relaxed), 0, "resume does not replay");
     client
-        .prompt_with_approval_context("fixture-session".to_owned(), "Hello".to_owned(), ())
+        .prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Hello".to_owned()).expect("text prompt"),
+            ],
+            (),
+            None,
+        )
         .await
         .expect("prompt");
     client
@@ -209,9 +217,10 @@ async fn close_cancels_running_turn_before_session_close() {
         .await
         .expect("resume");
     let (dispatch_tx, dispatch_rx) = tokio::sync::oneshot::channel();
-    let prompt = client.prompt_with_approval_dispatch(
+    let prompt = client.prompt_contents_with_approval_dispatch_for_input(
         "fixture-session".to_owned(),
-        "Hello".to_owned(),
+        session_event_model::InputId::generate(),
+        vec![session_event_model::PromptContent::text("Hello".to_owned()).expect("text prompt")],
         (),
         Some(dispatch_tx),
     );

@@ -140,7 +140,8 @@ fn setting_error(
         ExternalProviderRuntimeError::InvalidSetting { advertised, .. } => {
             ProviderSettingsFailure {
                 kind: ProviderSettingsFailureKind::InvalidSetting,
-                target: request.target.clone(),
+                stage: None,
+                target: Some(request.target.clone()),
                 message: "setting value was not advertised by the provider".into(),
                 setting: Some(request.setting),
                 value: Some(request.value.clone()),
@@ -149,7 +150,8 @@ fn setting_error(
         }
         ExternalProviderRuntimeError::SettingFailed { .. } => ProviderSettingsFailure {
             kind: ProviderSettingsFailureKind::ProviderRejected,
-            target: request.target.clone(),
+            stage: None,
+            target: Some(request.target.clone()),
             message: "provider rejected the setting; current reported values remain effective"
                 .into(),
             setting: Some(request.setting),
@@ -158,7 +160,8 @@ fn setting_error(
         },
         ExternalProviderRuntimeError::SettingOutcomeUnknown { .. } => ProviderSettingsFailure {
             kind: ProviderSettingsFailureKind::OutcomeUnknown,
-            target: request.target.clone(),
+            stage: None,
+            target: Some(request.target.clone()),
             message: "provider setting outcome is unknown; Session remains gated".into(),
             setting: Some(request.setting),
             value: Some(request.value.clone()),
@@ -209,7 +212,8 @@ fn failure(
 ) -> ProviderSettingsFailure {
     ProviderSettingsFailure {
         kind,
-        target: target.clone(),
+        stage: None,
+        target: Some(target.clone()),
         message: message.into(),
         setting: None,
         value: None,

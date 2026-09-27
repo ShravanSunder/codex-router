@@ -296,15 +296,19 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
             input_id.clone(),
             &prompt,
         );
-        permit.send(ConversationPromptRequest {
-            input_id: Some(input_id),
-            operation_id,
-            target: target.clone(),
-            generation: Some(generation()),
-            requested_by: (requester()).into(),
-            approver: (requester()).into(),
-            prompt,
-        });
+        permit.send(
+            crate::provider_acp_message_fifo::ProviderQueuedPrompt::Message(
+                ConversationPromptRequest {
+                    input_id: Some(input_id),
+                    operation_id,
+                    target: target.clone(),
+                    generation: Some(generation()),
+                    requested_by: (requester()).into(),
+                    approver: (requester()).into(),
+                    prompt,
+                },
+            ),
+        );
     }
 
     for expected in ["first", "second"] {
@@ -402,18 +406,19 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
         queued_input.clone(),
         &queued_prompt,
     );
-    queue
-        .reserve(&target)
-        .expect("queue capacity")
-        .send(ConversationPromptRequest {
-            input_id: Some(queued_input),
-            operation_id: queued_id.clone(),
-            target,
-            generation: Some(generation()),
-            requested_by: (requester()).into(),
-            approver: (requester()).into(),
-            prompt: queued_prompt,
-        });
+    queue.reserve(&target).expect("queue capacity").send(
+        crate::provider_acp_message_fifo::ProviderQueuedPrompt::Message(
+            ConversationPromptRequest {
+                input_id: Some(queued_input),
+                operation_id: queued_id.clone(),
+                target,
+                generation: Some(generation()),
+                requested_by: (requester()).into(),
+                approver: (requester()).into(),
+                prompt: queued_prompt,
+            },
+        ),
+    );
 
     queue.shutdown().await;
 
@@ -494,17 +499,21 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
             text: MessageText::try_from("queued work".to_owned()).expect("message"),
         },
     );
-    permit.send(ConversationPromptRequest {
-        input_id: Some(queued_input_id.clone()),
-        operation_id: queued_id.clone(),
-        target,
-        generation: Some(generation()),
-        requested_by: (requester()).into(),
-        approver: (requester()).into(),
-        prompt: MessageContent::Router {
-            text: MessageText::try_from("queued".to_owned()).expect("message"),
-        },
-    });
+    permit.send(
+        crate::provider_acp_message_fifo::ProviderQueuedPrompt::Message(
+            ConversationPromptRequest {
+                input_id: Some(queued_input_id.clone()),
+                operation_id: queued_id.clone(),
+                target,
+                generation: Some(generation()),
+                requested_by: (requester()).into(),
+                approver: (requester()).into(),
+                prompt: MessageContent::Router {
+                    text: MessageText::try_from("queued".to_owned()).expect("message"),
+                },
+            },
+        ),
+    );
     backend
         .runtime_for(&endpoint())
         .expect("provider runtime")

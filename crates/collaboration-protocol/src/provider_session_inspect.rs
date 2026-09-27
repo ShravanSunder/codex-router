@@ -67,12 +67,16 @@ pub enum ProviderConfigValueView {
 pub enum ProviderInspectFailureKind {
     NotFound,
     Unavailable,
+    Overloaded,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderInspectFailure {
     pub kind: ProviderInspectFailureKind,
-    pub target: SessionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<crate::ConversationOperationFailureStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<SessionRef>,
     pub message: String,
 }

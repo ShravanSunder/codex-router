@@ -4,7 +4,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use message_board::{SessionEndpointRef, SessionRef};
 use session_event_model::{
-    PendingInteraction, PendingInteractions, SessionEvent, SessionState, TurnOutcome,
+    PendingInteraction, PendingInteractions, SessionEvent, SessionSettings, SessionState,
+    TurnOutcome,
 };
 use tokio::sync::{Mutex, broadcast};
 
@@ -25,6 +26,7 @@ struct SessionHistory {
     events: Vec<HubEvent>,
     sender: broadcast::Sender<HubEvent>,
     state: SessionState,
+    settings: Option<SessionSettings>,
     pending: BTreeMap<String, PendingInteraction>,
     turn_running: bool,
 }
@@ -38,6 +40,7 @@ impl SessionHistory {
             events: Vec::new(),
             sender,
             state: SessionState::Unloaded,
+            settings: None,
             pending: BTreeMap::new(),
             turn_running: false,
         }
@@ -115,6 +118,9 @@ impl SessionHistory {
             | SessionEvent::ItemUpdated { .. }
             | SessionEvent::ItemCompleted { .. }
             | SessionEvent::CapabilitiesChanged { .. } => {}
+            SessionEvent::SettingsChanged { settings } => {
+                self.settings = Some(settings.clone());
+            }
             SessionEvent::ResyncRequired { .. } => {
                 return Err(SessionEventHubError::Unavailable);
             }
@@ -196,6 +202,7 @@ impl ProviderSessionEventHub {
         history.pending.clear();
         history.turn_running = false;
         history.state = SessionState::Unloaded;
+        history.settings = None;
         history.next_sequence = 1;
         history.replay_epoch = replay_epoch;
         Ok(replay_epoch)
@@ -295,6 +302,9 @@ impl SessionEventHub for ProviderSessionEventHub {
                     let state = histories
                         .get(&session)
                         .map_or(SessionState::Unloaded, |history| history.state.clone());
+                    let settings = histories
+                        .get(&session)
+                        .and_then(|history| history.settings.as_ref());
                     Ok(HubSessionSummary {
                         session,
                         approver: entry
@@ -307,7 +317,8 @@ impl SessionEventHub for ProviderSessionEventHub {
                         updated_at_seconds: entry.updated_at_ms.div_euclid(1_000),
                         preview: String::new(),
                         name: None,
-                        model: None,
+                        model: settings.and_then(|settings| settings.model.clone()),
+                        mode: settings.and_then(|settings| settings.mode.clone()),
                         state,
                     })
                 })
