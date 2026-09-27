@@ -182,7 +182,7 @@ mod tests {
     };
     use collaboration_service::{
         NativeControlBackend, NativeGenerationGate, ProviderOperationStore,
-        ProviderSessionEventHub, ServiceApprovalBroker, SessionEventHub,
+        ProviderSessionEventHub, ServiceInteractionBroker, SessionEventHub,
     };
     use message_board::{EndpointId, ServiceId, SessionEndpointRef, SessionId, SessionRef};
     use session_event_model::{SessionEvent, TurnOutcome};
@@ -212,7 +212,7 @@ mod tests {
             endpoint: approver_endpoint.clone(),
             session_id: ControlSessionId::try_from("approver".to_owned()).expect("approver"),
         };
-        let broker = ServiceApprovalBroker::load(
+        let broker = ServiceInteractionBroker::load(
             service_id.clone(),
             NativeControlBackend {
                 codex_home: root.path().to_owned(),

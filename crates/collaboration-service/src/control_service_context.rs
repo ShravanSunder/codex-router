@@ -18,7 +18,7 @@ pub struct ServiceIdentity {
     pub(crate) native_backend: Option<crate::NativeControlBackend>,
     pub(crate) session_delivery: Option<std::sync::Arc<dyn crate::SessionMessageDelivery>>,
     pub(crate) scheduled_run_execution: Option<std::sync::Arc<dyn crate::ScheduledRunExecution>>,
-    pub(crate) approval_broker: Option<std::sync::Arc<crate::ServiceApprovalBroker>>,
+    pub(crate) approval_broker: Option<std::sync::Arc<crate::ServiceInteractionBroker>>,
     pub(crate) automation:
         Option<std::sync::Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
     pub(crate) provider_operations:
@@ -152,7 +152,7 @@ impl ServiceIdentity {
     #[must_use]
     pub fn with_approval_broker(
         mut self,
-        broker: std::sync::Arc<crate::ServiceApprovalBroker>,
+        broker: std::sync::Arc<crate::ServiceInteractionBroker>,
     ) -> Self {
         self.approval_broker = Some(broker);
         self

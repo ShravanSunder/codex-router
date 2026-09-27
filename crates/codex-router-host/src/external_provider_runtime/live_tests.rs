@@ -5,7 +5,7 @@ use collaboration_protocol::{
     GenerationNumber, OperationId, SessionId, UuidIdentity,
 };
 use collaboration_service::{
-    EndpointDirectory, NativeControlBackend, NativeGenerationGate, ServiceApprovalBroker,
+    EndpointDirectory, NativeControlBackend, NativeGenerationGate, ServiceInteractionBroker,
 };
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -165,7 +165,7 @@ async fn approval_broker_fixture(
     service_id: &UuidIdentity,
     approver: &SessionRef,
 ) -> TestResult<(
-    Arc<ServiceApprovalBroker>,
+    Arc<ServiceInteractionBroker>,
     tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
 )> {
     let socket_path = root.path().join("native-approver.sock");
@@ -220,7 +220,7 @@ async fn approval_broker_fixture(
         endpoint: approver.endpoint.clone(),
         gate,
     };
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.clone(),
         native_backend.clone(),
         root.path().join("approval-routes.json"),

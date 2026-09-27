@@ -8,7 +8,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryRequest, NativeControlBackend, NativeGenerationGate, ServiceApprovalBroker,
+    DeliveryRequest, NativeControlBackend, NativeGenerationGate, ServiceInteractionBroker,
     SessionMessageDelivery,
 };
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
@@ -254,7 +254,7 @@ sys.stdin.read()
 }
 
 async fn wait_for_pending_approval<TPromptFuture>(
-    broker: &ServiceApprovalBroker,
+    broker: &ServiceInteractionBroker,
     _approval_notice: &Notify,
     mut pending_request: Pin<&mut TPromptFuture>,
 ) -> TestResult
@@ -289,7 +289,7 @@ struct ObservedTypedApproval {
 }
 
 async fn observed_typed_approvals(
-    broker: &ServiceApprovalBroker,
+    broker: &ServiceInteractionBroker,
     pending_only: bool,
 ) -> Vec<ObservedTypedApproval> {
     broker
@@ -348,14 +348,14 @@ async fn approval_broker_fixture(
     root: &tempfile::TempDir,
     service_id: &UuidIdentity,
     generation: &CodexGeneration,
-) -> TestResult<(Arc<ServiceApprovalBroker>, Arc<Notify>)> {
+) -> TestResult<(Arc<ServiceInteractionBroker>, Arc<Notify>)> {
     let gate = NativeGenerationGate::default();
     gate.activate(
         generation.clone(),
         root.path().join("unused-native.sock"),
         None,
     )?;
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.clone(),
         NativeControlBackend {
             endpoint: EndpointRef {

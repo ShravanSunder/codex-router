@@ -274,7 +274,7 @@ async fn dispatch_rename(request: NativeControlRequest<'_>) -> Value {
 
 /// Returns the access Router recorded for this thread, if the broker holds one.
 async fn recorded_access(
-    routes: &crate::ServiceApprovalBroker,
+    routes: &crate::ServiceInteractionBroker,
     thread_id: &str,
 ) -> Option<collaboration_protocol::RouterAccess> {
     use codex_acp_adapter::ApprovalBroker;

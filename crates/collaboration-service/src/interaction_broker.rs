@@ -10,11 +10,10 @@ use codex_acp_adapter::{
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalDetailedListResult,
     ApprovalDetailedRecord, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionEffect,
-    ApprovalOptionScope, ApprovalOptionView, ApprovalOptionViewScope, ApprovalPresentation,
-    ApprovalRequestRecord, ApprovalState, DeliveryOutcome, EndpointRef, MessageContent,
-    MessageDelivery, SessionRef, UuidIdentity,
+    ApprovalOptionScope, ApprovalOptionView, ApprovalOptionViewScope, ApprovalRequestRecord,
+    ApprovalState, DeliveryOutcome, EndpointRef, MessageContent, MessageDelivery, SessionRef,
+    UuidIdentity,
 };
-use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
@@ -26,10 +25,7 @@ use std::{
 };
 use tokio::sync::{Mutex, oneshot};
 
-mod external_requests;
 mod interaction_history;
-#[cfg(test)]
-use external_requests::map_external_options;
 use interaction_history::InteractionHistoryStore;
 pub use interaction_history::{
     InteractionHistoryError, InteractionHistoryRecord, InteractionHistoryState,
@@ -99,101 +95,16 @@ impl From<InteractionHistoryError> for ApprovalDecisionError {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ExternalApprovalOptionScope {
-    AllowOnce,
-    AllowAlways,
-    RejectOnce,
-    RejectAlways,
-    Unsupported { provider_kind: String },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExternalApprovalOption {
-    pub option_id: String,
-    pub label: Option<String>,
-    pub scope: ExternalApprovalOptionScope,
-}
-
-#[derive(Clone, Debug)]
-pub struct ExternalApprovalRequest {
-    pub requester: SessionRef,
-    pub approver: SessionRef,
-    pub generation: collaboration_protocol::CodexGeneration,
-    pub retirement: tokio_util::sync::CancellationToken,
-    pub cancellation: tokio_util::sync::CancellationToken,
-    pub turn_cancellation: tokio_util::sync::CancellationToken,
-    pub operation_metadata: ExternalApprovalOperationMetadata,
-    pub presentation: Option<ApprovalPresentation>,
-    pub options: Vec<ExternalApprovalOption>,
-}
-
 #[cfg(test)]
-struct ExternalAdmissionPause {
+struct TypedAdmissionPause {
     recorded: oneshot::Sender<()>,
     resume: oneshot::Receiver<()>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ExternalApprovalRefusal {
-    pub requester: SessionRef,
-    pub approver: SessionRef,
-    pub generation: collaboration_protocol::CodexGeneration,
-    pub operation_metadata: ExternalApprovalOperationMetadata,
-    pub offered_options: Vec<ExternalApprovalOption>,
-    pub presentation: Option<ApprovalPresentation>,
-    pub reason: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExternalApprovalOperationMetadata {
-    pub operation_id: collaboration_protocol::OperationId,
-    pub target: SessionRef,
-    pub binding_generation: collaboration_protocol::CodexGeneration,
-    pub method: &'static str,
-}
-
-impl Serialize for ExternalApprovalOperationMetadata {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct SerializedMetadata<'a> {
-            kind: &'static str,
-            operation_id: &'a collaboration_protocol::OperationId,
-            target: &'a SessionRef,
-            binding_generation: &'a collaboration_protocol::CodexGeneration,
-            method: &'static str,
-        }
-
-        SerializedMetadata {
-            kind: "externalProviderPermission",
-            operation_id: &self.operation_id,
-            target: &self.target,
-            binding_generation: &self.binding_generation,
-            method: self.method,
-        }
-        .serialize(serializer)
-    }
 }
 
 struct PendingApproval {
     record: ApprovalRequestRecord,
     offered: BTreeMap<ApprovalDecision, String>,
     completion: oneshot::Sender<BrokeredApprovalOutcome>,
-    generation_authority: ApprovalGenerationAuthority,
-}
-
-#[derive(Clone)]
-enum ApprovalGenerationAuthority {
-    Native,
-    External {
-        generation: collaboration_protocol::CodexGeneration,
-        retirement: tokio_util::sync::CancellationToken,
-        turn_cancellation: tokio_util::sync::CancellationToken,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,7 +148,7 @@ fn native_approval_refusal_diagnostic(
     }
 }
 
-pub struct ServiceApprovalBroker {
+pub struct ServiceInteractionBroker {
     service_id: UuidIdentity,
     backend: NativeControlBackend,
     session_delivery: OnceLock<Arc<dyn SessionMessageDelivery>>,
@@ -250,9 +161,7 @@ pub struct ServiceApprovalBroker {
     typed_pending_approvals: Mutex<BTreeMap<String, TypedPendingApproval>>,
     pending_questions: Mutex<BTreeMap<String, oneshot::Sender<QuestionResponse>>>,
     #[cfg(test)]
-    external_after_record: Mutex<Option<ExternalAdmissionPause>>,
-    #[cfg(test)]
-    typed_after_record: Mutex<Option<ExternalAdmissionPause>>,
+    typed_after_record: Mutex<Option<TypedAdmissionPause>>,
 }
 
 struct TypedPendingApproval {
@@ -262,7 +171,7 @@ struct TypedPendingApproval {
     requester: message_board::SessionRef,
 }
 
-impl ServiceApprovalBroker {
+impl ServiceInteractionBroker {
     pub async fn load(
         service_id: UuidIdentity,
         backend: NativeControlBackend,
@@ -302,8 +211,6 @@ impl ServiceApprovalBroker {
             interaction_history,
             typed_pending_approvals: Mutex::new(BTreeMap::new()),
             pending_questions: Mutex::new(BTreeMap::new()),
-            #[cfg(test)]
-            external_after_record: Mutex::new(None),
             #[cfg(test)]
             typed_after_record: Mutex::new(None),
         }))
@@ -975,7 +882,7 @@ fn legacy_choice_from_typed(
         })
 }
 
-impl ServiceApprovalBroker {
+impl ServiceInteractionBroker {
     pub async fn decide(
         &self,
         params: ApprovalDecideParams,
@@ -1042,39 +949,13 @@ impl ServiceApprovalBroker {
                 .await?;
             return Err(ApprovalDecisionError::Code("expired"));
         }
-        let current_generation = match &request.generation_authority {
-            ApprovalGenerationAuthority::Native => self
-                .backend
-                .gate
-                .acquire()
-                .map_err(|_| "unavailable")?
-                .generation()
-                .clone(),
-            ApprovalGenerationAuthority::External {
-                generation,
-                retirement,
-                turn_cancellation,
-            } => {
-                if turn_cancellation.is_cancelled() {
-                    drop(pending);
-                    self.finish_pending(
-                        &params.request_id,
-                        ApprovalState::Cancelled,
-                        Some("turnCancelled"),
-                    )
-                    .await
-                    .map_err(|_| "unavailable")?;
-                    return Err(ApprovalDecisionError::Code("approvalNotPending"));
-                }
-                if retirement.is_cancelled() {
-                    drop(pending);
-                    self.expire_or_cancel_stale(&params.request_id, ApprovalState::Cancelled)
-                        .await?;
-                    return Err(ApprovalDecisionError::Code("oldGeneration"));
-                }
-                generation.clone()
-            }
-        };
+        let current_generation = self
+            .backend
+            .gate
+            .acquire()
+            .map_err(|_| "unavailable")?
+            .generation()
+            .clone();
         if current_generation != request.record.generation {
             drop(pending);
             self.expire_or_cancel_stale(&params.request_id, ApprovalState::Cancelled)
@@ -1083,11 +964,7 @@ impl ServiceApprovalBroker {
         }
         let requester = board_identity(&request.record.requester)?;
         let approver = board_identity(&request.record.approver)?;
-        if matches!(
-            &request.generation_authority,
-            ApprovalGenerationAuthority::Native
-        ) && params.actor == requester
-        {
+        if params.actor == requester {
             return Err(ApprovalDecisionError::Code("selfDecision"));
         }
         if params.actor != approver {
@@ -1181,7 +1058,7 @@ impl ServiceApprovalBroker {
     }
 }
 
-impl ApprovalBroker for ServiceApprovalBroker {
+impl ApprovalBroker for ServiceInteractionBroker {
     fn register_route(
         &self,
         route: ApprovalRoute,
@@ -1325,7 +1202,6 @@ impl ApprovalBroker for ServiceApprovalBroker {
                     record: record.clone(),
                     offered,
                     completion,
-                    generation_authority: ApprovalGenerationAuthority::Native,
                 },
             );
             let mut cancellation = CancellationMarker {

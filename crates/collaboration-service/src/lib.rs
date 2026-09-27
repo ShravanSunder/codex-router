@@ -93,11 +93,9 @@ pub use codex_app_server_scheduled_runs::CodexAppServerScheduledRuns;
 mod session_delivery_sink;
 pub use codex_acp_adapter::BrokeredApprovalOutcome;
 pub use interaction_broker::{
-    ApprovalDecisionError, ExternalApprovalOperationMetadata, ExternalApprovalOption,
-    ExternalApprovalOptionScope, ExternalApprovalRefusal, ExternalApprovalRequest,
-    InteractionHistoryError, InteractionHistoryRecord, InteractionHistoryState,
-    QuestionHistoryState, QuestionResponse, RefusedApprovalOption, RefusedTypedApproval,
-    ServiceApprovalBroker,
+    ApprovalDecisionError, InteractionHistoryError, InteractionHistoryRecord,
+    InteractionHistoryState, QuestionHistoryState, QuestionResponse, RefusedApprovalOption,
+    RefusedTypedApproval, ServiceInteractionBroker,
 };
 
 mod acp_channel_listener;

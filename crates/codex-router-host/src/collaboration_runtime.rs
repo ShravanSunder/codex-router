@@ -351,7 +351,7 @@ impl CollaborationRuntime {
             endpoint,
             gate: publication.admission_gate(),
         };
-        let approval_broker = collaboration_service::ServiceApprovalBroker::load(
+        let approval_broker = collaboration_service::ServiceInteractionBroker::load(
             service_id.clone(),
             native_backend.clone(),
             inputs.directory.join("approval-routes.json"),

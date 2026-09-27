@@ -6,7 +6,9 @@ use acp_client_runtime::{
     ApprovalPortOutcome, InteractionFuture, InteractionPort, RefusedApprovalOffer, SessionEventSink,
 };
 use collaboration_protocol::OperationId;
-use collaboration_service::{RefusedApprovalOption, RefusedTypedApproval, ServiceApprovalBroker};
+use collaboration_service::{
+    RefusedApprovalOption, RefusedTypedApproval, ServiceInteractionBroker,
+};
 use message_board::{Identity, SessionRef as BoardSessionRef};
 use session_event_model::{ApprovalRequest, PendingInteraction, SessionEvent};
 use tokio::sync::RwLock;
@@ -16,16 +18,16 @@ use crate::ExternalProviderApprovalContext;
 
 #[derive(Clone, Default)]
 pub(crate) struct HostInteractionPort {
-    broker: Arc<RwLock<Option<Weak<ServiceApprovalBroker>>>>,
+    broker: Arc<RwLock<Option<Weak<ServiceInteractionBroker>>>>,
     event_sink: Arc<RwLock<Option<Arc<dyn SessionEventSink>>>>,
 }
 
 impl HostInteractionPort {
-    pub(crate) async fn install_broker(&self, broker: Arc<ServiceApprovalBroker>) {
+    pub(crate) async fn install_broker(&self, broker: Arc<ServiceInteractionBroker>) {
         *self.broker.write().await = Some(Arc::downgrade(&broker));
     }
 
-    async fn broker(&self) -> Option<Arc<ServiceApprovalBroker>> {
+    async fn broker(&self) -> Option<Arc<ServiceInteractionBroker>> {
         self.broker.read().await.as_ref().and_then(Weak::upgrade)
     }
 

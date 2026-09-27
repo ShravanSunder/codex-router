@@ -26,25 +26,6 @@ impl crate::SessionMessageDelivery for FakeApprovalDelivery {
     }
 }
 
-struct PendingApprovalNoticeDelivery;
-
-impl crate::SessionMessageDelivery for PendingApprovalNoticeDelivery {
-    fn deliver<'a>(
-        &'a self,
-        _: crate::DeliveryRequest,
-        _: &'a dyn crate::AttemptEvidenceSink,
-    ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
-        Box::pin(std::future::pending())
-    }
-
-    fn reconcile_attempt(
-        &self,
-        _: crate::AttemptReconciliationContext,
-    ) -> crate::DeliveryFuture<'_, crate::AttemptReconciliation> {
-        Box::pin(async { Ok(crate::AttemptReconciliation::StillUnknown) })
-    }
-}
-
 #[tokio::test]
 async fn approval_notice_uses_selected_delivery_outcome() {
     for (outcome, delivered) in [
@@ -108,7 +89,7 @@ fn typed_approval_request(request_id: &str) -> session_event_model::ApprovalRequ
     .expect("typed approval request")
 }
 
-pub(super) async fn fixture_broker() -> (Arc<ServiceApprovalBroker>, CodexGeneration, PathBuf) {
+pub(super) async fn fixture_broker() -> (Arc<ServiceInteractionBroker>, CodexGeneration, PathBuf) {
     let service_id = crate::new_service_uuid().unwrap_or_else(|error| panic!("service: {error}"));
     let generation: CodexGeneration = serde_json::from_value(json!({
         "serviceEpoch": String::from(service_id.clone()), "generation": 1
@@ -135,7 +116,7 @@ pub(super) async fn fixture_broker() -> (Arc<ServiceApprovalBroker>, CodexGenera
     tokio::fs::create_dir_all(&directory)
         .await
         .unwrap_or_else(|error| panic!("directory: {error}"));
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id,
         NativeControlBackend {
             endpoint,
@@ -150,7 +131,7 @@ pub(super) async fn fixture_broker() -> (Arc<ServiceApprovalBroker>, CodexGenera
 }
 
 async fn insert_pending(
-    broker: &ServiceApprovalBroker,
+    broker: &ServiceInteractionBroker,
     generation: CodexGeneration,
     expires_at: String,
 ) -> (
@@ -180,7 +161,6 @@ async fn insert_pending(
             record: record.clone(),
             offered: BTreeMap::from([(ApprovalDecision::Allow, "native-accept".to_owned())]),
             completion,
-            generation_authority: ApprovalGenerationAuthority::Native,
         },
     );
     broker
@@ -377,481 +357,6 @@ async fn native_request_with_empty_option_mapping_is_recorded_as_refused() {
     );
 }
 
-#[test]
-fn external_options_preserve_once_scope_and_reject_ambiguous_or_persistent_grants() {
-    let mapped = map_external_options(vec![
-        ExternalApprovalOption {
-            option_id: "allow-once".to_owned(),
-            label: None,
-            scope: ExternalApprovalOptionScope::AllowOnce,
-        },
-        ExternalApprovalOption {
-            option_id: "allow-always".to_owned(),
-            label: None,
-            scope: ExternalApprovalOptionScope::AllowAlways,
-        },
-        ExternalApprovalOption {
-            option_id: "reject-once".to_owned(),
-            label: None,
-            scope: ExternalApprovalOptionScope::RejectOnce,
-        },
-    ])
-    .expect("once-scoped options map");
-    assert_eq!(
-        mapped.get(&ApprovalDecision::Allow),
-        Some(&"allow-once".to_owned())
-    );
-    assert_eq!(
-        mapped.get(&ApprovalDecision::Deny),
-        Some(&"reject-once".to_owned())
-    );
-    assert!(!mapped.contains_key(&ApprovalDecision::AllowForSession));
-
-    assert!(
-        map_external_options(vec![ExternalApprovalOption {
-            option_id: "allow-always".to_owned(),
-            label: None,
-            scope: ExternalApprovalOptionScope::AllowAlways,
-        }])
-        .is_err()
-    );
-    assert!(
-        map_external_options(vec![ExternalApprovalOption {
-            option_id: "reject-once".to_owned(),
-            label: None,
-            scope: ExternalApprovalOptionScope::RejectOnce,
-        }])
-        .is_err(),
-        "a deny-only request has no supported allow choice"
-    );
-    assert!(
-        map_external_options(vec![
-            ExternalApprovalOption {
-                option_id: "first".to_owned(),
-                label: None,
-                scope: ExternalApprovalOptionScope::AllowOnce,
-            },
-            ExternalApprovalOption {
-                option_id: "second".to_owned(),
-                label: None,
-                scope: ExternalApprovalOptionScope::AllowOnce,
-            },
-        ])
-        .is_err()
-    );
-    assert!(
-        map_external_options(vec![
-            ExternalApprovalOption {
-                option_id: "duplicate".to_owned(),
-                label: None,
-                scope: ExternalApprovalOptionScope::AllowOnce,
-            },
-            ExternalApprovalOption {
-                option_id: "duplicate".to_owned(),
-                label: None,
-                scope: ExternalApprovalOptionScope::RejectOnce,
-            },
-        ])
-        .is_err()
-    );
-}
-
-#[tokio::test]
-async fn external_generation_is_independent_and_decision_remains_actor_bound_single_use() {
-    let (broker, native_generation, _directory) = fixture_broker().await;
-    let external_generation: CodexGeneration = serde_json::from_value(json!({
-        "serviceEpoch": String::from(broker.service_id.clone()), "generation": 99
-    }))
-    .expect("external generation");
-    assert_ne!(external_generation, native_generation);
-    let requester = session(&broker.service_id, "external-requester");
-    let approver = session(&broker.service_id, "external-approver");
-    let request_id = "external-approval-test".to_owned();
-    let record = ApprovalRequestRecord {
-        request_id: request_id.clone(),
-        requester,
-        approver: approver.clone(),
-        generation: external_generation.clone(),
-        state: ApprovalState::PendingClientDecision,
-        reason: None,
-        offered_options: Vec::new(),
-        presentation: None,
-        decision: None,
-        operation: json!({"kind":"externalProviderPermission","operationId":"019f0000-0000-7000-8000-000000001101"}),
-        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
-    };
-    let (completion, receiver) = oneshot::channel();
-    broker.pending.lock().await.insert(
-        request_id.clone(),
-        PendingApproval {
-            record: record.clone(),
-            offered: BTreeMap::from([(ApprovalDecision::Allow, "allow-once".to_owned())]),
-            completion,
-            generation_authority: ApprovalGenerationAuthority::External {
-                generation: external_generation,
-                retirement: tokio_util::sync::CancellationToken::new(),
-                turn_cancellation: tokio_util::sync::CancellationToken::new(),
-            },
-        },
-    );
-    broker
-        .record(record)
-        .await
-        .expect("record external approval");
-    let receipt = broker
-        .decide(ApprovalDecideParams {
-            request_id: request_id.clone(),
-            decision: Some(ApprovalDecision::Allow),
-            option_id: None,
-            acknowledge_persistent: false,
-            actor: board_identity(&approver).expect("actor"),
-        })
-        .await
-        .expect("external decision");
-    assert_eq!(receipt.scope, None);
-    assert_eq!(
-        receiver.await.expect("outcome"),
-        BrokeredApprovalOutcome::Selected {
-            option_id: "allow-once".to_owned()
-        }
-    );
-    assert!(matches!(
-        broker
-            .decide(ApprovalDecideParams {
-                request_id,
-                decision: Some(ApprovalDecision::Allow),
-                option_id: None,
-                acknowledge_persistent: false,
-                actor: board_identity(&session(&broker.service_id, "external-approver"))
-                    .expect("actor"),
-            })
-            .await,
-        Err(ApprovalDecisionError::Code("approvalNotPending"))
-    ));
-}
-
-#[tokio::test]
-async fn unreachable_external_approver_history_keeps_curated_decision_details() {
-    let (broker, generation, _directory) = fixture_broker().await;
-    let metadata = ExternalApprovalOperationMetadata {
-        operation_id: "019f0000-0000-7000-8000-000000001102"
-            .to_owned()
-            .try_into()
-            .expect("operation ID"),
-        target: session(&broker.service_id, "provider-session"),
-        binding_generation: generation.clone(),
-        method: "session/request_permission",
-    };
-    let operation = serde_json::json!({
-        "kind":"externalProviderPermission",
-        "operationId":"019f0000-0000-7000-8000-000000001102",
-        "target":session(&broker.service_id, "provider-session"),
-        "bindingGeneration":generation.clone(),
-        "method":"session/request_permission"
-    });
-    let outcome = broker
-        .request_external(ExternalApprovalRequest {
-            requester: session(&broker.service_id, "external-requester"),
-            approver: session(&broker.service_id, "external-approver"),
-            generation,
-            retirement: tokio_util::sync::CancellationToken::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            turn_cancellation: tokio_util::sync::CancellationToken::new(),
-            operation_metadata: metadata,
-            presentation: Some(ApprovalPresentation {
-                tool_name: Some("router-collaboration-endpoints_list".to_owned()),
-                title: Some("TRANSIENT_PRESENTATION_SENTINEL".to_owned()),
-                kind: Some("other".to_owned()),
-                ..ApprovalPresentation::default()
-            }),
-            options: vec![ExternalApprovalOption {
-                option_id: "allow-once".to_owned(),
-                label: Some("Allow once".to_owned()),
-                scope: ExternalApprovalOptionScope::AllowOnce,
-            }],
-        })
-        .await
-        .expect("external request settles");
-    assert_eq!(outcome, BrokeredApprovalOutcome::Cancelled);
-    let record = broker.list(false).await.approvals.pop().expect("history");
-    assert_eq!(record.state, ApprovalState::ApproverUnreachable);
-    assert_eq!(record.operation, operation);
-    assert_eq!(record.offered_options[0].option_id, "allow-once");
-    assert_eq!(
-        record.offered_options[0].scope,
-        ApprovalOptionScope::AllowOnce
-    );
-    assert_eq!(
-        record
-            .presentation
-            .as_ref()
-            .and_then(|item| item.title.as_deref()),
-        Some("TRANSIENT_PRESENTATION_SENTINEL")
-    );
-    assert_eq!(
-        record
-            .presentation
-            .as_ref()
-            .and_then(|item| item.tool_name.as_deref()),
-        Some("router-collaboration-endpoints_list")
-    );
-}
-
-#[tokio::test]
-async fn external_approval_timeout_is_recorded_in_history() {
-    let (broker, generation, _directory) = fixture_broker().await;
-    broker
-        .install_session_delivery(Arc::new(FakeApprovalDelivery(DeliveryOutcome::Started)))
-        .expect("delivery injection");
-    let operation_id = "019f0000-0000-7000-8000-000000001103"
-        .to_owned()
-        .try_into()
-        .expect("operation ID");
-    let target = session(&broker.service_id, "provider-session");
-
-    let outcome = broker
-        .request_external_with_timeout(
-            ExternalApprovalRequest {
-                requester: session(&broker.service_id, "requester"),
-                approver: session(&broker.service_id, "approver"),
-                generation: generation.clone(),
-                retirement: tokio_util::sync::CancellationToken::new(),
-                cancellation: tokio_util::sync::CancellationToken::new(),
-                turn_cancellation: tokio_util::sync::CancellationToken::new(),
-                operation_metadata: ExternalApprovalOperationMetadata {
-                    operation_id,
-                    target,
-                    binding_generation: generation,
-                    method: "session/request_permission",
-                },
-                presentation: None,
-                options: vec![ExternalApprovalOption {
-                    option_id: "allow-once".to_owned(),
-                    label: None,
-                    scope: ExternalApprovalOptionScope::AllowOnce,
-                }],
-            },
-            Duration::from_millis(1),
-        )
-        .await
-        .expect("external timeout settles");
-
-    assert_eq!(outcome, BrokeredApprovalOutcome::Cancelled);
-    let history = broker.list(false).await.approvals;
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].state, ApprovalState::TimedOut);
-}
-
-#[tokio::test]
-async fn external_timeout_covers_notice_delivery_and_cleans_pending_state() {
-    let (broker, generation, _directory) = fixture_broker().await;
-    broker
-        .install_session_delivery(Arc::new(PendingApprovalNoticeDelivery))
-        .expect("delivery injection");
-    let target = session(&broker.service_id, "provider-target");
-    let metadata = ExternalApprovalOperationMetadata {
-        operation_id: "019f0000-0000-7000-8000-000000001207"
-            .to_owned()
-            .try_into()
-            .expect("operation ID"),
-        target,
-        binding_generation: generation.clone(),
-        method: "session/request_permission",
-    };
-
-    let outcome = broker
-        .request_external_with_timeout(
-            ExternalApprovalRequest {
-                requester: session(&broker.service_id, "requester"),
-                approver: session(&broker.service_id, "approver"),
-                generation,
-                retirement: tokio_util::sync::CancellationToken::new(),
-                cancellation: tokio_util::sync::CancellationToken::new(),
-                turn_cancellation: tokio_util::sync::CancellationToken::new(),
-                operation_metadata: metadata,
-                presentation: None,
-                options: vec![ExternalApprovalOption {
-                    option_id: "allow-once".to_owned(),
-                    label: Some("Allow once".to_owned()),
-                    scope: ExternalApprovalOptionScope::AllowOnce,
-                }],
-            },
-            Duration::from_millis(1),
-        )
-        .await
-        .expect("timed out notice delivery is refused");
-
-    assert_eq!(outcome, BrokeredApprovalOutcome::Cancelled);
-    assert!(broker.pending.lock().await.is_empty());
-    let history = broker.list(false).await.approvals;
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].state, ApprovalState::TimedOut);
-    assert!(history[0].reason.is_some());
-}
-
-#[tokio::test]
-async fn external_decision_racing_retirement_has_one_terminal_state() {
-    let (broker, generation, _directory) = fixture_broker().await;
-    broker
-        .install_session_delivery(Arc::new(FakeApprovalDelivery(DeliveryOutcome::Started)))
-        .expect("delivery injection");
-    let requester_and_approver = session(&broker.service_id, "parent-approver");
-    let target = session(&broker.service_id, "provider-target");
-    let retirement = tokio_util::sync::CancellationToken::new();
-    let operation_id = "019f0000-0000-7000-8000-000000001206"
-        .to_owned()
-        .try_into()
-        .expect("operation ID");
-    let request = ExternalApprovalRequest {
-        requester: requester_and_approver.clone(),
-        approver: requester_and_approver.clone(),
-        generation: generation.clone(),
-        retirement: retirement.clone(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        turn_cancellation: tokio_util::sync::CancellationToken::new(),
-        operation_metadata: ExternalApprovalOperationMetadata {
-            operation_id,
-            target,
-            binding_generation: generation,
-            method: "session/request_permission",
-        },
-        presentation: None,
-        options: vec![ExternalApprovalOption {
-            option_id: "allow-once".to_owned(),
-            label: Some("Allow once".to_owned()),
-            scope: ExternalApprovalOptionScope::AllowOnce,
-        }],
-    };
-    let approval_task = tokio::spawn({
-        let broker = Arc::clone(&broker);
-        async move { broker.request_external(request).await }
-    });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if !broker.list(true).await.approvals.is_empty() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("approval becomes pending");
-    let pending_id = broker.list(true).await.approvals[0].request_id.clone();
-    let race_gate = Arc::new(tokio::sync::Barrier::new(3));
-    let decision_task = tokio::spawn({
-        let broker = Arc::clone(&broker);
-        let race_gate = Arc::clone(&race_gate);
-        let actor = requester_and_approver.clone();
-        async move {
-            race_gate.wait().await;
-            broker
-                .decide(ApprovalDecideParams {
-                    request_id: pending_id,
-                    decision: Some(ApprovalDecision::Allow),
-                    option_id: None,
-                    acknowledge_persistent: false,
-                    actor: board_identity(&actor).expect("actor"),
-                })
-                .await
-        }
-    });
-    let retirement_task = tokio::spawn({
-        let race_gate = Arc::clone(&race_gate);
-        async move {
-            race_gate.wait().await;
-            retirement.cancel();
-        }
-    });
-    race_gate.wait().await;
-    let decision = decision_task.await.expect("decision task");
-    retirement_task.await.expect("retirement task");
-    let outcome = approval_task
-        .await
-        .expect("approval task")
-        .expect("settled");
-
-    let history = broker.list(false).await.approvals;
-    assert_eq!(history.len(), 1);
-    assert!(broker.pending.lock().await.is_empty());
-    match history[0].state {
-        ApprovalState::Decided => {
-            assert!(decision.is_ok());
-            assert_eq!(
-                outcome,
-                BrokeredApprovalOutcome::Selected {
-                    option_id: "allow-once".to_owned()
-                }
-            );
-        }
-        ApprovalState::Cancelled => {
-            assert!(decision.is_err());
-            assert_eq!(outcome, BrokeredApprovalOutcome::Cancelled);
-        }
-        ref state => panic!("unexpected terminal approval state: {state:?}"),
-    }
-}
-
-#[tokio::test]
-async fn external_permission_refusal_keeps_its_reason_in_history() {
-    let (broker, generation, directory) = fixture_broker().await;
-    let requester = session(&broker.service_id, "requester");
-    let approver = session(&broker.service_id, "approver");
-    let target = session(&broker.service_id, "provider-session");
-    let metadata = ExternalApprovalOperationMetadata {
-        operation_id: "019f0000-0000-7000-8000-000000001104"
-            .to_owned()
-            .try_into()
-            .expect("operation ID"),
-        target: target.clone(),
-        binding_generation: generation.clone(),
-        method: "session/request_permission",
-    };
-
-    broker
-        .record_external_refusal(ExternalApprovalRefusal {
-            requester,
-            approver,
-            generation,
-            operation_metadata: metadata,
-            offered_options: Vec::new(),
-            presentation: None,
-            reason: "no supported allow option remains".to_owned(),
-        })
-        .await
-        .expect("refusal recorded");
-
-    let record = broker.list(false).await.approvals.pop().expect("history");
-    assert_eq!(record.state, ApprovalState::Cancelled);
-    assert_eq!(
-        record.reason.as_deref(),
-        Some("no supported allow option remains")
-    );
-    assert_eq!(
-        record.operation["target"],
-        serde_json::to_value(target).expect("target JSON")
-    );
-
-    let reloaded = ServiceApprovalBroker::load(
-        broker.service_id.clone(),
-        broker.backend.clone(),
-        directory.join("approval-routes.json"),
-    )
-    .await
-    .expect("history reload");
-    assert_eq!(
-        reloaded.list(false).await.approvals[0].reason.as_deref(),
-        Some("no supported allow option remains")
-    );
-    let mut prior_history = serde_json::to_value(record).expect("record JSON");
-    let prior_history_object = prior_history.as_object_mut().expect("record object");
-    prior_history_object.remove("reason");
-    prior_history_object.remove("offeredOptions");
-    prior_history_object.remove("presentation");
-    let decoded_prior_history: ApprovalRequestRecord =
-        serde_json::from_value(prior_history).expect("older history remains readable");
-    assert_eq!(decoded_prior_history.reason, None);
-}
-
 #[tokio::test]
 async fn terminal_history_failure_is_visible_and_does_not_strand_pending_entry() {
     let (broker, generation, _directory) = fixture_broker().await;
@@ -884,179 +389,6 @@ async fn terminal_history_failure_is_visible_and_does_not_strand_pending_entry()
     assert_eq!(
         record.reason.as_deref(),
         Some("approval ended, but its history could not be persisted; inspect Router diagnostics")
-    );
-}
-
-#[tokio::test]
-async fn external_target_cannot_approve_its_own_blocked_request() {
-    let (broker, generation, _directory) = fixture_broker().await;
-    let requester = session(&broker.service_id, "parent-sender");
-    let approver = session(&broker.service_id, "provider-target");
-    let target = approver.clone();
-    let operation_metadata = ExternalApprovalOperationMetadata {
-        operation_id: "019f0000-0000-7000-8000-000000001105"
-            .to_owned()
-            .try_into()
-            .expect("operation ID"),
-        target: target.clone(),
-        binding_generation: generation.clone(),
-        method: "session/request_permission",
-    };
-
-    let outcome = broker
-        .request_external(ExternalApprovalRequest {
-            requester: requester.clone(),
-            approver: approver.clone(),
-            generation: generation.clone(),
-            retirement: tokio_util::sync::CancellationToken::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            turn_cancellation: tokio_util::sync::CancellationToken::new(),
-            operation_metadata,
-            presentation: None,
-            options: vec![ExternalApprovalOption {
-                option_id: "allow-once".to_owned(),
-                label: Some("Allow once".to_owned()),
-                scope: ExternalApprovalOptionScope::AllowOnce,
-            }],
-        })
-        .await
-        .expect("undecidable approval is refused");
-
-    assert_eq!(outcome, BrokeredApprovalOutcome::Cancelled);
-    assert!(broker.pending.lock().await.is_empty());
-    let record = broker
-        .list(false)
-        .await
-        .approvals
-        .pop()
-        .expect("refusal history");
-    assert_eq!(record.requester, requester);
-    assert_eq!(record.approver, approver);
-    assert_eq!(record.state, ApprovalState::Cancelled);
-    assert_eq!(
-        record.reason.as_deref(),
-        Some("set a different approver; the approver cannot be the blocked provider session")
-    );
-}
-
-#[tokio::test]
-async fn external_wrong_service_and_invalid_options_are_recorded() {
-    let (broker, generation, _directory) = fixture_broker().await;
-    let other_service = crate::new_service_uuid().expect("foreign service");
-    let foreign_requester = session(&other_service, "foreign-requester");
-    let approver = session(&broker.service_id, "approver");
-    let target = session(&broker.service_id, "provider-target");
-    let metadata = |suffix: &str| ExternalApprovalOperationMetadata {
-        operation_id: format!("019f0000-0000-7000-8000-000000001{suffix}")
-            .try_into()
-            .expect("operation ID"),
-        target: target.clone(),
-        binding_generation: generation.clone(),
-        method: "session/request_permission",
-    };
-
-    broker
-        .request_external(ExternalApprovalRequest {
-            requester: foreign_requester.clone(),
-            approver: approver.clone(),
-            generation: generation.clone(),
-            retirement: tokio_util::sync::CancellationToken::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            turn_cancellation: tokio_util::sync::CancellationToken::new(),
-            operation_metadata: metadata("201"),
-            presentation: None,
-            options: vec![ExternalApprovalOption {
-                option_id: "allow-once".to_owned(),
-                label: None,
-                scope: ExternalApprovalOptionScope::AllowOnce,
-            }],
-        })
-        .await
-        .expect("wrong-service request is refused");
-
-    for (suffix, options) in [
-        (
-            "202",
-            vec![
-                ExternalApprovalOption {
-                    option_id: "duplicate".to_owned(),
-                    label: None,
-                    scope: ExternalApprovalOptionScope::AllowOnce,
-                },
-                ExternalApprovalOption {
-                    option_id: "duplicate".to_owned(),
-                    label: None,
-                    scope: ExternalApprovalOptionScope::RejectOnce,
-                },
-            ],
-        ),
-        (
-            "203",
-            vec![ExternalApprovalOption {
-                option_id: "allow-always".to_owned(),
-                label: Some("Always allow".to_owned()),
-                scope: ExternalApprovalOptionScope::AllowAlways,
-            }],
-        ),
-        (
-            "204",
-            vec![ExternalApprovalOption {
-                option_id: "future-scope".to_owned(),
-                label: Some("Future".to_owned()),
-                scope: ExternalApprovalOptionScope::Unsupported {
-                    provider_kind: "future_scope".to_owned(),
-                },
-            }],
-        ),
-        (
-            "205",
-            vec![ExternalApprovalOption {
-                option_id: "reject-once".to_owned(),
-                label: Some("Reject once".to_owned()),
-                scope: ExternalApprovalOptionScope::RejectOnce,
-            }],
-        ),
-    ] {
-        broker
-            .request_external(ExternalApprovalRequest {
-                requester: session(&broker.service_id, "requester"),
-                approver: approver.clone(),
-                generation: generation.clone(),
-                retirement: tokio_util::sync::CancellationToken::new(),
-                cancellation: tokio_util::sync::CancellationToken::new(),
-                turn_cancellation: tokio_util::sync::CancellationToken::new(),
-                operation_metadata: metadata(suffix),
-                presentation: None,
-                options,
-            })
-            .await
-            .expect("invalid option set is refused");
-    }
-
-    let history = broker.list(false).await.approvals;
-    assert_eq!(history.len(), 5);
-    assert!(
-        history
-            .iter()
-            .all(|record| record.state == ApprovalState::Cancelled && record.reason.is_some())
-    );
-    assert_eq!(history[0].requester, foreign_requester);
-    assert_eq!(history[1].offered_options.len(), 2);
-    assert_eq!(history[1].offered_options[0].option_id, "duplicate");
-    assert_eq!(
-        history[2].offered_options[0].scope,
-        ApprovalOptionScope::AllowAlways
-    );
-    assert_eq!(
-        history[3].offered_options[0].scope,
-        ApprovalOptionScope::Unsupported {
-            provider_kind: "future_scope".to_owned()
-        }
-    );
-    assert_eq!(history[4].offered_options[0].option_id, "reject-once");
-    assert_eq!(
-        history[4].reason.as_deref(),
-        Some("no supported one-time allow option remains")
     );
 }
 
@@ -1138,7 +470,7 @@ async fn malformed_persisted_routes_fail_closed() {
     std::fs::create_dir_all(&directory).unwrap();
     let routes = directory.join("approval-routes.json");
     std::fs::write(&routes, br#"[{"threadId":"thread","access":"invalid"}]"#).unwrap();
-    let loaded = ServiceApprovalBroker::load(
+    let loaded = ServiceInteractionBroker::load(
         service_id.clone(),
         NativeControlBackend {
             endpoint,
@@ -1184,7 +516,7 @@ async fn malformed_persisted_history_fails_closed_while_absence_stays_empty() {
     };
 
     // Act: a missing history file is an empty history.
-    let absent = ServiceApprovalBroker::load(
+    let absent = ServiceInteractionBroker::load(
         service_id.clone(),
         backend(directory.clone()),
         routes.clone(),
@@ -1196,7 +528,8 @@ async fn malformed_persisted_history_fails_closed_while_absence_stays_empty() {
 
     // Act: a malformed history file refuses to load.
     std::fs::write(directory.join("approval-history.json"), b"{not json").unwrap();
-    let corrupt = ServiceApprovalBroker::load(service_id.clone(), backend(directory), routes).await;
+    let corrupt =
+        ServiceInteractionBroker::load(service_id.clone(), backend(directory), routes).await;
 
     // Assert.
     assert!(matches!(corrupt, Err(ApprovalBrokerError::Unavailable)));
@@ -1307,7 +640,7 @@ async fn typed_interaction_rejects_self_approver_and_corrupt_stored_rows() {
     tokio::fs::write(&history_path, br#"{"bad":{"requestId":"other"}}"#)
         .await
         .expect("write corrupt stored row");
-    let reload = ServiceApprovalBroker::load(
+    let reload = ServiceInteractionBroker::load(
         broker.service_id.clone(),
         broker.backend.clone(),
         directory.join("approval-routes.json"),
@@ -1356,7 +689,7 @@ async fn refused_typed_offer_preserves_reviewed_fields_and_order_without_legacy_
             if stored == &refusal && stored.options[0].label == "First" && stored.options[1].label == "Second"
     ));
     assert!(!directory.join("approval-history.json").exists());
-    let reloaded = ServiceApprovalBroker::load(
+    let reloaded = ServiceInteractionBroker::load(
         broker.service_id.clone(),
         broker.backend.clone(),
         directory.join("approval-routes.json"),
@@ -1785,7 +1118,7 @@ async fn restart_cancels_populated_pending_interaction_history() {
     let backend = broker.backend.clone();
     drop(broker);
     let broker_after_restart =
-        ServiceApprovalBroker::load(service_id, backend, directory.join("approval-routes.json"))
+        ServiceInteractionBroker::load(service_id, backend, directory.join("approval-routes.json"))
             .await
             .expect("reload");
     assert_eq!(

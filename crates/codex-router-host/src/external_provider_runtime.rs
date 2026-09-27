@@ -8,7 +8,7 @@ use acp_client_runtime::AgentSessionClient;
 pub(crate) use acp_client_runtime::ProviderPromptDispatchObservation;
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
 use collaboration_service::ProviderSessionEventHub;
-use collaboration_service::ServiceApprovalBroker;
+use collaboration_service::ServiceInteractionBroker;
 use message_board::SessionEndpointRef;
 use tokio_util::sync::CancellationToken;
 
@@ -212,7 +212,7 @@ impl ExternalProviderRuntime {
         })
     }
 
-    pub async fn install_approval_broker(&self, broker: Arc<ServiceApprovalBroker>) {
+    pub async fn install_approval_broker(&self, broker: Arc<ServiceInteractionBroker>) {
         self.interaction_port.install_broker(broker).await;
     }
 

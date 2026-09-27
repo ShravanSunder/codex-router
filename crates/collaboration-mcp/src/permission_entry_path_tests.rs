@@ -8,7 +8,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     EndpointDirectory, LocalControlService, ManifestPublication, NativeControlBackend,
-    NativeGenerationGate, ServiceApprovalBroker, ServiceIdentity,
+    NativeGenerationGate, ServiceIdentity, ServiceInteractionBroker,
 };
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
@@ -32,7 +32,7 @@ const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000012";
 
 struct ApprovalFixture {
     directory: tempfile::TempDir,
-    broker: Arc<ServiceApprovalBroker>,
+    broker: Arc<ServiceInteractionBroker>,
     generation: CodexGeneration,
     requester: SessionRef,
     approver: SessionRef,
@@ -116,7 +116,7 @@ impl ApprovalFixture {
             gate: gate.clone(),
             codex_home: directory.path().to_owned(),
         };
-        let broker = ServiceApprovalBroker::load(
+        let broker = ServiceInteractionBroker::load(
             service_id.clone(),
             native_backend.clone(),
             directory.path().join("approval-routes.json"),
