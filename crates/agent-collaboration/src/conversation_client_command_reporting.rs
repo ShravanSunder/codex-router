@@ -243,7 +243,8 @@ pub(super) fn report_create_operation_failure(
         | ConversationOperationFailureKind::InvalidSetting
         | ConversationOperationFailureKind::UnsupportedCapability
         | ConversationOperationFailureKind::ProtocolViolation => 2,
-        ConversationOperationFailureKind::AuthenticationRequired
+        ConversationOperationFailureKind::Overloaded
+        | ConversationOperationFailureKind::AuthenticationRequired
         | ConversationOperationFailureKind::Unavailable => 3,
         ConversationOperationFailureKind::PermissionRejected
         | ConversationOperationFailureKind::SettingsUnresolved

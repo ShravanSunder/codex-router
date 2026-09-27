@@ -60,7 +60,8 @@ fn report_typed_failure(failure: &ConversationOperationFailure, json_output: boo
         | ConversationOperationFailureKind::InvalidSetting
         | ConversationOperationFailureKind::UnsupportedCapability
         | ConversationOperationFailureKind::ProtocolViolation => 2,
-        ConversationOperationFailureKind::AuthenticationRequired
+        ConversationOperationFailureKind::Overloaded
+        | ConversationOperationFailureKind::AuthenticationRequired
         | ConversationOperationFailureKind::Unavailable => 3,
         ConversationOperationFailureKind::PermissionRejected
         | ConversationOperationFailureKind::SettingsUnresolved
