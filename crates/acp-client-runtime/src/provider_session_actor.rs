@@ -134,6 +134,7 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                     break;
                 }
                 if observation.is_err() {
+                    shutdown.cancel();
                     break;
                 }
             }
