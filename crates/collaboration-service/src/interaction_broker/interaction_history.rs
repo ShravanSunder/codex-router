@@ -128,7 +128,9 @@ impl InteractionHistoryRecord {
                     && valid_question_fields(request)
                     && match state {
                         QuestionHistoryState::Pending | QuestionHistoryState::Declined => true,
-                        QuestionHistoryState::Cancelled { reason } => !reason.trim().is_empty(),
+                        QuestionHistoryState::Cancelled { reason } => {
+                            !reason.as_str().trim().is_empty()
+                        }
                         QuestionHistoryState::Answered { content } => {
                             validate_question_content(request, content).is_ok()
                         }
@@ -150,7 +152,7 @@ pub enum QuestionHistoryState {
     },
     Declined,
     Cancelled {
-        reason: String,
+        reason: InteractionCancelReason,
     },
 }
 
@@ -333,7 +335,7 @@ impl InteractionHistoryStore {
                     if state == &QuestionHistoryState::Pending =>
                 {
                     *state = QuestionHistoryState::Cancelled {
-                        reason: "hostRestarted".to_owned(),
+                        reason: InteractionCancelReason::HostRestarted,
                     };
                     had_pending = true;
                 }
@@ -455,6 +457,40 @@ impl InteractionHistoryStore {
         Ok(())
     }
 
+    pub(super) async fn cancel_approval_as_approver(
+        &self,
+        request_id: &str,
+        actor: &Identity,
+    ) -> Result<(), InteractionHistoryError> {
+        let mut records = self.records.lock().await;
+        let record = records
+            .get(request_id)
+            .ok_or(InteractionHistoryError::NotPending)?;
+        let InteractionHistoryRecord::Approval {
+            approver, state, ..
+        } = record
+        else {
+            return Err(InteractionHistoryError::NotPending);
+        };
+        if approver != actor {
+            return Err(InteractionHistoryError::WrongActor);
+        }
+        if state != &InteractionHistoryState::Pending {
+            return Err(InteractionHistoryError::AlreadySettled);
+        }
+        let mut next = records.clone();
+        let Some(InteractionHistoryRecord::Approval { state, .. }) = next.get_mut(request_id)
+        else {
+            return Err(InteractionHistoryError::NotPending);
+        };
+        *state = InteractionHistoryState::Cancelled {
+            reason: InteractionCancelReason::ApproverCancelled,
+        };
+        self.persist(&next).await?;
+        *records = next;
+        Ok(())
+    }
+
     pub(super) async fn cancel_approvals(
         &self,
         requester: &SessionRef,
@@ -554,7 +590,7 @@ impl InteractionHistoryStore {
             approver,
             request,
             state: QuestionHistoryState::Cancelled {
-                reason: reason.to_owned(),
+                reason: reason.to_owned().into(),
             },
         };
         if !record.is_valid_stored_value() {
@@ -599,7 +635,7 @@ impl InteractionHistoryStore {
             },
             QuestionResponse::Declined => QuestionHistoryState::Declined,
             QuestionResponse::Cancelled => QuestionHistoryState::Cancelled {
-                reason: "approver cancelled".to_owned(),
+                reason: InteractionCancelReason::ApproverCancelled,
             },
         };
         self.persist(&next).await?;
@@ -640,7 +676,7 @@ impl InteractionHistoryStore {
                 && state == &QuestionHistoryState::Pending
             {
                 *state = QuestionHistoryState::Cancelled {
-                    reason: reason.to_owned(),
+                    reason: reason.to_owned().into(),
                 };
                 cancelled.push(request_id.clone());
             }
@@ -671,7 +707,7 @@ impl InteractionHistoryStore {
             return Err(InteractionHistoryError::AlreadySettled);
         }
         *state = QuestionHistoryState::Cancelled {
-            reason: reason.to_owned(),
+            reason: reason.to_owned().into(),
         };
         self.persist(&next).await?;
         *records = next;

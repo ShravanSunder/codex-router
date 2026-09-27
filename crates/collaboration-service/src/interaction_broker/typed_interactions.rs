@@ -12,7 +12,7 @@ impl ServiceInteractionBroker {
         request: session_event_model::ApprovalRequest,
         turn_cancellation: tokio_util::sync::CancellationToken,
         retirement: tokio_util::sync::CancellationToken,
-    ) -> Result<oneshot::Receiver<TypedApprovalSelection>, InteractionHistoryError> {
+    ) -> Result<oneshot::Receiver<TypedApprovalResolution>, InteractionHistoryError> {
         if !self.participants_belong_to_service(&requester, &approver) {
             return Err(InteractionHistoryError::Unavailable);
         }
@@ -373,10 +373,73 @@ impl ServiceInteractionBroker {
         &self,
         request_id: &str,
         actor: &message_board::Identity,
-        option_id: &str,
-        acknowledge_persistent: bool,
-        note: Option<String>,
-    ) -> Result<session_event_model::OfferedOptionId, InteractionHistoryError> {
+        decision: TypedInteractionDecision,
+    ) -> Result<TypedInteractionDecisionOutcome, InteractionHistoryError> {
+        if decision == TypedInteractionDecision::Cancel {
+            let record = self
+                .interaction_history
+                .interaction(request_id)
+                .await
+                .ok_or(InteractionHistoryError::NotPending)?;
+            return match record {
+                InteractionHistoryRecord::Approval { .. } => {
+                    let _typed_operation = self.typed_operations.lock().await;
+                    let cancellation = self
+                        .typed_pending_approvals
+                        .lock()
+                        .await
+                        .get(request_id)
+                        .map(|approval| {
+                            (
+                                approval.turn_cancellation.is_cancelled(),
+                                approval.retirement.is_cancelled(),
+                            )
+                        });
+                    let Some((turn_cancelled, retired)) = cancellation else {
+                        return Err(InteractionHistoryError::AlreadySettled);
+                    };
+                    if turn_cancelled || retired {
+                        let reason = if turn_cancelled {
+                            "turnCancelled"
+                        } else {
+                            "providerRetired"
+                        };
+                        self.interaction_history
+                            .cancel_approval(request_id, reason)
+                            .await?;
+                        self.typed_pending_approvals.lock().await.remove(request_id);
+                        return Err(InteractionHistoryError::NotPending);
+                    }
+                    self.interaction_history
+                        .cancel_approval_as_approver(request_id, actor)
+                        .await?;
+                    let approval = self
+                        .typed_pending_approvals
+                        .lock()
+                        .await
+                        .remove(request_id)
+                        .ok_or(InteractionHistoryError::NotPending)?;
+                    let _ = approval.completion.send(TypedApprovalResolution::Cancelled);
+                    Ok(TypedInteractionDecisionOutcome::ApprovalCancelled)
+                }
+                InteractionHistoryRecord::Question { .. } => {
+                    self.respond_question(request_id, actor, QuestionResponse::Cancelled)
+                        .await?;
+                    Ok(TypedInteractionDecisionOutcome::QuestionCancelled)
+                }
+                InteractionHistoryRecord::RefusedApproval { .. } => {
+                    Err(InteractionHistoryError::AlreadySettled)
+                }
+            };
+        }
+        let TypedInteractionDecision::SelectApproval {
+            option_id,
+            acknowledge_persistent,
+            note,
+        } = decision
+        else {
+            return Err(InteractionHistoryError::NotPending);
+        };
         let _typed_operation = self.typed_operations.lock().await;
         let cancelled = self
             .typed_pending_approvals
@@ -414,7 +477,7 @@ impl ServiceInteractionBroker {
         }
         let selected = self
             .interaction_history
-            .decide(request_id, actor, option_id, acknowledge_persistent)
+            .decide(request_id, actor, &option_id, acknowledge_persistent)
             .await?;
         let sender = self
             .typed_pending_approvals
@@ -424,11 +487,13 @@ impl ServiceInteractionBroker {
             .ok_or(InteractionHistoryError::NotPending)?;
         sender
             .completion
-            .send(TypedApprovalSelection {
+            .send(TypedApprovalResolution::Selected(TypedApprovalSelection {
                 option_id: selected.clone(),
                 note,
-            })
+            }))
             .map_err(|_| InteractionHistoryError::Unavailable)?;
-        Ok(selected)
+        Ok(TypedInteractionDecisionOutcome::ApprovalSelected {
+            option_id: selected,
+        })
     }
 }

@@ -416,9 +416,11 @@ mod tests {
             .decide_typed_interaction(
                 "approval-one",
                 &actor,
-                "allow-once",
-                false,
-                Some("note".into()),
+                collaboration_service::TypedInteractionDecision::SelectApproval {
+                    option_id: "allow-once".into(),
+                    acknowledge_persistent: false,
+                    note: Some("note".into()),
+                },
             )
             .await
             .expect("approver decision");
@@ -437,9 +439,9 @@ mod tests {
         let question_task = tokio::spawn({
             let port = Arc::clone(&port);
             let context = crate::ExternalProviderApprovalContext {
-                requester: requester.into(),
+                requester: requester.clone().into(),
                 approver: approver.clone(),
-                target: question_target,
+                target: question_target.clone(),
                 operation_id: OperationId::generate(),
                 binding_generation: CodexGeneration {
                     service_epoch: UuidIdentity::try_from(
@@ -480,9 +482,114 @@ mod tests {
             .await
             .expect("question answer");
         assert_eq!(question_task.await.expect("question task"), response);
+        let cancel_context = || crate::ExternalProviderApprovalContext {
+            requester: requester.clone().into(),
+            approver: approver.clone(),
+            target: question_target.clone(),
+            operation_id: OperationId::generate(),
+            binding_generation: CodexGeneration {
+                service_epoch: UuidIdentity::try_from(
+                    "00000000-0000-4000-8000-000000000001".to_owned(),
+                )
+                .expect("epoch"),
+                generation: GenerationNumber::try_from(1).expect("generation"),
+            },
+            binding_retirement: tokio_util::sync::CancellationToken::new(),
+        };
+        let cancelled_approval = serde_json::from_value(serde_json::json!({
+            "requestId":"approval-cancelled", "title":"Cancel command", "options":[
+                {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}}
+            ]
+        })).expect("approval to cancel");
+        let approval_cancel_task = tokio::spawn({
+            let port = Arc::clone(&port);
+            let context = cancel_context();
+            async move {
+                port.request_approval(
+                    context,
+                    cancelled_approval,
+                    tokio_util::sync::CancellationToken::new(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(attached) = hub.attach(session.clone()).await
+                    && attached.snapshot.len() == 6
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancel approval pending");
+        assert_eq!(
+            broker
+                .decide_typed_interaction(
+                    "approval-cancelled",
+                    &actor,
+                    collaboration_service::TypedInteractionDecision::Cancel,
+                )
+                .await
+                .expect("approver cancel"),
+            collaboration_service::TypedInteractionDecisionOutcome::ApprovalCancelled
+        );
+        assert_eq!(
+            approval_cancel_task.await.expect("approval cancel task"),
+            ApprovalPortOutcome::Cancelled
+        );
+        let cancelled_question = serde_json::from_value(serde_json::json!({
+            "requestId":"question-cancelled", "prompt":"Cancel question?", "fields":[
+                {"kind":"boolean","fieldId":"yes","label":"Yes","description":null,"required":true}
+            ]
+        }))
+        .expect("question to cancel");
+        let question_cancel_task = tokio::spawn({
+            let port = Arc::clone(&port);
+            let context = cancel_context();
+            async move {
+                port.request_question(
+                    context,
+                    cancelled_question,
+                    tokio_util::sync::CancellationToken::new(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(attached) = hub.attach(session.clone()).await
+                    && attached.snapshot.len() == 8
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancel question pending");
+        assert_eq!(
+            broker
+                .decide_typed_interaction(
+                    "question-cancelled",
+                    &actor,
+                    collaboration_service::TypedInteractionDecision::Cancel,
+                )
+                .await
+                .expect("approver cancel"),
+            collaboration_service::TypedInteractionDecisionOutcome::QuestionCancelled
+        );
+        assert_eq!(
+            question_cancel_task.await.expect("question cancel task"),
+            session_event_model::QuestionResponse::Cancelled
+        );
         sink.shutdown().await.expect("drain");
         let attached = hub.attach(session).await.expect("attach history");
-        assert_eq!(attached.snapshot.len(), 5);
+        assert_eq!(attached.snapshot.len(), 9);
         assert!(matches!(
             &attached.snapshot[0].event,
             SessionEvent::TurnStarted { .. }
@@ -503,6 +610,16 @@ mod tests {
             &attached.snapshot[4].event,
             SessionEvent::InteractionResolved { .. }
         ));
+        for (requested, resolved) in [(5, 6), (7, 8)] {
+            assert!(matches!(
+                &attached.snapshot[requested].event,
+                SessionEvent::InteractionRequested { .. }
+            ));
+            assert!(matches!(
+                &attached.snapshot[resolved].event,
+                SessionEvent::InteractionResolved { .. }
+            ));
+        }
     }
 
     #[tokio::test]
