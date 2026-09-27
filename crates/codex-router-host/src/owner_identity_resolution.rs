@@ -37,7 +37,7 @@ async fn resolve_face_owner_with_command(
         Ok(owner) => Some(owner),
         Err(error) => {
             tracing::error!(error_kind = ?error,
-                "provider faces unavailable: owner identity lookup failed");
+                "provider app-server faces unavailable: owner identity lookup failed");
             None
         }
     }
@@ -74,7 +74,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn failed_owner_lookup_disables_only_provider_faces() {
+    async fn failed_owner_lookup_disables_only_provider_app_server_faces() {
         let directory = tempfile::tempdir().expect("test directory");
         let missing = directory.path().join("missing-id");
         assert!(
