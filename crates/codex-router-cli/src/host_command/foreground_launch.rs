@@ -150,16 +150,16 @@ pub(super) async fn run_foreground_host(
         .with_environment("OTEL_EXPORTER_OTLP_ENDPOINT", otlp_endpoint)
         .with_environment("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
         .with_output(ChildOutput::Telemetry);
-    let replacement_command = host_replacement_command(
-        current_executable,
-        router_root.clone(),
+    let replacement_command = host_replacement_command(HostReplacementCommandInputs {
+        executable: current_executable,
+        router_root: router_root.clone(),
         port,
         mcp_bind,
         provider_operation_retention_days,
-        owner_human_id.as_ref(),
-        &external_provider_launches,
+        owner_human_id: owner_human_id.as_ref(),
+        external_provider_launches: &external_provider_launches,
         launch_mode,
-    );
+    });
     let provider_startups = super::provider_launch_configuration::configured_provider_startups(
         &router_root,
         &external_provider_launches,
@@ -260,16 +260,28 @@ fn normalized_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn host_replacement_command(
+struct HostReplacementCommandInputs<'a> {
     executable: PathBuf,
     router_root: PathBuf,
     port: u16,
     mcp_bind: SocketAddr,
     provider_operation_retention_days: std::num::NonZeroU32,
-    owner_human_id: Option<&message_board::HumanId>,
-    external_provider_launches: &[codex_router_host::ExternalProviderLaunchBinding],
+    owner_human_id: Option<&'a message_board::HumanId>,
+    external_provider_launches: &'a [codex_router_host::ExternalProviderLaunchBinding],
     launch_mode: HostLaunchMode,
-) -> ChildCommandSpec {
+}
+
+fn host_replacement_command(inputs: HostReplacementCommandInputs<'_>) -> ChildCommandSpec {
+    let HostReplacementCommandInputs {
+        executable,
+        router_root,
+        port,
+        mcp_bind,
+        provider_operation_retention_days,
+        owner_human_id,
+        external_provider_launches,
+        launch_mode,
+    } = inputs;
     let mut arguments = vec![
         OsString::from("host"),
         OsString::from("--router-root"),
@@ -342,7 +354,9 @@ fn resolve_codex_home(context: &CliContext) -> Result<PathBuf, HostCommandError>
 
 #[cfg(test)]
 mod tests {
-    use super::{HostLaunchMode, apply_launch_policy, host_replacement_command};
+    use super::{
+        HostLaunchMode, HostReplacementCommandInputs, apply_launch_policy, host_replacement_command,
+    };
     use crate::CliContext;
     use codex_router_host::ChildCommandSpec;
     use std::{ffi::OsString, net::SocketAddr, path::PathBuf};
@@ -419,16 +433,16 @@ mod tests {
         let router_root = PathBuf::from("/tmp/router-root");
         let mcp_bind = SocketAddr::from(([127, 0, 0, 1], 19088));
         assert_eq!(
-            host_replacement_command(
-                executable.clone(),
-                router_root.clone(),
-                19087,
+            host_replacement_command(HostReplacementCommandInputs {
+                executable: executable.clone(),
+                router_root: router_root.clone(),
+                port: 19087,
                 mcp_bind,
-                std::num::NonZeroU32::new(60).expect("positive"),
-                None,
-                &[],
-                HostLaunchMode::OwnerProduction,
-            ),
+                provider_operation_retention_days: std::num::NonZeroU32::new(60).expect("positive"),
+                owner_human_id: None,
+                external_provider_launches: &[],
+                launch_mode: HostLaunchMode::OwnerProduction,
+            }),
             ChildCommandSpec::new(executable).with_arguments([
                 OsString::from("host"),
                 OsString::from("--router-root"),
@@ -453,16 +467,16 @@ mod tests {
             vec!["acp".to_owned()],
         )
         .expect("cursor binding");
-        let command = host_replacement_command(
-            executable.clone(),
-            router_root.clone(),
-            19087,
+        let command = host_replacement_command(HostReplacementCommandInputs {
+            executable: executable.clone(),
+            router_root: router_root.clone(),
+            port: 19087,
             mcp_bind,
-            std::num::NonZeroU32::new(60).expect("positive"),
-            None,
-            &[provider],
-            HostLaunchMode::OwnerProduction,
-        );
+            provider_operation_retention_days: std::num::NonZeroU32::new(60).expect("positive"),
+            owner_human_id: None,
+            external_provider_launches: &[provider],
+            launch_mode: HostLaunchMode::OwnerProduction,
+        });
         assert_eq!(
             command,
             ChildCommandSpec::new(executable).with_arguments([
@@ -489,16 +503,16 @@ mod tests {
             .expect("valid owner identity");
         let executable = PathBuf::from("/tmp/codex-router");
         let router_root = PathBuf::from("/tmp/router-root");
-        let command = host_replacement_command(
-            executable.clone(),
-            router_root.clone(),
-            19087,
-            SocketAddr::from(([127, 0, 0, 1], 19088)),
-            std::num::NonZeroU32::new(60).expect("positive"),
-            Some(&owner),
-            &[],
-            HostLaunchMode::OwnerProduction,
-        );
+        let command = host_replacement_command(HostReplacementCommandInputs {
+            executable: executable.clone(),
+            router_root: router_root.clone(),
+            port: 19087,
+            mcp_bind: SocketAddr::from(([127, 0, 0, 1], 19088)),
+            provider_operation_retention_days: std::num::NonZeroU32::new(60).expect("positive"),
+            owner_human_id: Some(&owner),
+            external_provider_launches: &[],
+            launch_mode: HostLaunchMode::OwnerProduction,
+        });
         assert_eq!(
             command,
             ChildCommandSpec::new(executable).with_arguments([
@@ -519,16 +533,16 @@ mod tests {
 
     #[test]
     fn replacement_command_carries_resolved_isolation() {
-        let command = host_replacement_command(
-            PathBuf::from("/tmp/codex-router"),
-            PathBuf::from("/tmp/private-router"),
-            18787,
-            SocketAddr::from(([127, 0, 0, 1], 18788)),
-            std::num::NonZeroU32::new(60).expect("positive"),
-            None,
-            &[],
-            HostLaunchMode::IsolatedDebug,
-        );
+        let command = host_replacement_command(HostReplacementCommandInputs {
+            executable: PathBuf::from("/tmp/codex-router"),
+            router_root: PathBuf::from("/tmp/private-router"),
+            port: 18787,
+            mcp_bind: SocketAddr::from(([127, 0, 0, 1], 18788)),
+            provider_operation_retention_days: std::num::NonZeroU32::new(60).expect("positive"),
+            owner_human_id: None,
+            external_provider_launches: &[],
+            launch_mode: HostLaunchMode::IsolatedDebug,
+        });
         assert_eq!(
             command,
             ChildCommandSpec::new(PathBuf::from("/tmp/codex-router")).with_arguments([
