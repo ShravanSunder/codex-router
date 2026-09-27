@@ -164,6 +164,45 @@ fn message_send_unknown_delivery_retains_outcome_in_typed_error() {
 }
 
 #[test]
+fn message_send_foreign_writer_rejection_has_typed_action_in_mcp_error() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let schema = server
+        .resolved_tools()
+        .into_iter()
+        .find(|tool| tool.name == "message_send")
+        .and_then(|tool| tool.output_schema)
+        .expect("advertised message_send output schema");
+    let validator = jsonschema::validator_for(&Value::Object((*schema).clone()))
+        .expect("message_send JSON Schema");
+    let receipt: DeliveryReceipt = serde_json::from_value(serde_json::json!({
+        "outcome":{
+            "kind":"rejected","reason":"heldByAnotherClient",
+            "nextAction":"messageFromHoldingCodexClient","clientCode":-32600,
+            "detail":"Message it from the Codex client that holds it."
+        },
+        "reachability":"codexAppServer","client":null
+    }))
+    .expect("typed delivery receipt");
+    let result = super::message_tool_result(Ok(receipt));
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured MCP error");
+    assert_eq!(structured["mcpResult"], "error");
+    assert_eq!(structured["outcome"]["reason"], "heldByAnotherClient");
+    assert_eq!(
+        structured["outcome"]["nextAction"],
+        "messageFromHoldingCodexClient"
+    );
+    assert_eq!(
+        structured["message"],
+        "Message it from the Codex client that holds it."
+    );
+    validator
+        .validate(&structured)
+        .expect("typed MCP output schema");
+}
+
+#[test]
 fn message_adapter_preserves_preparation_and_submission_effects() {
     let transport = || {
         collaboration_client::ClientError::Transport(std::io::Error::new(

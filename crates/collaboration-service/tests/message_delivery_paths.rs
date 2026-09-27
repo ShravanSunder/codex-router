@@ -89,6 +89,39 @@ async fn auto_resume_preserves_effect_when_submission_rejected() {
     );
     assert_eq!(requests[1]["params"]["excludeTurns"], true);
 }
+
+#[tokio::test]
+async fn foreign_writer_resume_returns_actionable_typed_rejection_without_retry() {
+    let (result, requests) = exercise(MessageScenario {
+        delivery: MessageDelivery::Auto,
+        steps: vec![
+            read("notLoaded"),
+            NativeStep {
+                method: "thread/resume",
+                reply: NativeReply::RejectWith {
+                    code: -32600,
+                    message: "thread target already has an active writer",
+                },
+            },
+        ],
+    })
+    .await
+    .unwrap();
+    let outcome = outcome_data(result).unwrap();
+    assert_eq!(outcome["kind"], "rejected");
+    assert_eq!(outcome["reason"], "heldByAnotherClient");
+    assert_eq!(outcome["nextAction"], "messageFromHoldingCodexClient");
+    assert_eq!(
+        outcome["detail"],
+        "Message it from the Codex client that holds it."
+    );
+    assert_eq!(outcome["clientCode"], -32600);
+    assert_eq!(
+        requests.len(),
+        2,
+        "no turn/start or retry after writer refusal"
+    );
+}
 #[tokio::test]
 async fn lost_resume_receipt_never_submits_input() {
     let (result, requests) = exercise(MessageScenario {

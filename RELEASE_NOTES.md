@@ -5,6 +5,7 @@
 - `wake send --wait-until-first-fire --json` now emits one result with `result.record.firstFire`, or one error retaining the created wake under `created`.
 - Scheduled runs can deliver their first input to a Codex conversation created without an initial prompt.
 - Scheduled runs to materialized existing Codex conversations now compare the native workspace with the schedule's declared workspace and deliver the input.
+- Name a Codex thread held by another client's active writer as a typed message rejection, with guidance to send from the holding Codex client instead of retrying the same Router path.
 - Isolated Hosts now work in release builds and accept `--require-debug-isolation` with home-default mode; a forged `HOME` cannot reach launchctl and must satisfy isolated debug-profile and socket checks.
 - Advertise an additive MCP tool output union that validates both unchanged successful structured receipts and typed structured errors. Reconnect existing MCP clients after a Host upgrade to refresh cached tool schemas.
 - Enable configured Claude and Cursor ACP providers by default from owner-editable `providers.json`. A failed provider reports endpoint-specific reason and fix without taking down the other endpoints.
