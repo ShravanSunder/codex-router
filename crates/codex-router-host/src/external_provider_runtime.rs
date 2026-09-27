@@ -398,6 +398,15 @@ impl ExternalProviderRuntime {
         self.client.session_activity(provider_session_id).await
     }
 
+    pub async fn active_prompt_operation(
+        &self,
+        provider_session_id: String,
+    ) -> Result<Option<OperationId>, ExternalProviderRuntimeError> {
+        self.client
+            .active_prompt_operation(provider_session_id)
+            .await
+    }
+
     pub async fn wait_session_idle(
         &self,
         provider_session_id: String,

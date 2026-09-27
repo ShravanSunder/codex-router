@@ -360,6 +360,22 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         result.await.map_err(|_| self.retired_operation_error())
     }
 
+    /// Resolve the operation owned by the currently running Session turn.
+    pub async fn active_prompt_operation(
+        &self,
+        provider_session_id: String,
+    ) -> Result<Option<P::OperationId>, ExternalProviderRuntimeError> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::InspectActiveOperation {
+                provider_session_id,
+                reply,
+            })
+            .await
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())
+    }
+
     pub async fn wait_session_idle(
         &self,
         provider_session_id: String,

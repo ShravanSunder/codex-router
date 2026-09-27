@@ -1,6 +1,8 @@
 //! ACP provider message delivery, evidence, and reconciliation.
+mod provider_active_turn_cancel;
 mod provider_content_commands;
 mod provider_queue_submission;
+pub use provider_active_turn_cancel::ProviderCancelActiveTurnError;
 pub use provider_content_commands::{
     ProviderPromptContentsError, ProviderQueueAdmissionError, ProviderSteerContentsError,
 };

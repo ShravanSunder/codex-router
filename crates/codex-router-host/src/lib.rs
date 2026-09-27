@@ -22,8 +22,8 @@ pub use provider_queue_operation_registry::{ProviderQueueCancellationError, Prov
 mod provider_model_catalog;
 mod provider_session_event_sink;
 pub use provider_acp_delivery_route::{
-    ProviderAcpDeliveryRoute, ProviderPromptContentsError, ProviderQueueAdmissionError,
-    ProviderSteerContentsError,
+    ProviderAcpDeliveryRoute, ProviderCancelActiveTurnError, ProviderPromptContentsError,
+    ProviderQueueAdmissionError, ProviderSteerContentsError,
 };
 mod provider_acp_scheduled_runs;
 mod provider_acp_session_loading;
