@@ -129,6 +129,21 @@ pub enum ApprovalSubject {
         command: String,
         cwd: String,
     },
+    #[serde(rename_all = "camelCase")]
+    Plan {
+        tool_call_id: String,
+        plan_item_id: String,
+    },
+}
+
+#[derive(
+    schemars::JsonSchema, Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum OptionsOrigin {
+    #[default]
+    AgentOffered,
+    RouterSynthesized,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -148,7 +163,16 @@ pub struct ApprovalRequest {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<ApprovalSubject>,
+    #[serde(default)]
+    pub options_origin: OptionsOrigin,
     pub options: OfferedOptions,
+}
+
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChoiceOption {
+    pub option_id: String,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -181,7 +205,17 @@ pub enum QuestionField {
         label: String,
         description: Option<String>,
         required: bool,
-        options: Vec<String>,
+        options: Vec<ChoiceOption>,
+    },
+    #[serde(rename_all = "camelCase")]
+    MultiChoice {
+        field_id: String,
+        label: String,
+        description: Option<String>,
+        required: bool,
+        options: Vec<ChoiceOption>,
+        min: Option<usize>,
+        max: Option<usize>,
     },
 }
 
@@ -194,6 +228,31 @@ pub struct QuestionFields {
 
 impl QuestionFields {
     pub fn new(fields: Vec<QuestionField>) -> Result<Self, EmptyQuestionFields> {
+        for field in &fields {
+            if let QuestionField::SingleChoice { options, .. }
+            | QuestionField::MultiChoice { options, .. } = field
+            {
+                let mut seen = BTreeSet::new();
+                if options.is_empty()
+                    || options.iter().any(|option| {
+                        option.option_id.is_empty() || !seen.insert(&option.option_id)
+                    })
+                {
+                    return Err(EmptyQuestionFields);
+                }
+            }
+            if let QuestionField::MultiChoice {
+                min, max, options, ..
+            } = field
+                && (min.is_some_and(|minimum| minimum > options.len())
+                    || max.is_some_and(|maximum| maximum > options.len())
+                    || min
+                        .zip(*max)
+                        .is_some_and(|(minimum, maximum)| minimum > maximum))
+            {
+                return Err(EmptyQuestionFields);
+            }
+        }
         let mut fields = fields.into_iter();
         let first = fields.next().ok_or(EmptyQuestionFields)?;
         Ok(Self {
@@ -228,7 +287,7 @@ pub struct EmptyQuestionFields;
 
 impl std::fmt::Display for EmptyQuestionFields {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a question requires at least one field")
+        formatter.write_str("a question requires valid fields and unique choice option IDs")
     }
 }
 

@@ -48,6 +48,7 @@ fn approval_event_round_trip_carries_prompt_subject_and_ordered_choices() {
         "requestId":"approval-1",
         "title":"Run command",
         "description":"Needs access",
+        "optionsOrigin":"routerSynthesized",
         "subject":{"type":"tool_call","toolCall":{"toolCallId":"call-1","kind":"execute","title":"echo"}},
         "options":[
             {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}},
@@ -58,6 +59,10 @@ fn approval_event_round_trip_carries_prompt_subject_and_ordered_choices() {
         request.subject,
         Some(ApprovalSubject::ToolCall { .. })
     ));
+    assert_eq!(
+        request.options_origin,
+        session_event_model::OptionsOrigin::RouterSynthesized
+    );
     let event = SessionEvent::InteractionRequested {
         interaction: PendingInteraction::Approval {
             approver: Identity::Human {
@@ -100,6 +105,45 @@ fn approval_event_round_trip_carries_prompt_subject_and_ordered_choices() {
             "requestId":"approval-1", "title":"Run command", "options":[]
         }))
         .is_err()
+    );
+}
+
+#[test]
+fn plan_subject_and_origin_round_trip_through_profile_metadata() {
+    use session_event_model::session_profile_codec::ApprovalRequestProfileMetadata;
+    let request: ApprovalRequest = serde_json::from_value(json!({
+        "requestId":"plan-1", "title":"Accept plan",
+        "subject":{"type":"plan","toolCallId":"call-1","planItemId":"item-1"},
+        "optionsOrigin":"routerSynthesized",
+        "options":[{"optionId":"plan.accept","label":"Accept","choice":{"effect":"allow","scope":"once"}}]
+    })).expect("plan request");
+    assert!(matches!(
+        request.subject,
+        Some(ApprovalSubject::Plan { .. })
+    ));
+    let metadata = ApprovalRequestProfileMetadata::from_request(&request);
+    let encoded = serde_json::to_value(&metadata).expect("metadata");
+    assert_eq!(encoded["sessionProfile"]["subject"]["planItemId"], "item-1");
+    assert_eq!(
+        serde_json::from_value::<ApprovalRequestProfileMetadata>(encoded).expect("decode"),
+        metadata
+    );
+}
+
+#[test]
+fn question_choice_ids_are_unique_while_labels_may_repeat() {
+    let field = json!({"kind":"multiChoice", "fieldId":"selection", "label":"Select", "description":null,
+        "required":true, "options":[{"optionId":"a","label":"Same"},{"optionId":"b","label":"Same"}],
+        "min":1,"max":2});
+    assert!(serde_json::from_value::<QuestionFields>(json!([field.clone()])).is_ok());
+    let mut duplicate = field;
+    duplicate["options"][1]["optionId"] = json!("a");
+    assert!(serde_json::from_value::<QuestionFields>(json!([duplicate])).is_err());
+    let answer: session_event_model::QuestionAnswerValue =
+        serde_json::from_value(json!({"selectedOptionIds":["a","b"]})).expect("selection");
+    assert_eq!(
+        serde_json::to_value(answer).expect("round trip"),
+        json!({"selectedOptionIds":["a","b"]})
     );
 }
 

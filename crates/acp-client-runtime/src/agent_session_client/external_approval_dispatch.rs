@@ -138,6 +138,7 @@ async fn handle_contextual_permission_request<P: InteractionPort>(
         title: reviewed.title,
         description: reviewed.description,
         subject: reviewed.subject,
+        options_origin: session_event_model::OptionsOrigin::AgentOffered,
         options,
     };
     let agent_cancellation = CancellationToken::new();

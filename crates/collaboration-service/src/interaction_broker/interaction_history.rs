@@ -194,17 +194,19 @@ fn question_field_id(field: &QuestionField) -> &str {
         QuestionField::Text { field_id, .. }
         | QuestionField::Number { field_id, .. }
         | QuestionField::Boolean { field_id, .. }
-        | QuestionField::SingleChoice { field_id, .. } => field_id,
+        | QuestionField::SingleChoice { field_id, .. }
+        | QuestionField::MultiChoice { field_id, .. } => field_id,
     }
 }
 
 fn valid_question_fields(request: &QuestionRequest) -> bool {
+    if session_event_model::QuestionFields::new(request.fields.iter().cloned().collect()).is_err() {
+        return false;
+    }
     let mut seen = BTreeSet::new();
     request.fields.iter().all(|field| {
         let field_id = question_field_id(field);
-        !field_id.is_empty()
-            && seen.insert(field_id)
-            && !matches!(field, QuestionField::SingleChoice { options, .. } if options.is_empty())
+        !field_id.is_empty() && seen.insert(field_id)
     })
 }
 
@@ -242,7 +244,21 @@ fn validate_question_content(
                 required, options, ..
             } => (
                 *required,
-                matches!(content.get(field_id), Some(QuestionAnswerValue::Text(choice)) if options.iter().any(|option| option == choice)),
+                matches!(content.get(field_id), Some(QuestionAnswerValue::SelectedOptions { selected_option_ids }) if selected_option_ids.len() == 1 && options.iter().any(|option| option.option_id == selected_option_ids[0])),
+            ),
+            QuestionField::MultiChoice {
+                required,
+                options,
+                min,
+                max,
+                ..
+            } => (
+                *required,
+                matches!(content.get(field_id), Some(QuestionAnswerValue::SelectedOptions { selected_option_ids })
+                    if selected_option_ids.len() >= min.unwrap_or(usize::from(*required))
+                    && max.is_none_or(|maximum| selected_option_ids.len() <= maximum)
+                    && selected_option_ids.iter().collect::<BTreeSet<_>>().len() == selected_option_ids.len()
+                    && selected_option_ids.iter().all(|selected| options.iter().any(|option| &option.option_id == selected))),
             ),
         };
         if (required && !valid) || (content.contains_key(field_id) && !valid) {
