@@ -81,6 +81,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         let callback_question_port = Arc::clone(&interaction_port);
         let callback_plan_contexts = Arc::clone(&approval_contexts);
         let callback_plan_port = Arc::clone(&interaction_port);
+        let callback_elicitation_contexts = Arc::clone(&approval_contexts);
+        let callback_elicitation_port = Arc::clone(&interaction_port);
         let task_approval_contexts = Arc::clone(&approval_contexts);
         let known_sessions = ProviderKnownSessions::default();
         let request_known_sessions = known_sessions.clone();
@@ -192,6 +194,10 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     Arc::clone(&task_event_sink),
                     callback_plan_contexts,
                     callback_plan_port,
+                ))
+                .with_handler(ProviderFormElicitationHandler::new(
+                    callback_elicitation_contexts,
+                    callback_elicitation_port,
                 ))
                 .with_handler(ProviderCursorTodoHandler::new(
                     tool_registry,
