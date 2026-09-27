@@ -154,6 +154,9 @@ async fn frontend_eof_detaches_active_turn_and_reconnect_is_busy_until_native_id
                     let _sent = turn_started_tx.send(());
                     publish_update_rx.await.unwrap();
                     wire.send(Message::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-a","turnId":"turn-a","itemId":"message-a","delta":"detached output"}}).to_string().into())).await?;
+                    wire.send(Message::Text(json!({"id":901,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-a","turnId":"turn-a","itemId":"tool-a","command":"cargo test","availableDecisions":["accept","decline"]}}).to_string().into())).await?;
+                    let approval = read_native_request(&mut wire).await;
+                    assert_eq!(approval, json!({"id":901,"result":{"decision":"cancel"}}));
                     tokio::select! {
                         _ = finish_turn_rx => {},
                         message = wire.next() => panic!("frontend detach sent native request before completion: {message:?}"),
