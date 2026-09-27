@@ -19,6 +19,7 @@ fn hosted_picker_keeps_equal_codex_and_provider_ids_distinct_and_provider_read_o
     }))
     .expect("Codex target");
     let provider: ProviderSessionSummary = serde_json::from_value(json!({
+        "origin":"hostedProvider",
         "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},"sessionId":"thread-a"},
         "workingDirectory":"/repo/project-a","updatedAt":3,
         "state":"unloaded",
@@ -35,7 +36,11 @@ fn hosted_picker_keeps_equal_codex_and_provider_ids_distinct_and_provider_read_o
     let mut model = SessionsPickerModel::new(request.clone(), 120);
     assert_eq!(model.visible_record_len(), 2);
     assert!(model.render_snapshot().contains("Claude fixture"));
-    assert!(model.focus_visible_identity(&SessionPickerIdentity::HostedProvider(provider.target)));
+    assert!(
+        model.focus_visible_identity(&SessionPickerIdentity::HostedProvider(
+            provider.target().clone()
+        ))
+    );
     assert_eq!(model.activation_outcome_for_focus(), None);
     assert_eq!(model.fork_outcome_for_focus(), None);
     assert!(model.focus_visible_identity(&SessionPickerIdentity::HostedCodex(codex_target)));

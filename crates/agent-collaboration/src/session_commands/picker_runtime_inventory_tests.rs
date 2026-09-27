@@ -248,6 +248,7 @@ async fn provider_inventory_reaches_picker_as_a_qualified_read_only_row() {
         "endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},
         "observedAt":"2026-09-07T00:00:00Z",
         "sessions":[{
+            "origin":"hostedProvider",
             "target":{"endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},"sessionId":"first"},
             "workingDirectory":"/repo","updatedAt":3,"state":"requiresAction",
             "approver":{"kind":"human","humanId":"owner"},
@@ -398,10 +399,28 @@ async fn unavailable_service_retains_remembered_rows_without_stale_active_claims
     assert_eq!(rows[0].runtime_status, PickerRuntimeStatus::Unknown);
 }
 
+#[test]
+fn claude_interactive_picker_timestamps_convert_seconds_to_milliseconds_once() {
+    let summary: collaboration_client::protocol::ProviderSessionSummary =
+        serde_json::from_value(json!({
+            "origin":"claudeCodeInteractive",
+            "target":{"endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},"sessionId":"interactive-one"},
+            "name":"Interactive fixture","workingDirectory":"/repo",
+            "status":"idle","startedAt":1_790_162_100,"updatedAt":1_790_162_494,
+            "statusUpdatedAt":1_790_162_494,"kind":"interactive","entrypoint":"cli"
+        }))
+        .expect("interactive summary");
+    let row = SessionPickerRecord::from_provider_summary(&summary, "Claude fixture");
+    assert_eq!(row.created_at_ms, Some(1_790_162_100_000));
+    assert_eq!(row.recency_at_ms, Some(1_790_162_494_000));
+    assert_eq!(row.title, "Interactive fixture");
+}
+
 #[tokio::test]
 async fn unavailable_service_clears_remembered_provider_state() {
     let summary: collaboration_client::protocol::ProviderSessionSummary =
         serde_json::from_value(json!({
+            "origin":"hostedProvider",
             "target":{"endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},"sessionId":"provider-one"},
             "workingDirectory":"/repo","updatedAt":3,"state":"requiresAction",
             "approver":{"kind":"human","humanId":"owner"},
@@ -427,6 +446,7 @@ async fn unavailable_service_clears_remembered_provider_state() {
 async fn local_picker_never_reuses_provider_rows() {
     let summary: collaboration_client::protocol::ProviderSessionSummary =
         serde_json::from_value(json!({
+            "origin":"hostedProvider",
             "target":{"endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},"sessionId":"shared-id"},
             "workingDirectory":"/repo","updatedAt":3,"state":"idle",
             "approver":{"kind":"human","humanId":"owner"},
