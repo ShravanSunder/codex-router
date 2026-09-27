@@ -303,6 +303,16 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                         "session/prompt",
                         json!({"sessionId":"created-thread","prompt":[{"type":"text","text":"must not dispatch"}]}),
                     ),
+                    (
+                        "prompt-not-loaded",
+                        "session/prompt",
+                        json!({"sessionId":"missing-thread","prompt":[{"type":"text","text":"not loaded"}]}),
+                    ),
+                    (
+                        "prompt-invalid-content",
+                        "session/prompt",
+                        json!({"sessionId":"created-thread","prompt":[{"type":"image","data":"AA==","mimeType":"image/png"}]}),
+                    ),
                 ] {
                     write.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":conflict_id,"method":conflict_method,"params":conflict_params})).as_bytes()).await.unwrap();
                     let mut conflict_response = String::new();
@@ -317,7 +327,11 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                         serde_json::from_str(&conflict_response).unwrap();
                     assert_eq!(conflict_response["id"], conflict_id);
                     assert_eq!(conflict_response["error"]["code"], -32600);
-                    assert_eq!(conflict_response["error"]["data"]["kind"], "busy");
+                    if matches!(conflict_id, "duplicate-load" | "prompt-during-load") {
+                        assert_eq!(conflict_response["error"]["data"]["kind"], "busy");
+                    } else {
+                        assert!(conflict_response["error"].get("data").is_none());
+                    }
                 }
             }
             let concurrent_id = format!("during-{method}");

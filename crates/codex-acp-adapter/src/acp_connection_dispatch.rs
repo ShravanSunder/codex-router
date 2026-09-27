@@ -155,7 +155,8 @@ async fn route_connection(
                     let mut known_session=if let Some(session_id)=requested_session.as_ref() {
                         match sessions.reserve_load(session_id,setup_requests.len()) {
                             Ok(binding)=>binding,
-                            Err(_)=>{router.output.send(busy_error(id,"Session busy or capacity unavailable")).await?;continue;},
+                            Err(crate::SessionRegistryError::Busy)=>{router.output.send(busy_error(id,"Session busy or capacity unavailable")).await?;continue;},
+                            Err(_)=>{router.output.send(error(id,-32600,"Session busy or capacity unavailable")).await?;continue;},
                         }
                     } else {None};
                     let mut adopted_held = false;
@@ -213,7 +214,11 @@ async fn route_connection(
                     }
                 },
                 "session/prompt"=>{
-                    if sessions.begin_prompt(&mut schema,id.clone(),params).is_err() {router.output.send(busy_error(id,"Session prompt unavailable or already pending")).await?;}
+                    match sessions.begin_prompt(&mut schema,id.clone(),params) {
+                        Ok(())=>{},
+                        Err(crate::SessionRegistryError::Busy)=>router.output.send(busy_error(id,"Session prompt unavailable or already pending")).await?,
+                        Err(_)=>router.output.send(error(id,-32600,"Session prompt unavailable or already pending")).await?,
+                    }
                 },
                 "session/list"=>{
                     if !schema.validate("ListSessionsRequest",&params).unwrap_or(false) {router.output.send(error(id,-32602,"Invalid session list parameters")).await?;continue;}
