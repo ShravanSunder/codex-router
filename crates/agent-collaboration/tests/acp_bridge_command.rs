@@ -3,7 +3,17 @@
 mod tests {
     use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
     use serde_json::json;
-    use std::{os::unix::fs::DirBuilderExt, path::PathBuf, process::Stdio, time::Duration};
+    use std::{
+        cell::Cell,
+        os::unix::fs::DirBuilderExt,
+        path::PathBuf,
+        process::Stdio,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio_util::sync::CancellationToken;
 
@@ -33,8 +43,11 @@ mod tests {
         let stop = CancellationToken::new();
         let service = tokio::spawn(listener.run(stop.clone()));
         let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).unwrap();
+        let provider_connected = Arc::new(AtomicBool::new(false));
+        let peer_connected = Arc::clone(&provider_connected);
         let peer = tokio::spawn(async move {
             let (stream, _) = acp.accept().await.unwrap();
+            peer_connected.store(true, Ordering::Release);
             let mut stream = BufReader::new(stream);
             let mut line = String::new();
             stream.read_line(&mut line).await.unwrap();
@@ -65,22 +78,27 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        let wait_phase = Cell::new("writing initialize");
         let flow = tokio::time::timeout(Duration::from_secs(5), async {
             let mut input = child.stdin.take().ok_or("stdin missing")?;
             let mut output = BufReader::new(child.stdout.take().ok_or("stdout missing")?);
             input.write_all(INITIALIZE.as_bytes()).await?;
+            wait_phase.set("reading callback after initialize");
             let mut callback = String::new();
             output.read_line(&mut callback).await?;
             if callback != CALLBACK {
                 return Err("raw ACP callback was not forwarded".into());
             }
+            wait_phase.set("writing callback reply");
             input.write_all(CALLBACK_REPLY.as_bytes()).await?;
+            wait_phase.set("reading initialize result");
             let mut result = String::new();
             output.read_line(&mut result).await?;
             if result != RESULT {
                 return Err("raw ACP result was not preserved".into());
             }
             // Keep stdin open: backend EOF must still terminate the bridge process.
+            wait_phase.set("waiting for bridge child exit");
             let status = child.wait().await?;
             if !status.success() {
                 return Err("ACP bridge exited unsuccessfully".into());
@@ -88,6 +106,13 @@ mod tests {
             Ok::<(), Box<dyn std::error::Error>>(())
         })
         .await;
+        let timeout_observation = flow.as_ref().err().map(|_| {
+            (
+                wait_phase.get(),
+                provider_connected.load(Ordering::Acquire),
+                peer.is_finished(),
+            )
+        });
         // Cleanup applies to both the expected initial red and the final green path.
         if child.try_wait().unwrap().is_none() {
             child.kill().await.unwrap();
@@ -104,6 +129,11 @@ mod tests {
         std::fs::remove_file(root.join("acp.sock")).unwrap();
         std::fs::remove_dir(root).unwrap();
         // Assert: whole executable carrier exchange completed and the peer's exact checks passed.
+        if let Some((phase, provider_connected, peer_finished)) = timeout_observation {
+            panic!(
+                "ACP bridge timed out while {phase}; provider_connected={provider_connected}; peer_finished={peer_finished}"
+            );
+        }
         flow.unwrap().unwrap();
         assert!(peer_passed);
         peer_result.unwrap();

@@ -172,6 +172,22 @@ pub(super) const SESSION_ACCOUNT_AFFINITIES: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 0),
     column!("last_seen_unix_seconds", "INTEGER", true, 0),
 ];
+pub(super) const CREDENTIAL_MAINTENANCE: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("credential_generation", "INTEGER", true, 0),
+    column!("state", "TEXT", true, 0),
+    column!("failure_class", "TEXT", false, 0),
+    column!("last_success_unix_seconds", "INTEGER", false, 0),
+    column!("next_attempt_unix_seconds", "INTEGER", false, 0),
+    column!("claimed_successor_generation", "INTEGER", false, 0),
+    ColumnSpec {
+        name: "consecutive_failures",
+        declared_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+        accepted_defaults: NO_OR_ZERO_DEFAULT,
+    },
+];
 
 pub(super) const BASE_TABLES: &[(&str, &[ColumnSpec])] = &[
     ("accounts", ACCOUNTS),

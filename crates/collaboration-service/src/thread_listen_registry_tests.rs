@@ -590,6 +590,11 @@ struct RecordingSink {
     reject_batches: bool,
     /// Rejects this many records before accepting anything, for reset proofs.
     rejections_remaining: Arc<std::sync::atomic::AtomicU8>,
+    batch_recorded: Arc<tokio::sync::Notify>,
+    batch_rejected: Arc<tokio::sync::Notify>,
+    first_batch_rejection_release: Option<Arc<tokio::sync::Notify>>,
+    heartbeat_recorded: Arc<tokio::sync::Notify>,
+    heartbeat_rejected: Arc<tokio::sync::Notify>,
 }
 
 impl RecordingSink {
@@ -598,6 +603,11 @@ impl RecordingSink {
             records: Arc::clone(records),
             reject_batches: false,
             rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            batch_recorded: Arc::new(tokio::sync::Notify::new()),
+            batch_rejected: Arc::new(tokio::sync::Notify::new()),
+            first_batch_rejection_release: None,
+            heartbeat_recorded: Arc::new(tokio::sync::Notify::new()),
+            heartbeat_rejected: Arc::new(tokio::sync::Notify::new()),
         })
     }
 }
@@ -619,11 +629,30 @@ impl BatchSink for RecordingSink {
             {
                 self.rejections_remaining
                     .store(remaining.saturating_sub(1), Ordering::Relaxed);
+                if matches!(record, ListenDeliveryRecord::Batch(_)) {
+                    self.batch_rejected.notify_one();
+                    if remaining == u8::MAX
+                        && let Some(release) = &self.first_batch_rejection_release
+                    {
+                        release.notified().await;
+                    }
+                }
+                if matches!(record, ListenDeliveryRecord::Heartbeat(_)) {
+                    self.heartbeat_rejected.notify_one();
+                }
                 return Err(BatchSinkFailure::Rejected {
                     evidence: serde_json::json!({"kind":"nativeRejected","reason":"busy"}),
                 });
             }
+            let is_batch = matches!(record, ListenDeliveryRecord::Batch(_));
+            let is_heartbeat = matches!(record, ListenDeliveryRecord::Heartbeat(_));
             self.records.lock().await.push(record);
+            if is_batch {
+                self.batch_recorded.notify_one();
+            }
+            if is_heartbeat {
+                self.heartbeat_recorded.notify_one();
+            }
             Ok(())
         })
     }
@@ -700,18 +729,36 @@ fn describe_record(record: &ListenDeliveryRecord) -> String {
 /// Two things paused time cannot do on its own. Auto-advance races task startup,
 /// so a single long sleep can jump the clock past the delivery task's first poll
 /// and leave its debounce window opening after the observation window closed.
-/// And the storage calls behind a Batch set complete on SQLx's worker thread,
-/// outside the paused clock, so every step waits for storage to settle before
-/// simulated time moves again.
+/// Storage calls behind a Batch set complete on a real background thread.
+/// Settle those calls and await accepted Batch progress before virtual time
+/// advances; cancellation exposes a failed delivery instead of parking here.
 async fn drive_session_delivery(
     store: &Arc<Mutex<BoardStore>>,
     records: &Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
     minutes: u64,
+    batch_progress: Option<(&tokio::sync::Notify, &tokio_util::sync::CancellationToken)>,
     settled: impl Fn(&[ListenDeliveryRecord]) -> bool,
 ) {
+    let mut observed_batch_progress = false;
     settle_storage_work(store).await;
     for _ in 0..minutes {
-        if settled(&records.lock().await) {
+        let seen = records.lock().await;
+        let settled_now = settled(&seen);
+        let accepted_batch_seen = seen
+            .iter()
+            .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)));
+        drop(seen);
+        if accepted_batch_seen && !observed_batch_progress {
+            if let Some((progress, cancellation)) = batch_progress {
+                tokio::select! {
+                    biased;
+                    () = progress.notified() => {}
+                    () = cancellation.cancelled() => return,
+                }
+            }
+            observed_batch_progress = true;
+        }
+        if settled_now {
             // Finalization is published before the detached delivery task drops
             // its last store reference. Let that task finish so fixture cleanup
             // observes ownership rather than racing publication.
@@ -762,6 +809,7 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
         .await;
     fixture.reply("Rejected activity").await;
     let records = Arc::new(TokioMutex::new(Vec::new()));
+    let state = registry.state(&listen.listen_id).await.unwrap();
 
     // Act.
     registry.spawn_session_delivery(
@@ -771,11 +819,20 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
             records: Arc::clone(&records),
             reject_batches: false,
             rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(2)),
+            batch_recorded: Arc::new(tokio::sync::Notify::new()),
+            batch_rejected: Arc::new(tokio::sync::Notify::new()),
+            first_batch_rejection_release: None,
+            heartbeat_recorded: Arc::new(tokio::sync::Notify::new()),
+            heartbeat_rejected: Arc::new(tokio::sync::Notify::new()),
         }),
     );
-    drive_session_delivery(&fixture.store, &records, 90, |seen| {
-        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
-    })
+    drive_session_delivery(
+        &fixture.store,
+        &records,
+        90,
+        Some((&state.batch_progress_recorded, &state.cancellation)),
+        |seen| matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_))),
+    )
     .await;
 
     // Assert: the listen reached its lifetime instead of failing, and the
@@ -794,6 +851,150 @@ async fn an_accepted_record_resets_the_rejection_counter_and_keeps_the_listen() 
 struct RetryOnceSink {
     records: Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
     attempts: Arc<std::sync::atomic::AtomicU8>,
+}
+
+struct HeldAcceptedBatchSink {
+    records: Arc<TokioMutex<Vec<ListenDeliveryRecord>>>,
+    accepted: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl BatchSink for HeldAcceptedBatchSink {
+    fn deliver<'a>(
+        &'a self,
+        record: ListenDeliveryRecord,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), BatchSinkFailure>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let is_batch = matches!(record, ListenDeliveryRecord::Batch(_));
+            self.records.lock().await.push(record);
+            if is_batch {
+                self.accepted.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn delivery_driver_waits_for_durable_progress_after_sink_accepts_batch() {
+    let fixture = ListenFixture::create("held-accepted-batch").await;
+    let registry = ThreadListenRegistry::new_without_lifecycle_cleanup();
+    let listen = fixture
+        .register_session_delivery(
+            &registry,
+            ThreadListenMode::Repeating {
+                lifetime_seconds: ThreadListenLifetime::Long.seconds(),
+            },
+        )
+        .await;
+    fixture.reply("Accepted before persistence").await;
+    let state = registry.state(&listen.listen_id).await.unwrap();
+    let records = Arc::new(TokioMutex::new(Vec::new()));
+    let accepted = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let observed = Arc::new(tokio::sync::Notify::new());
+    registry.spawn_session_delivery(
+        listen.listen_id.clone(),
+        Arc::clone(&fixture.store),
+        Arc::new(HeldAcceptedBatchSink {
+            records: Arc::clone(&records),
+            accepted: Arc::clone(&accepted),
+            release: Arc::clone(&release),
+        }),
+    );
+    let driver_records = Arc::clone(&records);
+    let driver_store = Arc::clone(&fixture.store);
+    let driver_observed = Arc::clone(&observed);
+    let driver_state = Arc::clone(&state);
+    let mut driver = tokio::spawn(async move {
+        drive_session_delivery(
+            &driver_store,
+            &driver_records,
+            30,
+            Some((
+                &driver_state.batch_progress_recorded,
+                &driver_state.cancellation,
+            )),
+            |seen| {
+                let has_batch = seen
+                    .iter()
+                    .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)));
+                if has_batch {
+                    driver_observed.notify_one();
+                }
+                has_batch
+            },
+        )
+        .await;
+    });
+    accepted.notified().await;
+    observed.notified().await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(1), &mut driver)
+            .await
+            .is_err(),
+        "a sink record must not settle delivery before its SQLite position write"
+    );
+    assert_eq!(
+        registry
+            .show(&listen.listen_id)
+            .await
+            .unwrap()
+            .batches_delivered,
+        0
+    );
+    release.notify_one();
+    driver
+        .await
+        .expect("delivery driver should finish after persistence");
+    assert_eq!(
+        registry
+            .show(&listen.listen_id)
+            .await
+            .unwrap()
+            .batches_delivered,
+        1
+    );
+    // The same wait must also end if delivery terminates without another
+    // durable Batch, as it does after a position-persistence failure.
+    let missing_progress = Arc::new(tokio::sync::Notify::new());
+    let failure_observed = Arc::new(tokio::sync::Notify::new());
+    let failure_records = Arc::clone(&records);
+    let failure_store = Arc::clone(&fixture.store);
+    let failure_state = Arc::clone(&state);
+    let failure_progress = Arc::clone(&missing_progress);
+    let failure_started = Arc::clone(&failure_observed);
+    let failure_driver = tokio::spawn(async move {
+        drive_session_delivery(
+            &failure_store,
+            &failure_records,
+            5,
+            Some((&failure_progress, &failure_state.cancellation)),
+            |seen| {
+                let has_batch = seen
+                    .iter()
+                    .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)));
+                if has_batch {
+                    failure_started.notify_one();
+                }
+                has_batch
+            },
+        )
+        .await;
+    });
+    failure_observed.notified().await;
+    registry.cancel(&listen.listen_id).await.unwrap();
+    failure_driver
+        .await
+        .expect("cancellation should release a missing-progress wait");
+    drive_session_delivery(&fixture.store, &records, 5, None, |seen| {
+        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
+    })
+    .await;
+    fixture.finish().await;
 }
 
 impl BatchSink for RetryOnceSink {
@@ -831,6 +1032,7 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
     fixture.reply("Retry this provider push").await;
     let records = Arc::new(TokioMutex::new(Vec::new()));
     let attempts = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let state = registry.state(&listen.listen_id).await.unwrap();
 
     registry.spawn_session_delivery(
         listen.listen_id.clone(),
@@ -840,26 +1042,22 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
             attempts: Arc::clone(&attempts),
         }),
     );
-    drive_session_delivery(&fixture.store, &records, 30, |seen| {
-        seen.iter()
-            .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)))
-    })
+    drive_session_delivery(
+        &fixture.store,
+        &records,
+        30,
+        Some((&state.batch_progress_recorded, &state.cancellation)),
+        |seen| {
+            seen.iter()
+                .any(|record| matches!(record, ListenDeliveryRecord::Batch(_)))
+        },
+    )
     .await;
 
-    let mut snapshot = registry
+    let snapshot = registry
         .show(&listen.listen_id)
         .await
         .expect("retrying listen remains active");
-    for _ in 0..1_000 {
-        if snapshot.batches_delivered >= 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-        snapshot = registry
-            .show(&listen.listen_id)
-            .await
-            .expect("retrying listen remains active");
-    }
     assert_eq!(attempts.load(Ordering::Relaxed), 2);
     assert_eq!(snapshot.batches_delivered, 1);
     assert!(records.lock().await.iter().any(|record| matches!(
@@ -871,7 +1069,7 @@ async fn retryable_unavailable_keeps_the_session_batch_pending_until_delivery_su
         .cancel(&listen.listen_id)
         .await
         .expect("cancel listen");
-    drive_session_delivery(&fixture.store, &records, 5, |seen| {
+    drive_session_delivery(&fixture.store, &records, 5, None, |seen| {
         matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
     })
     .await;
@@ -894,19 +1092,35 @@ async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
     fixture.reply("Inside the first mark").await;
     let records = Arc::new(TokioMutex::new(Vec::new()));
 
-    // Act: run past the first mark, which the delivery has already covered.
-    registry.spawn_session_delivery(
-        listen.listen_id.clone(),
-        Arc::clone(&fixture.store),
-        RecordingSink::accepting(&records),
-    );
-    // Run past the second mark, which proves the first passed silently.
-    drive_session_delivery(&fixture.store, &records, 90, |seen| {
-        seen.iter().any(
-            |record| matches!(record, ListenDeliveryRecord::Heartbeat(value) if value.mark == 2),
+    let state = registry.state(&listen.listen_id).await.unwrap();
+    let sink = RecordingSink::accepting(&records);
+    let delivery_registry = registry.clone();
+    let delivery_store = Arc::clone(&fixture.store);
+    let delivery_listen_id = listen.listen_id.clone();
+    let delivery_sink = sink.clone();
+    tokio::time::resume();
+    let delivery = tokio::spawn(async move {
+        session_delivery::run(
+            delivery_registry,
+            delivery_listen_id,
+            delivery_store,
+            delivery_sink,
         )
-    })
+        .await;
+    });
+    // Real SQLite work must finish before virtual time reaches the mark.
+    state.debounce_armed.notified().await;
+    tokio::time::pause();
+    tokio::time::advance(THREAD_LISTEN_DEBOUNCE).await;
+    tokio::time::resume();
+    sink.batch_recorded.notified().await;
+    tokio::time::pause();
+    // Run past the second mark, which proves the first passed silently.
+    tokio::time::advance(
+        THREAD_LISTEN_MARK * 2 - THREAD_LISTEN_DEBOUNCE + std::time::Duration::from_secs(1),
+    )
     .await;
+    sink.heartbeat_recorded.notified().await;
 
     // Assert: the Batch set stood in for that mark's heartbeat.
     let seen = records.lock().await;
@@ -923,12 +1137,9 @@ async fn delivery_inside_a_mark_window_suppresses_that_marks_heartbeat() {
     );
     drop(seen);
 
-    // Release the delivery task before the fixture reclaims the store.
-    let _cancelled = registry.cancel(&listen.listen_id).await;
-    drive_session_delivery(&fixture.store, &records, 5, |seen| {
-        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
-    })
-    .await;
+    registry.cancel(&listen.listen_id).await.unwrap();
+    tokio::time::resume();
+    delivery.await.unwrap();
     fixture.finish().await;
 }
 
@@ -949,19 +1160,52 @@ async fn a_third_consecutive_rejection_ends_the_listen_with_its_evidence() {
     let records = Arc::new(TokioMutex::new(Vec::new()));
 
     // Act: a refused Batch set, then two refused heartbeats.
-    registry.spawn_session_delivery(
-        listen.listen_id.clone(),
-        Arc::clone(&fixture.store),
-        Arc::new(RecordingSink {
-            records: Arc::clone(&records),
-            reject_batches: false,
-            rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(u8::MAX)),
-        }),
+    let first_batch_rejection_release = Arc::new(tokio::sync::Notify::new());
+    let sink = Arc::new(RecordingSink {
+        records: Arc::clone(&records),
+        reject_batches: false,
+        rejections_remaining: Arc::new(std::sync::atomic::AtomicU8::new(u8::MAX)),
+        batch_recorded: Arc::new(tokio::sync::Notify::new()),
+        batch_rejected: Arc::new(tokio::sync::Notify::new()),
+        first_batch_rejection_release: Some(Arc::clone(&first_batch_rejection_release)),
+        heartbeat_recorded: Arc::new(tokio::sync::Notify::new()),
+        heartbeat_rejected: Arc::new(tokio::sync::Notify::new()),
+    });
+    let state = registry.state(&listen.listen_id).await.unwrap();
+    let delivery_registry = registry.clone();
+    let delivery_store = Arc::clone(&fixture.store);
+    let delivery_listen_id = listen.listen_id.clone();
+    let delivery_sink = sink.clone();
+    tokio::time::resume();
+    let delivery = tokio::spawn(async move {
+        session_delivery::run(
+            delivery_registry,
+            delivery_listen_id,
+            delivery_store,
+            delivery_sink,
+        )
+        .await;
+    });
+    state.debounce_armed.notified().await;
+    tokio::time::pause();
+    tokio::time::advance(THREAD_LISTEN_DEBOUNCE).await;
+    tokio::time::resume();
+    sink.batch_rejected.notified().await;
+    let store_guard = fixture.store.lock().await;
+    tokio::time::pause();
+    first_batch_rejection_release.notify_one();
+    tokio::time::advance(THREAD_LISTEN_MARK - THREAD_LISTEN_DEBOUNCE).await;
+    sink.heartbeat_rejected.notified().await;
+    tokio::time::advance(THREAD_LISTEN_MARK).await;
+    sink.heartbeat_rejected.notified().await;
+    delivery.await.unwrap();
+    assert_eq!(
+        sink.rejections_remaining.load(Ordering::Relaxed),
+        u8::MAX - 3,
+        "one batch and two heartbeat refusals should end this listen"
     );
-    drive_session_delivery(&fixture.store, &records, 90, |seen| {
-        matches!(seen.last(), Some(ListenDeliveryRecord::Finalization(_)))
-    })
-    .await;
+    assert_eq!(Arc::strong_count(&fixture.store), 1);
+    drop(store_guard);
 
     // Assert: the listen ended on the third refusal, carrying the last evidence.
     let seen = records.lock().await;

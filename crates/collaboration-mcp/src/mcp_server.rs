@@ -2,7 +2,7 @@ use collaboration_client::{
     BoundedObservationRequest, BoundedObservationResult, ClientError, ControlClient,
     ConversationCancelInput, ConversationClient, ConversationClientError,
     ConversationCreatePromptOutcome, ConversationOperationResult, MessageSendError,
-    MessageSendRequest, NativeObservation, OperationEffect, operation_failure_from_client_error,
+    MessageSendRequest, OperationEffect, operation_failure_from_client_error,
 };
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult,
@@ -789,7 +789,12 @@ impl CollaborationMcpServer {
         Parameters(request): Parameters<BoundedObservationRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
-        match NativeObservation::observe_bounded(&self.service_directory, request, context.ct).await
+        match collaboration_client::SessionObservation::observe_bounded(
+            &self.service_directory,
+            request,
+            context.ct,
+        )
+        .await
         {
             Ok(value) => structured_result(Ok(value), OperationEffect::None),
             Err(error) => {

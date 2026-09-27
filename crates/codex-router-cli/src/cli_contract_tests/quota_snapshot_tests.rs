@@ -1,4 +1,139 @@
 use super::*;
+use sqlx::Connection;
+
+pub(super) struct FaultingFloorRefreshProvider {
+    pub(super) database_path: PathBuf,
+    pub(super) failure_stage: &'static str,
+}
+
+impl QuotaRefreshProvider for FaultingFloorRefreshProvider {
+    async fn fetch_quota(
+        &self,
+        request: QuotaRefreshProviderRequest,
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+        if request.route_band() == "responses" {
+            let trigger = match self.failure_stage {
+                "history" => {
+                    "CREATE TRIGGER injected_history_failure BEFORE INSERT ON quota_history_observations BEGIN SELECT RAISE(FAIL, 'injected history failure'); END"
+                }
+                "snapshot" => {
+                    "CREATE TRIGGER injected_snapshot_failure BEFORE INSERT ON quota_snapshots BEGIN SELECT RAISE(FAIL, 'injected snapshot failure'); END"
+                }
+                _ => panic!("unsupported fault stage"),
+            };
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&self.database_path)
+                .create_if_missing(false);
+            let mut connection = sqlx::SqliteConnection::connect_with(&options)
+                .await
+                .expect("fault connection should open");
+            sqlx::query(trigger)
+                .execute(&mut connection)
+                .await
+                .expect("fault should install");
+            connection
+                .close()
+                .await
+                .expect("fault connection should close");
+        }
+        Ok(QuotaRefreshProviderResponse {
+            windows: vec![
+                QuotaRefreshProviderWindow {
+                    limit_window_seconds: 18_000,
+                    remaining_headroom: 90,
+                    reset_unix_seconds: Some(20_000),
+                    effective: true,
+                },
+                QuotaRefreshProviderWindow {
+                    limit_window_seconds: 604_800,
+                    remaining_headroom: 8,
+                    reset_unix_seconds: Some(614_800),
+                    effective: false,
+                },
+            ],
+            reset_credits_available: None,
+        })
+    }
+}
+
+#[test]
+fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_signal() {
+    for (stage, should_signal) in [("history", false), ("snapshot", true)] {
+        let test_root = TestRoot::new(&format!("floor-refresh-{stage}-fault"));
+        must_ok(fs::create_dir(test_root.path()));
+        let state_path = test_root.path().join("state.sqlite");
+        let secret_root = test_root.path().join("secrets");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account_id = account_id("floor-fault-account");
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(account_id.clone(), "floor-fault", AccountStatus::Enabled)
+                .with_active_credential_generation(1),
+        ));
+        let secrets = must_ok(FileSecretStore::open(&secret_root));
+        let key = must_ok(account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "floor-access-canary",
+                        Some("floor-refresh-canary".to_owned()),
+                    )
+                    .with_expires_unix_seconds(2_000)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let mutation = must_ok(
+            test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
+        );
+        must_ok(
+            test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
+                &account_id,
+                Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+            )),
+        );
+        test_async_runtime().block_on(mutation.close());
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+        let provider = FaultingFloorRefreshProvider {
+            database_path: state_path.clone(),
+            failure_stage: stage,
+        };
+        let observer = RecordingWeeklyFloorObserver::default();
+        let mut output = Vec::new();
+        let error = must_err(refresh_quota_store_paths_with_floor_observer(
+            &mut output,
+            &state_path,
+            &secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            QuotaRefreshObservationContext {
+                observed_unix_seconds: 1_100,
+                weekly_floor_observer: Some(&observer),
+            },
+        ));
+        assert!(error.to_string().contains("sqlite state store failed"));
+        assert_eq!(
+            lock_test_mutex(&observer.account_ids, "weekly floor observer").len() == 1,
+            should_signal,
+        );
+        let windows = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
+            &state,
+            "responses",
+            1_100,
+        ));
+        let saved_new_weekly = windows
+            .iter()
+            .flat_map(|input| input.windows())
+            .any(|window| {
+                window.limit_window_seconds() == 604_800 && window.observed_unix_seconds() == 1_100
+            });
+        assert_eq!(saved_new_weekly, should_signal);
+    }
+}
 
 #[test]
 fn quota_refresh_writes_selector_windows_for_runtime_selection() {
@@ -53,6 +188,7 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
         )),
     );
     test_async_runtime().block_on(mutation.close());
+
     let floor_observer = RecordingWeeklyFloorObserver::default();
 
     must_ok(refresh_quota_store_paths_with_floor_observer(
@@ -70,6 +206,10 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
     assert_eq!(
         *lock_test_mutex(&floor_observer.account_ids, "weekly floor observer"),
         vec![account_id]
+    );
+    assert_eq!(
+        *lock_test_mutex(&floor_observer.intents, "weekly floor intents"),
+        vec![WeeklyQuotaFloorIntent::HardStop]
     );
 
     let selector_inputs = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
@@ -115,8 +255,8 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
 }
 
 #[test]
-fn quota_refresh_defers_floor_notification_until_complete_account_batch() {
-    let test_root = TestRoot::new("quota-refresh-deferred-floor-notification");
+fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
+    let test_root = TestRoot::new("quota-refresh-prompt-floor-notification");
     must_ok(fs::create_dir(test_root.path()));
     let router_root = test_root.path().join("router");
     must_ok(fs::create_dir_all(&router_root));
@@ -180,6 +320,7 @@ fn quota_refresh_defers_floor_notification_until_complete_account_batch() {
         floor_account_id.clone(),
         healthy_account_id,
         Arc::clone(&floor_observer),
+        router_root.join("state.sqlite"),
     );
     let mut stdout = Vec::new();
 
@@ -198,8 +339,108 @@ fn quota_refresh_defers_floor_notification_until_complete_account_batch() {
 
     assert_eq!(
         *lock_test_mutex(&floor_observer.account_ids, "weekly floor observer"),
-        vec![floor_account_id]
+        vec![floor_account_id, provider.healthy_account_id.clone()]
     );
+    assert_eq!(
+        *lock_test_mutex(&floor_observer.intents, "weekly floor intents"),
+        vec![
+            WeeklyQuotaFloorIntent::HardStop,
+            WeeklyQuotaFloorIntent::Clear
+        ]
+    );
+}
+
+#[test]
+fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
+    let test_root = TestRoot::new("quota-switch-clear-intents");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let account_id = account_id("acct_switch_intent");
+    must_ok(AccountStateRepository::upsert_account(
+        &state,
+        &AccountRecord::new(account_id.clone(), "switch-intent", AccountStatus::Enabled)
+            .with_active_credential_generation(1),
+    ));
+    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let bundle = AccountCredentialBundle::imported_codex_auth(
+        "switch-intent-access",
+        Some("switch-intent-refresh".to_owned()),
+    )
+    .with_expires_unix_seconds(2_000);
+    must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+    let resolver =
+        RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+    let mutation = must_ok(
+        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
+    );
+    must_ok(
+        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
+            &account_id,
+            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+        )),
+    );
+    let observer = RecordingWeeklyFloorObserver::default();
+    for (index, remaining) in [8, 9, 8, 8].into_iter().enumerate() {
+        if index == 3 {
+            must_ok(
+                test_async_runtime()
+                    .block_on(mutation.set_weekly_quota_floor_by_account_id(&account_id, None)),
+            );
+        }
+        let provider = StaticQuotaRefreshProvider::new(vec![
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 18_000,
+                remaining_headroom: 100,
+                reset_unix_seconds: Some(20_000),
+                effective: true,
+            },
+            QuotaRefreshProviderWindow {
+                limit_window_seconds: 604_800,
+                remaining_headroom: remaining,
+                reset_unix_seconds: Some(604_800),
+                effective: false,
+            },
+        ]);
+        let observed_unix_seconds = 1_100 + u64::try_from(index).expect("small index") * 100;
+        let mut output = Vec::new();
+        must_ok(refresh_quota_store_paths_with_floor_observer(
+            &mut output,
+            &state_path,
+            &secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            QuotaRefreshObservationContext {
+                observed_unix_seconds,
+                weekly_floor_observer: Some(&observer),
+            },
+        ));
+        let saved = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
+            &state,
+            "responses",
+            observed_unix_seconds,
+        ));
+        assert!(saved.iter().any(|account| {
+            account.account_id() == &account_id
+                && account.windows().iter().any(|window| {
+                    window.limit_window_seconds() == 604_800
+                        && window.remaining_headroom() == remaining
+                })
+        }));
+    }
+    assert_eq!(
+        *lock_test_mutex(&observer.intents, "weekly floor intents"),
+        vec![
+            WeeklyQuotaFloorIntent::GracefulSwitch,
+            WeeklyQuotaFloorIntent::Clear,
+            WeeklyQuotaFloorIntent::GracefulSwitch,
+            WeeklyQuotaFloorIntent::Clear,
+        ]
+    );
+    test_async_runtime().block_on(mutation.close());
 }
 
 #[test]

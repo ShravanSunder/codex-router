@@ -12,19 +12,17 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_router_core::ids::AccountId;
 use codex_router_secret_store::SecretStore;
+use codex_router_secret_store::account_credential_lock::AccountCredentialLock;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+use codex_router_secret_store::account_tokens::first_unused_account_credential_generation;
 use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::account_routing_policy::WeeklyQuotaFloorBasisPoints;
-#[cfg(test)]
-use codex_router_state::repositories::AccountStateRepository;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::AsyncWeeklyQuotaFloorMutationStore;
-#[cfg(test)]
-use codex_router_state::sqlite::SqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
@@ -39,17 +37,6 @@ use crate::router_root_or_default;
 pub enum AccountCommand {
     /// Prints account command help.
     Help(&'static str),
-    /// Logs in from an existing Codex OAuth auth.json into router-owned storage.
-    LoginAuthJson {
-        /// Router-owned root.
-        router_root: PathBuf,
-        /// Display label.
-        label: String,
-        /// Source auth.json path.
-        auth_json: PathBuf,
-        /// Explicit plaintext file-backend acknowledgement.
-        allow_plaintext_file_secrets: bool,
-    },
     /// Delegates device-code login to Codex, then imports the resulting auth.json.
     LoginDeviceAuth {
         /// Router-owned root.
@@ -58,17 +45,6 @@ pub enum AccountCommand {
         label: String,
         /// Codex executable to run.
         codex_bin: PathBuf,
-        /// Explicit plaintext file-backend acknowledgement.
-        allow_plaintext_file_secrets: bool,
-    },
-    /// Imports an existing Codex OAuth auth.json into router-owned storage.
-    ImportCodexAuth {
-        /// Router-owned root.
-        router_root: PathBuf,
-        /// Display label.
-        label: String,
-        /// Source auth.json path.
-        auth_json: PathBuf,
         /// Explicit plaintext file-backend acknowledgement.
         allow_plaintext_file_secrets: bool,
     },
@@ -116,27 +92,10 @@ impl AccountCommand {
                     return Ok(Self::Help(ACCOUNT_LOGIN_HELP_TEXT));
                 }
                 let options = AccountLoginOptions::parse(parser)?;
-                match options.method()? {
-                    AccountLoginMethod::AuthJson(auth_json) => Ok(Self::LoginAuthJson {
-                        router_root: options.router_root()?,
-                        label: options.label()?,
-                        auth_json,
-                        allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
-                    }),
-                    AccountLoginMethod::DeviceAuth { codex_bin } => Ok(Self::LoginDeviceAuth {
-                        router_root: options.router_root()?,
-                        label: options.label()?,
-                        codex_bin,
-                        allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
-                    }),
-                }
-            }
-            "import-codex-auth" => {
-                let options = AccountImportOptions::parse(parser)?;
-                Ok(Self::ImportCodexAuth {
+                Ok(Self::LoginDeviceAuth {
                     router_root: options.router_root()?,
                     label: options.label()?,
-                    auth_json: options.auth_json()?,
+                    codex_bin: options.codex_bin.unwrap_or_else(|| PathBuf::from("codex")),
                     allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
                 })
             }
@@ -217,11 +176,8 @@ pub enum AccountCommandError {
         message: String,
     },
     /// API-key auth cannot be imported as quota-compatible OAuth state.
-    #[error("account import-codex-auth requires Codex OAuth auth.json, not API-key auth")]
+    #[error("device login requires Codex OAuth credentials, not API-key auth")]
     ApiKeyAuth,
-    /// Login source was missing or ambiguous.
-    #[error("account login requires exactly one of --auth-json or --device-auth")]
-    LoginMethodRequired,
     /// Device-auth process failed to start.
     #[error("failed to start codex device-auth login {path}: {source}")]
     DeviceAuthLaunch {
@@ -309,6 +265,9 @@ pub enum AccountCommandError {
     /// Secret-store operation failed.
     #[error(transparent)]
     SecretStore(#[from] SecretStoreError),
+    /// Cross-process credential authority could not be established.
+    #[error("account credential lock unavailable")]
+    CredentialLockUnavailable,
     /// State-store operation failed.
     #[error(transparent)]
     StateStore(#[from] StateStoreError),
@@ -329,19 +288,6 @@ pub fn run_account_command(
         AccountCommand::Help(text) => stdout
             .write_all(text.as_bytes())
             .map_err(AccountCommandError::Stdout),
-        AccountCommand::LoginAuthJson {
-            router_root,
-            label,
-            auth_json,
-            allow_plaintext_file_secrets,
-        } => import_codex_auth(
-            stdout,
-            router_root,
-            label,
-            auth_json,
-            allow_plaintext_file_secrets,
-            AccountImportOutputMode::Login,
-        ),
         AccountCommand::LoginDeviceAuth {
             router_root,
             label,
@@ -353,19 +299,6 @@ pub fn run_account_command(
             label,
             codex_bin,
             allow_plaintext_file_secrets,
-        ),
-        AccountCommand::ImportCodexAuth {
-            router_root,
-            label,
-            auth_json,
-            allow_plaintext_file_secrets,
-        } => import_codex_auth(
-            stdout,
-            router_root,
-            label,
-            auth_json,
-            allow_plaintext_file_secrets,
-            AccountImportOutputMode::Import,
         ),
         AccountCommand::List { router_root } => list_accounts(stdout, router_root),
         AccountCommand::SetStatus {
@@ -426,37 +359,11 @@ codex-router account set-weekly-floor --account <label> --percent <0-15>
 Sets an integer weekly quota floor for exactly one account label. Zero disables it.
 ";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AccountImportOutputMode {
-    Import,
-    Login,
-}
-
-fn import_codex_auth(
-    stdout: &mut impl Write,
-    router_root: PathBuf,
-    label: String,
-    auth_json: PathBuf,
-    allow_plaintext_file_secrets: bool,
-    output_mode: AccountImportOutputMode,
-) -> Result<(), AccountCommandError> {
-    if !allow_plaintext_file_secrets {
-        return Err(AccountCommandError::PlaintextFileSecretsNotAllowed);
-    }
-
-    let auth_text =
-        std::fs::read_to_string(&auth_json).map_err(|error| AccountCommandError::ReadAuthJson {
-            message: error.to_string(),
-        })?;
-    import_codex_auth_text(stdout, router_root, label, &auth_text, output_mode)
-}
-
 fn import_codex_auth_text(
     stdout: &mut impl Write,
     router_root: PathBuf,
     label: String,
     auth_text: &str,
-    output_mode: AccountImportOutputMode,
 ) -> Result<(), AccountCommandError> {
     let trimmed_label = normalize_label(&label)?;
     let account_id = account_id_from_label(&trimmed_label)?;
@@ -482,25 +389,14 @@ fn import_codex_auth_text(
         &state, &secrets, request,
     ))?;
 
-    match output_mode {
-        AccountImportOutputMode::Import => {
-            writeln!(stdout, "imported account: {trimmed_label}")
-                .map_err(AccountCommandError::Stdout)?;
-        }
-        AccountImportOutputMode::Login => {
-            writeln!(stdout, "logged in account: {trimmed_label}")
-                .map_err(AccountCommandError::Stdout)?;
-        }
-    }
+    writeln!(stdout, "logged in account: {trimmed_label}").map_err(AccountCommandError::Stdout)?;
     writeln!(stdout, "account_id: {}", account_id.as_str()).map_err(AccountCommandError::Stdout)?;
-    if output_mode == AccountImportOutputMode::Login {
-        writeln!(
-            stdout,
-            "next: codex-router quota refresh --router-root {}",
-            router_root.display()
-        )
-        .map_err(AccountCommandError::Stdout)?;
-    }
+    writeln!(
+        stdout,
+        "next: codex-router quota refresh --router-root {}",
+        router_root.display()
+    )
+    .map_err(AccountCommandError::Stdout)?;
 
     Ok(())
 }
@@ -563,13 +459,7 @@ fn login_with_codex_device_auth(
         }
     };
     remove_temporary_codex_home(&temporary_codex_home)?;
-    import_codex_auth_text(
-        stdout,
-        router_root,
-        label,
-        &auth_text,
-        AccountImportOutputMode::Login,
-    )
+    import_codex_auth_text(stdout, router_root, label, &auth_text)
 }
 
 fn temporary_codex_home_path() -> PathBuf {
@@ -643,52 +533,39 @@ impl AccountImportRequest {
     }
 }
 
-/// Imports an already-parsed Codex OAuth auth record into router-owned state.
-#[cfg(test)]
-pub fn import_codex_auth_from_request(
-    state: &SqliteStateStore,
-    secrets: &impl SecretStore,
-    request: AccountImportRequest,
-) -> Result<(), AccountCommandError> {
-    let active_credential_generation = state.next_credential_generation(&request.account_id)?;
-    let disabled_account = AccountRecord::new(
-        request.account_id.clone(),
-        request.label.clone(),
-        AccountStatus::Disabled,
-    );
-    AccountStateRepository::upsert_account(state, &disabled_account)?;
-    let bundle_key =
-        account_credential_bundle_key(&request.account_id, active_credential_generation)?;
-    let mut bundle =
-        AccountCredentialBundle::imported_codex_auth(request.access_token, request.refresh_token);
-    if let Some(chatgpt_account_id) = request.chatgpt_account_id {
-        bundle = bundle.with_chatgpt_account_id(chatgpt_account_id);
-    }
-    secrets.write_secret(&bundle_key, &bundle.to_secret_string()?)?;
-    state.activate_account_credential_generation_and_invalidate_quota(
-        &request.account_id,
-        active_credential_generation,
-        AccountStatus::Enabled,
-    )?;
-
-    Ok(())
-}
-
 /// Imports an already-parsed Codex OAuth auth record into router-owned SQLx state.
 pub async fn import_codex_auth_from_request_async(
     state: &AsyncSqliteStateStore,
     secrets: &impl SecretStore,
     request: AccountImportRequest,
 ) -> Result<(), AccountCommandError> {
-    let active_credential_generation = state
-        .next_credential_generation(&request.account_id)
-        .await?;
-    let disabled_account = AccountRecord::new(
-        request.account_id.clone(),
-        request.label.clone(),
-        AccountStatus::Disabled,
-    );
-    state.upsert_account(&disabled_account).await?;
+    let database_path = state.database_path().to_path_buf();
+    let account_for_lock = request.account_id.clone();
+    let _account_lock = tokio::task::spawn_blocking(move || {
+        AccountCredentialLock::acquire(&database_path, &account_for_lock)
+    })
+    .await
+    .map_err(|_| AccountCommandError::CredentialLockUnavailable)?
+    .map_err(|_| AccountCommandError::CredentialLockUnavailable)?;
+    let existing_account = state.load_account(&request.account_id).await?;
+    let current_generation = existing_account
+        .as_ref()
+        .and_then(AccountRecord::active_credential_generation)
+        .unwrap_or(0);
+    let active_credential_generation = first_unused_account_credential_generation(
+        secrets,
+        &request.account_id,
+        current_generation,
+    )?;
+    if existing_account.is_none() {
+        state
+            .upsert_account(&AccountRecord::new(
+                request.account_id.clone(),
+                request.label.clone(),
+                AccountStatus::Disabled,
+            ))
+            .await?;
+    }
     let bundle_key =
         account_credential_bundle_key(&request.account_id, active_credential_generation)?;
     let mut bundle =
@@ -717,7 +594,7 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
     let policies = runtime.block_on(state.list_account_routing_policies())?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header(["account", "status", "weekly floor"]);
+    table.set_header(["account", "status", "weekly floor", "OAuth"]);
     for account in accounts {
         let weekly_floor = policies
             .iter()
@@ -726,7 +603,26 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
                 || "disabled".to_owned(),
                 |policy| format!("{}%", policy.weekly_quota_floor_basis_points().percent()),
             );
-        table.add_row([account.label(), account.status().as_str(), &weekly_floor]);
+        let maintenance =
+            runtime.block_on(state.load_credential_maintenance(account.account_id()))?;
+        let oauth_status = match maintenance
+            .as_ref()
+            .filter(|record| {
+                Some(record.credential_generation) == account.active_credential_generation()
+            })
+            .map(|record| record.state.as_str())
+        {
+            Some("healthy") => "healthy",
+            Some("retrying") => "retrying",
+            Some("reauth_required" | "unrefreshable") => "re-login required",
+            _ => "unknown",
+        };
+        table.add_row([
+            account.label(),
+            account.status().as_str(),
+            &weekly_floor,
+            oauth_status,
+        ]);
     }
     writeln!(stdout, "{table}").map_err(AccountCommandError::Stdout)?;
 
@@ -979,8 +875,6 @@ fn normalize_auth_mode(value: &str) -> String {
 struct AccountLoginOptions {
     router_root: Option<PathBuf>,
     label: Option<String>,
-    auth_json: Option<PathBuf>,
-    device_auth: bool,
     codex_bin: Option<PathBuf>,
     allow_plaintext_file_secrets: bool,
 }
@@ -998,13 +892,7 @@ impl AccountLoginOptions {
                 "--label" => {
                     options.label = Some(parser.next_required_value("--label")?);
                 }
-                "--auth-json" => {
-                    options.auth_json =
-                        Some(PathBuf::from(parser.next_required_value("--auth-json")?));
-                }
-                "--device-auth" => {
-                    options.device_auth = true;
-                }
+                "--device-auth" => {}
                 "--codex-bin" => {
                     options.codex_bin =
                         Some(PathBuf::from(parser.next_required_value("--codex-bin")?));
@@ -1031,80 +919,6 @@ impl AccountLoginOptions {
         self.label
             .clone()
             .ok_or(CliError::MissingOption { option: "--label" })
-    }
-
-    fn method(&self) -> Result<AccountLoginMethod, CliError> {
-        match (&self.auth_json, self.device_auth) {
-            (Some(_), true) => Err(AccountCommandError::LoginMethodRequired.into()),
-            (Some(auth_json), false) => Ok(AccountLoginMethod::AuthJson(auth_json.clone())),
-            (None, false) | (None, true) => Ok(AccountLoginMethod::DeviceAuth {
-                codex_bin: self
-                    .codex_bin
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("codex")),
-            }),
-        }
-    }
-}
-
-enum AccountLoginMethod {
-    AuthJson(PathBuf),
-    DeviceAuth { codex_bin: PathBuf },
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct AccountImportOptions {
-    router_root: Option<PathBuf>,
-    label: Option<String>,
-    auth_json: Option<PathBuf>,
-    allow_plaintext_file_secrets: bool,
-}
-
-impl AccountImportOptions {
-    fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
-        let mut options = Self::default();
-
-        while let Some(argument) = parser.next_string()? {
-            match argument.as_str() {
-                "--router-root" => {
-                    options.router_root =
-                        Some(PathBuf::from(parser.next_required_value("--router-root")?));
-                }
-                "--label" => {
-                    options.label = Some(parser.next_required_value("--label")?);
-                }
-                "--auth-json" => {
-                    options.auth_json =
-                        Some(PathBuf::from(parser.next_required_value("--auth-json")?));
-                }
-                "--allow-plaintext-file-secrets" => {
-                    options.allow_plaintext_file_secrets = true;
-                }
-                unknown => {
-                    return Err(CliError::UnknownOption {
-                        option: unknown.to_owned(),
-                    });
-                }
-            }
-        }
-
-        Ok(options)
-    }
-
-    fn router_root(&self) -> Result<PathBuf, CliError> {
-        router_root_or_default(self.router_root.clone())
-    }
-
-    fn label(&self) -> Result<String, CliError> {
-        self.label
-            .clone()
-            .ok_or(CliError::MissingOption { option: "--label" })
-    }
-
-    fn auth_json(&self) -> Result<PathBuf, CliError> {
-        self.auth_json.clone().ok_or(CliError::MissingOption {
-            option: "--auth-json",
-        })
     }
 }
 

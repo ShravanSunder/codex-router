@@ -182,14 +182,20 @@ async fn provider_process_exit_retires_advertisement_and_rejects_new_admission()
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
         .expect("private runtime root");
     let provider = root.path().join("exit-provider.py");
+    let barrier_path = root.path().join("exit-barrier.sock");
+    let barrier = tokio::net::UnixListener::bind(&barrier_path).expect("provider exit barrier");
     std::fs::write(&provider, r#"#!/usr/bin/python3
-import json,sys
+import json,os,socket,struct,sys
 request=json.loads(sys.stdin.readline())
+barrier=socket.socket(socket.AF_UNIX)
+barrier.connect(sys.argv[1])
+barrier.sendall(struct.pack('!I',os.getpid()))
+barrier.recv(1)
 print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'exit-fixture','version':'1'}}})); sys.stdout.flush()
 "#).expect("provider fixture");
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700))
         .expect("provider executable");
-    let mut runtime = CollaborationRuntime::start_with_external_providers(
+    let start = CollaborationRuntime::start_with_external_providers(
         CollaborationRuntimeInputs {
             directory: root.path().to_owned(),
             codex_home: root.path().to_owned(),
@@ -200,11 +206,38 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
             owner_human_id: None,
         },
         vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("binding"),
+            ExternalProviderLaunchBinding::claude(
+                provider,
+                vec![barrier_path.display().to_string()],
+            )
+            .expect("binding"),
         )],
+    );
+    tokio::pin!(start);
+    let (provider_barrier, _) = tokio::select! {
+        accepted = barrier.accept() => accepted.expect("provider reached exit barrier"),
+        _result = &mut start => panic!("provider startup finished before barrier"),
+    };
+    let mut provider_barrier = provider_barrier.into_std().expect("blocking exit barrier");
+    provider_barrier
+        .set_nonblocking(false)
+        .expect("blocking exit barrier");
+    let mut process_id_bytes = [0_u8; 4];
+    std::io::Read::read_exact(&mut provider_barrier, &mut process_id_bytes)
+        .expect("fixture process id");
+    let process_id = rustix::process::Pid::from_raw(
+        i32::try_from(u32::from_be_bytes(process_id_bytes)).expect("fixture process id range"),
     )
-    .await
-    .expect("runtime");
+    .expect("positive fixture process id");
+    std::io::Write::write_all(&mut provider_barrier, &[1]).expect("release provider exit");
+    // Keep the child waitable while ensuring exit wins before Tokio polls stdout again.
+    rustix::process::waitid(
+        rustix::process::WaitId::Pid(process_id),
+        rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+    )
+    .expect("fixture process exit")
+    .expect("fixture exit status");
+    let mut runtime = start.await.expect("runtime");
     let service_id = runtime.service_id().clone();
     let service_epoch = runtime.service_epoch().clone();
     let mut client = ControlClient::connect(root.path(), "retirement-proof", "1")

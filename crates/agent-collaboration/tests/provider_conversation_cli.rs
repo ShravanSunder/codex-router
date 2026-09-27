@@ -1017,7 +1017,22 @@ async fn serve_one(
     let request = read_operation_request(&mut lines, &mut write).await;
     assert_eq!(request["method"], method);
     write_response(&mut write, &request, result(&request)).await;
-    if method == "conversation/prompt" {
+    if method == "conversation/create" {
+        let wait: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("create wait read")
+                .expect("create wait frame"),
+        )
+        .expect("create wait JSON");
+        assert_eq!(wait["method"], "conversation/operationWait");
+        write_response(&mut write, &wait, json!({
+            "operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied"),
+            "output":{"kind":"available","settlement":{"kind":"created","target":target(),
+                "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"}}}
+        })).await;
+    } else if method == "conversation/prompt" {
         let wait: Value = serde_json::from_str(
             &lines
                 .next_line()

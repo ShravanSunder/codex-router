@@ -1,6 +1,106 @@
 use super::*;
 
 #[tokio::test]
+async fn fresh_account_database_has_generation_scoped_credential_maintenance() {
+    let temporary_database = TemporaryDatabase::new("credential_maintenance_schema");
+    let store = AsyncSqliteStateStore::open(temporary_database.path())
+        .await
+        .expect("fresh database should open");
+    store.close().await.expect("fresh database should close");
+
+    let mut connection = open_test_connection(temporary_database.path(), false).await;
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM pragma_table_info('credential_maintenance') ORDER BY cid",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("maintenance schema should be readable");
+    assert_eq!(
+        columns,
+        [
+            "account_id",
+            "credential_generation",
+            "state",
+            "failure_class",
+            "last_success_unix_seconds",
+            "next_attempt_unix_seconds",
+            "claimed_successor_generation",
+            "consecutive_failures",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn populated_native_baseline_requires_writable_upgrade_and_preserves_account_state() {
+    let temporary_database = TemporaryDatabase::new("native_credential_upgrade");
+    let database_path = temporary_database.path();
+    let initial = AsyncSqliteStateStore::open(database_path)
+        .await
+        .expect("fixture should initialize");
+    initial.close().await.expect("fixture should close");
+    let secret_path = database_path
+        .parent()
+        .expect("database parent")
+        .join("existing.secret");
+    std::fs::write(&secret_path, b"opaque-existing-secret-canary")
+        .expect("secret fixture should save");
+
+    let mut connection = open_test_connection(database_path, false).await;
+    sqlx::query("INSERT INTO accounts VALUES ('preserved-account', 'preserved', 'disabled', 41)")
+        .execute(&mut connection)
+        .await
+        .expect("account should seed");
+    sqlx::query("INSERT INTO quota_snapshots VALUES ('preserved-account', 'provider', 123, 'responses', 44, 999, 7, 0)")
+        .execute(&mut connection)
+        .await
+        .expect("quota should seed");
+    sqlx::query("DROP TABLE credential_maintenance")
+        .execute(&mut connection)
+        .await
+        .expect("new table should be removed for baseline fixture");
+    let maintenance_version = MIGRATOR.iter().last().expect("new migration").version;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?1")
+        .bind(maintenance_version)
+        .execute(&mut connection)
+        .await
+        .expect("new history should be removed for baseline fixture");
+    connection.close().await.expect("fixture should close");
+
+    let before = std::fs::read(database_path).expect("database bytes should read");
+    let error = AsyncSqliteStateStore::open_read_only(database_path)
+        .await
+        .expect_err("read-only baseline must require writable upgrade");
+    assert!(format!("{error}").contains("writable migration"));
+    assert_eq!(
+        std::fs::read(database_path).expect("database bytes should read"),
+        before
+    );
+
+    let upgraded = AsyncSqliteStateStore::open(database_path)
+        .await
+        .expect("writable baseline should upgrade");
+    let account = upgraded
+        .load_account(
+            &codex_router_core::ids::AccountId::new("preserved-account").expect("account id"),
+        )
+        .await
+        .expect("account should load")
+        .expect("account should remain");
+    assert_eq!(account.status(), crate::account::AccountStatus::Disabled);
+    assert_eq!(account.active_credential_generation(), Some(41));
+    upgraded.close().await.expect("upgraded store should close");
+    let mut connection = open_test_connection(database_path, false).await;
+    let quota: (i64, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT remaining_headroom, reset_unix_seconds, reset_credits_available FROM quota_snapshots WHERE account_id = 'preserved-account'"
+    ).fetch_one(&mut connection).await.expect("quota should remain");
+    assert_eq!(quota, (44, Some(999), Some(7)));
+    assert_eq!(
+        std::fs::read(secret_path).expect("secret should remain"),
+        b"opaque-existing-secret-canary"
+    );
+}
+
+#[tokio::test]
 async fn marker_only_v7_through_v13_reject_without_mutation() {
     for version in 7_i64..=13 {
         let temporary_database = TemporaryDatabase::new(&format!("marker_only_v{version}"));

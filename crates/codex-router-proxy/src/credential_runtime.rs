@@ -4,7 +4,10 @@ use std::path::Path;
 
 use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
 #[cfg(test)]
+use codex_router_auth::resolver::AsyncRouterCredentialResolver;
+#[cfg(test)]
 use codex_router_auth::resolver::CredentialRefreshClient;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::DefaultAsyncRouterCredentialResolver;
 #[cfg(test)]
@@ -20,6 +23,8 @@ use codex_router_auth::resolver::RouterCredentialResolver;
 use codex_router_auth::resolver::current_unix_seconds;
 use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::ids::AccountId;
+#[cfg(test)]
+use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -149,6 +154,7 @@ pub enum ProxyRuntimeCredentialResourcesOpenError {
 pub(crate) struct AsyncProxyCredentialResolverFactory {
     secret_store: ProxyRuntimeSecretStore,
     refresh_leases: AsyncRefreshLeaseRegistry,
+    refresh_tasks: CredentialRefreshTaskSupervisor,
     fixed_now_unix_seconds: Option<u64>,
 }
 
@@ -157,6 +163,7 @@ impl AsyncProxyCredentialResolverFactory {
         Self {
             secret_store,
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
+            refresh_tasks: CredentialRefreshTaskSupervisor::new(),
             fixed_now_unix_seconds,
         }
     }
@@ -171,6 +178,48 @@ impl AsyncProxyCredentialResolverFactory {
             self.fixed_now_unix_seconds,
             self.refresh_leases.clone(),
         )
+        .with_refresh_task_supervisor(self.refresh_tasks.clone())
+    }
+
+    pub(crate) async fn drain_refresh_tasks(&self, limit: std::time::Duration) -> bool {
+        self.refresh_tasks.drain(limit).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolver_for_state_with_refresh_client<C>(
+        &self,
+        state_store: AsyncSqliteStateStore,
+        refresh_client: C,
+    ) -> AsyncRouterCredentialResolver<ProxyRuntimeSecretStore, C>
+    where
+        C: CredentialRefreshClient + Clone + Send + Sync + 'static,
+    {
+        self.resolver_for_state_with_dependencies(
+            state_store,
+            self.secret_store.clone(),
+            refresh_client,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolver_for_state_with_dependencies<S, C>(
+        &self,
+        state_store: AsyncSqliteStateStore,
+        secret_store: S,
+        refresh_client: C,
+    ) -> AsyncRouterCredentialResolver<S, C>
+    where
+        S: SecretStore + Clone + Send + Sync + 'static,
+        C: CredentialRefreshClient + Clone + Send + Sync + 'static,
+    {
+        AsyncRouterCredentialResolver::new_with_refresh_leases(
+            state_store,
+            secret_store,
+            refresh_client,
+            self.fixed_now_unix_seconds,
+            self.refresh_leases.clone(),
+        )
+        .with_refresh_task_supervisor(self.refresh_tasks.clone())
     }
 }
 

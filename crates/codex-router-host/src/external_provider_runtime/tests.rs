@@ -622,7 +622,7 @@ async fn stable_v1_initialize_admits_runtime_and_capabilities() {
 async fn initialize_advertises_exact_supported_client_capabilities() {
     // ACP v1 initialization.mdx:28-54 requires protocolVersion and the
     // supported capabilities; omitted capabilities are unsupported (lines
-    // 100-115). R6 requires name/version and no fs, terminal or elicitation.
+    // 100-115). The Router supports form elicitation through its Question broker.
     let root = tempfile::tempdir().expect("fixture root");
     let fixture = acp_scripted_fixture::AcpFixtureScript::new()
         .expect_exact_request(
@@ -630,7 +630,7 @@ async fn initialize_advertises_exact_supported_client_capabilities() {
             "initialize",
             serde_json::json!({
                 "protocolVersion": 1,
-                "clientCapabilities": {"auth": {"terminal": false}},
+                "clientCapabilities": {"auth": {"terminal": false}, "elicitation": {"form": {}}},
                 "clientInfo": {"name": "codex-router", "version": env!("CARGO_PKG_VERSION")}
             }),
         )
@@ -699,7 +699,7 @@ async fn capability_report_uses_initialize_and_session_advertisements() {
     assert!(!before.supports_steering);
     assert!(!before.supports_modes);
     assert!(!before.supports_config_options);
-    assert!(!before.supports_elicitation);
+    assert!(before.supports_elicitation);
     runtime
         .create_session(PathBuf::from("/tmp"))
         .await

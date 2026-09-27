@@ -3,21 +3,20 @@ use codex_router_host::{
     ExternalProviderSupervisor,
 };
 use collaboration_protocol::{
-    ApprovalDecideParams, ApprovalDecision, CodexGeneration, ConversationAdmissionState,
-    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
-    ConversationLoadRequest, ConversationOperationFailureKind,
-    ConversationOperationReconcileRequest, ConversationOperationSettlement,
-    ConversationOperationShowRequest, ConversationOperationWaitOutput,
-    ConversationOperationWaitRequest, ConversationPromptRequest, ConversationResumeRequest,
-    EndpointDescription, EndpointId, EndpointRef, GenerationNumber, MessageContent, MessageText,
-    NonEmptyText, OperationId, PositiveSeconds, ProviderBindingId, ProviderBindingIdentity,
-    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
-    ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationStage,
-    ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
-    ProviderRequestedSettings, ProviderRuntimeIdentity, ProviderSessionInspectRequest,
-    ProviderSettingName, ProviderSettingsAcceptRequest, ProviderSettingsFailureKind,
-    ProviderSettingsSetRequest, ProviderTransport, ProviderWorkingDirectory, RouterAccess,
-    SessionId, SessionRef, UuidIdentity,
+    CodexGeneration, ConversationAdmissionState, ConversationCancelRequest,
+    ConversationCloseRequest, ConversationCreateRequest, ConversationLoadRequest,
+    ConversationOperationFailureKind, ConversationOperationReconcileRequest,
+    ConversationOperationSettlement, ConversationOperationShowRequest,
+    ConversationOperationWaitOutput, ConversationOperationWaitRequest, ConversationPromptRequest,
+    ConversationResumeRequest, EndpointDescription, EndpointId, EndpointRef, GenerationNumber,
+    MessageContent, MessageText, NonEmptyText, OperationId, PositiveSeconds, ProviderBindingId,
+    ProviderBindingIdentity, ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence,
+    ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect,
+    ProviderOperationStage, ProviderPromptStopReason, ProviderReconciliationState,
+    ProviderRequestedPolicy, ProviderRequestedSettings, ProviderRuntimeIdentity,
+    ProviderSessionInspectRequest, ProviderSettingName, ProviderSettingsAcceptRequest,
+    ProviderSettingsFailureKind, ProviderSettingsSetRequest, ProviderTransport,
+    ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, NativeGenerationGate, ProviderConversationBackend,
@@ -1028,7 +1027,7 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
     )?;
     let pending = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            if let Some(record) = broker.list(true).await.approvals.into_iter().next() {
+            if let Some(record) = broker.list_typed_approvals(true).await.into_iter().next() {
                 break record;
             }
             tokio::task::yield_now().await;
@@ -1048,31 +1047,47 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
         ProviderReconciliationState::Unresolved
     );
     ensure_eq!(
-        pending.requester,
-        actor(endpoint("cursor-local")?, "requester")?
+        pending
+            .options
+            .iter()
+            .next()
+            .map(|option| option.option_id.as_str()),
+        Some("allow-exact-once")
     );
-    ensure_eq!(pending.approver, approver.clone());
+    let pending_history = broker.list_interactions().await;
+    let Some(collaboration_service::InteractionHistoryRecord::Approval {
+        requester: recorded_requester,
+        approver: recorded_approver,
+        ..
+    }) = pending_history
+        .iter()
+        .find(|record| record.request_id() == pending.request_id)
+    else {
+        return Err("typed approval missing from history".into());
+    };
     ensure_eq!(
-        pending.operation["operationId"],
-        String::from(prompt_operation_id.clone())
+        serde_json::to_value(recorded_requester)?,
+        serde_json::to_value(actor(endpoint("cursor-local")?, "fixture-session")?)?
     );
-    ensure_eq!(pending.operation["method"], "session/request_permission");
+    ensure_eq!(
+        serde_json::to_value(recorded_approver)?,
+        json!({"kind":"session","session":approver.clone()})
+    );
     let native_requests = native_backend
         .await?
         .map_err(|error| format!("native approver fixture failed: {error}"))?;
     ensure_eq!(native_requests.len(), 4);
     let decision = broker
-        .decide(ApprovalDecideParams {
-            request_id: pending.request_id,
-            decision: Some(ApprovalDecision::Allow),
-            option_id: None,
-            acknowledge_persistent: false,
-            note: None,
-            actor: serde_json::from_value(json!({"kind":"session","session":approver.clone()}))?,
-        })
+        .decide_typed_interaction(
+            &pending.request_id,
+            &serde_json::from_value(json!({"kind":"session","session":approver.clone()}))?,
+            "allow-exact-once",
+            false,
+            None,
+        )
         .await
         .map_err(|error| format!("approval decision failed: {error}"))?;
-    ensure_eq!(decision.scope, None);
+    ensure_eq!(decision.as_str(), "allow-exact-once");
 
     let settled = operation(wait(&backend, prompt_operation_id).await)?;
     ensure!(matches!(
@@ -1084,7 +1099,7 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
             }
         }
     ));
-    ensure_eq!(broker.list(false).await.approvals.len(), 1);
+    ensure_eq!(broker.list_typed_approvals(false).await.len(), 1);
     Ok(())
 }
 
@@ -1145,7 +1160,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
     )?;
     let pending = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            if let Some(record) = broker.list(true).await.approvals.into_iter().next() {
+            if let Some(record) = broker.list_typed_approvals(true).await.into_iter().next() {
                 break record;
             }
             tokio::task::yield_now().await;
@@ -1160,7 +1175,7 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
     binding_retirement.cancel();
     let retirement_settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            if broker.list(true).await.approvals.is_empty() {
+            if broker.list_typed_approvals(true).await.is_empty() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1170,27 +1185,31 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
     if retirement_settled.is_err() {
         return Err(format!(
             "retired approval remained pending: {:?}",
-            broker.list(false).await.approvals
+            broker.list_interactions().await
         )
         .into());
     }
     ensure!(matches!(
         broker
-            .decide(ApprovalDecideParams {
-                request_id: pending.request_id,
-                decision: Some(ApprovalDecision::Allow),
-                option_id: None,
-                acknowledge_persistent: false,
-                note: None,
-                actor: serde_json::from_value(json!({"kind":"session","session":approver}))?,
-            })
+            .decide_typed_interaction(
+                &pending.request_id,
+                &serde_json::from_value(json!({"kind":"session","session":approver}))?,
+                "allow-exact-once",
+                false,
+                None,
+            )
             .await,
-        Err(error) if error.code() == "approvalNotPending"
+        Err(collaboration_service::InteractionHistoryError::AlreadySettled)
     ));
-    let history = broker.list(false).await.approvals;
-    ensure_eq!(
-        history.first().map(|record| record.state),
-        Some(collaboration_protocol::ApprovalState::Cancelled)
+    let history = broker.list_interactions().await;
+    ensure!(
+        history
+            .iter()
+            .any(|record| record.request_id() == pending.request_id
+                && matches!(
+                    record.approval_state(),
+                    Some(collaboration_service::InteractionHistoryState::Cancelled { .. })
+                ))
     );
     let failure = wait(&backend, prompt_operation_id)
         .await

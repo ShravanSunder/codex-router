@@ -224,6 +224,14 @@ pub fn control_schema_document(
         "provider/sessionInspect",
         &[],
     )?;
+    assembly.add_method::<BoundedObservationRequest, BoundedObservationResult>(
+        "provider/sessionObserve",
+        &["invalidField", "notFound", "unavailable", "overloaded"],
+    )?;
+    assembly.add_method::<ProviderSessionListenRequest, ProviderSessionListenReady>(
+        "provider/sessionListen",
+        &["invalidField", "notFound", "unavailable", "overloaded"],
+    )?;
     assembly.add_method::<ConversationOperationShowRequest, ConversationOperationSnapshot>(
         "conversation/operationShow",
         &[],
@@ -453,6 +461,10 @@ pub fn control_schema_document(
         .push(reference("endpoint-change-notification"));
     assembly.definitions.insert("wake-change-notification".into(),json!({"type":"object","required":["jsonrpc","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"method":{"const":"wake/changed"},"params":reference("wake-changed")}}));
     assembly.frames.push(reference("wake-change-notification"));
+    assembly.definitions.insert("provider-session-event-notification".into(),json!({"type":"object","required":["jsonrpc","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"method":{"const":"provider/sessionEvent"},"params":{"type":"object"}}}));
+    assembly
+        .frames
+        .push(reference("provider-session-event-notification"));
     Ok(json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",
         "$id":"urn:agent-communication:control:1",
@@ -463,7 +475,7 @@ pub fn control_schema_document(
         "x-protocolVersion":{"major":1,"minor":0},
         "x-nativeSchemaDigest":native_digest,
         "x-methods":assembly.methods,
-        "x-notifications":{"endpoint/changed":reference("endpoint-change-notification"),"wake/changed":reference("wake-change-notification")},
+        "x-notifications":{"endpoint/changed":reference("endpoint-change-notification"),"wake/changed":reference("wake-change-notification"),"provider/sessionEvent":reference("provider-session-event-notification")},
         "x-maxFrameUtf8Bytes":1048576,
         "x-maxPendingRequests":64,
         "x-maxRequestsPerConnection":65536

@@ -49,6 +49,12 @@ pub(super) struct JsonQuotaStatusAccount {
     pub(super) weekly_survival_margin_basis_points: Option<i64>,
     pub(super) weekly_quota_floor_basis_points: Option<u32>,
     pub(super) weekly_quota_floor_percent: Option<u32>,
+    pub(super) weekly_quota_switch_at_basis_points: Option<u32>,
+    pub(super) weekly_quota_switch_at_percent: Option<u32>,
+    pub(super) oauth_maintenance_state: &'static str,
+    pub(super) oauth_last_success_unix_seconds: Option<u64>,
+    pub(super) oauth_next_attempt_unix_seconds: Option<u64>,
+    pub(super) oauth_failure_class: Option<&'static str>,
     pub(super) weekly_projected_exhaustion_unix_seconds: Option<u64>,
     pub(super) short_guard_result: &'static str,
     pub(super) current_active_sessions: Option<u32>,
@@ -88,6 +94,26 @@ impl JsonQuotaStatusAccount {
             weekly_quota_floor_percent: row
                 .weekly_quota_floor_basis_points
                 .map(|basis_points| basis_points / 100),
+            weekly_quota_switch_at_basis_points: weekly_quota_switch_at_basis_points(
+                row.weekly_quota_floor_basis_points,
+            ),
+            weekly_quota_switch_at_percent: weekly_quota_switch_at_basis_points(
+                row.weekly_quota_floor_basis_points,
+            )
+            .map(|basis_points| basis_points / 100),
+            oauth_maintenance_state: oauth_maintenance_state(row.oauth_maintenance.as_ref()),
+            oauth_last_success_unix_seconds: row
+                .oauth_maintenance
+                .as_ref()
+                .and_then(|record| record.last_success_unix_seconds),
+            oauth_next_attempt_unix_seconds: row
+                .oauth_maintenance
+                .as_ref()
+                .and_then(|record| record.next_attempt_unix_seconds),
+            oauth_failure_class: row
+                .oauth_maintenance
+                .as_ref()
+                .and_then(|record| record.failure_class.map(|failure| failure.as_str())),
             weekly_projected_exhaustion_unix_seconds: row.weekly_projected_exhaustion_unix_seconds,
             short_guard_result: short_guard_result_json(row),
             current_active_sessions: row.active_clients_value,
@@ -110,6 +136,29 @@ impl JsonQuotaStatusAccount {
                 .map(|window| JsonQuotaWindow::from_window(window, now_unix_seconds))
                 .collect(),
         }
+    }
+}
+
+pub(super) fn oauth_maintenance_state(
+    record: Option<&CredentialMaintenanceRecord>,
+) -> &'static str {
+    match record.map(|record| record.state) {
+        Some(codex_router_state::credential_maintenance::CredentialMaintenanceState::Healthy) => {
+            "healthy"
+        }
+        Some(codex_router_state::credential_maintenance::CredentialMaintenanceState::Retrying) => {
+            "retrying"
+        }
+        Some(
+            codex_router_state::credential_maintenance::CredentialMaintenanceState::ReauthRequired,
+        ) => "reauth_required",
+        Some(
+            codex_router_state::credential_maintenance::CredentialMaintenanceState::Unrefreshable,
+        ) => "unrefreshable",
+        Some(
+            codex_router_state::credential_maintenance::CredentialMaintenanceState::InProgress,
+        )
+        | None => "unknown",
     }
 }
 
@@ -278,7 +327,6 @@ pub(super) const fn availability_json(value: AccountAvailability) -> &'static st
     match value {
         AccountAvailability::Usable => "usable",
         AccountAvailability::Reserve => "reserve",
-        AccountAvailability::Retiring => "retiring",
         AccountAvailability::Blocked => "blocked",
         AccountAvailability::Unknown => "unknown",
         AccountAvailability::Excluded => "excluded",

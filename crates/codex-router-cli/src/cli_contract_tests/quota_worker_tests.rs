@@ -28,7 +28,6 @@ fn background_quota_refresh_worker_runs_immediate_cycle_without_waiting_for_inte
     let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
         &state_path,
         &secret_root,
-        1_000,
         NoopCredentialRefreshClient,
     ));
     let (refresh_sender, refresh_receiver) = mpsc::channel();
@@ -87,7 +86,6 @@ fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider() {
     let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
         &state_path,
         &secret_root,
-        1_000,
         NoopCredentialRefreshClient,
     ));
     let provider = SlowQuotaRefreshProvider::new(Duration::from_millis(500), 72);
@@ -138,7 +136,6 @@ fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
     let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
         &state_path,
         &secret_root,
-        1_000,
         NoopCredentialRefreshClient,
     ));
     let (refresh_sender, refresh_receiver) = mpsc::channel();
@@ -175,11 +172,11 @@ fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
 #[test]
 fn background_quota_refresh_cycle_delay_subtracts_elapsed_work() {
     assert_eq!(
-        crate::quota::refresh_cycle_delay(Duration::from_secs(240), Duration::from_secs(17),),
-        Duration::from_secs(223)
+        crate::quota::refresh_cycle_delay(Duration::from_secs(180), Duration::from_secs(17),),
+        Duration::from_secs(163)
     );
     assert_eq!(
-        crate::quota::refresh_cycle_delay(Duration::from_secs(240), Duration::from_secs(241),),
+        crate::quota::refresh_cycle_delay(Duration::from_secs(180), Duration::from_secs(181),),
         Duration::ZERO
     );
 }
@@ -217,7 +214,6 @@ fn background_quota_refresh_worker_reports_refresh_failures() {
     let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
         &state_path,
         &secret_root,
-        1_000,
         NoopCredentialRefreshClient,
     ));
     let provider = AccountFailingQuotaRefreshProvider::new(unsafe_account_label, 429, 0);
@@ -261,6 +257,7 @@ fn background_quota_refresh_worker_reports_refresh_failures() {
 
 #[test]
 fn cli_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
+    let observed_now = must_ok(codex_router_auth::resolver::current_unix_seconds());
     let test_root = TestRoot::new("cli-runtime-resolver-refresh");
     must_ok(fs::create_dir(test_root.path()));
     let router_root = test_root.path().join("router");
@@ -281,7 +278,7 @@ fn cli_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
                     "expired-cli-runtime-access-token",
                     Some("cli-runtime-refresh-token".to_owned()),
                 )
-                .with_expires_unix_seconds(900)
+                .with_expires_unix_seconds(observed_now.saturating_sub(100))
                 .to_secret_string(),
             ),
         ),
@@ -293,12 +290,11 @@ fn cli_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
             "refreshed-cli-runtime-access-token",
             Some("refreshed-cli-runtime-refresh-token".to_owned()),
         )
-        .with_expires_unix_seconds(2_000),
+        .with_expires_unix_seconds(observed_now.saturating_add(3_600)),
     );
     let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
         &router_root.join("state.sqlite"),
         &secrets_root,
-        1_000,
         refresh_client.clone(),
     ));
 

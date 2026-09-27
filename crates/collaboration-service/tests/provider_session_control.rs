@@ -123,10 +123,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
     assert_eq!(cold.sessions[0].updated_at, 3);
     assert_eq!(cold.sessions[0].created_by, creator.clone().into());
     let wire = serde_json::to_value(&cold.sessions[0]).expect("row JSON");
-    assert_eq!(
-        wire["approver"],
-        json!({"kind":"session","session":creator})
-    );
+    assert_eq!(wire["approver"], json!(creator));
     assert!(wire.get("title").is_none());
     let older_page = client
         .list_provider_sessions(ProviderSessionListParams {
