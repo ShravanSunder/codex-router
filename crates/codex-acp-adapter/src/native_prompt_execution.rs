@@ -94,10 +94,6 @@ impl PendingAcpPrompt {
                 .map_err(|_| PromptExecutionError::InvalidPrompt)?,
             requested_effort: effort,
         };
-        pending
-            .settlement
-            .mark_dispatched()
-            .map_err(|_| PromptExecutionError::InvalidPrompt)?;
         let thread_state = pending
             .session
             .connection
@@ -116,6 +112,10 @@ impl PendingAcpPrompt {
                 return Err(PromptExecutionError::NativeThreadStatusUnavailable);
             }
         }
+        pending
+            .settlement
+            .mark_dispatched()
+            .map_err(|_| PromptExecutionError::InvalidPrompt)?;
         // Without a requested effort the turn inherits the thread's own.
         let mut turn = json!({"threadId":pending.session.session_id,"input":translated.input()});
         if let (Some(fields), Some(effort)) =

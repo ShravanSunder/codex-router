@@ -22,6 +22,8 @@ pub struct AcpChannelListener {
     providers: Vec<ProviderRouteBackend>,
     interaction_broker: Option<Arc<crate::ServiceInteractionBroker>>,
     permits: Arc<Semaphore>,
+    #[cfg(test)]
+    fail_accept: bool,
 }
 impl AcpChannelListener {
     pub fn bind(
@@ -43,6 +45,8 @@ impl AcpChannelListener {
             providers: Vec::new(),
             interaction_broker: None,
             permits: Arc::new(Semaphore::new(32)),
+            #[cfg(test)]
+            fail_accept: false,
         })
     }
     #[must_use]
@@ -75,7 +79,13 @@ impl AcpChannelListener {
             tokio::select! {
                 _ = shutdown.cancelled() => break Ok(()),
                 completed = tasks.join_next(), if !tasks.is_empty() => { let _ = completed; },
-                accepted = self.socket.listener.accept() => {
+                accepted = async {
+                    #[cfg(test)]
+                    if self.fail_accept {
+                        return Err(io::Error::other("injected ACP accept failure"));
+                    }
+                    self.socket.listener.accept().await
+                } => {
                     let (stream, _) = match accepted { Ok(pair) => pair, Err(error) => break Err(error) };
                     let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else { continue; };
                     let admission = GateCodexAdmissionSource {
@@ -105,6 +115,9 @@ impl AcpChannelListener {
         };
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
+        if result.is_err() {
+            self.generations.retire()?;
+        }
         self.holder.drain_host_tasks().await;
         result
     }
@@ -142,5 +155,59 @@ impl CodexAdmissionSource for GateCodexAdmissionSource {
             recorder: Arc::clone(&self.recorder),
             retired: admission.retirement(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_acp_adapter::{NativeStoredSessions, UnmaterializedBindingStore};
+    use serde_json::json;
+    use std::{os::unix::fs::DirBuilderExt, time::Duration};
+
+    #[tokio::test]
+    async fn accept_failure_retires_generation_before_draining_host_tasks() {
+        let root = std::env::temp_dir().join(format!("acp-accept-failure-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let gate = NativeGenerationGate::default();
+        gate.activate(
+            serde_json::from_value(
+                json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
+            )
+            .unwrap(),
+            root.join("backend.sock"),
+            None,
+        )
+        .unwrap();
+        let retirement = gate.acquire().unwrap().retirement();
+        let holder = Arc::new(crate::UnmaterializedThreadHolder::new());
+        holder
+            .host_tasks()
+            .spawn(async move { retirement.cancelled().await });
+        let mut listener = AcpChannelListener::bind(
+            &root.join("acp.sock"),
+            gate.clone(),
+            Arc::new(NativeStoredSessions::new(root.clone(), "fixture".into())),
+            Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+            holder,
+            Arc::new(crate::UnavailableConversationOperationRecorder),
+        )
+        .unwrap();
+        listener.fail_accept = true;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            listener.run(CancellationToken::new()),
+        )
+        .await
+        .expect("listener failure should reach Host before tracked drain blocks");
+        assert!(result.is_err());
+        assert!(
+            gate.acquire().is_err(),
+            "failed listener must retire native admission"
+        );
+        std::fs::remove_dir(root).unwrap();
     }
 }
