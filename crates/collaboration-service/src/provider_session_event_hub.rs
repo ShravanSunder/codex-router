@@ -107,7 +107,8 @@ impl SessionHistory {
                     _ => self.turn_running = false,
                 }
             }
-            SessionEvent::ItemStarted { .. }
+            SessionEvent::InputAccepted { .. }
+            | SessionEvent::ItemStarted { .. }
             | SessionEvent::ItemUpdated { .. }
             | SessionEvent::ItemCompleted { .. }
             | SessionEvent::CapabilitiesChanged { .. } => {}

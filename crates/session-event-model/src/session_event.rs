@@ -75,11 +75,20 @@ pub struct SessionItem {
 
 /// Events carry domain facts; the hub assigns sequence numbers and owns replay.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum SessionEvent {
     TurnStarted {
         turn_id: String,
-        input_id: String,
+        input_id: crate::InputId,
+    },
+    InputAccepted {
+        input_id: crate::InputId,
+        turn_id: String,
     },
     TurnEnded {
         turn_id: String,

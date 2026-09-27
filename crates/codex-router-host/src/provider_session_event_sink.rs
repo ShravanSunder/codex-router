@@ -244,7 +244,7 @@ mod tests {
             "session-one",
             SessionEvent::TurnStarted {
                 turn_id: "turn-one".into(),
-                input_id: "input-one".into(),
+                input_id: session_event_model::InputId::new("input-one").expect("input ID"),
             },
         )
         .expect("turn start");
@@ -344,7 +344,7 @@ mod tests {
             "session-one",
             SessionEvent::TurnStarted {
                 turn_id: "old-turn".into(),
-                input_id: "old-input".into(),
+                input_id: session_event_model::InputId::new("old-input").expect("input ID"),
             },
         )
         .expect("start old turn");
@@ -365,7 +365,7 @@ mod tests {
             "session-one",
             SessionEvent::TurnStarted {
                 turn_id: "replayed-turn".into(),
-                input_id: "replayed-input".into(),
+                input_id: session_event_model::InputId::new("replayed-input").expect("input ID"),
             },
         )
         .expect("replayed start");

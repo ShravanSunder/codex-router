@@ -229,7 +229,7 @@ async fn sessions_use_durable_inventory_with_live_state_overlay() -> TestResult 
         target.clone(),
         SessionEvent::TurnStarted {
             turn_id: "turn-1".into(),
-            input_id: "input-1".into(),
+            input_id: session_event_model::InputId::new("input-1").expect("input ID"),
         },
     )
     .await?;
@@ -266,7 +266,7 @@ async fn replay_reset_replaces_lost_history_and_resyncs_old_subscribers() -> Tes
         target.clone(),
         SessionEvent::TurnStarted {
             turn_id: "old-turn".into(),
-            input_id: "old-input".into(),
+            input_id: session_event_model::InputId::new("old-input").expect("input ID"),
         },
     )
     .await?;
@@ -312,7 +312,7 @@ async fn replay_reset_replaces_lost_history_and_resyncs_old_subscribers() -> Tes
         target.clone(),
         SessionEvent::TurnStarted {
             turn_id: "historical-turn".into(),
-            input_id: "replayed-input".into(),
+            input_id: session_event_model::InputId::new("replayed-input").expect("input ID"),
         },
     )
     .await?;

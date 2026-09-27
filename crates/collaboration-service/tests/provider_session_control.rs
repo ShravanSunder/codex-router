@@ -144,7 +144,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         hub_target,
         session_event_model::SessionEvent::TurnStarted {
             turn_id: "turn-1".into(),
-            input_id: "input-1".into(),
+            input_id: session_event_model::InputId::new("input-1").expect("input ID"),
         },
     )
     .await
