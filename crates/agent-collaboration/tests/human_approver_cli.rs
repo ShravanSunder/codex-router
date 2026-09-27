@@ -75,6 +75,28 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
         "sessionId":"human-approver-cli-caller"
     });
     let human = json!({"kind":"human","humanId":"fixture-owner"});
+    let invalid_from = run_cli(
+        root.path(),
+        &[
+            "conversation",
+            "create",
+            "--endpoint",
+            "claude-local",
+            "--cwd",
+        ],
+        &[
+            root.path().display().to_string(),
+            "--access".into(),
+            "workspace-write".into(),
+            "--from".into(),
+            "null".into(),
+            "--json".into(),
+        ],
+    )
+    .await?;
+    assert_eq!(invalid_from.status.code(), Some(2));
+    let invalid_from: Value = serde_json::from_slice(&invalid_from.stdout)?;
+    assert_eq!(invalid_from["error"]["kind"], "invalidField");
     let create = run_cli(
         root.path(),
         &[

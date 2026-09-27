@@ -3,14 +3,32 @@
 use crate::conversation_client::{ConversationClientError, ConversationCreateInput, unsupported};
 use collaboration_protocol::{ProviderIdentity, SessionRef};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 /// Accepts the established SessionRef shape and typed Human or Session identities.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(untagged)]
 pub enum ConversationCreateActor {
     Session(SessionRef),
     Typed(message_board::Identity),
+}
+
+impl<'de> Deserialize<'de> for ConversationCreateActor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("kind").is_some() {
+            serde_json::from_value(value)
+                .map(Self::Typed)
+                .map_err(de::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(Self::Session)
+                .map_err(de::Error::custom)
+        }
+    }
 }
 
 impl From<SessionRef> for ConversationCreateActor {

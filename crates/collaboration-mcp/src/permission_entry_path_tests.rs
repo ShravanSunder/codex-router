@@ -1164,10 +1164,7 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
             assert!(
                 response["result"]["content"][0]["text"]
                     .as_str()
-                    .is_some_and(|message| {
-                        message.contains("failed to deserialize parameters")
-                            && message.contains("ConversationCreateActor")
-                    }),
+                    .is_some_and(|message| message.contains("expected struct SessionRef")),
                 "{response}"
             );
             assert!(response["result"].get("structuredContent").is_none());
