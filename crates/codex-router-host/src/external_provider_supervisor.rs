@@ -1270,7 +1270,7 @@ fn failure(
         effect,
         message: NonEmptyText::try_from(message.to_owned())
             .expect("static provider failure message is valid"),
-        operation_id,
+        operation_id: Some(operation_id),
         invalid_setting: None,
         provider_code: None,
         target,

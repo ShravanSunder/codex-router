@@ -38,7 +38,8 @@ pub trait ProviderConversationBackend: Send + Sync {
         Box::pin(async move {
             Err(ProviderInspectFailure {
                 kind: ProviderInspectFailureKind::Unavailable,
-                target: request.target,
+                stage: None,
+                target: Some(request.target),
                 message: "provider Session inspection is unavailable".into(),
             })
         })
@@ -99,7 +100,8 @@ pub trait ProviderConversationBackend: Send + Sync {
 fn settings_unavailable(target: collaboration_protocol::SessionRef) -> ProviderSettingsFailure {
     ProviderSettingsFailure {
         kind: ProviderSettingsFailureKind::Unavailable,
-        target,
+        stage: None,
+        target: Some(target),
         message: "provider settings are unavailable".into(),
         setting: None,
         value: None,

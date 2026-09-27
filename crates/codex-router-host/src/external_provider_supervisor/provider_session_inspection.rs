@@ -133,11 +133,15 @@ fn state_tag(state: SessionState) -> ProviderSessionState {
 fn failure(kind: ProviderInspectFailureKind, target: &SessionRef) -> ProviderInspectFailure {
     ProviderInspectFailure {
         kind,
-        target: target.clone(),
+        stage: None,
+        target: Some(target.clone()),
         message: match kind {
             ProviderInspectFailureKind::NotFound => "provider Session is unknown".into(),
             ProviderInspectFailureKind::Unavailable => {
                 "provider Session inspection is unavailable".into()
+            }
+            ProviderInspectFailureKind::Overloaded => {
+                "provider Session inspection is overloaded".into()
             }
         },
     }

@@ -744,7 +744,9 @@ fn admit_request(frame: Value, admission: &mut ControlAdmission) -> Result<Reque
     }
     if let Err(failure) = admission.admit(&request.id, &request.method) {
         if failure == AdmissionError::Overloaded {
-            if request.method.starts_with("conversation/") {
+            if request.method.starts_with("conversation/")
+                || request.method == "provider/sessionInspect"
+            {
                 return Err(crate::provider_conversation_dispatch::overloaded(
                     id,
                     &request.method,
@@ -843,6 +845,64 @@ mod admission_error_tests {
                 collaboration_protocol::control_error_is_valid(method, &response),
                 "invalid overload response for {method}: {response}"
             );
+        }
+    }
+
+    #[test]
+    fn provider_methods_report_overload_before_target_resolution() {
+        let mut admission = ControlAdmission::default();
+        admission.admit("init", "control/initialize").unwrap();
+        admission.initialized();
+        admission.complete("init");
+        for number in 0..64 {
+            admission
+                .admit(&format!("pending-{number}"), "codex/sessionInspect")
+                .unwrap();
+        }
+        let target = json!({
+            "endpoint": {
+                "serviceId": "00000000-0000-4000-8000-000000000001",
+                "endpointId": "cursor-local"
+            },
+            "sessionId": "fixture-session"
+        });
+        let operation_id = collaboration_protocol::OperationId::generate();
+        for method in [
+            "provider/sessionInspect",
+            "provider/sessionList",
+            "conversation/resume",
+            "conversation/close",
+            "conversation/settingsSet",
+            "conversation/settingsAccept",
+        ] {
+            for include_target in [false, true] {
+                let params = if include_target {
+                    json!({"target": target, "operationId": operation_id})
+                } else {
+                    json!({})
+                };
+                let response = match admit_request(
+                    json!({"jsonrpc":"2.0","id":format!("{method}-{include_target}"),"method":method,"params":params}),
+                    &mut admission,
+                ) {
+                    Err(response) => response,
+                    Ok(_) => panic!("saturated admission accepted {method}"),
+                };
+                let data = &response["error"]["data"];
+                assert_eq!(data["kind"], "overloaded", "{method}: {response}");
+                assert_eq!(data["stage"], "discovery", "{method}: {response}");
+                assert!(
+                    collaboration_protocol::control_error_is_valid(method, &response),
+                    "{method}: {response}"
+                );
+                if method == "provider/sessionList" {
+                    assert!(data.get("target").is_none());
+                } else if include_target {
+                    assert_eq!(data["target"], target);
+                } else {
+                    assert!(data.get("target").is_none());
+                }
+            }
         }
     }
 

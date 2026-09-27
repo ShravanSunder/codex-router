@@ -105,70 +105,63 @@ pub(crate) async fn dispatch(
 }
 
 pub(crate) fn overloaded(id: Value, method: &str, params: Value) -> Value {
+    const MESSAGE: &str = "Request capacity exceeded; this request was not dispatched. Reconnect and retry the same operation identity when capacity is available.";
+    let target = params
+        .get("target")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<SessionRef>(value).ok());
     if method == "provider/sessionInspect" {
-        return match parse::<ProviderSessionInspectRequest>(params) {
-            Ok(request) => inspect_failure_response(
-                id,
-                ProviderInspectFailure {
-                    kind: ProviderInspectFailureKind::Unavailable,
-                    target: request.target,
-                    message: "provider Session inspection is overloaded".into(),
-                },
-            ),
-            Err(()) => invalid_params(id),
-        };
+        return inspect_failure_response(
+            id,
+            ProviderInspectFailure {
+                kind: ProviderInspectFailureKind::Overloaded,
+                stage: Some(ConversationOperationFailureStage::Discovery),
+                target,
+                message: MESSAGE.into(),
+            },
+        );
     }
     if matches!(
         method,
         "conversation/settingsSet" | "conversation/settingsAccept"
     ) {
-        let target = match method {
-            "conversation/settingsSet" => {
-                parse::<ProviderSettingsSetRequest>(params).map(|request| request.target)
-            }
-            _ => parse::<ProviderSettingsAcceptRequest>(params).map(|request| request.target),
-        };
-        return match target {
-            Ok(target) => settings_failure_response(
-                id,
-                ProviderSettingsFailure {
-                    kind: ProviderSettingsFailureKind::Unavailable,
-                    target,
-                    message: "provider settings service is overloaded".into(),
-                    setting: None,
-                    value: None,
-                    advertised: Vec::new(),
-                },
-            ),
-            Err(()) => invalid_params(id),
-        };
+        return settings_failure_response(
+            id,
+            ProviderSettingsFailure {
+                kind: ProviderSettingsFailureKind::Overloaded,
+                stage: Some(ConversationOperationFailureStage::Discovery),
+                target,
+                message: MESSAGE.into(),
+                setting: None,
+                value: None,
+                advertised: Vec::new(),
+            },
+        );
     }
-    let operation = match method {
-        "conversation/create" => {
-            parse::<ConversationCreateRequest>(params).map(|request| (request.operation_id, None))
-        }
-        "conversation/load" => parse::<ConversationLoadRequest>(params)
-            .map(|request| (request.operation_id, Some(request.target))),
-        "conversation/resume" => parse::<ConversationResumeRequest>(params)
-            .map(|request| (request.operation_id, Some(request.target))),
-        "conversation/close" => parse::<ConversationCloseRequest>(params)
-            .map(|request| (request.operation_id, Some(request.target))),
-        "conversation/prompt" => parse::<ConversationPromptRequest>(params)
-            .map(|request| (request.operation_id, Some(request.target))),
-        "conversation/cancel" => parse::<ConversationCancelRequest>(params)
-            .map(|request| (request.operation_id, Some(request.target))),
-        "conversation/operationShow" => parse::<ConversationOperationShowRequest>(params)
-            .map(|request| (request.operation_id, None)),
-        "conversation/operationWait" => parse::<ConversationOperationWaitRequest>(params)
-            .map(|request| (request.operation_id, None)),
-        "conversation/operationReconcile" => parse::<ConversationOperationReconcileRequest>(params)
-            .map(|request| (request.operation_id, None)),
-        _ => return json_rpc_error(id, -32601, "Method not found"),
+    if !method.starts_with("conversation/") {
+        return json_rpc_error(id, -32601, "Method not found");
+    }
+    let Some(message) = NonEmptyText::try_from(MESSAGE.to_owned()).ok() else {
+        return json_rpc_error(id, -32603, "Internal error");
     };
-    let Ok((operation_id, target)) = operation else {
-        return invalid_params(id);
-    };
-    local_failure_response(id, LocalFailure::Busy, operation_id, target)
+    failure_response(
+        id,
+        ConversationOperationFailure {
+            kind: ConversationOperationFailureKind::Overloaded,
+            stage: ConversationOperationFailureStage::Discovery,
+            effect: ProviderOperationEffect::None,
+            message,
+            operation_id: params
+                .get("operationId")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<OperationId>(value).ok()),
+            invalid_setting: None,
+            provider_code: None,
+            target,
+            endpoint: None,
+            availability: None,
+        },
+    )
 }
 
 async fn dispatch_provider_inspect(
@@ -184,7 +177,8 @@ async fn dispatch_provider_inspect(
             id,
             ProviderInspectFailure {
                 kind: ProviderInspectFailureKind::Unavailable,
-                target: request.target,
+                stage: None,
+                target: Some(request.target),
                 message: "provider Session inspection is unavailable".into(),
             },
         );
@@ -230,7 +224,8 @@ async fn dispatch_settings_accept(
 fn settings_unavailable(target: SessionRef) -> ProviderSettingsFailure {
     ProviderSettingsFailure {
         kind: ProviderSettingsFailureKind::Unavailable,
-        target,
+        stage: None,
+        target: Some(target),
         message: "provider settings service is unavailable".into(),
         setting: None,
         value: None,
@@ -837,7 +832,7 @@ fn unavailable_provider_response(
             stage: ConversationOperationFailureStage::Binding,
             effect: ProviderOperationEffect::None,
             message,
-            operation_id,
+            operation_id: Some(operation_id),
             invalid_setting: None,
             provider_code: None,
             target,
@@ -869,11 +864,6 @@ fn local_failure_response(
             ConversationOperationFailureStage::Binding,
             "provider conversation generation is stale",
         ),
-        LocalFailure::Busy => (
-            ConversationOperationFailureKind::Busy,
-            ConversationOperationFailureStage::Admission,
-            "provider conversation request capacity exceeded",
-        ),
         LocalFailure::Unavailable => (
             ConversationOperationFailureKind::Unavailable,
             ConversationOperationFailureStage::Binding,
@@ -890,7 +880,7 @@ fn local_failure_response(
             stage,
             effect: ProviderOperationEffect::None,
             message,
-            operation_id,
+            operation_id: Some(operation_id),
             invalid_setting: None,
             provider_code: None,
             target,
@@ -904,7 +894,6 @@ enum LocalFailure {
     InvalidIdentity,
     InvalidBinding,
     StaleGeneration,
-    Busy,
     Unavailable,
 }
 

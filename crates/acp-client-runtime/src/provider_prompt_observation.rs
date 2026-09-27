@@ -194,23 +194,19 @@ async fn update_live_settings(
         *handles.last_settings_catalog.write().await = Some(catalog);
     }
     if let Some(modes_update) = capability_change {
-        let changed = {
+        let capabilities = {
             let mut reports = handles.session_capabilities.write().await;
-            reports.get_mut(session_id).and_then(|report| {
+            reports.get_mut(session_id).map(|report| {
                 let flag = if modes_update {
                     &mut report.supports_modes
                 } else {
                     &mut report.supports_config_options
                 };
-                if *flag {
-                    None
-                } else {
-                    *flag = true;
-                    Some(report.to_session_model())
-                }
+                *flag = true;
+                report.to_session_model()
             })
         };
-        if let Some(capabilities) = changed {
+        if let Some(capabilities) = capabilities {
             handles.event_sink.publish(
                 session_id,
                 SessionEvent::CapabilitiesChanged { capabilities },

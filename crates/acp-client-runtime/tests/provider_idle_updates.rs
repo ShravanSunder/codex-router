@@ -133,7 +133,11 @@ async fn idle_mode_config_unknown_and_late_tool_updates_are_projected() {
 
     let initial_events = tokio::time::timeout(Duration::from_secs(2), async {
         let mut observed = Vec::new();
-        while observed.len() < 6 {
+        while !observed.iter().any(|event| {
+            matches!(event,
+            SessionEvent::ItemStarted { item } if matches!(&item.kind,
+                SessionItemKind::Unknown { source_kind } if source_kind == "future_idle_kind"))
+        }) {
             observed.push(events.recv().await.expect("event sink remains open"));
         }
         observed
@@ -147,6 +151,14 @@ async fn idle_mode_config_unknown_and_late_tool_updates_are_projected() {
     assert!(initial_events.iter().any(|event| matches!(event,
         SessionEvent::ItemStarted { item } if matches!(&item.kind,
             SessionItemKind::Unknown { source_kind } if source_kind == "future_idle_kind"))));
+    assert_eq!(
+        initial_events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CapabilitiesChanged { .. }))
+            .count(),
+        2,
+        "mode and config updates each publish current capabilities"
+    );
     let catalog = client
         .settings_catalog(&session_id)
         .await
