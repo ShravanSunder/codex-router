@@ -21,10 +21,16 @@ use collaboration_client::{ConversationClient, ConversationCreateActor, Conversa
 mod delivery_matrix_approval;
 #[path = "delivery_matrix/support.rs"]
 mod delivery_matrix_support;
-use delivery_matrix_support::{ConfigHashGuard, PeerFixture, mcp_send, prepare_provider_fixture};
+use delivery_matrix_support::{
+    ConfigHashGuard, PeerFixture, mcp_send, prepare_acp_target_fixture, prepare_provider_fixture,
+};
+#[path = "delivery_matrix/acp_target.rs"]
+mod delivery_matrix_acp_target;
 use proof_context::{ProofContext, ProofResult};
 use serde_json::{Value, json};
 use std::time::Duration;
+
+const ACP_TARGET_EXPECTED_PROMPTS: usize = 9;
 
 #[tokio::test]
 #[ignore = "requires an owned isolated CLI Host with scripted provider fixture"]
@@ -95,6 +101,21 @@ async fn sequential_approval_notices_reach_codex_and_claude_recipients() -> Proo
 #[ignore = "creates a fresh private direct child of /tmp for the isolated CLI Host"]
 fn prepare_delivery_matrix_provider_fixture() -> ProofResult<()> {
     prepare_provider_fixture()
+}
+
+#[test]
+#[ignore = "creates a fresh isolated Host root with two scripted ACP provider runtimes"]
+fn prepare_delivery_matrix_acp_target_fixture() -> ProofResult<()> {
+    prepare_acp_target_fixture()
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh isolated CLI Host with scripted ACP target and requester"]
+async fn delivery_matrix_reaches_scripted_acp_target() -> ProofResult<()> {
+    let config_guard = ConfigHashGuard::capture()?;
+    let result = delivery_matrix_acp_target::exercise_acp_target_matrix(&config_guard).await;
+    config_guard.verify()?;
+    result
 }
 
 async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult<()> {
@@ -354,6 +375,16 @@ async fn cli_send(
     target: &SessionRef,
     text: &str,
 ) -> ProofResult<()> {
+    let _receipt = cli_send_receipt(proof, sender, target, text).await?;
+    Ok(())
+}
+
+async fn cli_send_receipt(
+    proof: &ProofContext,
+    sender: &SessionRef,
+    target: &SessionRef,
+    text: &str,
+) -> ProofResult<Value> {
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args([
             "message",
@@ -378,7 +409,7 @@ async fn cli_send(
         )
         .into());
     }
-    Ok(())
+    Ok(receipt["result"]["record"].clone())
 }
 
 async fn wake_send(
@@ -483,6 +514,14 @@ async fn board_listen_push(
     codex_marker: &str,
     peer_marker: &str,
 ) -> ProofResult<()> {
+    board_listen_push_targets(proof, sender, &[(codex, codex_marker), (peer, peer_marker)]).await
+}
+
+async fn board_listen_push_targets(
+    proof: &mut ProofContext,
+    sender: &SessionRef,
+    targets: &[(&SessionRef, &str)],
+) -> ProofResult<()> {
     let actor: Identity = serde_json::from_value(json!({"kind":"session","session":sender}))?;
     let project_id = ProjectId::generate();
     let board_id = BoardId::generate();
@@ -533,7 +572,7 @@ async fn board_listen_push(
             watch: true,
         })
         .await?;
-    for target in [codex, peer] {
+    for (target, _) in targets {
         let reader: Identity = serde_json::from_value(json!({"kind":"session","session":target}))?;
         proof
             .client
@@ -562,7 +601,7 @@ async fn board_listen_push(
             })
             .await?;
     }
-    for marker in [codex_marker, peer_marker] {
+    for (_, marker) in targets {
         proof
             .client
             .board_message_post(MessagePostRequest {
@@ -572,7 +611,7 @@ async fn board_listen_push(
                 },
                 actor: actor.clone(),
                 acting_for: None,
-                text: BoardMessageText::try_from(marker.to_owned())?,
+                text: BoardMessageText::try_from((*marker).to_owned())?,
                 references: MessageReferences::try_from(Vec::new())?,
             })
             .await?;
