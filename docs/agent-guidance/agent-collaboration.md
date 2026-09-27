@@ -137,7 +137,9 @@ lifetime, not the wait interval.
 
 Creation means the reminder is durably arranged. Add `--wait-until-first-fire`
 to wait for its first firing; that does not wait for native acceptance or a
-reply. Pause/cancel before the first firing returns an error. Pausing discards
+reply. With `--json`, the command emits one result whose `result.record.firstFire`
+contains the firing receipt. A wait failure emits one error that retains the
+created wake under `created`. Pause/cancel before the first firing returns an error. Pausing discards
 undispatched reminders; resume preserves the original timing and expiry.
 
 Save the returned `operationId`. If creation's outcome is uncertain, inspect

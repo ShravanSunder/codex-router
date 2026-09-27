@@ -3,13 +3,17 @@ use crate::{
     AppServerChild, BackendSchemaEvidence, CollaborationRuntime, CollaborationRuntimeInputs,
     HostConfig,
 };
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 pub(super) struct CollaborationLifecycle {
     directory: PathBuf,
     codex_home: PathBuf,
     backend_socket: PathBuf,
     mcp_bind: std::net::SocketAddr,
+    fixture_peer_registry_directory: Option<PathBuf>,
     external_provider_startups: Vec<crate::ExternalProviderStartup>,
     provider_operation_retention_days: std::num::NonZeroU32,
     router_executable_relation:
@@ -37,6 +41,9 @@ impl CollaborationLifecycle {
                 .to_owned(),
             backend_socket: config.app_server_socket().to_owned(),
             mcp_bind: config.mcp_bind(),
+            fixture_peer_registry_directory: config
+                .fixture_peer_registry_directory()
+                .map(Path::to_path_buf),
             external_provider_startups: config.external_provider_startups().to_vec(),
             provider_operation_retention_days: config.provider_operation_retention_days(),
             router_executable_relation,
@@ -91,7 +98,7 @@ impl CollaborationLifecycle {
                         backend_socket: self.backend_socket.clone(),
                         mcp_bind: self.mcp_bind,
                         native_schema: export.clone(),
-                        peer_registry_directory: None,
+                        peer_registry_directory: self.fixture_peer_registry_directory.clone(),
                     },
                     self.external_provider_startups.clone(),
                     self.router_executable_relation.clone(),

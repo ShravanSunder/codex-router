@@ -6,7 +6,7 @@ use collaboration_client::protocol::{
     ExpiryRequest, LocalMutationEvidence, LocalMutationState, OperationId, TimingRequest,
     WakeMutationRequest, WakeSendRequest, WakeShowRequest,
 };
-use collaboration_client::{ControlClient, WakeClientError};
+use collaboration_client::{ControlClient, WakeClientError, WakeWaitFailureKind};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -24,7 +24,7 @@ struct WakeArguments {
 }
 #[derive(Subcommand)]
 enum WakeCommand {
-    /// Save a timed message. Returns after durable creation; this is not native acceptance.
+    /// Save a timed message; optional first-fire wait returns one combined result, not native acceptance.
     Send {
         #[command(flatten)]
         message: Box<SendArguments>,
@@ -233,25 +233,61 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
     } else {
         None
     };
+    let (record, code) = if let Some(id) = wait_id {
+        match runtime.block_on(crate::wakeup_wait_output::wait(
+            &invocation.directory,
+            id.clone(),
+        )) {
+            Ok(fire) => {
+                let mut combined = record;
+                if let Some(first_fire) = combined.pointer_mut("/result/record/firstFire") {
+                    *first_fire = json!(fire);
+                    (combined, 0)
+                } else {
+                    (
+                        json!({"kind":"error","operationId":invocation.operation_id,
+                        "wakeupId":id,"created":combined.pointer("/result/record"),
+                        "error":{"kind":"protocolViolation","message":"Created wake snapshot omitted firstFire"}}),
+                        5,
+                    )
+                }
+            }
+            Err(error) => {
+                let failure = error.into_operation_failure();
+                let code = if matches!(
+                    failure.kind,
+                    WakeWaitFailureKind::Unavailable
+                        | WakeWaitFailureKind::NotFound
+                        | WakeWaitFailureKind::Connection
+                ) {
+                    3
+                } else {
+                    4
+                };
+                (
+                    json!({"kind":"error","operationId":invocation.operation_id,
+                    "wakeupId":id,"created":record.pointer("/result/record"),"error":failure}),
+                    code,
+                )
+            }
+        }
+    } else if invocation.wait_until_first_fire && code == 0 {
+        (
+            json!({"kind":"error","operationId":invocation.operation_id,
+            "created":record.pointer("/result/record"),
+            "error":{"kind":"protocolViolation","message":"Created wake snapshot omitted its identity"}}),
+            5,
+        )
+    } else {
+        (record, code)
+    };
     let text = if machine {
         serde_json::to_string(&record)
     } else {
         serde_json::to_string_pretty(&record)
     };
     match text {
-        Ok(text) if writeln!(io::stdout(), "{text}").is_ok() => {
-            if let Some(id) = wait_id {
-                runtime.block_on(crate::wakeup_wait_output::wait(
-                    &invocation.directory,
-                    id,
-                    machine,
-                ))
-            } else if invocation.wait_until_first_fire && code == 0 {
-                5
-            } else {
-                code
-            }
-        }
+        Ok(text) if writeln!(io::stdout(), "{text}").is_ok() => code,
         _ => 5,
     }
 }

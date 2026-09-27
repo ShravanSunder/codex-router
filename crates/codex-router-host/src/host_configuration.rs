@@ -46,6 +46,7 @@ impl HostCoordinationPaths {
 pub struct HostConfig {
     collaboration_directory: Option<PathBuf>,
     collaboration_codex_home: Option<PathBuf>,
+    fixture_peer_registry_directory: Option<PathBuf>,
     coordination_paths: HostCoordinationPaths,
     router_endpoint: SocketAddr,
     mcp_bind: SocketAddr,
@@ -78,6 +79,7 @@ impl HostConfig {
         Self {
             collaboration_directory: None,
             collaboration_codex_home: None,
+            fixture_peer_registry_directory: None,
             coordination_paths: inputs.coordination_paths,
             router_endpoint: inputs.router_endpoint,
             mcp_bind: inputs.mcp_bind,
@@ -114,6 +116,16 @@ impl HostConfig {
         self.collaboration_codex_home = Some(codex_home);
         self.collaboration_directory = Some(directory);
         self
+    }
+    /// Test-only peer registry override; production continues to use the owner registry.
+    #[must_use]
+    pub fn with_fixture_peer_registry_directory(mut self, directory: PathBuf) -> Self {
+        self.fixture_peer_registry_directory = Some(directory);
+        self
+    }
+    #[must_use]
+    pub fn fixture_peer_registry_directory(&self) -> Option<&Path> {
+        self.fixture_peer_registry_directory.as_deref()
     }
     #[must_use]
     pub fn collaboration_codex_home(&self) -> Option<&Path> {

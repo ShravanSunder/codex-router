@@ -1,4 +1,6 @@
 //! Opt-in acceptance Host: normal Codex home, existing debug provider, fresh runtime and Luna only.
+#[path = "automation_debug_host/fixture_peer_registry.rs"]
+mod fixture_peer_registry;
 #[path = "automation_debug_host/proof_permissions.rs"]
 mod proof_permissions;
 
@@ -32,6 +34,7 @@ struct DebugHostOptions {
     run_directory_admission: RunDirectoryAdmission,
     router_binary: PathBuf,
     port: u16,
+    fixture_peer_registry: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -99,6 +102,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .create(&native_directory)?;
         std::fs::DirBuilder::new().mode(0o700).create(&workspace)?;
     }
+    let fixture_peer_registry = fixture_peer_registry::prepare(
+        &options.run_directory,
+        options.run_directory_admission,
+        options.fixture_peer_registry,
+    )?;
     let socket = native_directory.join("app-server.sock");
     let paths = CodexPaths::from_codex_home(codex_home.clone());
     let control_socket =
@@ -159,6 +167,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         deadlines: HostDeadlines::production(),
     })
     .with_collaboration_directory(collaboration.clone(), codex_home);
+    let config = if let Some(registry) = fixture_peer_registry {
+        config.with_fixture_peer_registry_directory(registry)
+    } else {
+        config
+    };
     let prepared = DebugHostContext {
         kind: "debugHostPrepared".to_owned(),
         run_directory: options.run_directory.clone(),
@@ -242,12 +255,17 @@ fn parse_options_from(
     let mut run_directory = None::<(PathBuf, RunDirectoryAdmission)>;
     let mut router_binary = None;
     let mut port = 18787;
+    let mut fixture_peer_registry = false;
     while let Some(flag) = arguments.next() {
         if flag == "--help" || flag == "-h" {
             println!(
-                "automation-debug-host (--run-directory /tmp/NEW-DIRECTORY | --resume-run-directory /tmp/OWNED-DIRECTORY) --router-binary /ABSOLUTE/target/debug/codex-router [--port 18787]\n\nOpt-in real acceptance Host. Uses the existing codex-router-debug profile with an in-memory Luna override. Fresh mode creates runtime/workspace directories. Resume mode reopens only a stopped Host's validated private directory. Starts only its own debug router and app-server and shuts its children down on SIGTERM. Never use production paths or ports. Keep this process running while the acceptance runner connects."
+                "automation-debug-host (--run-directory /tmp/NEW-DIRECTORY | --resume-run-directory /tmp/OWNED-DIRECTORY) --router-binary /ABSOLUTE/target/debug/codex-router [--port 18787] [--fixture-peer-registry]\n\nOpt-in real acceptance Host. Uses the existing codex-router-debug profile with an in-memory Luna override. Fresh mode creates runtime/workspace directories. Resume mode reopens only a stopped Host's validated private directory. --fixture-peer-registry selects an owner-private Claude peer fixture directory inside this run root instead of the real registry. Starts only its own debug router and app-server and shuts its children down on SIGTERM. Never use production paths or ports. Keep this process running while the acceptance runner connects."
             );
             return Ok(None);
+        }
+        if flag == "--fixture-peer-registry" {
+            fixture_peer_registry = true;
+            continue;
         }
         let value = arguments.next().ok_or("option value missing; use --help")?;
         match flag.to_str() {
@@ -274,6 +292,7 @@ fn parse_options_from(
         run_directory_admission,
         router_binary: router_binary.ok_or("--router-binary required; use --help")?,
         port,
+        fixture_peer_registry,
     }))
 }
 
@@ -529,6 +548,21 @@ supports_websockets = true
         let process_id = child.id();
         let _status = child.wait()?;
         Ok(process_id)
+    }
+
+    #[test]
+    fn peer_registry_fixture_requires_an_explicit_debug_host_flag()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let options = parse_options_from([
+            OsString::from("--run-directory"),
+            OsString::from("/tmp/fresh"),
+            OsString::from("--router-binary"),
+            OsString::from("/tmp/codex-router"),
+            OsString::from("--fixture-peer-registry"),
+        ])?
+        .ok_or("options missing")?;
+        assert!(options.fixture_peer_registry);
+        Ok(())
     }
 
     #[test]

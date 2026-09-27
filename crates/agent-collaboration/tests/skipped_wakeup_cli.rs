@@ -96,19 +96,10 @@ async fn skipped_one_shot_cli_wait_reports_no_firing() -> Result<(), Box<dyn std
         )
         .into());
     }
-    let records = String::from_utf8(output.stdout)?
-        .lines()
-        .map(serde_json::from_str::<Value>)
-        .collect::<Result<Vec<_>, _>>()?;
-    if records.len() != 2
-        || records
-            .first()
-            .and_then(|value| value.pointer("/result/record/definition/wakeupId"))
-            != Some(&json!(wake.definition.wakeup_id))
-    {
-        return Err("creation replay did not return the original wake before waiting".into());
+    let error: Value = serde_json::from_slice(&output.stdout)?;
+    if error.pointer("/created/definition/wakeupId") != Some(&json!(wake.definition.wakeup_id)) {
+        return Err("wait error omitted the durably created wake".into());
     }
-    let error = records.last().ok_or("missing wait error")?;
     for (pointer, expected) in [
         ("/error/kind", "wakeFinishedWithoutFiring"),
         ("/error/nextAction", "createWakeup"),

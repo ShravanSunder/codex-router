@@ -137,18 +137,13 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         )
         .into());
     }
-    let last = String::from_utf8(fire.stdout)?
-        .lines()
-        .last()
-        .ok_or("missing firing output")?
-        .to_owned();
-    let fired: serde_json::Value = serde_json::from_str(&last)?;
+    let fired: serde_json::Value = serde_json::from_slice(&fire.stdout)?;
     if fired
-        .pointer("/result/record/kind")
+        .pointer("/result/record/firstFire/kind")
         .and_then(serde_json::Value::as_str)
         != Some("wakeFired")
     {
-        return Err("wait returned before firing receipt".into());
+        return Err("one-result wait returned before firing receipt".into());
     }
     let listing = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args([
@@ -182,7 +177,7 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         return Err("CLI bounded listing missing page or cursor".into());
     }
     let fired_id = fired
-        .pointer("/result/record/wakeupId")
+        .pointer("/result/record/firstFire/wakeupId")
         .and_then(serde_json::Value::as_str)
         .ok_or("missing fired wake identity")?;
     let deliveries = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
