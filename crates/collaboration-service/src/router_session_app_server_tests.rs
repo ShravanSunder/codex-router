@@ -343,7 +343,21 @@ async fn thread_resume_returns_replayed_items_grouped_into_historical_turns()
         &[],
     )
     .await?;
-    assert_eq!(read["thread"]["turns"], resumed["thread"]["turns"]);
+    assert_eq!(read["thread"]["turns"], json!([]));
+    let read_with_turns = handle_app_server_thread_request(
+        "thread/read",
+        json!({"threadId":backend.session.session_id.as_str(),"includeTurns":true}),
+        Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
+        Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        backend.endpoint.clone(),
+        ScriptedSessionBackend::actor()?,
+        &[],
+    )
+    .await?;
+    assert_eq!(
+        read_with_turns["thread"]["turns"],
+        resumed["thread"]["turns"]
+    );
     Ok(())
 }
 

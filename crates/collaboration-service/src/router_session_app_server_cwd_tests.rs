@@ -131,6 +131,40 @@ fn remote_trust_read_is_narrow_and_trust_write_is_refused() -> Result<(), Box<dy
     Ok(())
 }
 
+/// Oracle: Codex tui/src/config_update.rs:235-261,294-375. A remote TUI
+/// needs a project layer whenever the trusted key differs from its literal cwd.
+#[test]
+fn canonical_trust_key_produces_a_project_layer() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("codex-home");
+    let project = directory.path().join("project");
+    let alias = directory.path().join("alias");
+    std::fs::create_dir(&home)?;
+    std::fs::create_dir(&project)?;
+    std::os::unix::fs::symlink(&project, &alias)?;
+    let canonical = project.canonicalize()?;
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            canonical.display()
+        ),
+    )?;
+    let lookup = codex_native_integration::CodexHomeProjectTrust::new(home);
+    let result = handle_app_server_request(
+        json!(1),
+        "config/read",
+        &json!({"includeLayers":true,"cwd":alias}),
+        &[],
+        Some(&lookup),
+    );
+    assert_eq!(
+        result["result"]["layers"][0]["name"]["dotCodexFolder"],
+        format!("{}/.codex", canonical.display())
+    );
+    Ok(())
+}
+
 /// Oracle: pinned Codex tui/src/config_update.rs:235-261, 294-375.
 #[test]
 fn repository_root_trust_is_visible_to_remote_tui() -> Result<(), Box<dyn std::error::Error>> {

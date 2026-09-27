@@ -11,7 +11,7 @@ use message_board::{Identity, SessionRef};
 use serde_json::{Value, json};
 use session_event_model::{
     ApprovalRequest, PendingInteraction, QuestionRequest, SessionEvent, SessionItem, StopReason,
-    TurnOutcome,
+    TurnLostReason, TurnOutcome,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -32,12 +32,28 @@ fn render_turn_event(session: &SessionRef, event: &HubEvent) -> Option<Value> {
         }
         _ => return None,
     };
+    let error = match &event.event {
+        SessionEvent::TurnEnded {
+            outcome: TurnOutcome::Lost { reason },
+            ..
+        } => {
+            let message = match reason {
+                TurnLostReason::ProviderRetired => {
+                    "Provider generation retired before the Turn settled"
+                }
+                TurnLostReason::ProviderTurnFailed => "Provider Turn failed before completion",
+                TurnLostReason::EndNotObservable => "Provider Turn end was not observable",
+            };
+            Some(json!({"message":message,"codexErrorInfo":null}))
+        }
+        _ => None,
+    };
     Some(json!({
         "method":method,
         "params":{
             "threadId":thread_id,
             "turn":{
-                "id":turn_id,"items":[],"status":status,"error":null,
+                "id":turn_id,"items":[],"status":status,"error":error,
                 "startedAt":null,"completedAt":null,"durationMs":null
             }
         }
@@ -184,6 +200,26 @@ impl AppServerEventForwarding {
                                 })
                                 .unwrap_or_default()
                         }
+                        session_event_model::SessionItemKind::AgentThought => {
+                            let old_text = previous
+                                .as_ref()
+                                .and_then(|value| value.get("summary"))
+                                .and_then(Value::as_array)
+                                .and_then(|parts| parts.first())
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            let new_text = item.text.as_deref().unwrap_or("");
+                            new_text
+                                .strip_prefix(old_text)
+                                .filter(|delta| !delta.is_empty())
+                                .map(|delta| {
+                                    vec![json!({"method":"item/reasoning/summaryTextDelta","params":{
+                                        "threadId":thread_id,"turnId":turn_id,"itemId":item.item_id,
+                                        "delta":delta,"summaryIndex":0
+                                    }})]
+                                })
+                                .unwrap_or_default()
+                        }
                         session_event_model::SessionItemKind::ToolCall { .. } => item
                             .text
                             .as_deref()
@@ -207,8 +243,11 @@ impl AppServerEventForwarding {
                 let Some(item) = self.items.remove(&(session.clone(), item_id.clone())) else {
                     return Vec::new();
                 };
+                let Some(turn_id) = self.turn_ids.get(session) else {
+                    return Vec::new();
+                };
                 vec![json!({"method":"item/completed","params":{
-                    "threadId":thread_id,"turnId":self.turn_ids.get(session),"item":item,
+                    "threadId":thread_id,"turnId":turn_id,"item":item,
                     "completedAtMs":chrono::Utc::now().timestamp_millis()
                 }})]
             }
@@ -606,6 +645,117 @@ mod notification_wire_tests {
     use super::*;
     use session_event_model::SessionItemKind;
 
+    #[test]
+    fn lost_turn_completion_has_a_typed_error_message() -> Result<(), Box<dyn std::error::Error>> {
+        let session: SessionRef = serde_json::from_value(json!({
+            "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"claude-local"},
+            "sessionId":"provider-1"
+        }))?;
+        let lost = render_turn_event(
+            &session,
+            &HubEvent {
+                sequence: 2,
+                event: SessionEvent::TurnEnded {
+                    turn_id: "turn-1".into(),
+                    outcome: TurnOutcome::Lost {
+                        reason: session_event_model::TurnLostReason::ProviderRetired,
+                    },
+                },
+            },
+        )
+        .ok_or("turn completion")?;
+        assert_eq!(lost["params"]["turn"]["status"], "failed");
+        assert!(
+            lost["params"]["turn"]["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("retired"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn item_completion_without_an_active_turn_is_not_sent() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let session: SessionRef = serde_json::from_value(json!({
+            "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"claude-local"},
+            "sessionId":"provider-1"
+        }))?;
+        let actor: Identity = serde_json::from_value(json!({"kind":"human","humanId":"owner"}))?;
+        let mut projector = AppServerEventForwarding::new(actor, None);
+        projector.project(
+            &session,
+            &HubEvent {
+                sequence: 1,
+                event: SessionEvent::ItemStarted {
+                    item: SessionItem {
+                        item_id: "orphan".into(),
+                        kind: SessionItemKind::AgentMessage,
+                        text: Some("orphan".into()),
+                    },
+                },
+            },
+        );
+        let completed = projector.project(
+            &session,
+            &HubEvent {
+                sequence: 2,
+                event: SessionEvent::ItemCompleted {
+                    item_id: "orphan".into(),
+                },
+            },
+        );
+        assert!(completed.is_empty());
+        Ok(())
+    }
+
+    /// Oracle: pinned Codex app-server-protocol v2/item.rs:1449-1457.
+    #[test]
+    fn reasoning_update_streams_summary_text_delta() -> Result<(), Box<dyn std::error::Error>> {
+        let session: SessionRef = serde_json::from_value(json!({
+            "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"claude-local"},
+            "sessionId":"provider-1"
+        }))?;
+        let actor: Identity = serde_json::from_value(json!({"kind":"human","humanId":"owner"}))?;
+        let mut projector = AppServerEventForwarding::new(actor, None);
+        projector.project(
+            &session,
+            &HubEvent {
+                sequence: 1,
+                event: SessionEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                    input_id: session_event_model::InputId::generate(),
+                },
+            },
+        );
+        let thought = |text: &str| SessionItem {
+            item_id: "thought-1".into(),
+            kind: SessionItemKind::AgentThought,
+            text: Some(text.into()),
+        };
+        projector.project(
+            &session,
+            &HubEvent {
+                sequence: 2,
+                event: SessionEvent::ItemStarted {
+                    item: thought("First"),
+                },
+            },
+        );
+        let updated = projector.project(
+            &session,
+            &HubEvent {
+                sequence: 3,
+                event: SessionEvent::ItemUpdated {
+                    item: thought("First more"),
+                },
+            },
+        );
+        assert_eq!(updated[0]["method"], "item/reasoning/summaryTextDelta");
+        assert_eq!(updated[0]["params"]["delta"], " more");
+        assert_eq!(updated[0]["params"]["summaryIndex"], 0);
+        Ok(())
+    }
+
     /// Oracle: Codex 0.157.1 app-server-protocol v2/item.rs:1327-1336,
     /// 1405-1414,1427-1433 and protocol/common.rs:1936-1946.
     #[test]
@@ -664,6 +814,7 @@ mod notification_wire_tests {
             },
         );
         assert_eq!(completed[0]["method"], "item/completed");
+        assert_eq!(completed[0]["params"]["turnId"], "turn-1");
         assert_eq!(completed[0]["params"]["item"]["text"], "First streamed");
         assert!(completed[0]["params"]["completedAtMs"].is_i64());
         let ended = projector.project(

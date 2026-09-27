@@ -135,12 +135,14 @@ impl CodexProjectTrustLookup for CodexHomeProjectTrust {
 }
 
 fn path_keys(path: &Path) -> Vec<String> {
-    let mut keys = vec![path.to_string_lossy().into_owned()];
+    let raw_key = path.to_string_lossy().into_owned();
+    let mut keys = Vec::with_capacity(2);
     if let Ok(canonical) = fs::canonicalize(path) {
         let key = canonical.to_string_lossy().into_owned();
-        if !keys.contains(&key) {
-            keys.push(key);
-        }
+        keys.push(key);
+    }
+    if !keys.contains(&raw_key) {
+        keys.push(raw_key);
     }
     keys
 }
@@ -244,6 +246,32 @@ mod tests {
         write_config(&home, &trust_entry(&canonical_project))?;
         assert!(
             matches!(lookup.project_trust(&alias), ProjectTrustAnswer::Trusted { matched_key, match_kind: ProjectTrustMatchKind::WorkingDirectory } if matched_key == canonical_project.to_string_lossy())
+        );
+        Ok(())
+    }
+
+    /// Oracle: Codex config/src/loader/mod.rs:1359-1371.
+    #[test]
+    fn canonical_key_precedes_the_raw_alias_when_both_have_trust() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = root.path().join("project");
+        let alias = root.path().join("alias");
+        fs::create_dir(&project)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&project, &alias)?;
+        let canonical = fs::canonicalize(&project)?;
+        write_config(
+            &home,
+            &format!(
+                "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                alias.display(),
+                canonical.display()
+            ),
+        )?;
+        let lookup = CodexHomeProjectTrust::new(home);
+        assert!(
+            matches!(lookup.project_trust(&alias), ProjectTrustAnswer::Trusted { matched_key, .. } if matched_key == canonical.to_string_lossy())
         );
         Ok(())
     }

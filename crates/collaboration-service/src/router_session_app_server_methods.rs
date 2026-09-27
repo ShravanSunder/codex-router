@@ -36,11 +36,9 @@ pub(super) fn handle_app_server_request(
             let (projects, layers) = match answer {
                 codex_native_integration::ProjectTrustAnswer::Trusted {
                     matched_key,
-                    match_kind,
+                    match_kind: _,
                 } => {
-                    let layers = if match_kind
-                        == codex_native_integration::ProjectTrustMatchKind::WorkingDirectory
-                    {
+                    let layers = if matched_key == cwd.to_string_lossy() {
                         json!([])
                     } else {
                         json!([{"name":{"type":"project","dotCodexFolder":format!("{matched_key}/.codex")}}])
@@ -194,7 +192,7 @@ pub(super) async fn handle_app_server_thread_request(
                 Ok(result)
             } else {
                 let mut thread = render_thread(&summary);
-                if params.get("includeTurns").and_then(Value::as_bool) != Some(false)
+                if params.get("includeTurns").and_then(Value::as_bool) == Some(true)
                     && summary.state != session_event_model::SessionState::Unloaded
                 {
                     let attachment = events
