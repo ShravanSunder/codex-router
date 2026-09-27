@@ -1,5 +1,6 @@
 //! Foreground lifecycle control for one shared Codex app-server.
 
+mod acp_interaction_port;
 mod app_server_endpoint_guard;
 mod live_session_ownership_check;
 pub use live_session_ownership_check::{LiveSessionOwnership, LiveSessionOwnershipCheck};
@@ -44,14 +45,10 @@ pub use provider_configuration_file::{
 };
 mod provider_startup_composition;
 pub use provider_startup_composition::ExternalProviderStartup;
-mod provider_capability_report;
 mod provider_operation_settlement;
-mod provider_prompt_content;
-mod provider_prompt_observation;
-mod provider_prompt_result_codec;
-mod provider_session_actor;
-mod provider_update_kind;
-pub use provider_session_actor::{ProviderSessionActivity, ProviderSteeringOutcome};
+pub use acp_client_runtime::ProviderSessionActivity;
+pub type ProviderSteeringOutcome =
+    acp_client_runtime::ProviderSteeringOutcome<collaboration_protocol::OperationId>;
 mod router_compatibility;
 mod router_executable_observation;
 mod session_message_route_composition;

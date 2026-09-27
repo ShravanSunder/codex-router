@@ -1,11 +1,11 @@
 //! Validate ACP prompt blocks against a Session's advertised content types.
 
-use crate::external_provider_runtime::ExternalProviderRuntimeError;
-use crate::provider_capability_report::ProviderCapabilityReport;
+use crate::ProviderCapabilityReport;
+use crate::agent_session_client::ExternalProviderRuntimeError;
 use agent_client_protocol::schema::v1::ContentBlock;
 
 #[derive(Clone, Debug)]
-pub(crate) struct ProviderPromptContent {
+pub struct ProviderPromptContent {
     blocks: Vec<ContentBlock>,
 }
 
@@ -34,5 +34,13 @@ impl ProviderPromptContent {
 
     pub(crate) fn into_blocks(self) -> Vec<ContentBlock> {
         self.blocks
+    }
+
+    #[cfg(feature = "test-observation")]
+    pub fn new_for_test(
+        blocks: Vec<ContentBlock>,
+        capabilities: &ProviderCapabilityReport,
+    ) -> Result<Self, ExternalProviderRuntimeError> {
+        Self::new(blocks, capabilities)
     }
 }
