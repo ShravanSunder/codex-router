@@ -1,8 +1,8 @@
-"""Ordered stdio JSON-RPC fixture agent, launched only by Rust tests."""
+"""Scripted stdio JSON-RPC fixture agent, launched only by Rust tests."""
 
 import json
 import os
-import signal
+import socket
 import sys
 import traceback
 
@@ -76,6 +76,17 @@ for step_number, step in enumerate(steps, start=1):
         actual = read_message(step_number)
         if not contains_expected(actual, step["message"]):
             fail(step_number, step["message"], actual)
+    elif action == "expect_messages_unordered":
+        pending = list(step["messages"])
+        while pending:
+            actual = read_message(step_number)
+            matched = next(
+                (index for index, expected in enumerate(pending) if contains_expected(actual, expected)),
+                None,
+            )
+            if matched is None:
+                fail(step_number, pending, actual)
+            pending.pop(matched)
     elif action == "respond":
         request_name = step["requestName"]
         if request_name not in request_ids:
@@ -96,11 +107,11 @@ for step_number, step in enumerate(steps, start=1):
         send_message(step["message"])
     elif action == "exit":
         sys.exit(0)
-    elif action == "wait_for_signal":
-        signal.signal(signal.SIGUSR1, lambda _signal, _frame: sys.exit(0))
-        with open(step["processIdPath"], "w", encoding="utf-8") as destination:
-            destination.write(str(os.getpid()))
-        signal.pause()
+    elif action == "exit_on_socket_signal":
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(step["socketPath"])
+            connection.recv(1)
+        os._exit(0)
     elif action == "write_marker":
         with open(step["path"], "w", encoding="utf-8") as destination:
             destination.write("observed")

@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-message-board = { path = "../message-board", version = "0.1.39" }
+message-board = { path = "../message-board", version = "0.1.40" }
 serde.workspace = true
 
 [dev-dependencies]

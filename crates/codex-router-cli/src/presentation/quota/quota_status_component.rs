@@ -366,7 +366,6 @@ pub(super) fn QuotaStatusComponent(
     hooks.use_future({
         let mut view_model = view_model;
         let reload_view_model = props.reload_view_model.clone();
-        let reload_lock = reload_lock;
         let reload_interval = if props.reload_interval.is_zero() {
             LIVE_QUOTA_STATUS_RELOAD_INTERVAL
         } else {

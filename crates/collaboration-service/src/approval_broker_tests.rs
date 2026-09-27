@@ -85,7 +85,7 @@ async fn approval_notice_uses_selected_delivery_outcome() {
     }
 }
 
-fn session(service_id: &UuidIdentity, id: &str) -> SessionRef {
+pub(super) fn session(service_id: &UuidIdentity, id: &str) -> SessionRef {
     SessionRef {
         endpoint: EndpointRef {
             service_id: service_id.clone(),
@@ -99,7 +99,7 @@ fn session(service_id: &UuidIdentity, id: &str) -> SessionRef {
     }
 }
 
-async fn fixture_broker() -> (Arc<ServiceApprovalBroker>, CodexGeneration, PathBuf) {
+pub(super) async fn fixture_broker() -> (Arc<ServiceApprovalBroker>, CodexGeneration, PathBuf) {
     let service_id = crate::new_service_uuid().unwrap_or_else(|error| panic!("service: {error}"));
     let generation: CodexGeneration = serde_json::from_value(json!({
         "serviceEpoch": String::from(service_id.clone()), "generation": 1
@@ -476,6 +476,7 @@ async fn external_generation_is_independent_and_decision_remains_actor_bound_sin
             generation_authority: ApprovalGenerationAuthority::External {
                 generation: external_generation,
                 retirement: tokio_util::sync::CancellationToken::new(),
+                turn_cancellation: tokio_util::sync::CancellationToken::new(),
             },
         },
     );
@@ -536,6 +537,7 @@ async fn unreachable_external_approver_history_keeps_curated_decision_details() 
             generation,
             retirement: tokio_util::sync::CancellationToken::new(),
             cancellation: tokio_util::sync::CancellationToken::new(),
+            turn_cancellation: tokio_util::sync::CancellationToken::new(),
             operation_metadata: metadata,
             presentation: Some(ApprovalPresentation {
                 tool_name: Some("router-collaboration-endpoints_list".to_owned()),
@@ -596,6 +598,7 @@ async fn external_approval_timeout_is_recorded_in_history() {
                 generation: generation.clone(),
                 retirement: tokio_util::sync::CancellationToken::new(),
                 cancellation: tokio_util::sync::CancellationToken::new(),
+                turn_cancellation: tokio_util::sync::CancellationToken::new(),
                 operation_metadata: ExternalApprovalOperationMetadata {
                     operation_id,
                     target,
@@ -645,6 +648,7 @@ async fn external_timeout_covers_notice_delivery_and_cleans_pending_state() {
                 generation,
                 retirement: tokio_util::sync::CancellationToken::new(),
                 cancellation: tokio_util::sync::CancellationToken::new(),
+                turn_cancellation: tokio_util::sync::CancellationToken::new(),
                 operation_metadata: metadata,
                 presentation: None,
                 options: vec![ExternalApprovalOption {
@@ -685,6 +689,7 @@ async fn external_decision_racing_retirement_has_one_terminal_state() {
         generation: generation.clone(),
         retirement: retirement.clone(),
         cancellation: tokio_util::sync::CancellationToken::new(),
+        turn_cancellation: tokio_util::sync::CancellationToken::new(),
         operation_metadata: ExternalApprovalOperationMetadata {
             operation_id,
             target,
@@ -884,6 +889,7 @@ async fn external_target_cannot_approve_its_own_blocked_request() {
             generation: generation.clone(),
             retirement: tokio_util::sync::CancellationToken::new(),
             cancellation: tokio_util::sync::CancellationToken::new(),
+            turn_cancellation: tokio_util::sync::CancellationToken::new(),
             operation_metadata,
             presentation: None,
             options: vec![ExternalApprovalOption {
@@ -935,6 +941,7 @@ async fn external_wrong_service_and_invalid_options_are_recorded() {
             generation: generation.clone(),
             retirement: tokio_util::sync::CancellationToken::new(),
             cancellation: tokio_util::sync::CancellationToken::new(),
+            turn_cancellation: tokio_util::sync::CancellationToken::new(),
             operation_metadata: metadata("201"),
             presentation: None,
             options: vec![ExternalApprovalOption {
@@ -996,6 +1003,7 @@ async fn external_wrong_service_and_invalid_options_are_recorded() {
                 generation: generation.clone(),
                 retirement: tokio_util::sync::CancellationToken::new(),
                 cancellation: tokio_util::sync::CancellationToken::new(),
+                turn_cancellation: tokio_util::sync::CancellationToken::new(),
                 operation_metadata: metadata(suffix),
                 presentation: None,
                 options,

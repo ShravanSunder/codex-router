@@ -30,6 +30,8 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines,
 };
+pub(crate) use approval_turn_cancellation::ProviderTurnCancellation;
+use approval_turn_cancellation::{ActiveApprovalContext, active_turn_cancellation};
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
 use external_approval_dispatch::spawn_external_approval_dispatch;
 use provider_acp_error_mapping::acp_load_session_error;
@@ -271,7 +273,7 @@ pub struct ExternalProviderApprovalContext {
 }
 
 struct ApprovalContextGuard {
-    contexts: Arc<std::sync::Mutex<HashMap<String, ExternalProviderApprovalContext>>>,
+    contexts: Arc<std::sync::Mutex<HashMap<String, ActiveApprovalContext>>>,
     provider_session_id: String,
     operation_id: OperationId,
 }
@@ -281,7 +283,7 @@ impl Drop for ApprovalContextGuard {
         if let Ok(mut contexts) = self.contexts.lock()
             && contexts
                 .get(&self.provider_session_id)
-                .is_some_and(|context| context.operation_id == self.operation_id)
+                .is_some_and(|context| context.approval.operation_id == self.operation_id)
         {
             contexts.remove(&self.provider_session_id);
         }
@@ -467,7 +469,7 @@ pub struct ExternalProviderRuntime {
     approval_broker: Arc<
         tokio::sync::RwLock<Option<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>>,
     >,
-    approval_contexts: Arc<std::sync::Mutex<HashMap<String, ExternalProviderApprovalContext>>>,
+    approval_contexts: Arc<std::sync::Mutex<HashMap<String, ActiveApprovalContext>>>,
     permission_refusal_reasons:
         Arc<std::sync::Mutex<HashMap<OperationId, ExternalProviderApprovalRefusalReason>>>,
     endpoint_id: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -550,11 +552,13 @@ impl ExternalProviderRuntime {
             None::<std::sync::Weak<collaboration_service::ServiceApprovalBroker>>,
         ));
         let callback_approval_broker = Arc::clone(&approval_broker);
+        let task_approval_broker = Arc::clone(&approval_broker);
         let approval_contexts = Arc::new(std::sync::Mutex::new(HashMap::<
             String,
-            ExternalProviderApprovalContext,
+            ActiveApprovalContext,
         >::new()));
         let callback_approval_contexts = Arc::clone(&approval_contexts);
+        let task_approval_contexts = Arc::clone(&approval_contexts);
         let known_sessions = ProviderKnownSessions::default();
         let request_known_sessions = known_sessions.clone();
         let permission_refusal_reasons = Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -602,7 +606,13 @@ impl ExternalProviderRuntime {
                     }
                     std::io::Error::other(error)
                 })
-            });
+            })
+            .chain(futures_util::stream::once(async {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "provider stdout closed",
+                ))
+            }));
             let final_approval_broker = Arc::clone(&callback_approval_broker);
             let connection = Client.builder().name("codex-router-host")
                 .with_handler(ProviderRequestSessionGuard::new(request_known_sessions))
@@ -650,7 +660,7 @@ impl ExternalProviderRuntime {
                                 && let Ok(mut refusals) =
                                     callback_permission_refusal_reasons.lock()
                             {
-                                refusals.insert(context.operation_id.clone(), reason);
+                                refusals.insert(context.approval.operation_id.clone(), reason);
                             }
                         }
                         spawn_external_approval_dispatch(
@@ -848,7 +858,8 @@ impl ExternalProviderRuntime {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                                                 continue;
                                             };
-                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, dispatch, reply }).await
+                                            let turn_cancellation = operation_id.as_ref().and_then(|operation_id| active_turn_cancellation(&task_approval_contexts, &task_approval_broker, &provider_session_id, Some(operation_id)));
+                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, turn_cancellation, dispatch, reply }).await
                                                 && let ProviderSessionCommand::Prompt { dispatch: Some(dispatch), .. } = error.0
                                             {
                                                 let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);

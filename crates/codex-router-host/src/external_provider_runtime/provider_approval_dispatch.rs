@@ -1,8 +1,9 @@
 //! Approval context lifetime for a dispatched provider prompt.
 
 use super::{
-    ApprovalContextGuard, ExternalProviderApprovalContext, ExternalProviderPromptOutcome,
-    ExternalProviderRuntime, ExternalProviderRuntimeError, ProviderPromptDispatchObservation,
+    ActiveApprovalContext, ApprovalContextGuard, ExternalProviderApprovalContext,
+    ExternalProviderPromptOutcome, ExternalProviderRuntime, ExternalProviderRuntimeError,
+    ProviderPromptDispatchObservation,
 };
 use std::sync::Arc;
 
@@ -25,7 +26,13 @@ impl ExternalProviderRuntime {
             if contexts.contains_key(&provider_session_id) {
                 return Err(ExternalProviderRuntimeError::LocalBusy);
             }
-            contexts.insert(provider_session_id.clone(), context);
+            contexts.insert(
+                provider_session_id.clone(),
+                ActiveApprovalContext {
+                    approval: context,
+                    cancelling: tokio_util::sync::CancellationToken::new(),
+                },
+            );
         }
         let _context_guard = ApprovalContextGuard {
             contexts: Arc::clone(&self.approval_contexts),
