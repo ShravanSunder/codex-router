@@ -63,7 +63,7 @@ fn classify_endpoint_for_session_list(endpoint: &EndpointDescription) -> Invento
 }
 #[derive(Subcommand)]
 enum InventoryCommand {
-    /// Read stored metadata or currently loaded/active native observations; never resumes threads.
+    /// Read stored metadata or live sessions from the selected endpoint; never resumes sessions.
     List {
         #[arg(long)]
         endpoint: String,

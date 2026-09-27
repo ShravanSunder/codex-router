@@ -234,7 +234,7 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::None)
     }
 
-    #[tool(name = "sessions_list", description = "Lists stored, loaded, or active conversations using the selected endpoint and scope. Read-only and never resumes a conversation.", output_schema = rmcp::handler::server::tool::schema_for_type::<NativeSessionListResult>())]
+    #[tool(name = "sessions_list", description = "Lists stored, loaded, or active Codex conversations using the selected scope. Claude Code sessions use provider_sessions_list. Read-only and never resumes a conversation.", output_schema = rmcp::handler::server::tool::schema_for_type::<NativeSessionListResult>())]
     async fn sessions_list(
         &self,
         Parameters(request): Parameters<NativeSessionListParams>,
@@ -261,7 +261,7 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::None)
     }
 
-    #[tool(name = "provider_sessions_list", description = "Lists Router-owned provider Sessions from durable inventory with live state when available. Provider records have no source, title or model.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSessionListResult>())]
+    #[tool(name = "provider_sessions_list", description = "Lists Router-hosted provider Sessions and live Claude Code terminal sessions. Claude terminal discovery supports active or loaded views; stored applies only to hosted Sessions.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSessionListResult>())]
     async fn provider_sessions_list(
         &self,
         Parameters(request): Parameters<ProviderSessionListParams>,
