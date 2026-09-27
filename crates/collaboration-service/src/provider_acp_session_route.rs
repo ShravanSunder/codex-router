@@ -1,5 +1,5 @@
 //! ACP route for Router-owned provider Sessions on the shared connection shell.
-use crate::ServiceApprovalBroker;
+use crate::ServiceInteractionBroker;
 use crate::provider_acp_event_projection::{ProviderSessionObservers, stream_prompt};
 use crate::provider_acp_interaction::{
     OutboundInteraction, apply_interaction_reply, present_interaction,
@@ -23,7 +23,7 @@ pub struct ProviderAcpSessionRoute {
     endpoint: SessionEndpointRef,
     commands: Arc<dyn SessionCommandPort>,
     events: Arc<dyn SessionEventHub>,
-    interaction_broker: Option<Arc<ServiceApprovalBroker>>,
+    interaction_broker: Option<Arc<ServiceInteractionBroker>>,
 }
 
 impl ProviderAcpSessionRoute {
@@ -41,7 +41,7 @@ impl ProviderAcpSessionRoute {
     }
 
     #[must_use]
-    pub fn with_interaction_broker(mut self, broker: Arc<ServiceApprovalBroker>) -> Self {
+    pub fn with_interaction_broker(mut self, broker: Arc<ServiceInteractionBroker>) -> Self {
         self.interaction_broker = Some(broker);
         self
     }

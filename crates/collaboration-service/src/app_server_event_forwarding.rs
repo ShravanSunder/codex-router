@@ -2,7 +2,7 @@
 use crate::router_session_app_server::thread_alias;
 use crate::{
     ApprovalPresentation, ApprovalReply, HubEvent, InteractionDisplayContext, QuestionPresentation,
-    QuestionReply, ServiceApprovalBroker, group_historical_turns, map_approval_reply,
+    QuestionReply, ServiceInteractionBroker, group_historical_turns, map_approval_reply,
     map_question_form_reply, render_historical_turn, translate_approval_request,
     translate_question_request, translate_session_item,
 };
@@ -92,14 +92,14 @@ enum PendingAppServerInteraction {
 
 pub(crate) struct AppServerEventForwarding {
     actor: Identity,
-    broker: Option<Arc<ServiceApprovalBroker>>,
+    broker: Option<Arc<ServiceInteractionBroker>>,
     turn_ids: HashMap<SessionRef, String>,
     items: HashMap<(SessionRef, String), Value>,
     pending: HashMap<String, PendingAppServerInteraction>,
 }
 
 impl AppServerEventForwarding {
-    pub(crate) fn new(actor: Identity, broker: Option<Arc<ServiceApprovalBroker>>) -> Self {
+    pub(crate) fn new(actor: Identity, broker: Option<Arc<ServiceInteractionBroker>>) -> Self {
         Self {
             actor,
             broker,
@@ -277,6 +277,7 @@ impl AppServerEventForwarding {
                         &self.actor,
                         option_id.as_str(),
                         acknowledge_persistent,
+                        None,
                     )
                     .await;
             }

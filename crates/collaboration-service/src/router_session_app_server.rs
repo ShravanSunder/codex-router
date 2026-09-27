@@ -32,7 +32,7 @@ pub struct RouterSessionAppServerContext {
     commands: Arc<dyn SessionCommandPort>,
     events: Arc<dyn SessionEventHub>,
     model_catalog: watch::Receiver<Vec<ProviderModelEntry>>,
-    interaction_broker: Option<Arc<crate::ServiceApprovalBroker>>,
+    interaction_broker: Option<Arc<crate::ServiceInteractionBroker>>,
 }
 
 impl RouterSessionAppServerContext {
@@ -63,7 +63,7 @@ impl RouterSessionAppServerContext {
     }
 
     #[must_use]
-    pub fn with_interaction_broker(mut self, broker: Arc<crate::ServiceApprovalBroker>) -> Self {
+    pub fn with_interaction_broker(mut self, broker: Arc<crate::ServiceInteractionBroker>) -> Self {
         self.interaction_broker = Some(broker);
         self
     }

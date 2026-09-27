@@ -20,7 +20,7 @@ pub struct AcpChannelListener {
     holder: Arc<crate::UnmaterializedThreadHolder>,
     recorder: Arc<dyn codex_acp_adapter::ConversationOperationRecorder>,
     providers: Vec<ProviderRouteBackend>,
-    interaction_broker: Option<Arc<crate::ServiceApprovalBroker>>,
+    interaction_broker: Option<Arc<crate::ServiceInteractionBroker>>,
     permits: Arc<Semaphore>,
 }
 impl AcpChannelListener {
@@ -65,7 +65,7 @@ impl AcpChannelListener {
         self
     }
     #[must_use]
-    pub fn with_interaction_broker(mut self, broker: Arc<crate::ServiceApprovalBroker>) -> Self {
+    pub fn with_interaction_broker(mut self, broker: Arc<crate::ServiceInteractionBroker>) -> Self {
         self.interaction_broker = Some(broker);
         self
     }

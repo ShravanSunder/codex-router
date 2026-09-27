@@ -226,7 +226,8 @@ impl SessionEventHub for ScriptedProviderBackend {
                     sequence: 2,
                     event: SessionEvent::TurnStarted {
                         turn_id: "turn-1".into(),
-                        input_id: "input-1".into(),
+                        input_id:
+                            session_event_model::InputId::new("input-1").expect("test input id"),
                     },
                 }))
                 .collect(),

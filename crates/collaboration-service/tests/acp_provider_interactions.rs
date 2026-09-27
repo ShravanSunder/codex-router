@@ -2,7 +2,7 @@ use codex_acp_adapter::{AcpSchemaCatalog, NativeStoredSessions};
 use collaboration_protocol::QuestionResponse;
 use collaboration_service::{
     AcpChannelListener, HubEvent, NativeControlBackend, NativeGenerationGate,
-    ServiceApprovalBroker, SessionCommandPort, SessionEventHub, UnmaterializedThreadHolder,
+    ServiceInteractionBroker, SessionCommandPort, SessionEventHub, UnmaterializedThreadHolder,
 };
 use message_board::{Identity, SessionEndpointRef};
 use serde_json::{Value, json};
@@ -73,6 +73,7 @@ fn approval(request_id: &str) -> Result<ApprovalRequest, Box<dyn std::error::Err
         title: "Run checks".into(),
         description: Some("Approve execution".into()),
         subject: None,
+        options_origin: session_event_model::OptionsOrigin::AgentOffered,
         options: OfferedOptions::new(vec![
             OfferedOption {
                 option_id: OfferedOptionId::new("allow-once")?,
@@ -96,7 +97,7 @@ async fn only_the_approver_receives_and_decides_exact_provider_options() -> Test
     let service_id = "0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89";
     let provider = Arc::new(ScriptedProviderBackend::new()?);
     let endpoint: SessionEndpointRef = provider.endpoint.clone();
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.to_owned().try_into()?,
         NativeControlBackend {
             endpoint: serde_json::from_value(
@@ -154,7 +155,13 @@ async fn only_the_approver_receives_and_decides_exact_provider_options() -> Test
 
     let request = approval("approval-1")?;
     let agent_reply = broker
-        .request_typed_approval(provider.session.clone(), owner.clone(), request.clone())
+        .request_typed_approval(
+            provider.session.clone(),
+            owner.clone(),
+            request.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await?;
     let pending = PendingInteraction::Approval {
         approver: owner.clone(),
@@ -201,7 +208,7 @@ async fn only_the_approver_receives_and_decides_exact_provider_options() -> Test
     )
     .await?;
     let selected = tokio::time::timeout(Duration::from_secs(2), agent_reply).await??;
-    assert_eq!(selected.as_str(), "allow-once");
+    assert_eq!(selected.option_id.as_str(), "allow-once");
     stop.cancel();
     serving.await??;
     Ok(())
@@ -214,7 +221,7 @@ async fn approver_question_form_returns_typed_answers_to_the_agent() -> TestResu
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
     let service_id = "0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89";
     let provider = Arc::new(ScriptedProviderBackend::new()?);
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.to_owned().try_into()?,
         NativeControlBackend {
             endpoint: serde_json::from_value(

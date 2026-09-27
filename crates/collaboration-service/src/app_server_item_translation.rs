@@ -4,7 +4,7 @@ use message_board::SessionRef;
 use serde_json::{Value, json};
 use session_event_model::{
     ApprovalEffect, ApprovalRequest, ApprovalScope, ApprovalSubject, OfferedOptionId,
-    QuestionField, QuestionRequest,
+    OptionsOrigin, QuestionField, QuestionRequest,
 };
 use session_event_model::{SessionItem, SessionItemKind, StopReason, ToolCallStatus, TurnOutcome};
 use std::collections::{BTreeMap, BTreeSet};
@@ -210,8 +210,25 @@ fn native_command_decision(effect: ApprovalEffect, scope: &ApprovalScope) -> Opt
 fn approval_item_id(request: &ApprovalRequest) -> &str {
     match &request.subject {
         Some(ApprovalSubject::ToolCall { tool_call }) => &tool_call.tool_call_id,
+        Some(ApprovalSubject::Plan { tool_call_id, .. }) => tool_call_id,
         _ => &request.request_id,
     }
+}
+
+fn approval_form_message(request: &ApprovalRequest) -> String {
+    let mut message = request.title.clone();
+    if let Some(description) = &request.description {
+        message.push('\n');
+        message.push_str(description);
+    }
+    if request.options_origin == OptionsOrigin::RouterSynthesized {
+        message.push_str("\nRouter synthesized these choices; the agent did not offer them.");
+    }
+    if let Some(ApprovalSubject::Plan { plan_item_id, .. }) = &request.subject {
+        message.push_str("\nPlan item: ");
+        message.push_str(plan_item_id);
+    }
+    message
 }
 
 /// Exact native prompts are used only if their decision controls represent
@@ -249,7 +266,7 @@ pub fn translate_approval_request(
             },
         )
     });
-    if command_kind && exact_command {
+    if command_kind && exact_command && request.options_origin == OptionsOrigin::AgentOffered {
         let mut available_decisions = request
             .options
             .iter()
@@ -284,7 +301,8 @@ pub fn translate_approval_request(
         .iter()
         .map(|option| native_command_decision(option.choice.effect, &option.choice.scope))
         .collect::<Vec<_>>();
-    if file_kind
+    if request.options_origin == OptionsOrigin::AgentOffered
+        && file_kind
         && offered.len() == 2
         && file_decisions.contains(&Some("accept"))
         && file_decisions.contains(&Some("acceptForSession"))
@@ -331,9 +349,7 @@ pub fn translate_approval_request(
         params: json!({
             "threadId":context.thread_id,"turnId":context.turn_id,
             "serverName":"codex-router","mode":"form",
-            "message":request.description.as_ref()
-                .map_or_else(|| request.title.clone(),
-                    |description| format!("{}\n{}",request.title,description)),
+            "message":approval_form_message(request),
             "requestedSchema":{"type":"object","properties":{
                 "choice":{"type":"string","title":request.title,"oneOf":choices}
             },"required":["choice"]}
@@ -457,7 +473,23 @@ pub fn translate_question_request(
                 required,
                 json!({"type":"string","title":label,"description":description,
                     "oneOf":options.iter().map(|option|
-                        json!({"const":option,"title":option})).collect::<Vec<_>>()}),
+                        json!({"const":option.option_id,"title":option.label})).collect::<Vec<_>>()}),
+            ),
+            QuestionField::MultiChoice {
+                field_id,
+                label,
+                description,
+                required,
+                options,
+                min,
+                max,
+            } => (
+                field_id,
+                required,
+                json!({"type":"array","title":label,"description":description,
+                    "uniqueItems":true,"minItems":min,"maxItems":max,
+                    "items":{"type":"string","oneOf":options.iter().map(|option|
+                        json!({"const":option.option_id,"title":option.label})).collect::<Vec<_>>()}}),
             ),
         };
         properties.insert(field_id.clone(), schema);

@@ -1,5 +1,5 @@
 //! ACP client presentation and broker replies for provider interactions.
-use crate::{InteractionHistoryError, ServiceApprovalBroker};
+use crate::{InteractionHistoryError, ServiceInteractionBroker};
 use collaboration_protocol::QuestionResponse;
 use message_board::{Identity, SessionRef};
 use serde_json::{Map, Value, json};
@@ -39,6 +39,13 @@ pub(crate) fn present_interaction(
                 Some(ApprovalSubject::Command { .. }) => json!({
                     "toolCallId":request.request_id,"title":request.title,"kind":"execute",
                 }),
+                Some(ApprovalSubject::Plan {
+                    tool_call_id,
+                    plan_item_id,
+                }) => json!({
+                    "toolCallId":tool_call_id,"title":request.title,"kind":"other",
+                    "_meta":{"router":{"planItemId":plan_item_id}}
+                }),
                 None => {
                     json!({"toolCallId":request.request_id,"title":request.title,"kind":"other"})
                 }
@@ -55,14 +62,20 @@ pub(crate) fn present_interaction(
                         }
                         (ApprovalEffect::Decline | ApprovalEffect::Abort, _) => "reject_always",
                     };
+                    let persistent_target = match &option.choice.scope {
+                        ApprovalScope::Persistent { where_stored } => Some(where_stored.as_str()),
+                        _ => None,
+                    };
                     json!({"optionId":option.option_id.as_str(),"name":option.label,"kind":kind,
-                    "_meta":{"sessionProfile":{"choice":encode_choice_metadata(&option.choice)}}})
+                    "_meta":{"sessionProfile":{"choice":encode_choice_metadata(&option.choice)},
+                        "router":{"persistentTarget":persistent_target}}})
                 })
                 .collect::<Vec<_>>();
             let frame = json!({"jsonrpc":"2.0","id":request_id,
             "method":"session/request_permission","params":{
                 "sessionId":session.session_id.as_str(),"toolCall":tool_call,"options":options,
-                "_meta":ApprovalRequestProfileMetadata::from_request(request)
+                "_meta":{"sessionProfile":ApprovalRequestProfileMetadata::from_request(request).session_profile,
+                    "router":{"optionsOrigin":request.options_origin}}
             }});
             Some(OutboundInteraction {
                 request_id,
@@ -112,6 +125,13 @@ pub(crate) fn present_interaction(
                         "string",
                         Some(options),
                     ),
+                    QuestionField::MultiChoice {
+                        field_id,
+                        label,
+                        description,
+                        required,
+                        ..
+                    } => (field_id, label, description, required, "array", None),
                 };
                 if *is_required {
                     required.push(field_id.clone());
@@ -123,7 +143,31 @@ pub(crate) fn present_interaction(
                     property.insert("description".into(), json!(description));
                 }
                 if let Some(choices) = choices {
-                    property.insert("enum".into(), json!(choices));
+                    property.insert(
+                        "oneOf".into(),
+                        json!(
+                            choices
+                                .iter()
+                                .map(
+                                    |choice| json!({"const":choice.option_id,"title":choice.label})
+                                )
+                                .collect::<Vec<_>>()
+                        ),
+                    );
+                }
+                if let QuestionField::MultiChoice {
+                    options, min, max, ..
+                } = field
+                {
+                    property.insert("uniqueItems".into(), json!(true));
+                    property.insert("items".into(), json!({"type":"string","oneOf":options.iter().map(|choice|
+                        json!({"const":choice.option_id,"title":choice.label})).collect::<Vec<_>>()}));
+                    if let Some(min) = min {
+                        property.insert("minItems".into(), json!(min));
+                    }
+                    if let Some(max) = max {
+                        property.insert("maxItems".into(), json!(max));
+                    }
                 }
                 properties.insert(field_id.clone(), Value::Object(property));
             }
@@ -142,7 +186,7 @@ pub(crate) fn present_interaction(
 }
 
 pub(crate) async fn apply_interaction_reply(
-    broker: &ServiceApprovalBroker,
+    broker: &ServiceInteractionBroker,
     actor: &Identity,
     interaction: &PendingInteraction,
     reply: &Value,
@@ -163,6 +207,7 @@ pub(crate) async fn apply_interaction_reply(
                     actor,
                     option_id,
                     acknowledge_persistent,
+                    None,
                 )
                 .await?;
             Ok(())

@@ -1,7 +1,7 @@
 use collaboration_protocol::QuestionResponse;
 use collaboration_service::{
     HubEvent, NativeControlBackend, NativeGenerationGate, RouterSessionAppServerContext,
-    ServiceApprovalBroker, SessionCommandPort, SessionEventHub,
+    ServiceInteractionBroker, SessionCommandPort, SessionEventHub,
     serve_router_session_app_server_connection,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -27,7 +27,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
     let service_id = "0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89";
     let backend = Arc::new(ScriptedProviderBackend::new()?);
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.to_owned().try_into()?,
         NativeControlBackend {
             endpoint: serde_json::from_value(
@@ -81,6 +81,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
             command: "cargo test".into(),
             cwd: "/tmp".into(),
         }),
+        options_origin: session_event_model::OptionsOrigin::AgentOffered,
         options: OfferedOptions::new(vec![
             OfferedOption {
                 option_id: OfferedOptionId::new("allow-once")?,
@@ -95,13 +96,19 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
         ])?,
     };
     let agent_reply = broker
-        .request_typed_approval(backend.session.clone(), actor.clone(), request.clone())
+        .request_typed_approval(
+            backend.session.clone(),
+            actor.clone(),
+            request.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await?;
     let _sent = backend.events.send(HubEvent {
         sequence: 90,
         event: SessionEvent::TurnStarted {
             turn_id: "turn-1".into(),
-            input_id: "input-1".into(),
+            input_id: session_event_model::InputId::new("input-1")?,
         },
     });
     let turn_started: Value =
@@ -128,7 +135,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
         ))
         .await?;
     let selected = tokio::time::timeout(Duration::from_secs(2), agent_reply).await??;
-    assert_eq!(selected.as_str(), "allow-once");
+    assert_eq!(selected.option_id.as_str(), "allow-once");
 
     let question: QuestionRequest = serde_json::from_value(json!({
         "requestId":"question-1","prompt":"Choose count","fields":[
@@ -213,6 +220,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
             command: "cargo check".into(),
             cwd: "/tmp".into(),
         }),
+        options_origin: session_event_model::OptionsOrigin::AgentOffered,
         options: OfferedOptions::new(vec![OfferedOption {
             option_id: OfferedOptionId::new("allow-again")?,
             label: "Allow once".into(),
@@ -224,6 +232,8 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
             backend.session.clone(),
             actor.clone(),
             second_request.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await?;
     let _sent = backend.events.send(HubEvent {
@@ -265,6 +275,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), second_agent_reply)
             .await??
+            .option_id
             .as_str(),
         "allow-again"
     );

@@ -31,6 +31,7 @@ fn approval(kind: &str, options: Vec<OfferedOption>) -> ApprovalRequest {
                 title: "Tool action".into(),
             },
         }),
+        options_origin: session_event_model::OptionsOrigin::AgentOffered,
         options: OfferedOptions::new(options).expect("options"),
     }
 }
@@ -204,6 +205,42 @@ fn form_preserves_two_reject_options_and_discloses_persistence() {
 }
 
 #[test]
+fn synthesized_plan_approval_discloses_origin_and_plan_subject() {
+    let actor = identity("owner");
+    let mut request = approval(
+        "execute",
+        vec![offered(
+            "allow",
+            "Allow",
+            ApprovalEffect::Allow,
+            ApprovalScope::Once,
+        )],
+    );
+    request.options_origin = session_event_model::OptionsOrigin::RouterSynthesized;
+    request.subject = Some(ApprovalSubject::Plan {
+        tool_call_id: "tool-plan".into(),
+        plan_item_id: "plan-item-2".into(),
+    });
+    let presentation = translate_approval_request(&request, &actor, &actor, context());
+    let ApprovalPresentation::Interactive { method, params, .. } = presentation else {
+        panic!("expected disclosed form");
+    };
+    assert_eq!(method, "mcpServer/elicitation/request");
+    assert!(
+        params["message"]
+            .as_str()
+            .expect("message")
+            .contains("Router synthesized")
+    );
+    assert!(
+        params["message"]
+            .as_str()
+            .expect("message")
+            .contains("plan-item-2")
+    );
+}
+
+#[test]
 fn non_approver_sees_only_read_only_interaction() {
     let request = approval(
         "execute",
@@ -262,7 +299,16 @@ fn question_form_keeps_typed_fields_and_distinct_outcomes() {
                 label: "Mode".into(),
                 description: None,
                 required: true,
-                options: vec!["safe".into(), "fast".into()],
+                options: vec![
+                    session_event_model::ChoiceOption {
+                        option_id: "safe".into(),
+                        label: "Safe".into(),
+                    },
+                    session_event_model::ChoiceOption {
+                        option_id: "fast".into(),
+                        label: "Fast".into(),
+                    },
+                ],
             },
         ])
         .expect("fields"),
@@ -302,7 +348,16 @@ fn non_approver_cannot_answer_a_question() {
             label: "Mode".into(),
             description: None,
             required: true,
-            options: vec!["safe".into(), "fast".into()],
+            options: vec![
+                session_event_model::ChoiceOption {
+                    option_id: "safe".into(),
+                    label: "Safe".into(),
+                },
+                session_event_model::ChoiceOption {
+                    option_id: "fast".into(),
+                    label: "Fast".into(),
+                },
+            ],
         }])
         .expect("fields"),
     };
