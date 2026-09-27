@@ -42,6 +42,9 @@ enum InventoryEndpointKind {
 }
 
 fn classify_endpoint_for_session_list(endpoint: &EndpointDescription) -> InventoryEndpointKind {
+    if String::from(endpoint.endpoint.endpoint_id.clone()) == "claude-local" {
+        return InventoryEndpointKind::Provider;
+    }
     if endpoint
         .channels
         .iter()
@@ -310,6 +313,15 @@ mod tests {
         })).expect("native endpoint");
         assert_eq!(
             classify_endpoint_for_session_list(&provider),
+            InventoryEndpointKind::Provider
+        );
+        let unavailable_claude: EndpointDescription = serde_json::from_value(json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+            "label":"Claude", "availability":{"state":"unavailable","observedAt":"2026-09-26T00:00:00Z","reason":"ACP unavailable"},
+            "channels":[]
+        })).expect("unavailable Claude endpoint");
+        assert_eq!(
+            classify_endpoint_for_session_list(&unavailable_claude),
             InventoryEndpointKind::Provider
         );
         assert_eq!(

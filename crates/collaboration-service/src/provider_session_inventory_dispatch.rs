@@ -155,10 +155,11 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
         Ok(None) => return failure(id, "endpointNotFound"),
         Err(_) => return failure(id, "unavailable"),
     };
-    if !description
-        .channels
-        .iter()
-        .any(|channel| matches!(channel, ChannelDescription::ExternalProvider { .. }))
+    if !is_claude
+        && !description
+            .channels
+            .iter()
+            .any(|channel| matches!(channel, ChannelDescription::ExternalProvider { .. }))
     {
         return failure(id, "unsupportedCapability");
     }

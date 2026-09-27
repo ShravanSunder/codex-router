@@ -329,4 +329,44 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         .await
         .expect("second server task")
         .expect("second serve");
+
+    let unavailable_claude: EndpointDescription = serde_json::from_value(json!({
+        "endpoint":target.endpoint,"label":"Claude unavailable fixture",
+        "availability":{"state":"unavailable","observedAt":"2026-09-26T00:00:00Z","reason":"ACP unavailable"},
+        "channels":[]
+    })).expect("unavailable Claude endpoint");
+    let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
+        .expect("identity")
+        .with_endpoints(vec![unavailable_claude])
+        .expect("endpoint")
+        .with_claude_code_sessions(Arc::new(ClaudeCodeSessionRegistry::new(
+            root.path().join("claude-fixture-registry"),
+        )));
+    let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("third socket");
+    let server = tokio::spawn(serve_control_connection(server_stream, identity));
+    let mut client = ControlClient::initialize(client_stream, "terminal-only-list-test", "1")
+        .await
+        .expect("third initialize");
+    let terminal_only = client
+        .list_provider_sessions(ProviderSessionListParams {
+            endpoint: target.endpoint,
+            view: NativeSessionView::Active,
+            scope: NativeSessionScope::Any,
+            source: NativeSessionSource::Interactive,
+            query: None,
+            page_size: 10,
+            cursor: None,
+        })
+        .await
+        .expect("terminal discovery survives unavailable ACP");
+    assert_eq!(terminal_only.sessions.len(), 1);
+    assert!(matches!(
+        &terminal_only.sessions[0],
+        collaboration_protocol::ProviderSessionSummary::ClaudeCodeInteractive { .. }
+    ));
+    client.close().await.expect("third close");
+    server
+        .await
+        .expect("third server task")
+        .expect("third serve");
 }
