@@ -2,9 +2,11 @@
 
 import json
 import os
+import select
 import socket
 import sys
 import traceback
+from pathlib import Path
 
 
 def record_diagnostic(message):
@@ -69,9 +71,16 @@ for step_number, step in enumerate(steps, start=1):
         actual = read_message(step_number)
         expected = {"jsonrpc": "2.0", "method": step["method"], "params": step["params"]}
         exact_params = not step.get("exactParams") or actual.get("params") == step["params"]
-        if not contains_expected(actual, expected) or not exact_params or "id" not in actual:
+        expected_text = step.get("promptTextContains")
+        has_expected_text = expected_text is None or expected_text in json.dumps(
+            actual.get("params", {}).get("prompt", [])
+        )
+        if not contains_expected(actual, expected) or not exact_params or not has_expected_text or "id" not in actual:
             fail(step_number, expected, actual)
         request_ids[step["requestName"]] = actual["id"]
+        if "recordPath" in step:
+            with Path(step["recordPath"]).open("a", encoding="utf-8") as destination:
+                destination.write(json.dumps(actual) + "\n")
     elif action == "expect_message":
         actual = read_message(step_number)
         if not contains_expected(actual, step["message"]):
@@ -112,6 +121,16 @@ for step_number, step in enumerate(steps, start=1):
             connection.connect(step["socketPath"])
             connection.recv(1)
         os._exit(0)
+    elif action == "wait_for_socket_signal":
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(step["socketPath"])
+            while True:
+                readable, _, _ = select.select([sys.stdin, connection], [], [])
+                if sys.stdin in readable:
+                    fail(step_number, "no provider request before turn settlement", read_message(step_number))
+                if connection in readable:
+                    connection.recv(1)
+                    break
     elif action == "write_marker":
         with open(step["path"], "w", encoding="utf-8") as destination:
             destination.write("observed")

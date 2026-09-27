@@ -13,7 +13,20 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 
 const PEER_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
+enum ProviderFixtureMode {
+    CodexAndPeerRecipients,
+    AcpTarget,
+}
+
 pub(super) fn prepare_provider_fixture() -> ProofResult<()> {
+    prepare_fixture(ProviderFixtureMode::CodexAndPeerRecipients)
+}
+
+pub(super) fn prepare_acp_target_fixture() -> ProofResult<()> {
+    prepare_fixture(ProviderFixtureMode::AcpTarget)
+}
+
+fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
     let root = PathBuf::from(
         std::env::var_os("CODEX_AUTOMATION_PROOF_ROOT")
             .ok_or("Set CODEX_AUTOMATION_PROOF_ROOT to a new direct child of /tmp")?,
@@ -89,10 +102,49 @@ pub(super) fn prepare_provider_fixture() -> ProofResult<()> {
             json!({"action":"respond","requestName":prompt_name,"result":{"stopReason":"end_turn"}}),
         ]);
     }
-    let config = json!({"version":1,"providers":{
-        "claude":{"enabled":false,"executable":null,"arguments":[]},
-        "cursor":{"enabled":true,"executable":"/usr/bin/env","arguments":["python3","-u",script,serde_json::to_string(&steps)?]}
-    }});
+    let config = if matches!(mode, ProviderFixtureMode::AcpTarget) {
+        let receipt_path = root.join("provider-prompt-receipts.jsonl");
+        let gate_path = root.join("busy-prompt-gate.sock");
+        let mut target_steps = vec![
+            json!({"action":"expect_request","requestName":"initialize","method":"initialize","params":{"protocolVersion":1}}),
+            json!({"action":"respond","requestName":"initialize","result":{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"matrix-recipient","version":"1"}}}),
+            json!({"action":"expect_request","requestName":"create-target","method":"session/new","params":{}}),
+            json!({"action":"respond","requestName":"create-target","result":{"sessionId":"matrix-acp-target"}}),
+        ];
+        // Board Listen emits a batch and then a separate listenEnd notice.
+        const LISTEN_END_PROMPT_INDEX: usize = 5;
+        const HELD_PROMPT_INDEX: usize = 7;
+        const TARGET_PROMPT_COUNT: usize = 9;
+        for index in 0..TARGET_PROMPT_COUNT {
+            let request_name = format!("target-prompt-{index}");
+            let expected_lifecycle = (index == LISTEN_END_PROMPT_INDEX).then_some("listenEnd");
+            target_steps.push(json!({"action":"expect_request","requestName":request_name,"method":"session/prompt","params":{"sessionId":"matrix-acp-target"},"recordPath":receipt_path,"promptTextContains":expected_lifecycle}));
+            if index == HELD_PROMPT_INDEX {
+                target_steps
+                    .push(json!({"action":"wait_for_socket_signal","socketPath":gate_path}));
+            }
+            target_steps.push(json!({"action":"respond","requestName":request_name,"result":{"stopReason":"end_turn"}}));
+        }
+        let requester_steps = vec![
+            json!({"action":"expect_request","requestName":"initialize","method":"initialize","params":{"protocolVersion":1}}),
+            json!({"action":"respond","requestName":"initialize","result":{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"matrix-approval-requester","version":"1"}}}),
+            json!({"action":"expect_request","requestName":"create-requester","method":"session/new","params":{}}),
+            json!({"action":"respond","requestName":"create-requester","result":{"sessionId":"matrix-approval-requester"}}),
+            json!({"action":"expect_request","requestName":"approval-prompt","method":"session/prompt","params":{"sessionId":"matrix-approval-requester"}}),
+            json!({"action":"send","message":{"jsonrpc":"2.0","id":191,"method":"session/request_permission","params":{"sessionId":"matrix-approval-requester","toolCall":{"toolCallId":"matrix-target-approval","title":"Approve matrix command","kind":"execute"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"deny-once","name":"Deny once","kind":"reject_once"}]}}}),
+            json!({"action":"expect_message","message":{"jsonrpc":"2.0","id":191,"result":{"outcome":{"outcome":"selected"}}}}),
+            json!({"action":"respond","requestName":"approval-prompt","result":{"stopReason":"end_turn"}}),
+        ];
+        json!({"version":1,"providers":{
+            "claude":{"enabled":true,"executable":"/usr/bin/env","arguments":["python3","-u",&script,serde_json::to_string(&requester_steps)?]},
+            "cursor":{"enabled":true,"executable":"/usr/bin/env","arguments":["python3","-u",&script,serde_json::to_string(&target_steps)?]}
+        }})
+    } else {
+        json!({"version":1,"providers":{
+            "claude":{"enabled":false,"executable":null,"arguments":[]},
+            "cursor":{"enabled":true,"executable":"/usr/bin/env","arguments":["python3","-u",script,serde_json::to_string(&steps)?]}
+        }})
+    };
     write_private_file(
         &root.join("providers.json"),
         format!("{}\n", serde_json::to_string_pretty(&config)?).as_bytes(),
