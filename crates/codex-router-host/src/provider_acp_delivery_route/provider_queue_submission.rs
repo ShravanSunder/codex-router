@@ -24,7 +24,7 @@ impl ProviderAcpDeliveryRoute {
             ));
         };
         let requested_by = match &request.message {
-            MessageContent::Agent { sender, .. } => sender.clone(),
+            MessageContent::Agent { sender, .. } => sender.clone().into(),
             MessageContent::HumanUser { .. } | MessageContent::Router { .. } => record.created_by,
         };
         let permit = match self.queue.reserve(&request.target) {
@@ -33,19 +33,27 @@ impl ProviderAcpDeliveryRoute {
         };
         let effect = Self::effect(request, binding, SubmissionEffect::RouterQueued)?;
         sink.record(effect).await?;
+        let input_id = session_event_model::InputId::generate();
         self.supervisor.queued_operation_registry().record_queued(
             operation_id.clone(),
             request.target.clone(),
             binding.clone(),
+            input_id.clone(),
+            &request.message,
         );
-        permit.send(ConversationPromptRequest {
-            operation_id: operation_id.clone(),
-            target: request.target.clone(),
-            generation: Some(binding.generation.clone()),
-            requested_by,
-            approver: record.approver,
-            prompt: request.message.clone(),
-        });
+        permit.send(
+            crate::provider_acp_message_fifo::ProviderQueuedPrompt::Message(
+                ConversationPromptRequest {
+                    operation_id: operation_id.clone(),
+                    input_id: Some(input_id),
+                    target: request.target.clone(),
+                    generation: Some(binding.generation.clone()),
+                    requested_by,
+                    approver: record.approver,
+                    prompt: request.message.clone(),
+                },
+            ),
+        );
         Ok(Self::receipt(
             DeliveryOutcome::Queued,
             Some(operation_id.clone()),

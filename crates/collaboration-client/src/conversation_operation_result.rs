@@ -14,6 +14,9 @@ use serde_json::Value;
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
+// Keep the public completed-result shape stable; future stop values add one
+// string payload but do not justify boxing every existing settlement caller.
+#[allow(clippy::large_enum_variant)]
 pub enum ConversationOperationResult {
     Completed {
         target: SessionRef,
@@ -60,6 +63,14 @@ pub enum ConversationCreatePromptOutcome {
     CreatePending {
         operation_id: OperationId,
     },
+    CreatedWithoutSettings {
+        operation_id: OperationId,
+        target: SessionRef,
+        applied: Vec<collaboration_protocol::AppliedProviderSetting>,
+        failed: Vec<collaboration_protocol::FailedProviderSetting>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_applied: Vec<collaboration_protocol::NotAppliedProviderSetting>,
+    },
     Prompt {
         create_operation_id: OperationId,
         prompt: Box<ConversationOperationResult>,
@@ -75,7 +86,7 @@ pub struct ConversationSettlement {
     pub detail: ConversationSettlementDetail,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConversationStopReason {
     Completed,
@@ -85,6 +96,7 @@ pub enum ConversationStopReason {
     MaxTokens,
     MaxTurnRequests,
     Refusal,
+    Unknown(String),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

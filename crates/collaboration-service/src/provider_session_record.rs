@@ -1,9 +1,10 @@
 //! Durable provider session metadata needed for load-on-demand and approvals.
 use crate::{ProviderOperationStore, ProviderOperationStoreError};
 use collaboration_protocol::{
-    ConversationBindingIdentity, OperationId, ProviderOperationEffect, ProviderOperationKind,
-    ProviderOperationStage, ProviderReconciliationState, ProviderRequestedPolicy,
-    ProviderWorkingDirectory, SessionRef,
+    ConversationBindingIdentity, EndpointRef, OperationId, ProviderIdentity,
+    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
+    ProviderReconciliationState, ProviderRequestedPolicy, ProviderWorkingDirectory, SessionId,
+    SessionRef,
 };
 use sqlx::Connection;
 
@@ -12,8 +13,8 @@ pub struct ProviderSessionRecord {
     pub target: SessionRef,
     pub working_directory: ProviderWorkingDirectory,
     pub requested_policy: ProviderRequestedPolicy,
-    pub created_by: SessionRef,
-    pub approver: SessionRef,
+    pub created_by: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub updated_at_ms: i64,
 }
 
@@ -21,8 +22,12 @@ impl ProviderSessionRecord {
     fn validate(&self) -> Result<(), ProviderOperationStoreError> {
         let endpoint_id = String::from(self.target.endpoint.endpoint_id.clone());
         if !matches!(endpoint_id.as_str(), "claude-local" | "cursor-local")
-            || self.created_by.endpoint.service_id != self.target.endpoint.service_id
-            || self.approver.endpoint.service_id != self.target.endpoint.service_id
+            || self.created_by.session().is_some_and(|session| {
+                session.endpoint.service_id != self.target.endpoint.service_id
+            })
+            || self.approver.session().is_some_and(|session| {
+                session.endpoint.service_id != self.target.endpoint.service_id
+            })
             || self.updated_at_ms < 0
         {
             return Err(ProviderOperationStoreError::InvalidRecord);
@@ -32,7 +37,7 @@ impl ProviderSessionRecord {
 }
 
 impl ProviderOperationStore {
-    /// Atomically settle create/load and make its target loadable after a restart.
+    /// Atomically settle create/load/resume and make its target loadable after a restart.
     pub async fn settle_session_operation(
         &mut self,
         operation_id: &OperationId,
@@ -66,7 +71,7 @@ impl ProviderOperationStore {
                 stage=?,effect=?,reconciliation_state=?,
                 terminal_at_ms=MAX(admitted_at_ms,?),
                 updated_at_ms=MAX(updated_at_ms,admitted_at_ms,?)
-             WHERE operation_id=? AND stage=? AND operation_kind IN (?,?)
+             WHERE operation_id=? AND stage=? AND operation_kind IN (?,?,?)
              AND (target_session_id IS NULL OR
                  (target_service_id=? AND target_endpoint_id=? AND target_session_id=?))",
             target_service_id,
@@ -85,6 +90,9 @@ impl ProviderOperationStore {
                 ProviderOperationKind::ConversationCreate
             )?,
             super::provider_operation_store::encode_enum(ProviderOperationKind::ConversationLoad)?,
+            super::provider_operation_store::encode_enum(
+                ProviderOperationKind::ConversationResume
+            )?,
             target_service_id,
             target_endpoint_id,
             target_session_id,
@@ -196,5 +204,49 @@ impl ProviderOperationStore {
             Ok(record)
         })
         .transpose()
+    }
+
+    /// The durable provider inventory is the source for every front door's
+    /// session list. Hub live state is overlaid after this read.
+    pub async fn list_sessions(
+        &mut self,
+        endpoint: &EndpointRef,
+    ) -> Result<Vec<ProviderSessionRecord>, ProviderOperationStoreError> {
+        let target_service_id = String::from(endpoint.service_id.clone());
+        let target_endpoint_id = String::from(endpoint.endpoint_id.clone());
+        let rows = sqlx::query!(
+            "SELECT target_session_id,working_directory,requested_policy_json,
+                    created_by_json,approver_json,updated_at_ms
+             FROM provider_session_records
+             WHERE target_service_id=? AND target_endpoint_id=?
+             ORDER BY updated_at_ms DESC,target_session_id ASC",
+            target_service_id,
+            target_endpoint_id,
+        )
+        .fetch_all(&mut self.connection)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let target = SessionRef {
+                    endpoint: endpoint.clone(),
+                    session_id: SessionId::try_from(row.target_session_id)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                };
+                let record = ProviderSessionRecord {
+                    target,
+                    working_directory: ProviderWorkingDirectory::try_from(row.working_directory)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                    requested_policy: serde_json::from_str(&row.requested_policy_json)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                    created_by: serde_json::from_str(&row.created_by_json)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                    approver: serde_json::from_str(&row.approver_json)
+                        .map_err(|_| ProviderOperationStoreError::InvalidRecord)?,
+                    updated_at_ms: row.updated_at_ms,
+                };
+                record.validate()?;
+                Ok(record)
+            })
+            .collect()
     }
 }

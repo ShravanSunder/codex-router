@@ -15,6 +15,7 @@ pub fn conversation_operation_snapshot(
         reconciliation: record.reconciliation_state,
         terminal_stop_reason: record.terminal_stop_reason,
         queue_state: None,
+        input_id: None,
         admitted_at: timestamp_from_millis(record.admitted_at_ms)?,
         terminal_at: record
             .terminal_at_ms

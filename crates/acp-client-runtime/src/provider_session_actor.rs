@@ -1,5 +1,7 @@
 //! One provider session's prompt, cancellation, and steering actor.
 use crate::InteractionPort;
+use crate::SessionEventSink;
+use crate::agent_session_client::CursorPlanItems;
 #[cfg(any(test, feature = "test-observation"))]
 use crate::agent_session_client::ExternalProviderToolCall;
 use crate::agent_session_client::ProviderTurnCancellation;
@@ -7,11 +9,14 @@ use crate::agent_session_client::{
     ExternalProviderPromptOutcome, ExternalProviderRuntimeError, ProviderFrameObservation,
     acp_operation_error,
 };
+use crate::provider_connection_activity::ProviderConnectionActivity;
+use crate::provider_item_projection::ProviderItemProjection;
 use crate::provider_prompt_content::ProviderPromptContent;
-use crate::provider_prompt_observation::read_bounded_prompt;
+use crate::provider_prompt_observation::{observe_idle_session_update, read_bounded_prompt};
 use agent_client_protocol::schema::v1::{CancelNotification, PromptRequest};
 use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, JsonRpcMessage, UntypedMessage};
 use serde_json::json;
+use session_event_model::{InputId, LocalCause, SessionEvent, TurnLostReason, TurnOutcome};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -41,8 +46,35 @@ pub enum ProviderSessionActivity {
     Running,
 }
 
+#[derive(Clone)]
+pub(crate) struct ProviderSessionRuntimeHandles {
+    pub(crate) event_sink: Arc<dyn SessionEventSink>,
+    pub(crate) sink_closed: CancellationToken,
+    pub(crate) tool_registry: Arc<ProviderConnectionActivity>,
+    pub(crate) todo_state: Arc<CursorPlanItems>,
+    pub(crate) session_settings:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::ProviderSettingsCatalog>>>,
+    pub(crate) session_capabilities: Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, crate::ProviderCapabilityReport>>,
+    >,
+    pub(crate) last_settings_catalog:
+        Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
+    pub(crate) settings_unresolved: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<
+                String,
+                std::collections::HashMap<
+                    crate::ProviderSettingKind,
+                    crate::provider_session_settings::UnresolvedSettingCause,
+                >,
+            >,
+        >,
+    >,
+}
+
 pub(crate) enum ProviderSessionCommand<P: InteractionPort> {
     Prompt {
+        input_id: InputId,
         operation_id: Option<P::OperationId>,
         prompt: ProviderPromptContent,
         turn_cancellation: Option<ProviderTurnCancellation<P>>,
@@ -56,7 +88,8 @@ pub(crate) enum ProviderSessionCommand<P: InteractionPort> {
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
     Steer {
-        prompt: String,
+        input_id: InputId,
+        prompt: ProviderPromptContent,
         reply: tokio::sync::oneshot::Sender<
             Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError>,
         >,
@@ -64,8 +97,18 @@ pub(crate) enum ProviderSessionCommand<P: InteractionPort> {
     Inspect {
         reply: tokio::sync::oneshot::Sender<ProviderSessionActivity>,
     },
+    InspectActiveOperation {
+        reply: tokio::sync::oneshot::Sender<Option<P::OperationId>>,
+    },
     WaitIdle {
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
+    },
+    SetSetting {
+        kind: crate::ProviderSettingKind,
+        value: String,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError>,
+        >,
     },
 }
 
@@ -74,23 +117,50 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
     mut commands: tokio::sync::mpsc::Receiver<ProviderSessionCommand<P>>,
     shutdown: CancellationToken,
     frame_observation: Arc<ProviderFrameObservation>,
+    runtime_handles: ProviderSessionRuntimeHandles,
+    initial_projection: Option<ProviderItemProjection>,
     #[cfg(any(test, feature = "test-observation"))] test_tool_calls: Arc<
         std::sync::Mutex<Vec<ExternalProviderToolCall>>,
     >,
 ) {
+    let mut item_projection = initial_projection.unwrap_or_else(|| {
+        ProviderItemProjection::new(
+            session.session_id().to_string(),
+            Arc::clone(&runtime_handles.event_sink),
+        )
+    });
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
             update = session.read_update() => {
                 let Ok(update) = update else { break; };
-                if reject_unhandled_session_request(update).await.is_err() {
+                let observation = observe_idle_session_update(
+                    update,
+                    &mut item_projection,
+                    &runtime_handles,
+                    session.session_id().0.as_ref(),
+                ).await;
+                if matches!(observation, Err(ExternalProviderRuntimeError::SinkClosed)) {
+                    runtime_handles.sink_closed.cancel();
+                    shutdown.cancel();
+                    break;
+                }
+                if observation.is_err() {
+                    shutdown.cancel();
                     break;
                 }
             }
             command = commands.recv() => {
                 let Some(command) = command else { break; };
                 match command {
-                    ProviderSessionCommand::Prompt { operation_id, prompt, turn_cancellation, dispatch, reply } => {
+                    ProviderSessionCommand::Prompt { input_id, operation_id, prompt, turn_cancellation, dispatch, reply } => {
+                        if runtime_handles.settings_unresolved.read().await.contains_key(session.session_id().0.as_ref()) {
+                            if let Some(dispatch) = dispatch {
+                                let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
+                            }
+                            let _result = reply.send(Err(ExternalProviderRuntimeError::SettingsUnresolved));
+                            continue;
+                        }
                         let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
                         let prompt_request = PromptRequest::new(
                             session.session_id().clone(),
@@ -120,6 +190,19 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             let _result = reply.send(Err(acp_operation_error(error)));
                             continue;
                         }
+                        let turn_id = uuid::Uuid::now_v7().to_string();
+                        runtime_handles.tool_registry.turn_started(session.session_id().0.as_ref(), &turn_id);
+                        if runtime_handles.event_sink.publish(
+                            session.session_id().0.as_ref(),
+                            SessionEvent::TurnStarted { turn_id: turn_id.clone(), input_id },
+                        ).is_err() {
+                            runtime_handles.sink_closed.cancel();
+                            shutdown.cancel();
+                            let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
+                            runtime_handles.tool_registry.turn_ended(session.session_id().0.as_ref());
+                            runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());
+                            return;
+                        }
                         if let Some(dispatch) = dispatch {
                             let _result = dispatch.send(ProviderPromptDispatchObservation::Submitted);
                         }
@@ -133,6 +216,8 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             terminal_rx,
                             output_limit_tx,
                             Arc::clone(&frame_observation),
+                            &mut item_projection,
+                            &runtime_handles,
                             #[cfg(any(test, feature = "test-observation"))]
                             Arc::clone(&test_tool_calls),
                         ));
@@ -141,9 +226,24 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             tokio::select! {
                                 biased;
                                 () = shutdown.cancelled() => {
-                                    let _result = reply.send(Err(ExternalProviderRuntimeError::Operation(
-                                        "provider runtime shut down while prompt was active".to_owned(),
-                                    )));
+                                    if runtime_handles.tool_registry.claim_turn_end(provider_session_id.0.as_ref(), &turn_id) {
+                                        let _result = runtime_handles.event_sink.publish(
+                                            provider_session_id.0.as_ref(),
+                                            SessionEvent::TurnEnded {
+                                                turn_id: turn_id.clone(),
+                                                outcome: TurnOutcome::Lost { reason: TurnLostReason::ProviderRetired },
+                                            },
+                                        );
+                                    }
+                                    runtime_handles.todo_state.forget_session(provider_session_id.0.as_ref());
+                                    let error = if runtime_handles.sink_closed.is_cancelled() {
+                                        ExternalProviderRuntimeError::SinkClosed
+                                    } else {
+                                        ExternalProviderRuntimeError::Operation(
+                                            "provider runtime shut down while prompt was active".to_owned(),
+                                        )
+                                    };
+                                    let _result = reply.send(Err(error));
                                     return;
                                 }
                                 limit_notice = output_limit_rx.recv(), if !output_limit_cancelled => {
@@ -152,20 +252,54 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                         if let Some(turn_cancellation) = &turn_cancellation {
                                             turn_cancellation.mark_cancelling();
                                         }
-                                        let _result = provider_connection
-                                            .send_notification(CancelNotification::new(provider_session_id.clone()));
                                         if let Some(turn_cancellation) = &turn_cancellation {
                                             turn_cancellation.settle_pending_approvals().await;
                                         }
+                                        let _result = provider_connection
+                                            .send_notification(CancelNotification::new(provider_session_id.clone()));
                                     }
                                 }
                                 result = &mut prompt_result => {
-                                    let result = if output_limit_cancelled {
+                                    if matches!(&result, Err(ExternalProviderRuntimeError::SinkClosed)) {
+                                        runtime_handles.sink_closed.cancel();
+                                        shutdown.cancel();
+                                        let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
+                                        return;
+                                    }
+                                    // A provider may finish immediately after Router admits
+                                    // cancellation. Settle interactions before the hub sees the
+                                    // terminal Turn fact, regardless of which path won the race.
+                                    if let Some(turn_cancellation) = &turn_cancellation {
+                                        turn_cancellation.mark_cancelling();
+                                        turn_cancellation.settle_pending_approvals().await;
+                                    }
+                                    let outcome = match &result {
+                                        Ok(prompt) => TurnOutcome::Ended {
+                                            stop_reason: prompt.stop_reason.clone(),
+                                            local_cause: output_limit_cancelled.then_some(LocalCause::OutputOverflow),
+                                        },
+                                        Err(ExternalProviderRuntimeError::TransportFailure) => TurnOutcome::Lost { reason: TurnLostReason::ProviderRetired },
+                                        Err(_) => TurnOutcome::Lost { reason: TurnLostReason::ProviderTurnFailed },
+                                    };
+                                    if runtime_handles.tool_registry.claim_turn_end(provider_session_id.0.as_ref(), &turn_id)
+                                        && runtime_handles.event_sink.publish(
+                                            provider_session_id.0.as_ref(),
+                                            SessionEvent::TurnEnded { turn_id: turn_id.clone(), outcome },
+                                        ).is_err()
+                                    {
+                                        runtime_handles.sink_closed.cancel();
+                                        shutdown.cancel();
+                                        runtime_handles.todo_state.forget_session(provider_session_id.0.as_ref());
+                                        let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
+                                        return;
+                                    }
+                                    runtime_handles.todo_state.forget_session(provider_session_id.0.as_ref());
+                                    let reply_result = if output_limit_cancelled {
                                         Err(ExternalProviderRuntimeError::PromptOutputLimitExceeded)
                                     } else {
                                         result
                                     };
-                                    let _result = reply.send(result);
+                                    let _result = reply.send(reply_result);
                                     for waiter in idle_waiters.drain(..) {
                                         let _result = waiter.send(Ok(()));
                                     }
@@ -186,14 +320,35 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                         Some(ProviderSessionCommand::Prompt { reply, .. }) => {
                                             let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
                                         }
-                                        Some(ProviderSessionCommand::Steer { prompt, reply }) => {
+                                        Some(ProviderSessionCommand::Steer { input_id, prompt, reply }) => {
+                                            if runtime_handles.settings_unresolved.read().await.contains_key(provider_session_id.0.as_ref()) {
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::SettingsUnresolved));
+                                                continue;
+                                            }
                                             let result = steer_provider_turn::<P>(&provider_connection, &provider_session_id, prompt, operation_id.clone()).await;
+                                            if matches!(result, Ok(ProviderSteeringOutcome::Injected { .. }))
+                                                && runtime_handles.event_sink.publish(
+                                                    provider_session_id.0.as_ref(),
+                                                    SessionEvent::InputAccepted { input_id, turn_id: turn_id.clone() },
+                                                ).is_err()
+                                            {
+                                                runtime_handles.sink_closed.cancel();
+                                                shutdown.cancel();
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
+                                                return;
+                                            }
                                             let _result = reply.send(result);
                                         }
                                         Some(ProviderSessionCommand::Inspect { reply }) => {
                                             let _result = reply.send(ProviderSessionActivity::Running);
                                         }
+                                        Some(ProviderSessionCommand::InspectActiveOperation { reply }) => {
+                                            let _result = reply.send(operation_id.clone());
+                                        }
                                         Some(ProviderSessionCommand::WaitIdle { reply }) => idle_waiters.push(reply),
+                                        Some(ProviderSessionCommand::SetSetting { reply, .. }) => {
+                                            let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
+                                        }
                                         None => return,
                                     }
                                 }
@@ -203,15 +358,64 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                     ProviderSessionCommand::Cancel { reply, .. } => {
                         let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                     }
-                    ProviderSessionCommand::Steer { prompt, reply } => {
+                    ProviderSessionCommand::Steer { input_id, prompt, reply } => {
+                        if runtime_handles.settings_unresolved.read().await.contains_key(session.session_id().0.as_ref()) {
+                            let _result = reply.send(Err(ExternalProviderRuntimeError::SettingsUnresolved));
+                            continue;
+                        }
                         let result = steer_provider_turn::<P>(session.connection(), session.session_id(), prompt, None).await;
+                        if matches!(result, Ok(ProviderSteeringOutcome::StartedNewTurn)) {
+                            let turn_id = uuid::Uuid::now_v7().to_string();
+                            runtime_handles.tool_registry.turn_started(session.session_id().0.as_ref(), &turn_id);
+                            if runtime_handles.event_sink.publish(
+                                session.session_id().0.as_ref(),
+                                SessionEvent::TurnStarted { turn_id: turn_id.clone(), input_id },
+                            ).is_err() {
+                                runtime_handles.sink_closed.cancel();
+                                shutdown.cancel();
+                                runtime_handles.tool_registry.turn_ended(session.session_id().0.as_ref());
+                                runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());
+                                let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
+                                return;
+                            }
+                            if runtime_handles.tool_registry.claim_turn_end(session.session_id().0.as_ref(), &turn_id)
+                                && runtime_handles.event_sink.publish(
+                                session.session_id().0.as_ref(),
+                                SessionEvent::TurnEnded {
+                                    turn_id,
+                                    outcome: TurnOutcome::Lost { reason: TurnLostReason::EndNotObservable },
+                                },
+                            ).is_err() {
+                                runtime_handles.sink_closed.cancel();
+                                shutdown.cancel();
+                                let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
+                                return;
+                            }
+                            runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());
+                        }
                         let _result = reply.send(result);
                     }
                     ProviderSessionCommand::Inspect { reply } => {
                         let _result = reply.send(ProviderSessionActivity::Idle);
                     }
+                    ProviderSessionCommand::InspectActiveOperation { reply } => {
+                        let _result = reply.send(None);
+                    }
                     ProviderSessionCommand::WaitIdle { reply } => {
                         let _result = reply.send(Ok(()));
+                    }
+                    ProviderSessionCommand::SetSetting { kind, value, reply } => {
+                        let result = crate::provider_session_setting_update::apply_loaded_setting(
+                            &session,
+                            kind,
+                            value,
+                            &runtime_handles,
+                        ).await;
+                        if matches!(result, Err(ExternalProviderRuntimeError::SinkClosed)) {
+                            runtime_handles.sink_closed.cancel();
+                            shutdown.cancel();
+                        }
+                        let _result = reply.send(result);
                     }
                 }
             }
@@ -219,38 +423,17 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
     }
 }
 
-async fn reject_unhandled_session_request(
-    message: agent_client_protocol::SessionMessage,
-) -> Result<(), agent_client_protocol::Error> {
-    match message {
-        agent_client_protocol::SessionMessage::SessionMessage(dispatch) => {
-            agent_client_protocol::util::MatchDispatch::new(dispatch)
-                .otherwise(|message| async move {
-                    match message {
-                        agent_client_protocol::Dispatch::Request(_, responder) => responder
-                            .respond_with_error(agent_client_protocol::Error::method_not_found()),
-                        agent_client_protocol::Dispatch::Notification(_)
-                        | agent_client_protocol::Dispatch::Response(_, _) => Ok(()),
-                    }
-                })
-                .await
-        }
-        agent_client_protocol::SessionMessage::StopReason(_) => Ok(()),
-        _ => Ok(()),
-    }
-}
-
 async fn steer_provider_turn<P: InteractionPort>(
     connection: &ConnectionTo<Agent>,
     session_id: &agent_client_protocol::schema::v1::SessionId,
-    prompt: String,
+    prompt: ProviderPromptContent,
     running_operation_id: Option<P::OperationId>,
 ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
     let message = UntypedMessage::new(
         "_session/steering",
         json!({
             "sessionId": session_id.to_string(),
-            "prompt": [{ "type": "text", "text": prompt }],
+            "prompt": prompt.into_blocks(),
             "_meta": { "steering": { "idleBehavior": "promptRequired" } },
         }),
     )

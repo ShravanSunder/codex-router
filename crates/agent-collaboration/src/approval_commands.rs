@@ -1,10 +1,11 @@
 //! Explicit listing and single-use decisions for client-exposed native approvals.
 use clap::{Args, Parser, Subcommand};
-use collaboration_client::protocol::{ApprovalDecideParams, ApprovalDecision, SessionRef};
+use collaboration_client::protocol::{ApprovalDecideParams, ApprovalDecision};
 use collaboration_client::{
     ClientError, ControlClient, OperationEffect, OperationFailure, OperationFailureKind,
     operation_failure_from_client_error,
 };
+use message_board::Identity;
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -24,6 +25,8 @@ enum ApprovalCommand {
     List {
         #[arg(long)]
         pending: bool,
+        #[arg(long)]
+        include_options: bool,
         #[command(flatten)]
         output: OutputArguments,
     },
@@ -37,6 +40,13 @@ enum ApprovalCommand {
         allow_for_session: bool,
         #[arg(long, group = "decision")]
         deny: bool,
+        #[arg(long, group = "decision")]
+        option_id: Option<String>,
+        /// Optional note sent to the provider with the selected option.
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        acknowledge_persistent: bool,
         #[arg(long)]
         actor: String,
         #[command(flatten)]
@@ -74,13 +84,20 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
-    let (output, request, pending_only) = match parsed.command {
-        ApprovalCommand::List { pending, output } => (output, None, pending),
+    let (output, request, pending_only, include_options) = match parsed.command {
+        ApprovalCommand::List {
+            pending,
+            include_options,
+            output,
+        } => (output, None, pending, include_options),
         ApprovalCommand::Decide {
             request_id,
             allow,
             allow_for_session,
             deny,
+            option_id,
+            note,
+            acknowledge_persistent,
             actor,
             output,
         } => {
@@ -89,34 +106,45 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
                 Err(_) => {
                     return crate::endpoint_commands::report_failure(
                         "invalidField",
-                        "--actor must be exact SessionRef JSON",
+                        "--actor must be typed Identity or exact SessionRef JSON",
                         2,
                         output.json,
                     );
                 }
             };
-            if usize::from(allow) + usize::from(allow_for_session) + usize::from(deny) != 1 {
+            if usize::from(allow)
+                + usize::from(allow_for_session)
+                + usize::from(deny)
+                + usize::from(option_id.is_some())
+                != 1
+            {
                 return crate::endpoint_commands::report_failure(
                     "invalidField",
-                    "Choose exactly one of --allow, --allow-for-session, or --deny",
+                    "Choose exactly one of --option-id, --allow, --allow-for-session, or --deny",
                     2,
                     output.json,
                 );
             }
             let decision = if allow {
-                ApprovalDecision::Allow
+                Some(ApprovalDecision::Allow)
             } else if allow_for_session {
-                ApprovalDecision::AllowForSession
+                Some(ApprovalDecision::AllowForSession)
+            } else if deny {
+                Some(ApprovalDecision::Deny)
             } else {
-                ApprovalDecision::Deny
+                None
             };
             (
                 output,
                 Some(ApprovalDecideParams {
                     request_id,
                     decision,
+                    option_id,
+                    note,
+                    acknowledge_persistent,
                     actor,
                 }),
+                false,
                 false,
             )
         }
@@ -150,6 +178,12 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
                     .decide_approval(request)
                     .await
                     .map_err(|error| ApprovalCommandError::Operation(error.into_parts().0))?,
+            ),
+            None if include_options => serde_json::to_value(
+                client
+                    .list_approvals_with_options(pending_only)
+                    .await
+                    .map_err(ApprovalCommandError::Client)?,
             ),
             None => serde_json::to_value(
                 client
@@ -210,10 +244,38 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
     }
 }
 
-fn parse_actor(value: &str) -> Result<SessionRef, ()> {
+pub(crate) fn parse_actor(value: &str) -> Result<Identity, ()> {
     let parsed: serde_json::Value = serde_json::from_str(value).map_err(|_| ())?;
-    if parsed.get("kind").and_then(serde_json::Value::as_str) == Some("session") {
-        return serde_json::from_value(parsed.get("session").cloned().ok_or(())?).map_err(|_| ());
+    if parsed.get("kind").is_some() {
+        return serde_json::from_value(parsed).map_err(|_| ());
     }
-    serde_json::from_value(parsed).map_err(|_| ())
+    let session = serde_json::from_value(parsed).map_err(|_| ())?;
+    Ok(Identity::Session { session })
+}
+
+#[cfg(test)]
+mod approval_list_argument_tests {
+    use super::*;
+
+    #[test]
+    fn options_are_absent_by_default_and_opt_in_explicitly() {
+        let default =
+            ApprovalArguments::try_parse_from(["approval", "list"]).expect("default list");
+        let ApprovalCommand::List {
+            include_options, ..
+        } = default.command
+        else {
+            panic!("list")
+        };
+        assert!(!include_options);
+        let detailed = ApprovalArguments::try_parse_from(["approval", "list", "--include-options"])
+            .expect("detailed list");
+        let ApprovalCommand::List {
+            include_options, ..
+        } = detailed.command
+        else {
+            panic!("list")
+        };
+        assert!(include_options);
+    }
 }

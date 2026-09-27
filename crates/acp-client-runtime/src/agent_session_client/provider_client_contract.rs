@@ -7,6 +7,7 @@ pub struct ExternalProviderLaunch {
     pub executable: PathBuf,
     pub arguments: Vec<String>,
     pub environment: Vec<(String, String)>,
+    pub persistence_target: crate::ProviderPersistenceTarget,
 }
 
 impl ExternalProviderLaunch {
@@ -100,6 +101,15 @@ pub(crate) fn classify_mcp_tool_outcome(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderCreatedSession {
     pub provider_session_id: String,
+    pub effective_settings: crate::EffectiveProviderSettings,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderSessionSummary {
+    pub provider_session_id: String,
+    pub cwd: PathBuf,
+    pub title: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[cfg(any(test, feature = "test-observation"))]
@@ -130,8 +140,28 @@ pub enum ExternalProviderRuntimeError {
     UnsupportedProtocol { actual: AcpProtocolVersion },
     #[error("provider conversation is busy")]
     LocalBusy,
+    #[error("provider session settings need resolution before work can start")]
+    SettingsUnresolved,
+    #[error(
+        "settings-uncertain: run conversation settings set to resolve the unknown provider setting outcome"
+    )]
+    SettingsOutcomeUncertain,
+    #[error("provider setting could not be applied")]
+    SettingFailed {
+        setting: crate::ProviderSettingKind,
+        value: String,
+        reason: String,
+    },
+    #[error("outcomeUnknown: provider setting effect is not confirmed")]
+    SettingOutcomeUnknown {
+        provider_session_id: String,
+        setting: crate::ProviderSettingKind,
+        value: String,
+    },
     #[error("provider does not advertise steering")]
     UnsupportedSteering,
+    #[error("provider does not advertise {capability}")]
+    UnsupportedCapability { capability: &'static str },
     #[error("provider conversation operation is not active")]
     LocalNotFound,
     #[error("provider cancellation target is no longer active")]
@@ -152,6 +182,25 @@ pub enum ExternalProviderRuntimeError {
     ProviderRejected { code: i64 },
     #[error("provider operation response was unavailable")]
     TransportFailure,
+    #[error("session event consumer closed")]
+    SinkClosed,
+    #[error("invalidSetting: provider setting was not advertised")]
+    InvalidSetting {
+        setting: crate::ProviderSettingKind,
+        value: String,
+        advertised: Vec<String>,
+        provider_session_id: String,
+        disposition: crate::InvalidSettingSessionDisposition,
+    },
+    #[error("createdWithoutSettings: provider session needs setting resolution")]
+    CreatedWithoutSettings {
+        provider_session_id: String,
+        applied: Vec<crate::AppliedProviderSetting>,
+        failed: crate::FailedProviderSetting,
+        not_applied: Box<[crate::NotAppliedProviderSetting]>,
+    },
+    #[error("session history replay could not begin")]
+    HistoryReplayUnavailable,
     #[error(
         "provider prompt output exceeded the retained output limit; cancellation was requested and settled"
     )]
@@ -162,26 +211,8 @@ pub enum ExternalProviderRuntimeError {
     FrameDecodeFailure,
     #[error("unsupportedContent{{{content_type}}}")]
     UnsupportedContent { content_type: &'static str },
-    #[error("agent ended the turn with an unrecognized stop reason{suffix}")]
-    UnknownStopReason { suffix: String },
     #[error("provider ACP operation failed: {0}")]
     Operation(String),
-}
-
-impl ExternalProviderRuntimeError {
-    pub fn unknown_stop_reason(value: &str) -> Self {
-        let suffix = if !value.is_empty()
-            && value.len() <= 32
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        {
-            format!(" ({value})")
-        } else {
-            String::new()
-        };
-        Self::UnknownStopReason { suffix }
-    }
 }
 
 pub(crate) fn sanitized_initialization_error(error: &agent_client_protocol::Error) -> String {

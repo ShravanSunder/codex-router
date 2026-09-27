@@ -1,6 +1,11 @@
 //! Client-exposed Codex approval routing and single-use decisions.
 use crate::{CodexGeneration, SessionRef};
+use message_board::Identity;
 use serde::{Deserialize, Serialize};
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(
     schemars::JsonSchema, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
@@ -19,6 +24,7 @@ pub enum ApprovalState {
     TimedOut,
     ApproverUnreachable,
     ApproverIsRequester,
+    Refused,
     Cancelled,
     Decided,
 }
@@ -69,6 +75,64 @@ pub struct ApprovalPresentation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApprovalListParams {
     pub pending: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_options: bool,
+}
+
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalOptionEffect {
+    Allow,
+    Decline,
+    Abort,
+}
+
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalOptionViewScope {
+    Once,
+    Session,
+    Persistent,
+}
+
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalOptionView {
+    pub option_id: String,
+    pub label: String,
+    pub effect: ApprovalOptionEffect,
+    pub scope: ApprovalOptionViewScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistent_target: Option<String>,
+}
+
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalDetailedRecord {
+    pub request_id: String,
+    pub requester: message_board::SessionRef,
+    pub approver: Identity,
+    pub state: ApprovalState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_origin: Option<session_event_model::OptionsOrigin>,
+    pub options: Vec<ApprovalOptionView>,
+}
+
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalDetailedListResult {
+    pub approvals: Vec<ApprovalDetailedRecord>,
+}
+
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ApprovalListResponse {
+    Legacy(ApprovalListResult),
+    Detailed(ApprovalDetailedListResult),
 }
 
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
@@ -101,8 +165,16 @@ pub struct ApprovalListResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApprovalDecideParams {
     pub request_id: String,
-    pub decision: ApprovalDecision,
-    pub actor: SessionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ApprovalDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub acknowledge_persistent: bool,
+    #[serde(deserialize_with = "crate::interaction_actor::deserialize_interaction_actor")]
+    pub actor: Identity,
 }
 
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
@@ -110,6 +182,9 @@ pub struct ApprovalDecideParams {
 pub struct ApprovalDecideResult {
     pub request_id: String,
     pub state: ApprovalState,
-    pub decision: ApprovalDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ApprovalDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
     pub scope: Option<String>,
 }

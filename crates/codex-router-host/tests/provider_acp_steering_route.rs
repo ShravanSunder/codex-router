@@ -61,6 +61,12 @@ fn target() -> SessionRef {
     }
 }
 
+fn non_creator_agent(target: &SessionRef) -> SessionRef {
+    let mut sender = target.clone();
+    sender.session_id = SessionId::try_from("other-session".to_owned()).expect("sender ID");
+    sender
+}
+
 fn binding(target: &SessionRef) -> ProviderBindingIdentity {
     ProviderBindingIdentity {
         endpoint: target.endpoint.clone(),
@@ -102,10 +108,14 @@ assert prompt['method']=='session/prompt'
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({:?})
  event.sendall(b'active')
- for _ in range(2):
+ for index in range(3):
   steer=json.loads(sys.stdin.readline())
   assert steer['method']=='_session/steering'
-  assert steer['params']['prompt'][0]['text'].endswith('follow-up')
+  if index < 2:
+   assert '"sessionId":"other-session"' in steer['params']['prompt'][0]['text']
+   assert steer['params']['prompt'][0]['text'].endswith('follow-up')
+  else:
+   assert steer['params']['prompt']==[{{'type':'text','text':'follow-up'}}]
   print(json.dumps({{'jsonrpc':'2.0','id':steer['id'],'result':{{'outcome':'injected'}}}})); sys.stdout.flush()
  event.recv(1)
 print(json.dumps({{'jsonrpc':'2.0','id':prompt['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
@@ -114,6 +124,7 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -153,8 +164,8 @@ async fn prepared_route(
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -249,6 +260,7 @@ assert steer['method']=='_session/steering'
 "#
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -266,6 +278,7 @@ print(json.dumps({'jsonrpc':'2.0','id':create['id'],'result':{'sessionId':'fixtu
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script.to_owned()],
         environment: Vec::new(),
@@ -282,6 +295,7 @@ create=json.loads(sys.stdin.readline())
 print(json.dumps({{'jsonrpc':'2.0','id':create['id'],'result':{{'sessionId':'fixture-session'}}}})); sys.stdout.flush()
 first=json.loads(sys.stdin.readline())
 assert first['method']=='session/prompt'
+assert '"sessionId":"other-session"' in first['params']['prompt'][0]['text']
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({event_socket:?})
  event.sendall(b'first')
@@ -289,6 +303,7 @@ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
 print(json.dumps({{'jsonrpc':'2.0','id':first['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 second=json.loads(sys.stdin.readline())
 assert second['method']=='session/prompt'
+assert '"sessionId":"other-session"' in second['params']['prompt'][0]['text']
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({event_socket:?})
  event.sendall(b'second')
@@ -298,6 +313,7 @@ sys.stdin.read()
         event_socket = event_socket.display().to_string(),
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -385,10 +401,11 @@ async fn unadvertised_steering_is_rejected_on_any_provider_endpoint() {
 
 fn request(target: SessionRef, mode: MessageDelivery) -> DeliveryRequest {
     DeliveryRequest {
-        target,
-        message: MessageContent::HumanUser {
+        message: MessageContent::Agent {
+            sender: non_creator_agent(&target),
             text: MessageText::try_from("follow-up".to_owned()).expect("message"),
         },
+        target,
         mode,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::generate(),
@@ -406,11 +423,12 @@ async fn running_claude_auto_and_steer_name_the_running_operation() {
     let running_operation = OperationId::generate();
     supervisor
         .prompt(ConversationPromptRequest {
+            input_id: None,
             operation_id: running_operation.clone(),
             target: target.clone(),
             generation: Some(generation),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("hold".to_owned()).expect("prompt"),
             },
@@ -432,7 +450,8 @@ async fn running_claude_auto_and_steer_name_the_running_operation() {
             .deliver(
                 DeliveryRequest {
                     target: target.clone(),
-                    message: MessageContent::HumanUser {
+                    message: MessageContent::Agent {
+                        sender: non_creator_agent(&target),
                         text: MessageText::try_from("follow-up".to_owned()).expect("message"),
                     },
                     mode,
@@ -452,6 +471,19 @@ async fn running_claude_auto_and_steer_name_the_running_operation() {
             [RouteEffectEvidence::ProviderAcp(before), RouteEffectEvidence::ProviderAcp(after)]
             if before.submission == SubmissionEffect::Dispatching && after.submission == SubmissionEffect::Accepted));
     }
+    let typed_steer = route
+        .steer_contents(
+            target.clone(),
+            non_creator_agent(&target).into(),
+            session_event_model::InputId::generate(),
+            vec![session_event_model::PromptContent::text("follow-up".into()).expect("typed text")],
+        )
+        .await
+        .expect("non-creator typed steer");
+    assert!(matches!(
+        typed_steer,
+        codex_router_host::ProviderSteeringOutcome::Injected { .. }
+    ));
     active_event.write_all(b"x").await.expect("release prompt");
     route.shutdown_queue().await;
     supervisor.shutdown().await.expect("shutdown");

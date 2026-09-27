@@ -118,7 +118,7 @@ fn thread_list_outside_repository_shows_corrected_example() {
 }
 
 #[test]
-fn conversation_create_help_explains_codex_and_provider_model_rules() {
+fn conversation_create_help_explains_codex_and_provider_setting_rules() {
     let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["conversation", "create", "--help"])
         .output()
@@ -126,7 +126,11 @@ fn conversation_create_help_explains_codex_and_provider_model_rules() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("required for Codex endpoints"), "{help}");
-    assert!(help.contains("rejected for provider endpoints"), "{help}");
+    assert!(
+        help.contains("provider endpoints accept advertised"),
+        "{help}"
+    );
+    assert!(help.contains("--mode <MODE>"), "{help}");
     assert!(help.contains("--model <MODEL>"), "{help}");
     assert!(help.contains("--effort <EFFORT>"), "{help}");
 }

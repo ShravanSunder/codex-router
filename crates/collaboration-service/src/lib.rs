@@ -29,15 +29,27 @@ pub use codex_acp_adapter::ConversationOperationRecorder;
 pub use codex_conversation_operation_recorder::{
     CodexConversationOperationRecorder, UnavailableConversationOperationRecorder,
 };
+mod provider_session_event_hub;
+mod provider_session_observation_dispatch;
 mod provider_session_record;
+mod session_event_hub;
 pub use provider_operation_store::{
     ProviderOperationAdmission, ProviderOperationAdmissionResult, ProviderOperationRecord,
     ProviderOperationStore, ProviderOperationStoreError,
 };
 mod delivery_acceptance_effect;
 mod delivery_route_projection;
+pub use provider_session_event_hub::{HubReceiveError, ProviderSessionEventHub, receive_hub_event};
 pub use provider_session_record::ProviderSessionRecord;
+pub use session_event_hub::{
+    HubEvent, HubFuture, HubSessionSummary, SessionEventAttachment, SessionEventHub,
+    SessionEventHubError,
+};
+mod app_server_model_catalog;
 mod provider_conversation_backend;
+pub use app_server_model_catalog::{
+    InvalidProviderModelEntry, ProviderModelEntry, render_model_list,
+};
 mod schedule_preparation_evidence_sink;
 mod scheduled_run_contract;
 mod scheduled_run_evidence_sink;
@@ -47,7 +59,10 @@ mod session_delivery_router;
 mod stored_delivery_receipt;
 mod stored_run_receipt;
 pub use collaboration_protocol::{DeliveryClientReceipt, DeliveryReceipt};
-pub use provider_conversation_backend::{ProviderConversationBackend, ProviderConversationFuture};
+pub use provider_conversation_backend::{
+    ProviderConversationBackend, ProviderConversationFuture, ProviderSessionInspectFuture,
+    ProviderSettingsFuture,
+};
 pub use scheduled_run_contract::{
     FreshSessionRequest, NativeTurnRef, PreparationEvidenceSink, PreparedTarget, RunAcceptance,
     RunEvidenceDisposition, RunEvidenceSink, RunObservationContext, RunReconciliation,
@@ -75,20 +90,23 @@ mod native_control_request;
 mod session_message_dispatch;
 pub use native_control_dispatch::NativeControlBackend;
 
-mod approval_broker;
 mod codex_app_server_delivery_route;
 mod codex_app_server_scheduled_runs;
 mod codex_queue_reconciliation;
+mod interaction_broker;
 mod message_effect_state;
 mod native_message_dispatch;
 pub use codex_app_server_delivery_route::CodexAppServerDeliveryRoute;
 pub use codex_app_server_scheduled_runs::CodexAppServerScheduledRuns;
 mod session_delivery_sink;
-pub use approval_broker::{
-    ExternalApprovalOperationMetadata, ExternalApprovalOption, ExternalApprovalOptionScope,
-    ExternalApprovalRefusal, ExternalApprovalRequest, ServiceApprovalBroker,
-};
 pub use codex_acp_adapter::BrokeredApprovalOutcome;
+pub use interaction_broker::{
+    ApprovalDecisionError, InteractionHistoryError, InteractionHistoryRecord,
+    InteractionHistoryState, QuestionHistoryState, QuestionResponse, RefusedApprovalOption,
+    RefusedTypedApproval, ServiceInteractionBroker, TypedApprovalLegacyContext,
+    TypedApprovalResolution, TypedApprovalSelection, TypedInteractionDecision,
+    TypedInteractionDecisionOutcome,
+};
 
 mod acp_channel_listener;
 pub use acp_channel_listener::AcpChannelListener;
@@ -97,6 +115,7 @@ pub use codex_acp_adapter::{ACP_SCHEMA_DIGEST, NativeStoredSessions};
 pub use unmaterialized_thread_holder::UnmaterializedThreadHolder;
 
 mod instruction_dispatch;
+mod provider_session_inventory_dispatch;
 mod session_inventory_dispatch;
 mod stored_inventory_observation;
 

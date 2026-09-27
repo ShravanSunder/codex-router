@@ -67,6 +67,9 @@ pub(crate) fn picker_record(
     source: &str,
 ) -> SessionPickerRecord {
     SessionPickerRecord {
+        identity: crate::sessions::SessionPickerIdentity::LocalCodex(session_id.to_owned()),
+        endpoint_label: None,
+        provider_state: None,
         session_id: session_id.to_owned(),
         title: title.to_owned(),
         full_title: title.to_owned(),

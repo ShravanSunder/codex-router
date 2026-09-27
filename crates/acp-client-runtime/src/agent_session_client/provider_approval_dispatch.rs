@@ -1,16 +1,40 @@
 //! Approval context lifetime for a dispatched provider prompt.
 
+use super::approval_turn_cancellation::PermissionResponseBarrier;
 use super::{
     ActiveApprovalContext, AgentSessionClient, ApprovalContextGuard, ExternalProviderPromptOutcome,
     ExternalProviderRuntimeError, ProviderPromptDispatchObservation,
 };
+use crate::provider_prompt_content::acp_blocks_from_prompt_content;
+use agent_client_protocol::schema::v1::ContentBlock;
+use session_event_model::{InputId, PromptContent};
 use std::sync::Arc;
 
 impl<P: crate::InteractionPort> AgentSessionClient<P> {
-    pub async fn prompt_with_approval_dispatch(
+    /// Preserve the typed approval context for a multi-block delivery turn.
+    pub async fn prompt_contents_with_approval_dispatch_for_input(
         &self,
         provider_session_id: String,
-        prompt: String,
+        input_id: InputId,
+        contents: Vec<PromptContent>,
+        context: P::Context,
+        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
+    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
+        self.prompt_with_approval_dispatch_blocks_for_input(
+            provider_session_id,
+            input_id,
+            acp_blocks_from_prompt_content(contents),
+            context,
+            dispatch,
+        )
+        .await
+    }
+
+    async fn prompt_with_approval_dispatch_blocks_for_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        blocks: Vec<ContentBlock>,
         context: P::Context,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
@@ -30,6 +54,7 @@ impl<P: crate::InteractionPort> AgentSessionClient<P> {
                 ActiveApprovalContext {
                     approval: context,
                     cancelling: tokio_util::sync::CancellationToken::new(),
+                    responses: Arc::new(PermissionResponseBarrier::default()),
                 },
             );
         }
@@ -39,10 +64,11 @@ impl<P: crate::InteractionPort> AgentSessionClient<P> {
             operation_id: operation_id.clone(),
         };
         let prompt_result = self
-            .prompt_for_operation(
+            .prompt_content(
                 provider_session_id,
+                input_id,
                 Some(operation_id.clone()),
-                prompt,
+                blocks,
                 dispatch,
             )
             .await;

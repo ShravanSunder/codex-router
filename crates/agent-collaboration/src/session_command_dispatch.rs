@@ -52,7 +52,8 @@ use session_display_text::{
 mod session_catalog_records;
 use session_catalog_records::SessionRecord;
 pub(crate) use session_catalog_records::{
-    SessionConversationPreview, SessionConversationSource, SessionPickerRecord,
+    SessionConversationPreview, SessionConversationSource, SessionPickerIdentity,
+    SessionPickerRecord,
 };
 #[path = "session_commands/session_catalog_query.rs"]
 mod session_catalog_query;

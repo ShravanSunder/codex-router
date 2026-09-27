@@ -20,6 +20,7 @@ tokio-util.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
+message-board = { path = "../message-board", version = "0.1.20" }
 codex-native-integration.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
@@ -32,6 +33,7 @@ tokio = { workspace = true, features = ["io-std"] }
 unicode-width.workspace = true
 
 [dev-dependencies]
+tempfile = "3.27.0"
 jsonschema.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
@@ -41,6 +43,7 @@ automation-storage = { path = "../automation-storage", version = "0.1.16" }
 codex-router-host.workspace = true
 lifecycle-observation = { path = "../lifecycle-observation", version = "0.1.14" }
 collaboration-service = { path = "../collaboration-service", version = "0.1.14" }
+collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14" }
 message-board-storage = { path = "../message-board-storage", version = "0.1.20" }
 tokio-util.workspace = true
 futures-util.workspace = true
