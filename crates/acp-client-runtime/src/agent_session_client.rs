@@ -39,6 +39,8 @@ use provider_acp_error_mapping::acp_load_session_error;
 pub(crate) use provider_acp_error_mapping::acp_operation_error;
 #[cfg(any(test, feature = "test-observation"))]
 pub(crate) use provider_client_contract::classify_mcp_tool_outcome;
+#[cfg(feature = "test-observation")]
+pub(crate) use provider_client_contract::sanitized_acp_error;
 pub use provider_client_contract::{
     ExternalProviderAdmission, ExternalProviderApprovalRefusalReason,
     ExternalProviderCreatedSession, ExternalProviderLaunch, ExternalProviderPromptOutcome,
@@ -50,7 +52,7 @@ pub use provider_client_contract::{
     ExternalProviderPermissionOutcome, ExternalProviderToolCall, ExternalProviderToolOutcome,
 };
 pub(crate) use provider_client_contract::{
-    provider_frame_decode_error, sanitized_acp_error, sanitized_initialization_error,
+    provider_frame_decode_error, sanitized_initialization_error,
 };
 pub(crate) use provider_frame_observation::ProviderFrameObservation;
 use provider_initialize_request::initialize_provider_connection;
