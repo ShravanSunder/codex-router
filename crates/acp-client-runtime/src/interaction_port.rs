@@ -32,11 +32,8 @@ pub trait InteractionPort: Send + Sync + 'static {
         agent_cancellation: CancellationToken,
     ) -> InteractionFuture<'_, ApprovalPortOutcome>;
 
-    fn cancel_all(
-        &self,
-        context: Option<Self::Context>,
-        reason: &'static str,
-    ) -> InteractionFuture<'_, ()>;
+    fn cancel_all(&self, context: Self::Context, reason: &'static str)
+    -> InteractionFuture<'_, ()>;
 
     fn cancel_retired(&self) -> InteractionFuture<'_, ()>;
 }

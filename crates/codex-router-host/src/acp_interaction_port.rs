@@ -114,11 +114,10 @@ impl InteractionPort for HostInteractionPort {
 
     fn cancel_all(
         &self,
-        context: Option<Self::Context>,
+        context: Self::Context,
         reason: &'static str,
     ) -> InteractionFuture<'_, ()> {
         Box::pin(async move {
-            let Some(context) = context else { return };
             if let Some(broker) = self.broker().await
                 && let Err(error) = broker.cancel_all_for_session(&context.target, reason).await
             {

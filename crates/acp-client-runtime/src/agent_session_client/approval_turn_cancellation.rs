@@ -53,7 +53,7 @@ impl<P: InteractionPort> ProviderTurnCancellation<P> {
 
     pub(crate) async fn settle_pending_approvals(&self) {
         self.interaction_port
-            .cancel_all(Some(self.approval.clone()), "turnCancelled")
+            .cancel_all(self.approval.clone(), "turnCancelled")
             .await;
     }
 }
