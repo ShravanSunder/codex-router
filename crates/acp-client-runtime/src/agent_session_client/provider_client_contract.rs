@@ -148,6 +148,12 @@ pub enum ExternalProviderRuntimeError {
         value: String,
         reason: String,
     },
+    #[error("outcomeUnknown: provider setting effect is not confirmed")]
+    SettingOutcomeUnknown {
+        provider_session_id: String,
+        setting: crate::ProviderSettingKind,
+        value: String,
+    },
     #[error("provider does not advertise steering")]
     UnsupportedSteering,
     #[error("provider does not advertise {capability}")]

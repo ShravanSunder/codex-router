@@ -50,6 +50,18 @@ pub(crate) async fn apply_loaded_setting(
                 reason,
             })
         }
+        Some(SettingSetupFailure::Uncertain { .. }) => {
+            handles
+                .settings_unresolved
+                .write()
+                .await
+                .insert(provider_session_id.clone(), kind);
+            Err(ExternalProviderRuntimeError::SettingOutcomeUnknown {
+                provider_session_id,
+                setting: kind,
+                value,
+            })
+        }
         None => {
             let effective = catalog.effective_settings();
             handles
