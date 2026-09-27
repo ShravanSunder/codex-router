@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use session_event_model::session_profile_codec::{ProfileState, ProfileTurn, StateNotification};
 use session_event_model::{
     CapabilityReport, PendingInteraction, SessionEvent, SessionItemKind, SessionState, StopReason,
-    ToolCallStatus, TurnOutcome,
+    ToolCallStatus, TurnLostReason, TurnOutcome,
 };
 use std::{
     collections::{BTreeSet, HashMap},
@@ -70,18 +70,25 @@ fn event_notification(
                     };
                     (ProfileState::Idle, turn)
                 }
-                TurnOutcome::Lost { reason } if reason == "endNotObservable" => (
+                TurnOutcome::Lost {
+                    reason: TurnLostReason::EndNotObservable,
+                } => (
                     ProfileState::Idle,
                     ProfileTurn::Lost {
                         turn_id: turn_id.clone(),
-                        reason: reason.clone(),
+                        reason: "endNotObservable".into(),
                     },
                 ),
                 TurnOutcome::Lost { reason } => (
                     ProfileState::Unloaded,
                     ProfileTurn::Lost {
                         turn_id: turn_id.clone(),
-                        reason: reason.clone(),
+                        reason: match reason {
+                            TurnLostReason::ProviderRetired => "providerRetired",
+                            TurnLostReason::ProviderTurnFailed => "providerTurnFailed",
+                            TurnLostReason::EndNotObservable => "endNotObservable",
+                        }
+                        .into(),
                     },
                 ),
             };
@@ -446,7 +453,7 @@ mod state_tests {
         let not_observable = SessionEvent::TurnEnded {
             turn_id: "turn-1".into(),
             outcome: TurnOutcome::Lost {
-                reason: "endNotObservable".into(),
+                reason: TurnLostReason::EndNotObservable,
             },
         };
         let lost_frame = event_notification(

@@ -167,7 +167,12 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
         ]
     }))?;
     let answer = broker
-        .request_question(backend.session.clone(), actor.clone(), question.clone())
+        .request_question(
+            backend.session.clone(),
+            actor.clone(),
+            question.clone(),
+            None,
+        )
         .await?;
     let _sent = backend.events.send(HubEvent {
         sequence: 92,
@@ -209,7 +214,7 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
         ]
     }))?;
     let choice_answer = broker
-        .request_question(backend.session.clone(), actor.clone(), choice.clone())
+        .request_question(backend.session.clone(), actor.clone(), choice.clone(), None)
         .await?;
     let _sent = backend.events.send(HubEvent {
         sequence: 93,
@@ -304,7 +309,12 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
         ]
     }))?;
     let withdrawn_answer = broker
-        .request_question(backend.session.clone(), actor.clone(), withdrawn.clone())
+        .request_question(
+            backend.session.clone(),
+            actor.clone(),
+            withdrawn.clone(),
+            None,
+        )
         .await?;
     let _sent = backend.events.send(HubEvent {
         sequence: 94,

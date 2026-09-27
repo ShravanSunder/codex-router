@@ -179,7 +179,13 @@ impl SessionEventHub for ScriptedSessionBackend {
     fn attach(&self, _: SessionRef) -> HubFuture<'_, SessionEventAttachment> {
         let receiver = self.events.subscribe();
         let snapshot = self.history.lock().expect("test lock").clone();
-        Box::pin(async move { Ok(SessionEventAttachment { snapshot, receiver }) })
+        Box::pin(async move {
+            Ok(SessionEventAttachment {
+                snapshot,
+                receiver,
+                epoch: 0,
+            })
+        })
     }
     fn state(&self, session: SessionRef) -> HubFuture<'_, SessionState> {
         let exists = self

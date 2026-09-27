@@ -231,6 +231,7 @@ impl SessionEventHub for ScriptedProviderBackend {
                 }))
                 .collect(),
                 receiver,
+                epoch: 0,
             })
         })
     }

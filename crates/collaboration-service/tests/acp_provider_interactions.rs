@@ -270,7 +270,12 @@ async fn approver_question_form_returns_typed_answers_to_the_agent() -> TestResu
         ]
     }))?;
     let agent_reply = broker
-        .request_question(provider.session.clone(), owner.clone(), request.clone())
+        .request_question(
+            provider.session.clone(),
+            owner.clone(),
+            request.clone(),
+            None,
+        )
         .await?;
     let _sent = provider.events.send(HubEvent {
         sequence: 80,
