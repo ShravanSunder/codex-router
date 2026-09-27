@@ -88,6 +88,9 @@ pub(crate) enum ProviderSessionCommand<P: InteractionPort> {
     Inspect {
         reply: tokio::sync::oneshot::Sender<ProviderSessionActivity>,
     },
+    InspectActiveOperation {
+        reply: tokio::sync::oneshot::Sender<Option<P::OperationId>>,
+    },
     WaitIdle {
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
@@ -312,6 +315,9 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                         Some(ProviderSessionCommand::Inspect { reply }) => {
                                             let _result = reply.send(ProviderSessionActivity::Running);
                                         }
+                                        Some(ProviderSessionCommand::InspectActiveOperation { reply }) => {
+                                            let _result = reply.send(operation_id.clone());
+                                        }
                                         Some(ProviderSessionCommand::WaitIdle { reply }) => idle_waiters.push(reply),
                                         Some(ProviderSessionCommand::SetSetting { reply, .. }) => {
                                             let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
@@ -360,6 +366,9 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                     }
                     ProviderSessionCommand::Inspect { reply } => {
                         let _result = reply.send(ProviderSessionActivity::Idle);
+                    }
+                    ProviderSessionCommand::InspectActiveOperation { reply } => {
+                        let _result = reply.send(None);
                     }
                     ProviderSessionCommand::WaitIdle { reply } => {
                         let _result = reply.send(Ok(()));
