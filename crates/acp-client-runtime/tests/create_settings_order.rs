@@ -152,6 +152,51 @@ elif mode=='rejected':
 sys.stdin.read()
 "#;
 
+const HELD_SETTING_RESPONSE_FIXTURE: &str = r#"
+import json,sys
+ready_path,go_path=sys.argv[1:]
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},
+    'agentInfo':{'name':'held-setting-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session',
+    'configOptions':[{'id':'mode','name':'Mode','category':'mode','type':'select',
+    'currentValue':'auto','options':[{'value':'auto','name':'Auto'},{'value':'ask','name':'Ask'}]}]}})
+request=read()
+assert request['method']=='session/set_config_option'
+with open(ready_path,'wb',buffering=0) as ready:
+    ready.write(b'R')
+with open(go_path,'rb',buffering=0) as barrier:
+    assert barrier.read(1)==b'G'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'configOptions':'bad-shape'}})
+request=read()
+assert request['method']=='session/prompt',request
+send({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+
+const SILENT_SETTING_RESPONSE_FIXTURE: &str = r#"
+import json,sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},
+    'agentInfo':{'name':'silent-setting-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session',
+    'configOptions':[{'id':'mode','name':'Mode','category':'mode','type':'select',
+    'currentValue':'auto','options':[{'value':'auto','name':'Auto'},{'value':'ask','name':'Ask'}]}]}})
+request=read()
+assert request['method']=='session/set_config_option'
+sys.stdin.read()
+"#;
+
 const LEGACY_SETTING_RESPONSE_FIXTURE: &str = r#"
 import json,sys
 def read(): return json.loads(sys.stdin.readline())
@@ -449,7 +494,7 @@ async fn partial_setup_blocks_prompt_until_settings_are_accepted() {
             RequestedProviderSettings {
                 mode: Some("ask".to_owned()),
                 model: Some("b".to_owned()),
-                effort: None,
+                effort: Some("high".to_owned()),
             },
         )
         .await;
@@ -457,6 +502,7 @@ async fn partial_setup_blocks_prompt_until_settings_are_accepted() {
         provider_session_id,
         applied,
         failed,
+        not_applied,
     }) = result
     else {
         panic!("partial setup result: {result:?}")
@@ -468,7 +514,15 @@ async fn partial_setup_blocks_prompt_until_settings_are_accepted() {
         acp_client_runtime::ProviderSettingKind::Mode
     );
     assert_eq!(failed.kind, acp_client_runtime::ProviderSettingKind::Model);
-    assert!(!failed.reason.contains("private agent detail"));
+    assert!(!failed.reason.as_str().contains("private agent detail"));
+    assert_eq!(
+        not_applied,
+        vec![acp_client_runtime::NotAppliedProviderSetting {
+            kind: acp_client_runtime::ProviderSettingKind::Effort,
+            value: "high".to_owned(),
+        }]
+        .into_boxed_slice()
+    );
     assert!(client.settings_unresolved(&provider_session_id).await);
     let blocked = client
         .prompt_contents_with_approval_dispatch_for_input(
@@ -513,7 +567,7 @@ async fn partial_setup_blocks_prompt_until_settings_are_accepted() {
 /// Oracle: specification R14 lets the caller resolve a partial setup by
 /// applying a currently offered value before prompting.
 #[tokio::test]
-async fn partial_setup_can_be_resolved_by_setting_the_failed_value() {
+async fn resolving_failed_kind_keeps_untried_kind_gated_until_accepted() {
     let root = tempfile::tempdir().expect("fixture root");
     let receipt = root.path().join("resolved.txt");
     let sink = Arc::new(SettingsEventSink::default());
@@ -530,7 +584,7 @@ async fn partial_setup_can_be_resolved_by_setting_the_failed_value() {
             RequestedProviderSettings {
                 mode: Some("ask".to_owned()),
                 model: Some("b".to_owned()),
-                effort: None,
+                effort: Some("high".to_owned()),
             },
         )
         .await;
@@ -558,6 +612,11 @@ async fn partial_setup_can_be_resolved_by_setting_the_failed_value() {
         assert_eq!(settings[0].model.as_deref(), Some("a"));
         assert_eq!(settings[1].model.as_deref(), Some("b"));
     }
+    assert!(client.settings_unresolved(&provider_session_id).await);
+    client
+        .accept_session_settings(provider_session_id.clone())
+        .await
+        .expect("accept remaining untried setting");
     assert!(!client.settings_unresolved(&provider_session_id).await);
     let prompt = client
         .prompt_contents_with_approval_dispatch_for_input(
@@ -650,6 +709,161 @@ fn setting_response_launch(mode: &str) -> ExternalProviderLaunch {
 /// Oracle: once a setting request was sent, an unusable success response
 /// leaves the effect unknown. Work stays gated until the caller resolves it.
 #[tokio::test]
+async fn queued_prompt_is_gated_after_in_flight_setting_becomes_uncertain() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let ready_path = root.path().join("setting-ready.fifo");
+    let go_path = root.path().join("setting-go.fifo");
+    for path in [&ready_path, &go_path] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .expect("create FIFO")
+                .success()
+        );
+    }
+    let client = AgentSessionClient::initialize(
+        ExternalProviderLaunch {
+            executable: PathBuf::from("python3"),
+            arguments: vec![
+                "-u".to_owned(),
+                "-c".to_owned(),
+                HELD_SETTING_RESPONSE_FIXTURE.to_owned(),
+                ready_path.to_string_lossy().into_owned(),
+                go_path.to_string_lossy().into_owned(),
+            ],
+            environment: Vec::new(),
+            persistence_target: ProviderPersistenceTarget::Unspecified,
+        },
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let session_id = client
+        .create_session(root.path().to_path_buf())
+        .await
+        .expect("session opens");
+    let setting = client.set_setting(
+        session_id.clone(),
+        acp_client_runtime::ProviderSettingKind::Mode,
+        "ask".to_owned(),
+    );
+    tokio::pin!(setting);
+    assert!(futures_util::poll!(setting.as_mut()).is_pending());
+    let ready = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut barrier = std::fs::OpenOptions::new()
+            .read(true)
+            .open(ready_path)
+            .expect("setting reached agent");
+        let mut ready = [0_u8; 1];
+        barrier.read_exact(&mut ready).expect("setting held");
+        ready
+    })
+    .await
+    .expect("barrier reader");
+    assert_eq!(ready, [b'R']);
+
+    let prompt = client.prompt_contents_with_approval_dispatch_for_input(
+        session_id.clone(),
+        session_event_model::InputId::generate(),
+        vec![
+            session_event_model::PromptContent::text("Do not dispatch".to_owned())
+                .expect("text prompt"),
+        ],
+        (),
+        None,
+    );
+    tokio::pin!(prompt);
+    assert!(futures_util::poll!(prompt.as_mut()).is_pending());
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut release = std::fs::OpenOptions::new()
+            .write(true)
+            .open(go_path)
+            .expect("release barrier");
+        release.write_all(b"G").expect("release setting");
+    })
+    .await
+    .expect("barrier writer");
+
+    assert!(matches!(
+        setting.await,
+        Err(acp_client_runtime::ExternalProviderRuntimeError::SettingOutcomeUnknown { .. })
+    ));
+    assert!(matches!(
+        prompt.await,
+        Err(acp_client_runtime::ExternalProviderRuntimeError::SettingsUnresolved)
+    ));
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn silent_setting_response_expires_to_unknown_and_gates_session() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let client = AgentSessionClient::initialize(
+        ExternalProviderLaunch {
+            executable: PathBuf::from("python3"),
+            arguments: vec![
+                "-u".to_owned(),
+                "-c".to_owned(),
+                SILENT_SETTING_RESPONSE_FIXTURE.to_owned(),
+            ],
+            environment: Vec::new(),
+            persistence_target: ProviderPersistenceTarget::Unspecified,
+        },
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let session_id = client
+        .create_session(root.path().to_path_buf())
+        .await
+        .expect("session opens");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(32),
+        client.set_setting(
+            session_id.clone(),
+            acp_client_runtime::ProviderSettingKind::Mode,
+            "ask".to_owned(),
+        ),
+    )
+    .await;
+    if result.is_err() {
+        client.shutdown().await;
+        panic!("setting request remained busy beyond its deadline");
+    }
+    assert!(matches!(
+        result,
+        Ok(Err(
+            acp_client_runtime::ExternalProviderRuntimeError::SettingOutcomeUnknown { .. }
+        ))
+    ));
+    assert!(client.settings_unresolved(&session_id).await);
+    let blocked = client
+        .prompt_contents_with_approval_dispatch_for_input(
+            session_id,
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Must stay gated".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
+        .await;
+    assert!(matches!(
+        blocked,
+        Err(acp_client_runtime::ExternalProviderRuntimeError::SettingsUnresolved)
+    ));
+    client.shutdown().await;
+}
+
+/// Oracle: once a setting request was sent, an unusable success response
+/// leaves the effect unknown. Work stays gated until the caller resolves it.
+#[tokio::test]
 async fn malformed_post_send_setting_response_gates_existing_session() {
     let root = tempfile::tempdir().expect("fixture root");
     let client = AgentSessionClient::initialize(
@@ -677,6 +891,10 @@ async fn malformed_post_send_setting_response_gates_existing_session() {
         "setting result: {result:?}"
     );
     assert!(client.settings_unresolved(&session_id).await);
+    assert!(matches!(
+        client.accept_session_settings(session_id.clone()).await,
+        Err(acp_client_runtime::ExternalProviderRuntimeError::SettingsOutcomeUncertain)
+    ));
     let blocked = client
         .prompt_contents_with_approval_dispatch_for_input(
             session_id,

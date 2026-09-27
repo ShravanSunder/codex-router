@@ -25,6 +25,8 @@ enum ApprovalCommand {
     List {
         #[arg(long)]
         pending: bool,
+        #[arg(long)]
+        include_options: bool,
         #[command(flatten)]
         output: OutputArguments,
     },
@@ -82,8 +84,12 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
-    let (output, request, pending_only) = match parsed.command {
-        ApprovalCommand::List { pending, output } => (output, None, pending),
+    let (output, request, pending_only, include_options) = match parsed.command {
+        ApprovalCommand::List {
+            pending,
+            include_options,
+            output,
+        } => (output, None, pending, include_options),
         ApprovalCommand::Decide {
             request_id,
             allow,
@@ -139,6 +145,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
                     actor,
                 }),
                 false,
+                false,
             )
         }
     };
@@ -172,9 +179,15 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
                     .await
                     .map_err(|error| ApprovalCommandError::Operation(error.into_parts().0))?,
             ),
-            None => serde_json::to_value(
+            None if include_options => serde_json::to_value(
                 client
                     .list_approvals_with_options(pending_only)
+                    .await
+                    .map_err(ApprovalCommandError::Client)?,
+            ),
+            None => serde_json::to_value(
+                client
+                    .list_pending_approvals(pending_only)
                     .await
                     .map_err(ApprovalCommandError::Client)?,
             ),
@@ -238,4 +251,31 @@ pub(crate) fn parse_actor(value: &str) -> Result<Identity, ()> {
     }
     let session = serde_json::from_value(parsed).map_err(|_| ())?;
     Ok(Identity::Session { session })
+}
+
+#[cfg(test)]
+mod approval_list_argument_tests {
+    use super::*;
+
+    #[test]
+    fn options_are_absent_by_default_and_opt_in_explicitly() {
+        let default =
+            ApprovalArguments::try_parse_from(["approval", "list"]).expect("default list");
+        let ApprovalCommand::List {
+            include_options, ..
+        } = default.command
+        else {
+            panic!("list")
+        };
+        assert!(!include_options);
+        let detailed = ApprovalArguments::try_parse_from(["approval", "list", "--include-options"])
+            .expect("detailed list");
+        let ApprovalCommand::List {
+            include_options, ..
+        } = detailed.command
+        else {
+            panic!("list")
+        };
+        assert!(include_options);
+    }
 }

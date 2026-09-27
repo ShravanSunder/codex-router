@@ -16,6 +16,10 @@ impl ProviderKnownSessions {
         self.0.write().await.remove(session_id);
     }
 
+    pub(super) async fn snapshot(&self) -> Vec<String> {
+        self.0.read().await.iter().cloned().collect()
+    }
+
     async fn contains(&self, session_id: &str) -> bool {
         self.0.read().await.contains(session_id)
     }

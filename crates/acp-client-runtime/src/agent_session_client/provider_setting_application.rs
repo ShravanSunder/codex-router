@@ -10,6 +10,9 @@ use super::*;
 use crate::{
     AppliedProviderSetting, ProviderSettingKind, ProviderSettingsCatalog, RequestedProviderSettings,
 };
+use std::time::Duration;
+
+const SETTING_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) enum SettingSetupFailure {
     Invalid {
@@ -172,7 +175,11 @@ async fn send_setting_request(
             Ok(())
         })
         .map_err(|_| SettingResponseFailure::Unknown)?;
-    match result.await.map_err(|_| SettingResponseFailure::Unknown)? {
+    let response = tokio::time::timeout(SETTING_RESPONSE_TIMEOUT, result)
+        .await
+        .map_err(|_| SettingResponseFailure::Unknown)?
+        .map_err(|_| SettingResponseFailure::Unknown)?;
+    match response {
         Ok(response) => Ok(response),
         Err(error) if agent_client_protocol::is_incoming_transport_closed(&error) => {
             Err(SettingResponseFailure::Unknown)

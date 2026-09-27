@@ -754,6 +754,7 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                                 provider_session_id,
                                 applied,
                                 failed,
+                                not_applied,
                             }) => {
                                 let catalog = runtime.settings_catalog(&provider_session_id).await;
                                 match SessionId::try_from(provider_session_id) {
@@ -767,6 +768,7 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                                             target: target.clone(),
                                             applied: applied.into_iter().map(provider_applied_setting).collect(),
                                             failed: vec![provider_failed_setting(failed)],
+                                            not_applied: not_applied.into_iter().map(crate::provider_operation_settlement::provider_not_applied_setting).collect(),
                                         },
                                         target: Some(target.clone()),
                                         session_record: Some(Box::new(provider_session_record(

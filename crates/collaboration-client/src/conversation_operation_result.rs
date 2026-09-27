@@ -46,6 +46,8 @@ pub enum ConversationCreatePromptOutcome {
         target: SessionRef,
         applied: Vec<collaboration_protocol::AppliedProviderSetting>,
         failed: Vec<collaboration_protocol::FailedProviderSetting>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_applied: Vec<collaboration_protocol::NotAppliedProviderSetting>,
     },
     Prompt {
         create_operation_id: OperationId,

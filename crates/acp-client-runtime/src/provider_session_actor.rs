@@ -16,7 +16,7 @@ use crate::provider_prompt_observation::{observe_idle_session_update, read_bound
 use agent_client_protocol::schema::v1::{CancelNotification, PromptRequest};
 use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, JsonRpcMessage, UntypedMessage};
 use serde_json::json;
-use session_event_model::{InputId, LocalCause, SessionEvent, TurnOutcome};
+use session_event_model::{InputId, LocalCause, SessionEvent, TurnLostReason, TurnOutcome};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -59,8 +59,17 @@ pub(crate) struct ProviderSessionRuntimeHandles {
     >,
     pub(crate) last_settings_catalog:
         Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
-    pub(crate) settings_unresolved:
-        Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::ProviderSettingKind>>>,
+    pub(crate) settings_unresolved: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<
+                String,
+                std::collections::HashMap<
+                    crate::ProviderSettingKind,
+                    crate::provider_session_settings::UnresolvedSettingCause,
+                >,
+            >,
+        >,
+    >,
 }
 
 pub(crate) enum ProviderSessionCommand<P: InteractionPort> {
@@ -145,6 +154,13 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                 let Some(command) = command else { break; };
                 match command {
                     ProviderSessionCommand::Prompt { input_id, operation_id, prompt, turn_cancellation, dispatch, reply } => {
+                        if runtime_handles.settings_unresolved.read().await.contains_key(session.session_id().0.as_ref()) {
+                            if let Some(dispatch) = dispatch {
+                                let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
+                            }
+                            let _result = reply.send(Err(ExternalProviderRuntimeError::SettingsUnresolved));
+                            continue;
+                        }
                         let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
                         let prompt_request = PromptRequest::new(
                             session.session_id().clone(),
@@ -215,7 +231,7 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                             provider_session_id.0.as_ref(),
                                             SessionEvent::TurnEnded {
                                                 turn_id: turn_id.clone(),
-                                                outcome: TurnOutcome::Lost { reason: "providerRetired".to_owned() },
+                                                outcome: TurnOutcome::Lost { reason: TurnLostReason::ProviderRetired },
                                             },
                                         );
                                     }
@@ -236,11 +252,11 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                         if let Some(turn_cancellation) = &turn_cancellation {
                                             turn_cancellation.mark_cancelling();
                                         }
-                                        let _result = provider_connection
-                                            .send_notification(CancelNotification::new(provider_session_id.clone()));
                                         if let Some(turn_cancellation) = &turn_cancellation {
                                             turn_cancellation.settle_pending_approvals().await;
                                         }
+                                        let _result = provider_connection
+                                            .send_notification(CancelNotification::new(provider_session_id.clone()));
                                     }
                                 }
                                 result = &mut prompt_result => {
@@ -250,13 +266,20 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                         let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
                                         return;
                                     }
+                                    // A provider may finish immediately after Router admits
+                                    // cancellation. Settle interactions before the hub sees the
+                                    // terminal Turn fact, regardless of which path won the race.
+                                    if let Some(turn_cancellation) = &turn_cancellation {
+                                        turn_cancellation.mark_cancelling();
+                                        turn_cancellation.settle_pending_approvals().await;
+                                    }
                                     let outcome = match &result {
                                         Ok(prompt) => TurnOutcome::Ended {
                                             stop_reason: prompt.stop_reason.clone(),
                                             local_cause: output_limit_cancelled.then_some(LocalCause::OutputOverflow),
                                         },
-                                        Err(ExternalProviderRuntimeError::TransportFailure) => TurnOutcome::Lost { reason: "providerRetired".to_owned() },
-                                        Err(_) => TurnOutcome::Lost { reason: "providerTurnFailed".to_owned() },
+                                        Err(ExternalProviderRuntimeError::TransportFailure) => TurnOutcome::Lost { reason: TurnLostReason::ProviderRetired },
+                                        Err(_) => TurnOutcome::Lost { reason: TurnLostReason::ProviderTurnFailed },
                                     };
                                     if runtime_handles.tool_registry.claim_turn_end(provider_session_id.0.as_ref(), &turn_id)
                                         && runtime_handles.event_sink.publish(
@@ -298,6 +321,10 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                             let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
                                         }
                                         Some(ProviderSessionCommand::Steer { input_id, prompt, reply }) => {
+                                            if runtime_handles.settings_unresolved.read().await.contains_key(provider_session_id.0.as_ref()) {
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::SettingsUnresolved));
+                                                continue;
+                                            }
                                             let result = steer_provider_turn::<P>(&provider_connection, &provider_session_id, prompt, operation_id.clone()).await;
                                             if matches!(result, Ok(ProviderSteeringOutcome::Injected { .. }))
                                                 && runtime_handles.event_sink.publish(
@@ -332,6 +359,10 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                         let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                     }
                     ProviderSessionCommand::Steer { input_id, prompt, reply } => {
+                        if runtime_handles.settings_unresolved.read().await.contains_key(session.session_id().0.as_ref()) {
+                            let _result = reply.send(Err(ExternalProviderRuntimeError::SettingsUnresolved));
+                            continue;
+                        }
                         let result = steer_provider_turn::<P>(session.connection(), session.session_id(), prompt, None).await;
                         if matches!(result, Ok(ProviderSteeringOutcome::StartedNewTurn)) {
                             let turn_id = uuid::Uuid::now_v7().to_string();
@@ -352,7 +383,7 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                 session.session_id().0.as_ref(),
                                 SessionEvent::TurnEnded {
                                     turn_id,
-                                    outcome: TurnOutcome::Lost { reason: "endNotObservable".to_owned() },
+                                    outcome: TurnOutcome::Lost { reason: TurnLostReason::EndNotObservable },
                                 },
                             ).is_err() {
                                 runtime_handles.sink_closed.cancel();

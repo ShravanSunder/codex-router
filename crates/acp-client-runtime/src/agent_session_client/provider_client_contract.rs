@@ -142,6 +142,10 @@ pub enum ExternalProviderRuntimeError {
     LocalBusy,
     #[error("provider session settings need resolution before work can start")]
     SettingsUnresolved,
+    #[error(
+        "settings-uncertain: run conversation settings set to resolve the unknown provider setting outcome"
+    )]
+    SettingsOutcomeUncertain,
     #[error("provider setting could not be applied")]
     SettingFailed {
         setting: crate::ProviderSettingKind,
@@ -193,6 +197,7 @@ pub enum ExternalProviderRuntimeError {
         provider_session_id: String,
         applied: Vec<crate::AppliedProviderSetting>,
         failed: crate::FailedProviderSetting,
+        not_applied: Box<[crate::NotAppliedProviderSetting]>,
     },
     #[error("session history replay could not begin")]
     HistoryReplayUnavailable,

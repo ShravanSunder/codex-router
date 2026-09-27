@@ -19,6 +19,7 @@ pub struct HubEvent {
 pub struct SessionEventAttachment {
     pub snapshot: Vec<HubEvent>,
     pub receiver: broadcast::Receiver<HubEvent>,
+    pub epoch: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

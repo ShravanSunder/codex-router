@@ -50,6 +50,10 @@ enum EventCommand {
         max_events: usize,
         #[arg(long, default_value_t = 262_144, value_parser = parse_max_bytes)]
         max_bytes: usize,
+        #[arg(long, requires = "epoch")]
+        after_sequence: Option<u64>,
+        #[arg(long)]
+        epoch: Option<u64>,
     },
 }
 
@@ -117,14 +121,20 @@ pub fn run_event_command(arguments: Vec<OsString>) -> i32 {
                 timeout_seconds,
                 max_events,
                 max_bytes,
+                after_sequence,
+                epoch,
             } => {
                 observe(
                     &directory,
-                    endpoint,
-                    session,
-                    timeout_seconds,
-                    max_events,
-                    max_bytes,
+                    ObserveInput {
+                        endpoint,
+                        session,
+                        timeout_seconds,
+                        max_events,
+                        max_bytes,
+                        after_sequence,
+                        epoch,
+                    },
                 )
                 .await
             }
@@ -238,15 +248,18 @@ fn report_observation_error(error: collaboration_client::OperationError) -> i32 
     exit
 }
 
-async fn observe(
-    directory: &std::path::Path,
+struct ObserveInput {
     endpoint: String,
     session: String,
     timeout_seconds: u64,
     max_events: usize,
     max_bytes: usize,
-) -> i32 {
-    let endpoint_id = match EndpointId::try_from(endpoint) {
+    after_sequence: Option<u64>,
+    epoch: Option<u64>,
+}
+
+async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
+    let endpoint_id = match EndpointId::try_from(input.endpoint) {
         Ok(value) => value,
         Err(_) => {
             return crate::endpoint_commands::report_failure(
@@ -257,7 +270,7 @@ async fn observe(
             );
         }
     };
-    let session_id = match SessionId::try_from(session) {
+    let session_id = match SessionId::try_from(input.session) {
         Ok(value) => value,
         Err(_) => {
             return crate::endpoint_commands::report_failure(
@@ -302,9 +315,11 @@ async fn observe(
         directory,
         BoundedObservationRequest {
             target,
-            timeout_seconds,
-            max_events,
-            max_bytes,
+            timeout_seconds: input.timeout_seconds,
+            max_events: input.max_events,
+            max_bytes: input.max_bytes,
+            after_sequence: input.after_sequence,
+            epoch: input.epoch,
         },
         cancel.clone(),
     );
@@ -338,5 +353,55 @@ async fn observe(
             let _printed = writeln!(io::stdout(), "{record}");
             exit
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{EventArguments, EventCommand};
+
+    #[test]
+    fn observe_accepts_paging_cursor_with_epoch() {
+        let arguments = EventArguments::try_parse_from([
+            "events",
+            "observe",
+            "--endpoint",
+            "claude-local",
+            "--session",
+            "session-one",
+            "--attach",
+            "--after-sequence",
+            "12",
+            "--epoch",
+            "3",
+        ])
+        .expect("paged observe args");
+        match arguments.command {
+            EventCommand::Observe {
+                after_sequence,
+                epoch,
+                ..
+            } => {
+                assert_eq!(after_sequence, Some(12));
+                assert_eq!(epoch, Some(3));
+            }
+            EventCommand::Listen { .. } => panic!("expected observe"),
+        }
+        assert!(
+            EventArguments::try_parse_from([
+                "events",
+                "observe",
+                "--endpoint",
+                "claude-local",
+                "--session",
+                "session-one",
+                "--attach",
+                "--after-sequence",
+                "12",
+            ])
+            .is_err()
+        );
     }
 }

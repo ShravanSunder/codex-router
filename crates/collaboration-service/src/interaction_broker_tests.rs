@@ -60,7 +60,7 @@ async fn typed_approval_and_question_notify_their_session_approver() {
     }))
     .expect("question");
     let _question = broker
-        .request_question(requester.clone(), approver_identity, question)
+        .request_question(requester.clone(), approver_identity, question, None)
         .await
         .expect("question pending");
     let notices = notices.lock().await;
@@ -830,6 +830,14 @@ async fn refused_typed_offer_preserves_reviewed_fields_and_order_without_legacy_
             if stored == &refusal && stored.options[0].label == "First" && stored.options[1].label == "Second"
     ));
     assert!(!directory.join("approval-history.json").exists());
+    let detailed = broker.list_detailed(false).await.expect("detailed list");
+    let row = detailed
+        .approvals
+        .iter()
+        .find(|row| row.request_id == "malformed-offer")
+        .expect("refusal listed");
+    assert_eq!(row.state, collaboration_protocol::ApprovalState::Refused);
+    assert_eq!(row.reason.as_deref(), Some(refusal.reason.as_str()));
     let reloaded = ServiceInteractionBroker::load(
         broker.service_id.clone(),
         broker.backend.clone(),
@@ -838,6 +846,42 @@ async fn refused_typed_offer_preserves_reviewed_fields_and_order_without_legacy_
     .await
     .expect("reload typed refusal");
     assert_eq!(reloaded.list_interactions().await, recorded);
+}
+
+#[tokio::test]
+async fn self_approver_refusal_is_recorded_and_listed_with_a_fix() {
+    let (broker, _, _) = fixture_broker().await;
+    let requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let refusal = crate::interaction_broker::RefusedTypedApproval {
+        request_id: "self-offer".into(),
+        title: "Run command".into(),
+        description: None,
+        subject: None,
+        options: Vec::new(),
+        reason: "set a different approver".into(),
+    };
+    broker
+        .record_typed_refusal(
+            requester.clone(),
+            message_board::Identity::Session { session: requester },
+            refusal,
+        )
+        .await
+        .expect("self refusal recorded");
+    let row = broker
+        .list_detailed(false)
+        .await
+        .expect("detailed list")
+        .approvals
+        .into_iter()
+        .find(|row| row.request_id == "self-offer")
+        .expect("self refusal listed");
+    assert_eq!(
+        row.state,
+        collaboration_protocol::ApprovalState::ApproverIsRequester
+    );
+    assert_eq!(row.reason.as_deref(), Some("set a different approver"));
 }
 
 // R17: the exact option ID is returned to the waiting agent. Persistent scope
@@ -1069,6 +1113,7 @@ async fn typed_question_checks_fields_and_keeps_answer_decline_cancel_distinct()
                     session: requester.clone()
                 },
                 question("self-question"),
+                None,
             )
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::SelfApprover)
@@ -1082,12 +1127,17 @@ async fn typed_question_checks_fields_and_keeps_answer_decline_cancel_distinct()
     .expect("parsed question");
     assert!(matches!(
         broker
-            .request_question(requester.clone(), approver.clone(), duplicate_fields)
+            .request_question(requester.clone(), approver.clone(), duplicate_fields, None)
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::InvalidQuestion)
     ));
     let receiver = broker
-        .request_question(requester.clone(), approver.clone(), question("q-answer"))
+        .request_question(
+            requester.clone(),
+            approver.clone(),
+            question("q-answer"),
+            None,
+        )
         .await
         .expect("pending question");
     assert_eq!(broker.list_questions(true).await.len(), 1);
@@ -1147,7 +1197,12 @@ async fn typed_question_checks_fields_and_keeps_answer_decline_cancel_distinct()
         ("q-cancel", QuestionResponse::Cancelled),
     ] {
         let receiver = broker
-            .request_question(requester.clone(), approver.clone(), question(request_id))
+            .request_question(
+                requester.clone(),
+                approver.clone(),
+                question(request_id),
+                None,
+            )
             .await
             .expect("pending question");
         broker
@@ -1182,22 +1237,33 @@ async fn cancelling_a_session_answers_its_pending_questions_only() {
         .expect("question")
     };
     let first = broker
-        .request_question(requester.clone(), approver.clone(), question("q-first"))
+        .request_question(
+            requester.clone(),
+            approver.clone(),
+            question("q-first"),
+            None,
+        )
         .await
         .expect("first");
     let second = broker
-        .request_question(requester.clone(), approver.clone(), question("q-second"))
+        .request_question(
+            requester.clone(),
+            approver.clone(),
+            question("q-second"),
+            None,
+        )
         .await
         .expect("second");
     let mut other = broker
-        .request_question(other_requester, approver, question("q-other"))
+        .request_question(other_requester, approver, question("q-other"), None)
         .await
         .expect("other");
     assert_eq!(
         broker
             .cancel_questions(&requester, "turn cancelled")
             .await
-            .expect("cancel"),
+            .expect("cancel")
+            .len(),
         2
     );
     assert_eq!(
@@ -1248,11 +1314,16 @@ async fn agent_withdrawal_cancels_one_question_without_touching_the_next() {
         .expect("question")
     };
     let withdrawn = broker
-        .request_question(requester.clone(), approver.clone(), question("withdrawn"))
+        .request_question(
+            requester.clone(),
+            approver.clone(),
+            question("withdrawn"),
+            None,
+        )
         .await
         .expect("first");
     let mut still_pending = broker
-        .request_question(requester, approver, question("still-pending"))
+        .request_question(requester, approver, question("still-pending"), None)
         .await
         .expect("second");
     broker
@@ -1304,7 +1375,7 @@ async fn restart_cancels_populated_pending_interaction_history() {
     }))
     .expect("question");
     let question_receiver = broker
-        .request_question(requester, approver.clone(), question)
+        .request_question(requester, approver.clone(), question, None)
         .await
         .expect("question");
     let service_id = broker.service_id.clone();
@@ -1337,7 +1408,7 @@ async fn restart_cancels_populated_pending_interaction_history() {
     )
     .expect("persisted rows");
     assert!(matches!(records["restart-approval"].approval_state(),
-        Some(crate::interaction_broker::InteractionHistoryState::Cancelled { reason }) if reason == "hostRestarted"));
+        Some(crate::interaction_broker::InteractionHistoryState::Cancelled { reason }) if reason.as_str() == "hostRestarted"));
     assert!(matches!(&records["restart-question"],
         crate::interaction_broker::InteractionHistoryRecord::Question {
             state: crate::interaction_broker::QuestionHistoryState::Cancelled { reason }, ..

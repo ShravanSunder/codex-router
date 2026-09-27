@@ -49,9 +49,19 @@ if mode=='running-close':
     send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})
 else:
     send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+if mode=='aborted-close':
+    prompt=read()
+    assert prompt['method']=='session/prompt',prompt
+    seen.append('prompt')
+    send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
 close=read()
 assert close['method']=='session/close',close
 seen.append('close')
+if mode=='held-close':
+    with open(receipt+'.ready','wb',buffering=0) as ready:
+        ready.write(b'R')
+    with open(receipt+'.go','rb',buffering=0) as release:
+        assert release.read(1)==b'G'
 with open(receipt,'w') as output: json.dump(seen,output)
 send({'jsonrpc':'2.0','id':close['id'],'result':{}})
 sys.stdin.read()
@@ -198,6 +208,219 @@ async fn advertised_list_resume_and_idle_close_keep_wire_order() {
     let seen: Vec<String> =
         serde_json::from_slice(&std::fs::read(receipt).expect("receipt")).expect("receipt JSON");
     assert_eq!(seen, ["list", "resume", "prompt", "close"]);
+}
+
+#[tokio::test]
+async fn close_admission_rejects_a_new_prompt_before_close_command_is_processed() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let receipt = root.path().join("exchange.json");
+    let client = AgentSessionClient::initialize(
+        fixture_launch("idle-close", root.path(), &receipt),
+        Arc::new(NoopInteractionPort),
+        Arc::new(CountingEventSink::default()),
+    )
+    .await
+    .expect("fixture initializes");
+    client
+        .list_sessions(Some(root.path().to_path_buf()))
+        .await
+        .expect("list");
+    client
+        .resume_session("fixture-session".to_owned(), root.path().to_path_buf())
+        .await
+        .expect("resume");
+    client
+        .prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("First".to_owned()).expect("first prompt"),
+            ],
+            (),
+            None,
+        )
+        .await
+        .expect("first prompt settles");
+
+    let close = client.close_session("fixture-session".to_owned());
+    tokio::pin!(close);
+    assert!(futures_util::poll!(close.as_mut()).is_pending());
+    let second_prompt = client.prompt_contents_with_approval_dispatch_for_input(
+        "fixture-session".to_owned(),
+        session_event_model::InputId::generate(),
+        vec![session_event_model::PromptContent::text("Second".to_owned()).expect("second prompt")],
+        (),
+        None,
+    );
+    tokio::pin!(second_prompt);
+    assert!(futures_util::poll!(second_prompt.as_mut()).is_pending());
+    let (close_result, prompt_result) = tokio::join!(&mut close, &mut second_prompt);
+    client.shutdown().await;
+    assert!(close_result.is_ok(), "close result: {close_result:?}");
+    assert!(matches!(
+        prompt_result,
+        Err(acp_client_runtime::ExternalProviderRuntimeError::LocalBusy)
+    ));
+    let seen: Vec<String> =
+        serde_json::from_slice(&std::fs::read(receipt).expect("receipt")).expect("receipt JSON");
+    assert_eq!(seen, ["list", "resume", "prompt", "close"]);
+}
+
+#[tokio::test]
+async fn dropped_close_before_command_submission_releases_admission_mark() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let receipt = root.path().join("exchange.json");
+    let client = AgentSessionClient::initialize(
+        fixture_launch("aborted-close", root.path(), &receipt),
+        Arc::new(NoopInteractionPort),
+        Arc::new(CountingEventSink::default()),
+    )
+    .await
+    .expect("fixture initializes");
+    client
+        .list_sessions(Some(root.path().to_path_buf()))
+        .await
+        .expect("list");
+    client
+        .resume_session("fixture-session".to_owned(), root.path().to_path_buf())
+        .await
+        .expect("resume");
+    client
+        .prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("First".to_owned()).expect("first prompt"),
+            ],
+            (),
+            None,
+        )
+        .await
+        .expect("first prompt settles");
+
+    let mut close = Box::pin(client.close_session("fixture-session".to_owned()));
+    assert!(futures_util::poll!(close.as_mut()).is_pending());
+    drop(close);
+    let second_prompt = client
+        .prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Second".to_owned())
+                    .expect("second prompt"),
+            ],
+            (),
+            None,
+        )
+        .await;
+    if second_prompt.is_ok() {
+        client
+            .close_session("fixture-session".to_owned())
+            .await
+            .expect("later close");
+    }
+    client.shutdown().await;
+    assert!(
+        second_prompt.is_ok(),
+        "prompt after abandoned close: {second_prompt:?}"
+    );
+    let seen: Vec<String> =
+        serde_json::from_slice(&std::fs::read(receipt).expect("receipt")).expect("receipt JSON");
+    assert_eq!(seen, ["list", "resume", "prompt", "prompt", "close"]);
+}
+
+#[tokio::test]
+async fn dropped_close_waiter_keeps_mark_until_submitted_close_settles() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let receipt = root.path().join("exchange.json");
+    let ready_path = root.path().join("exchange.json.ready");
+    let go_path = root.path().join("exchange.json.go");
+    for path in [&ready_path, &go_path] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .expect("create FIFO")
+                .success()
+        );
+    }
+    let client = Arc::new(
+        AgentSessionClient::initialize(
+            fixture_launch("held-close", root.path(), &receipt),
+            Arc::new(NoopInteractionPort),
+            Arc::new(CountingEventSink::default()),
+        )
+        .await
+        .expect("fixture initializes"),
+    );
+    client
+        .list_sessions(Some(root.path().to_path_buf()))
+        .await
+        .expect("list");
+    client
+        .resume_session("fixture-session".to_owned(), root.path().to_path_buf())
+        .await
+        .expect("resume");
+    client
+        .prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("First".to_owned()).expect("first prompt"),
+            ],
+            (),
+            None,
+        )
+        .await
+        .expect("first prompt settles");
+    let close_client = Arc::clone(&client);
+    let close = tokio::spawn(async move {
+        close_client
+            .close_session("fixture-session".to_owned())
+            .await
+    });
+    let ready = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .open(ready_path)
+            .expect("close reached agent");
+        let mut ready = [0_u8; 1];
+        pipe.read_exact(&mut ready).expect("close held");
+        ready
+    })
+    .await
+    .expect("barrier reader");
+    assert_eq!(ready, [b'R']);
+    close.abort();
+    assert!(close.await.is_err(), "close waiter aborted");
+    let blocked = client
+        .prompt_contents_with_approval_dispatch_for_input(
+            "fixture-session".to_owned(),
+            session_event_model::InputId::generate(),
+            vec![
+                session_event_model::PromptContent::text("Must not run".to_owned())
+                    .expect("text prompt"),
+            ],
+            (),
+            None,
+        )
+        .await;
+    assert!(matches!(
+        blocked,
+        Err(acp_client_runtime::ExternalProviderRuntimeError::LocalBusy)
+    ));
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut pipe = std::fs::OpenOptions::new()
+            .write(true)
+            .open(go_path)
+            .expect("release close");
+        pipe.write_all(b"G").expect("release agent");
+    })
+    .await
+    .expect("barrier writer");
+    client.shutdown().await;
 }
 
 /// Oracle: specification R13 requires close to end the active Turn first;

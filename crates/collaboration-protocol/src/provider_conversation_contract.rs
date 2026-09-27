@@ -317,10 +317,17 @@ pub struct AppliedProviderSetting {
 
 #[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NotAppliedProviderSetting {
+    pub setting: ProviderSettingName,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FailedProviderSetting {
     pub setting: ProviderSettingName,
     pub value: String,
-    pub reason: String,
+    pub reason: session_event_model::ProviderSettingFailureReason,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -553,6 +560,8 @@ pub enum ConversationOperationSettlement {
         target: SessionRef,
         applied: Vec<AppliedProviderSetting>,
         failed: Vec<FailedProviderSetting>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_applied: Vec<NotAppliedProviderSetting>,
     },
     Loaded {
         target: SessionRef,

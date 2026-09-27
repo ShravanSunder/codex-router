@@ -14,7 +14,9 @@ impl ProviderPersistenceTarget {
             Self::CursorAllowlist => {
                 "Cursor allowlist (Cursor decides whether global or per-project)"
             }
-            Self::ClaudeSettingsRule => "Claude Code permission rule in its settings",
+            Self::ClaudeSettingsRule => {
+                "May add a Claude Code permission rule to its local settings, or apply only to this Session; Claude chooses and does not report which."
+            }
             Self::Unspecified => "the agent's own persistent permissions (location not reported)",
         }
     }

@@ -15,7 +15,7 @@ fn confirmed_and_lost_turns_keep_distinct_evidence() {
         local_cause: None,
     };
     let lost = TurnOutcome::Lost {
-        reason: "provider retired".into(),
+        reason: session_event_model::TurnLostReason::ProviderRetired,
     };
     assert_ne!(confirmed, lost);
     assert_eq!(

@@ -223,12 +223,14 @@ impl ConversationClient {
                 target,
                 applied,
                 failed,
+                not_applied,
             } => {
                 return Ok(ConversationCreatePromptOutcome::CreatedWithoutSettings {
                     operation_id,
                     target,
                     applied,
                     failed,
+                    not_applied,
                 });
             }
             ConversationCreateOutcome::Pending { operation_id } => {
@@ -503,6 +505,7 @@ impl ConversationClient {
                                     target,
                                     applied,
                                     failed,
+                                    not_applied,
                                 },
                         } => {
                             return Ok(ConversationCreateOutcome::CreatedWithoutSettings {
@@ -510,6 +513,7 @@ impl ConversationClient {
                                 target,
                                 applied,
                                 failed,
+                                not_applied,
                             });
                         }
                         _ => {}

@@ -117,15 +117,43 @@ async fn provider_observers_share_snapshot_and_live_order() {
             timeout_seconds: 1,
             max_events: 2,
             max_bytes: 262_144,
+            after_sequence: None,
+            epoch: None,
         })
         .await
         .expect("bounded observation");
-    assert_eq!(observed.events, vec![first_snapshot, first_live]);
+    assert_eq!(observed.events, vec![first_snapshot, first_live.clone()]);
     assert_eq!(
         observed.end_reason,
         ObservationEndReason::ResultLimitReached
     );
     assert!(observed.continuation_gap);
+    let resumed = bounded
+        .observe_provider_session(BoundedObservationRequest {
+            target: observed.target.clone(),
+            timeout_seconds: 1,
+            max_events: 1,
+            max_bytes: 262_144,
+            after_sequence: Some(1),
+            epoch: observed.epoch,
+        })
+        .await
+        .expect("paged observation");
+    assert_eq!(resumed.events, vec![first_live.clone()]);
+    assert_eq!(resumed.epoch, observed.epoch);
+    let stale = bounded
+        .observe_provider_session(BoundedObservationRequest {
+            target: observed.target.clone(),
+            timeout_seconds: 1,
+            max_events: 1,
+            max_bytes: 262_144,
+            after_sequence: Some(1),
+            epoch: Some(observed.epoch.expect("provider epoch") + 1),
+        })
+        .await
+        .expect("stale epoch response");
+    assert_eq!(stale.end_reason, ObservationEndReason::ResyncRequired);
+    assert_eq!(stale.events, vec![json!({"kind":"resyncRequired"})]);
     for index in 3..=5 {
         hub.publish(
             serde_json::from_value(serde_json::to_value(&observed.target).expect("target JSON"))
@@ -143,6 +171,65 @@ async fn provider_observers_share_snapshot_and_live_order() {
         next(&mut second).await.expect("second lag"),
         json!({"kind":"resyncRequired"})
     );
+    let large_text = format!("{}{}", "a".repeat(900_000), "\"".repeat(50_000));
+    hub.publish(
+        serde_json::from_value(serde_json::to_value(&observed.target).expect("target JSON"))
+            .expect("board target"),
+        item("oversized", &large_text),
+    )
+    .await
+    .expect("large item");
+    let (mut oversized, oversized_server) = client(&identity).await.expect("oversized client");
+    let oversized_page = oversized
+        .observe_provider_session(BoundedObservationRequest {
+            target: observed.target.clone(),
+            timeout_seconds: 1,
+            max_events: 10,
+            max_bytes: 1_048_576,
+            after_sequence: None,
+            epoch: None,
+        })
+        .await
+        .expect("oversized observation");
+    assert!(oversized_page.events.iter().any(|event| {
+        event == &json!({"kind":"eventTooLarge","sequence":6,"itemId":"oversized"})
+    }));
+    let (mut large_listener, large_listener_server) =
+        client(&identity).await.expect("large listener");
+    large_listener
+        .listen_provider_session(ProviderSessionListenRequest {
+            target: observed.target.clone(),
+        })
+        .await
+        .expect("attach after large item");
+    let mut snapshot = Vec::new();
+    for _ in 0..6 {
+        snapshot.push(next(&mut large_listener).await.expect("replayed event"));
+    }
+    assert!(snapshot.iter().any(|event| {
+        event == &json!({"kind":"eventTooLarge","sequence":6,"itemId":"oversized"})
+    }));
+    hub.publish(
+        serde_json::from_value(serde_json::to_value(&observed.target).expect("target JSON"))
+            .expect("board target"),
+        item("after-large", "still delivered"),
+    )
+    .await
+    .expect("later item");
+    assert_eq!(
+        next(&mut large_listener).await.expect("later delivery")["sequence"],
+        7
+    );
+    large_listener.close().await.expect("listener close");
+    large_listener_server
+        .await
+        .expect("listener service")
+        .expect("listener IO");
+    oversized.close().await.expect("oversized close");
+    oversized_server
+        .await
+        .expect("oversized service")
+        .expect("oversized IO");
     first.close().await.expect("first close");
     second.close().await.expect("second close");
     bounded.close().await.expect("bounded close");

@@ -24,6 +24,7 @@ pub enum ApprovalState {
     TimedOut,
     ApproverUnreachable,
     ApproverIsRequester,
+    Refused,
     Cancelled,
     Decided,
 }
@@ -112,6 +113,8 @@ pub struct ApprovalDetailedRecord {
     pub requester: message_board::SessionRef,
     pub approver: Identity,
     pub state: ApprovalState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

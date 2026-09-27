@@ -24,13 +24,14 @@ pub use provider_conversation_contract::{
     ConversationOperationWaitRequest, ConversationOperationWaitResult,
     ConversationOutputUnavailableReason, ConversationPromptRequest, ConversationResumeRequest,
     EffectiveProviderSettings, FailedProviderSetting, InvalidProviderSetting,
-    InvalidSettingSessionDisposition, ProviderAuthenticationState, ProviderBindingId,
-    ProviderBindingIdentity, ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence,
-    ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect,
-    ProviderOperationKind, ProviderOperationStage, ProviderPermissionOutcome,
-    ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
-    ProviderRequestedSettings, ProviderRuntimeIdentity, ProviderSettingName,
-    ProviderSettingsMappingStatus, ProviderTransport, ProviderWorkingDirectory,
+    InvalidSettingSessionDisposition, NotAppliedProviderSetting, ProviderAuthenticationState,
+    ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities, ProviderCapability,
+    ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
+    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
+    ProviderPermissionOutcome, ProviderPromptStopReason, ProviderReconciliationState,
+    ProviderRequestedPolicy, ProviderRequestedSettings, ProviderRuntimeIdentity,
+    ProviderSettingName, ProviderSettingsMappingStatus, ProviderTransport,
+    ProviderWorkingDirectory,
 };
 pub use provider_identity::ProviderIdentity;
 pub use provider_settings_contract::{
@@ -74,6 +75,7 @@ pub use question_contract::{
 };
 pub use session_observation_contract::{
     BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
+    ProviderObservationEventTooLarge, ProviderObservationEventTooLargeKind,
     ProviderSessionListenReady, ProviderSessionListenRequest,
 };
 mod backend_generation;

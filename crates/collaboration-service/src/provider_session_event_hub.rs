@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use message_board::{SessionEndpointRef, SessionRef};
 use session_event_model::{
     PendingInteraction, PendingInteractions, SessionEvent, SessionSettings, SessionState,
-    TurnOutcome,
+    TurnLostReason, TurnOutcome,
 };
 use tokio::sync::{Mutex, broadcast};
 
@@ -16,19 +16,37 @@ use crate::{
 
 pub struct ProviderSessionEventHub {
     store: Arc<Mutex<ProviderOperationStore>>,
-    histories: Mutex<BTreeMap<SessionRef, SessionHistory>>,
+    histories: Mutex<BTreeMap<SessionRef, Arc<Mutex<SessionHistory>>>>,
     subscriber_capacity: usize,
 }
 
 struct SessionHistory {
     replay_epoch: u64,
     next_sequence: u64,
-    events: Vec<HubEvent>,
+    events: BTreeMap<u64, HubEvent>,
+    items: BTreeMap<String, RetainedItem>,
     sender: broadcast::Sender<HubEvent>,
+    subscriber_capacity: usize,
     state: SessionState,
     settings: Option<SessionSettings>,
     pending: BTreeMap<String, PendingInteraction>,
     turn_running: bool,
+}
+
+#[derive(Default)]
+struct RetainedItem {
+    latest: Option<HubEvent>,
+    completion: Option<HubEvent>,
+}
+
+#[derive(Debug)]
+enum HubProjectionDiagnostic {
+    PendingAtTurnEnd,
+    DuplicateInteraction,
+    UnknownInteractionResolution,
+    PendingStateConflict,
+    EmptyRequiresAction,
+    UnexpectedResyncEvent,
 }
 
 impl SessionHistory {
@@ -37,8 +55,10 @@ impl SessionHistory {
         Self {
             replay_epoch: 0,
             next_sequence: 1,
-            events: Vec::new(),
+            events: BTreeMap::new(),
+            items: BTreeMap::new(),
             sender,
+            subscriber_capacity,
             state: SessionState::Unloaded,
             settings: None,
             pending: BTreeMap::new(),
@@ -46,7 +66,17 @@ impl SessionHistory {
         }
     }
 
-    fn project(&mut self, event: &SessionEvent) -> Result<(), SessionEventHubError> {
+    fn snapshot(&self) -> Vec<HubEvent> {
+        let mut snapshot = self.events.values().cloned().collect::<Vec<_>>();
+        for retained in self.items.values() {
+            snapshot.extend(retained.latest.iter().cloned());
+            snapshot.extend(retained.completion.iter().cloned());
+        }
+        snapshot.sort_by_key(|event| event.sequence);
+        snapshot
+    }
+
+    fn project(&mut self, event: &SessionEvent) -> Result<(), HubProjectionDiagnostic> {
         match event {
             SessionEvent::TurnStarted { .. } => {
                 self.turn_running = true;
@@ -58,20 +88,20 @@ impl SessionHistory {
             }
             SessionEvent::TurnEnded { outcome, .. } => {
                 if !self.pending.is_empty() {
-                    return Err(SessionEventHubError::Unavailable);
+                    return Err(HubProjectionDiagnostic::PendingAtTurnEnd);
                 }
                 self.turn_running = false;
                 self.state = match outcome {
                     TurnOutcome::Ended { .. } => SessionState::Idle,
-                    TurnOutcome::Lost { reason } if reason == "endNotObservable" => {
-                        SessionState::Idle
-                    }
+                    TurnOutcome::Lost {
+                        reason: TurnLostReason::EndNotObservable,
+                    } => SessionState::Idle,
                     TurnOutcome::Lost { .. } => SessionState::Unloaded,
                 };
             }
             SessionEvent::InteractionRequested { interaction } => {
                 if self.pending.contains_key(interaction.request_id()) {
-                    return Err(SessionEventHubError::Unavailable);
+                    return Err(HubProjectionDiagnostic::DuplicateInteraction);
                 }
                 self.pending
                     .insert(interaction.request_id().to_owned(), interaction.clone());
@@ -79,7 +109,7 @@ impl SessionHistory {
             }
             SessionEvent::InteractionResolved { request_id } => {
                 if self.pending.remove(request_id).is_none() {
-                    return Err(SessionEventHubError::Unavailable);
+                    return Err(HubProjectionDiagnostic::UnknownInteractionResolution);
                 }
                 self.state = if self.pending.is_empty() {
                     if self.turn_running {
@@ -100,11 +130,11 @@ impl SessionHistory {
                         })
                         .collect();
                     if !self.pending.is_empty() && self.pending != advertised {
-                        return Err(SessionEventHubError::Unavailable);
+                        return Err(HubProjectionDiagnostic::PendingStateConflict);
                     }
                     self.pending = advertised;
                 } else if !self.pending.is_empty() {
-                    return Err(SessionEventHubError::Unavailable);
+                    return Err(HubProjectionDiagnostic::PendingStateConflict);
                 }
                 self.state = state.clone();
                 match state {
@@ -122,16 +152,36 @@ impl SessionHistory {
                 self.settings = Some(settings.clone());
             }
             SessionEvent::ResyncRequired { .. } => {
-                return Err(SessionEventHubError::Unavailable);
+                return Err(HubProjectionDiagnostic::UnexpectedResyncEvent);
             }
         }
         Ok(())
     }
 
-    fn requires_action_state(&self) -> Result<SessionState, SessionEventHubError> {
+    fn requires_action_state(&self) -> Result<SessionState, HubProjectionDiagnostic> {
         let pending = PendingInteractions::new(self.pending.values().cloned().collect())
-            .ok_or(SessionEventHubError::Unavailable)?;
+            .ok_or(HubProjectionDiagnostic::EmptyRequiresAction)?;
         Ok(SessionState::RequiresAction { pending })
+    }
+
+    fn reset_after_projection_rejection(&mut self) -> HubEvent {
+        let replay_epoch = self.replay_epoch.wrapping_add(1);
+        let control = HubEvent {
+            sequence: self.next_sequence,
+            event: SessionEvent::ResyncRequired { replay_epoch },
+        };
+        let _ = self.sender.send(control.clone());
+        let (sender, _) = broadcast::channel(self.subscriber_capacity);
+        self.sender = sender;
+        self.events.clear();
+        self.items.clear();
+        self.pending.clear();
+        self.turn_running = false;
+        self.state = SessionState::Unloaded;
+        self.settings = None;
+        self.next_sequence = 1;
+        self.replay_epoch = replay_epoch;
+        control
     }
 }
 
@@ -153,25 +203,74 @@ impl ProviderSessionEventHub {
         }
     }
 
-    /// Publishing and attach share one lock. No I/O is performed under it.
+    /// Publishing and attach share the lock for this Session only.
     pub async fn publish(
         &self,
         session: SessionRef,
         event: SessionEvent,
     ) -> Result<HubEvent, SessionEventHubError> {
-        let mut histories = self.histories.lock().await;
-        let history = histories
-            .entry(session)
-            .or_insert_with(|| SessionHistory::new(self.subscriber_capacity));
+        let history = self
+            .histories
+            .lock()
+            .await
+            .entry(session.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(SessionHistory::new(self.subscriber_capacity))))
+            .clone();
+        let mut history = history.lock().await;
         let sequence = history.next_sequence;
         let next_sequence = sequence
             .checked_add(1)
             .ok_or(SessionEventHubError::Unavailable)?;
-        history.project(&event)?;
+        if let Err(projection_failure) = history.project(&event) {
+            tracing::warn!(
+                ?session,
+                ?projection_failure,
+                "provider Session hub projection rejected; Session history reset"
+            );
+            return Ok(history.reset_after_projection_rejection());
+        }
         history.next_sequence = next_sequence;
         let item = HubEvent { sequence, event };
-        history.events.push(item.clone());
+        match &item.event {
+            SessionEvent::ItemStarted { item: snapshot }
+            | SessionEvent::ItemUpdated { item: snapshot } => {
+                history
+                    .items
+                    .entry(snapshot.item_id.clone())
+                    .or_default()
+                    .latest = Some(item.clone());
+            }
+            SessionEvent::ItemCompleted { item_id } => {
+                history.items.entry(item_id.clone()).or_default().completion = Some(item.clone());
+            }
+            _ => {
+                history.events.insert(sequence, item.clone());
+            }
+        }
         let _ = history.sender.send(item.clone());
+        if matches!(
+            &item.event,
+            SessionEvent::StateChanged {
+                state: SessionState::Unloaded | SessionState::Closed
+            }
+        ) || matches!(&item.event, SessionEvent::TurnEnded { .. })
+            && history.state == SessionState::Unloaded
+        {
+            let replay_epoch = history
+                .replay_epoch
+                .checked_add(1)
+                .ok_or(SessionEventHubError::Unavailable)?;
+            let _ = history.sender.send(HubEvent {
+                sequence: history.next_sequence,
+                event: SessionEvent::ResyncRequired { replay_epoch },
+            });
+            let (sender, _) = broadcast::channel(self.subscriber_capacity);
+            history.sender = sender;
+            history.events.clear();
+            history.items.clear();
+            history.next_sequence = 1;
+            history.replay_epoch = replay_epoch;
+        }
         Ok(item)
     }
 
@@ -181,10 +280,14 @@ impl ProviderSessionEventHub {
         &self,
         session: SessionRef,
     ) -> Result<u64, SessionEventHubError> {
-        let mut histories = self.histories.lock().await;
-        let history = histories
+        let history = self
+            .histories
+            .lock()
+            .await
             .entry(session)
-            .or_insert_with(|| SessionHistory::new(self.subscriber_capacity));
+            .or_insert_with(|| Arc::new(Mutex::new(SessionHistory::new(self.subscriber_capacity))))
+            .clone();
+        let mut history = history.lock().await;
         if history.state != SessionState::Unloaded {
             return Err(SessionEventHubError::Unavailable);
         }
@@ -199,6 +302,7 @@ impl ProviderSessionEventHub {
         let (sender, _) = broadcast::channel(self.subscriber_capacity);
         history.sender = sender;
         history.events.clear();
+        history.items.clear();
         history.pending.clear();
         history.turn_running = false;
         history.state = SessionState::Unloaded;
@@ -214,10 +318,14 @@ impl ProviderSessionEventHub {
         &self,
         session: SessionRef,
     ) -> Result<u64, SessionEventHubError> {
-        let mut histories = self.histories.lock().await;
-        let history = histories
+        let history = self
+            .histories
+            .lock()
+            .await
             .entry(session)
-            .or_insert_with(|| SessionHistory::new(self.subscriber_capacity));
+            .or_insert_with(|| Arc::new(Mutex::new(SessionHistory::new(self.subscriber_capacity))))
+            .clone();
+        let mut history = history.lock().await;
         let replay_epoch = history
             .replay_epoch
             .checked_add(1)
@@ -231,7 +339,7 @@ impl ProviderSessionEventHub {
         // event into the new epoch ahead of capabilities and Idle.
         let current_settings = history
             .events
-            .iter()
+            .values()
             .rev()
             .find_map(|item| match &item.event {
                 SessionEvent::SettingsChanged { settings } => Some(settings.clone()),
@@ -240,15 +348,19 @@ impl ProviderSessionEventHub {
         let (sender, _) = broadcast::channel(self.subscriber_capacity);
         history.sender = sender;
         history.events.clear();
+        history.items.clear();
         history.pending.clear();
         history.turn_running = false;
         history.state = SessionState::Idle;
         history.next_sequence = 1;
         if let Some(settings) = current_settings {
-            history.events.push(HubEvent {
-                sequence: 1,
-                event: SessionEvent::SettingsChanged { settings },
-            });
+            history.events.insert(
+                1,
+                HubEvent {
+                    sequence: 1,
+                    event: SessionEvent::SettingsChanged { settings },
+                },
+            );
             history.next_sequence = 2;
         }
         history.replay_epoch = replay_epoch;
@@ -271,32 +383,30 @@ impl SessionEventHub for ProviderSessionEventHub {
             }
             let history = histories
                 .entry(session)
-                .or_insert_with(|| SessionHistory::new(self.subscriber_capacity));
+                .or_insert_with(|| {
+                    Arc::new(Mutex::new(SessionHistory::new(self.subscriber_capacity)))
+                })
+                .clone();
+            drop(histories);
+            let history = history.lock().await;
             Ok(SessionEventAttachment {
-                snapshot: history.events.clone(),
+                snapshot: history.snapshot(),
                 receiver: history.sender.subscribe(),
+                epoch: history.replay_epoch,
             })
         })
     }
 
     fn state(&self, session: SessionRef) -> HubFuture<'_, SessionState> {
         Box::pin(async move {
-            if let Some(state) = self
-                .histories
-                .lock()
-                .await
-                .get(&session)
-                .map(|history| history.state.clone())
-            {
-                return Ok(state);
+            if let Some(history) = self.histories.lock().await.get(&session).cloned() {
+                return Ok(history.lock().await.state.clone());
             }
             if self.persisted_session_exists(&session).await? {
-                return Ok(self
-                    .histories
-                    .lock()
-                    .await
-                    .get(&session)
-                    .map_or(SessionState::Unloaded, |history| history.state.clone()));
+                if let Some(history) = self.histories.lock().await.get(&session).cloned() {
+                    return Ok(history.lock().await.state.clone());
+                }
+                return Ok(SessionState::Unloaded);
             }
             Err(SessionEventHubError::SessionNotFound)
         })
@@ -312,35 +422,39 @@ impl SessionEventHub for ProviderSessionEventHub {
                 .list_sessions(&stored_endpoint)
                 .await
                 .map_err(|_| SessionEventHubError::Unavailable)?;
-            let histories = self.histories.lock().await;
-            inventory
-                .into_iter()
-                .map(|entry| {
-                    let session = from_stored_session(&entry.target)?;
-                    let state = histories
-                        .get(&session)
-                        .map_or(SessionState::Unloaded, |history| history.state.clone());
-                    let settings = histories
-                        .get(&session)
-                        .and_then(|history| history.settings.as_ref());
-                    Ok(HubSessionSummary {
-                        session,
-                        approver: entry
-                            .approver
-                            .to_board_identity()
-                            .map_err(|_| SessionEventHubError::Unavailable)?,
-                        working_directory: std::path::PathBuf::from(String::from(
-                            entry.working_directory,
-                        )),
-                        updated_at_seconds: entry.updated_at_ms.div_euclid(1_000),
-                        preview: String::new(),
-                        name: None,
-                        model: settings.and_then(|settings| settings.model.clone()),
-                        mode: settings.and_then(|settings| settings.mode.clone()),
-                        state,
-                    })
-                })
-                .collect()
+            let histories = self.histories.lock().await.clone();
+            let mut summaries = Vec::with_capacity(inventory.len());
+            for entry in inventory {
+                let session = from_stored_session(&entry.target)?;
+                let history = if let Some(history) = histories.get(&session) {
+                    Some(history.lock().await)
+                } else {
+                    None
+                };
+                let state = history
+                    .as_ref()
+                    .map_or(SessionState::Unloaded, |history| history.state.clone());
+                let settings = history
+                    .as_ref()
+                    .and_then(|history| history.settings.as_ref());
+                summaries.push(HubSessionSummary {
+                    session,
+                    approver: entry
+                        .approver
+                        .to_board_identity()
+                        .map_err(|_| SessionEventHubError::Unavailable)?,
+                    working_directory: std::path::PathBuf::from(String::from(
+                        entry.working_directory,
+                    )),
+                    updated_at_seconds: entry.updated_at_ms.div_euclid(1_000),
+                    preview: String::new(),
+                    name: None,
+                    model: settings.and_then(|settings| settings.model.clone()),
+                    mode: settings.and_then(|settings| settings.mode.clone()),
+                    state,
+                });
+            }
+            Ok(summaries)
         })
     }
 }
@@ -424,5 +538,72 @@ pub async fn receive_hub_event(
         | Err(broadcast::error::RecvError::Lagged(_))
         | Err(broadcast::error::RecvError::Closed) => Err(HubReceiveError::ResyncRequired),
         Ok(event) => Ok(event),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use message_board::SessionRef;
+    use session_event_model::{SessionEvent, SessionItem, SessionItemKind};
+    use tokio::sync::Mutex;
+
+    use super::ProviderSessionEventHub;
+    use crate::ProviderOperationStore;
+
+    #[tokio::test]
+    async fn locked_attach_on_one_session_does_not_stall_another_publish() {
+        let root = tempfile::tempdir().expect("temp root");
+        let store = ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("store");
+        let hub = Arc::new(ProviderSessionEventHub::new(Arc::new(Mutex::new(store))));
+        let first: SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+            "sessionId":"first"
+        })).expect("first session");
+        let second: SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+            "sessionId":"second"
+        })).expect("second session");
+        for target in [&first, &second] {
+            hub.publish(
+                target.clone(),
+                SessionEvent::ItemStarted {
+                    item: SessionItem {
+                        item_id: "one".into(),
+                        kind: SessionItemKind::UserMessage,
+                        text: Some("hello".into()),
+                    },
+                },
+            )
+            .await
+            .expect("seed item");
+        }
+        let first_history = hub
+            .histories
+            .lock()
+            .await
+            .get(&first)
+            .cloned()
+            .expect("first history");
+        let _held_attach_lock = first_history.lock().await;
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            hub.publish(
+                second,
+                SessionEvent::ItemStarted {
+                    item: SessionItem {
+                        item_id: "two".into(),
+                        kind: SessionItemKind::UserMessage,
+                        text: Some("world".into()),
+                    },
+                },
+            ),
+        )
+        .await
+        .expect("independent publish must not wait")
+        .expect("publish");
     }
 }

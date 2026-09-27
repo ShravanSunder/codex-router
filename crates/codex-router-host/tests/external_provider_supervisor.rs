@@ -149,22 +149,31 @@ if mode=='invalid':
 else:
     request=read()
     assert request['method']=='session/set_config_option' and request['params']['configId']=='mode'
-    current['mode']='ask'
-    send({'jsonrpc':'2.0','id':request['id'],'result':{'configOptions':options()}})
-    request=read()
-    assert request['method']=='session/set_config_option' and request['params']['configId']=='model'
-    if mode=='partial':
+    if mode=='partial_first':
         send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32603,'message':'private detail'}})
     else:
-        current['model']='b'
+        current['mode']='ask'
         send({'jsonrpc':'2.0','id':request['id'],'result':{'configOptions':options()}})
+        request=read()
+        assert request['method']=='session/set_config_option' and request['params']['configId']=='model'
+        if mode=='partial':
+            send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32603,'message':'private detail'}})
+        else:
+            current['model']='b'
+            send({'jsonrpc':'2.0','id':request['id'],'result':{'configOptions':options()}})
 sys.stdin.read()
 "#;
 
 #[cfg(unix)]
 #[tokio::test]
 async fn provider_create_projects_effective_partial_and_invalid_settings() -> TestResult {
-    for mode in ["success", "partial", "invalid", "invalid_no_close"] {
+    for mode in [
+        "success",
+        "partial",
+        "partial_first",
+        "invalid",
+        "invalid_no_close",
+    ] {
         let root = tempfile::tempdir()?;
         let provider_endpoint = endpoint("cursor-local")?;
         let creator = actor(provider_endpoint.clone(), "creator")?;
@@ -271,6 +280,7 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                             target,
                             applied,
                             failed,
+                            not_applied,
                         },
                 } = settled.output
                 else {
@@ -278,6 +288,7 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                 };
                 ensure_eq!(applied.len(), 1);
                 ensure_eq!(failed.len(), 1);
+                ensure!(not_applied.is_empty());
                 let mut store =
                     ProviderOperationStore::open(&root.path().join("provider-operations.sqlite"))
                         .await?;
@@ -302,6 +313,27 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                     .map_err(|error| error.message)?;
                 ensure_eq!(accepted.target, target);
                 ensure_eq!(accepted.effective_settings.mode.as_deref(), Some("ask"));
+            }
+            "partial_first" => {
+                let settled = operation(wait(&backend, operation_id).await)?;
+                let ConversationOperationWaitOutput::Available {
+                    settlement:
+                        ConversationOperationSettlement::CreatedWithoutSettings {
+                            applied,
+                            failed,
+                            not_applied,
+                            ..
+                        },
+                } = settled.output
+                else {
+                    return Err("expected partial-first settings settlement".into());
+                };
+                ensure!(applied.is_empty());
+                ensure_eq!(failed.len(), 1);
+                ensure_eq!(failed[0].setting, ProviderSettingName::Mode);
+                ensure_eq!(not_applied.len(), 1);
+                ensure_eq!(not_applied[0].setting, ProviderSettingName::Model);
+                ensure_eq!(not_applied[0].value.as_str(), "b");
             }
             "invalid" | "invalid_no_close" => {
                 let failure = wait(&backend, operation_id.clone())

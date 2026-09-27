@@ -1,8 +1,8 @@
 //! Persist applied provider effects and session metadata at one settlement boundary.
 use collaboration_protocol::{
     AppliedProviderSetting, ConversationOperationFailure, ConversationOperationSettlement,
-    EffectiveProviderSettings, FailedProviderSetting, MessageText, OperationId,
-    ProviderAuthenticationState, ProviderIdentity, ProviderOperationEffect,
+    EffectiveProviderSettings, FailedProviderSetting, MessageText, NotAppliedProviderSetting,
+    OperationId, ProviderAuthenticationState, ProviderIdentity, ProviderOperationEffect,
     ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
     ProviderSettingName, ProviderSettingsMappingStatus, ProviderWorkingDirectory, SessionRef,
 };
@@ -93,6 +93,15 @@ pub(crate) fn provider_failed_setting(
         setting: provider_setting_name(setting.kind),
         value: setting.value,
         reason: setting.reason,
+    }
+}
+
+pub(crate) fn provider_not_applied_setting(
+    setting: acp_client_runtime::NotAppliedProviderSetting,
+) -> NotAppliedProviderSetting {
+    NotAppliedProviderSetting {
+        setting: provider_setting_name(setting.kind),
+        value: setting.value,
     }
 }
 
