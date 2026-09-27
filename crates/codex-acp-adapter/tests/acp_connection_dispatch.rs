@@ -216,7 +216,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             let result = if method == "initialize" {
                 json!({})
             } else {
-                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"created-thread","cwd":"/work","turns":[]}})
+                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"created-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}})
             };
             if method != "initialize" {
                 setup_entered.send(method).await.unwrap();
@@ -303,6 +303,16 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                         "session/prompt",
                         json!({"sessionId":"created-thread","prompt":[{"type":"text","text":"must not dispatch"}]}),
                     ),
+                    (
+                        "prompt-not-loaded",
+                        "session/prompt",
+                        json!({"sessionId":"missing-thread","prompt":[{"type":"text","text":"not loaded"}]}),
+                    ),
+                    (
+                        "prompt-invalid-content",
+                        "session/prompt",
+                        json!({"sessionId":"created-thread","prompt":[{"type":"image","data":"AA==","mimeType":"image/png"}]}),
+                    ),
                 ] {
                     write.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":conflict_id,"method":conflict_method,"params":conflict_params})).as_bytes()).await.unwrap();
                     let mut conflict_response = String::new();
@@ -317,6 +327,11 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                         serde_json::from_str(&conflict_response).unwrap();
                     assert_eq!(conflict_response["id"], conflict_id);
                     assert_eq!(conflict_response["error"]["code"], -32600);
+                    if matches!(conflict_id, "duplicate-load" | "prompt-during-load") {
+                        assert_eq!(conflict_response["error"]["data"]["kind"], "busy");
+                    } else {
+                        assert!(conflict_response["error"].get("data").is_none());
+                    }
                 }
             }
             let concurrent_id = format!("during-{method}");
@@ -431,7 +446,7 @@ async fn detached_create_finishes_and_holds_its_empty_thread()
                     "approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
                     "sandbox":{"type":"workspaceWrite","writableRoots":[native_scratch]},
-                    "thread":{"id":"detached-thread","cwd":"/work","turns":[]}})
+                    "thread":{"id":"detached-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}})
             };
             let _sent = wire
                 .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -538,7 +553,7 @@ async fn closed_create_connection_loads_held_binding_without_native_resume_and_p
                     "approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
                     "sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},
-                    "thread":{"id":"created-thread","cwd":"/work","turns":[]}
+                    "thread":{"id":"created-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}
                 }),
                 "turn/start" => json!({"turn":{"id":"turn-one"}}),
                 _ => {

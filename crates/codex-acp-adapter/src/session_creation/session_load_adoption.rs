@@ -118,6 +118,43 @@ impl AcpSessionBinding {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeThreadActivity {
+    Idle,
+    Active,
+    Invalid,
+}
+
+pub(crate) fn native_thread_activity(resume_response: &Value) -> NativeThreadActivity {
+    let Some(thread) = resume_response.get("thread") else {
+        return NativeThreadActivity::Invalid;
+    };
+    let Some(status) = thread.pointer("/status/type").and_then(Value::as_str) else {
+        return NativeThreadActivity::Invalid;
+    };
+    match status {
+        "active" => NativeThreadActivity::Active,
+        "idle" => {
+            let has_active_turn =
+                thread
+                    .get("turns")
+                    .and_then(Value::as_array)
+                    .is_some_and(|turns| {
+                        turns.iter().any(|turn| {
+                            turn.get("status").and_then(Value::as_str) == Some("inProgress")
+                        })
+                    });
+            if has_active_turn {
+                NativeThreadActivity::Active
+            } else {
+                NativeThreadActivity::Idle
+            }
+        }
+        "notLoaded" | "systemError" => NativeThreadActivity::Invalid,
+        _ => NativeThreadActivity::Invalid,
+    }
+}
+
 fn resume_parameters(session_id: &str, cwd: &Path, route: Option<&crate::ApprovalRoute>) -> Value {
     let Some(route) = route else {
         return json!({"threadId":session_id});
@@ -144,4 +181,40 @@ fn resume_parameters(session_id: &str, cwd: &Path, route: Option<&crate::Approva
             format!("permissions.{profile}.filesystem"):filesystem
         }
     })
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::{NativeThreadActivity, native_thread_activity};
+    use serde_json::json;
+
+    #[test]
+    fn active_resume_state_blocks_session_attachment() {
+        assert_eq!(
+            native_thread_activity(&json!({"thread":{"status":{"type":"active"},"turns":[]}})),
+            NativeThreadActivity::Active
+        );
+        assert_eq!(
+            native_thread_activity(
+                &json!({"thread":{"status":{"type":"idle"},"turns":[{"status":"inProgress"}]}})
+            ),
+            NativeThreadActivity::Active
+        );
+        assert_eq!(
+            native_thread_activity(
+                &json!({"thread":{"status":{"type":"idle"},"turns":[{"status":"completed"}]}})
+            ),
+            NativeThreadActivity::Idle
+        );
+        assert_eq!(
+            native_thread_activity(&json!({"thread":{"turns":[]}})),
+            NativeThreadActivity::Invalid
+        );
+        assert_eq!(
+            native_thread_activity(
+                &json!({"thread":{"status":{"type":"future-state"},"turns":[]}})
+            ),
+            NativeThreadActivity::Invalid
+        );
+    }
 }

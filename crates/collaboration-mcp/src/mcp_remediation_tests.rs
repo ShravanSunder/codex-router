@@ -11,7 +11,7 @@ const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
 
 #[tokio::test]
-async fn initialized_http_application_deadline_returns_timed_out_settlement() {
+async fn initialized_http_application_deadline_detaches_without_cancelling_turn() {
     let fixture = ConversationFixture::start("deadline-acp.sock").await;
     let acp_path = fixture.root.path().join("deadline-acp.sock");
     let acp = tokio::net::UnixListener::bind(&acp_path).expect("ACP listener");
@@ -42,18 +42,14 @@ async fn initialized_http_application_deadline_returns_timed_out_settlement() {
             .expect("load response");
         let prompt = next_json_line(&mut lines, "prompt").await;
         assert_eq!(prompt["method"], "session/prompt");
-        let cancel = next_json_line(&mut lines, "cancel").await;
-        assert_eq!(cancel["method"], "session/cancel");
-        writer
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"cancelled"}})
-                )
-                .as_bytes(),
-            )
-            .await
-            .expect("deadline settlement");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), lines.next_line())
+                .await
+                .expect("caller detaches at deadline")
+                .expect("ACP read")
+                .is_none(),
+            "deadline must close the waiter without session/cancel"
+        );
     });
     let client = reqwest::Client::new();
     let session_id = initialize_mcp(&client, &fixture.listener).await;
@@ -68,12 +64,17 @@ async fn initialized_http_application_deadline_returns_timed_out_settlement() {
     let body = protocol_response_json(response).await;
     assert_eq!(body.pointer("/result/isError"), Some(&json!(false)));
     assert_eq!(
-        body.pointer("/result/structuredContent/prompt/settlement/stopReason"),
-        Some(&json!("timedOut"))
+        body.pointer("/result/structuredContent/prompt/kind"),
+        Some(&json!("running"))
     );
     assert_eq!(
-        body.pointer("/result/structuredContent/prompt/settlement/detail/result/stopReason"),
-        Some(&json!("cancelled"))
+        body.pointer("/result/structuredContent/prompt/target/sessionId"),
+        Some(&json!("deadline-thread"))
+    );
+    assert!(
+        body.pointer("/result/structuredContent/prompt/followUp")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains("session inspect"))
     );
     peer.await.expect("ACP peer");
     fixture.shutdown().await;

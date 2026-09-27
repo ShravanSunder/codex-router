@@ -501,23 +501,13 @@ impl AcpConversation {
                 "PromptRequest",
             )
             .await?;
-        let mut deadline = tokio::time::Instant::now()
+        let deadline = tokio::time::Instant::now()
             .checked_add(timeout)
             .ok_or(ClientError::InvalidRequest("invalid prompt deadline"))?;
-        let mut end = ConversationEnd::Completed;
         loop {
             let frame = tokio::select! {
-                _=cancel.cancelled(),if end==ConversationEnd::Completed=>{
-                    end=ConversationEnd::Cancelled;
-                    self.write(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}})).await?;
-                    deadline=tokio::time::Instant::now()+Duration::from_secs(30);continue;
-                },
-                _=tokio::time::sleep_until(deadline)=>{
-                    if end!=ConversationEnd::Completed{return Err(ClientError::Timeout);}
-                    end=ConversationEnd::TimedOut;
-                    self.write(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}})).await?;
-                    deadline=tokio::time::Instant::now()+Duration::from_secs(30);continue;
-                },
+                _=cancel.cancelled()=>return Ok(ConversationEnd::Detached),
+                _=tokio::time::sleep_until(deadline)=>return Ok(ConversationEnd::Detached),
                 frame=self.read()=>frame?,
             };
             if frame.get("method").is_some() {
@@ -536,10 +526,10 @@ impl AcpConversation {
             let result = self.response(frame, &id, "PromptResponse")?;
             emit(ConversationEvent::PromptResult {
                 target,
-                end,
+                end: ConversationEnd::Completed,
                 result,
             })?;
-            return Ok(end);
+            return Ok(ConversationEnd::Completed);
         }
     }
     /// Renders caller-declared public content once, then waits for the ACP

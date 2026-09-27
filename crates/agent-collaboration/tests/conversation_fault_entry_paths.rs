@@ -468,9 +468,9 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
                             .send(())
                             .expect("interrupt signal");
                     }
-                    let cancel: Value = serde_json::from_str(&lines.next_line().await.expect("cancel read").expect("cancel frame")).expect("cancel JSON");
-                    assert_eq!(cancel["method"], "session/cancel");
-                    writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"cancelled"}})).as_bytes()).await.expect("settlement response");
+                    assert!(tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+                        .await.expect("caller detaches").expect("ACP read").is_none(),
+                        "wait expiry and Ctrl-C must not send session/cancel");
                 }
                 _ => panic!("fixed fixture outcomes"),
             }
@@ -581,11 +581,18 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
     );
 
     let deadline = prompt(&root, 1).await;
-    assert_eq!(deadline.status.code(), Some(124));
+    assert_eq!(deadline.status.code(), Some(0));
     let deadline_result = create_prompt_result_line(&deadline.stdout);
+    assert_eq!(deadline_result["prompt"]["kind"], "running");
     assert_eq!(
-        deadline_result["prompt"]["settlement"]["stopReason"],
-        "timedOut"
+        deadline_result["prompt"]["target"]["sessionId"],
+        "deadline-thread"
+    );
+    assert!(
+        deadline_result["prompt"]["followUp"]
+            .as_str()
+            .expect("follow-up command")
+            .contains("session inspect")
     );
 
     let mut interrupted = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
@@ -637,11 +644,12 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .await
         .expect("interrupt deadline")
         .expect("interrupt output");
-    assert_eq!(interrupted.status.code(), Some(130));
+    assert_eq!(interrupted.status.code(), Some(0));
     let interrupted_result = create_prompt_result_line(&interrupted.stdout);
+    assert_eq!(interrupted_result["prompt"]["kind"], "running");
     assert_eq!(
-        interrupted_result["prompt"]["settlement"]["stopReason"],
-        "cancelled"
+        interrupted_result["prompt"]["target"]["sessionId"],
+        "interrupt-thread"
     );
 
     tokio::time::timeout(Duration::from_secs(5), peer)

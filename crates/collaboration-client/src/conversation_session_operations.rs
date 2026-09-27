@@ -169,6 +169,11 @@ impl ConversationClient {
                     ConversationEnd::Completed => ConversationStopReason::Completed,
                     ConversationEnd::TimedOut => ConversationStopReason::TimedOut,
                     ConversationEnd::Cancelled => ConversationStopReason::Cancelled,
+                    ConversationEnd::Detached => {
+                        return Ok(ConversationOperationResult::running_codex_turn(
+                            prompted.target,
+                        ));
+                    }
                 };
                 Ok(ConversationOperationResult::Completed {
                     target: prompted.target.clone(),
