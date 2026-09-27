@@ -1,6 +1,9 @@
 //! Public provider Session operations after connection admission.
 
 use super::*;
+use crate::provider_prompt_content::acp_blocks_from_prompt_content;
+use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use session_event_model::PromptContent;
 
 impl<P: InteractionPort> AgentSessionClient<P> {
     fn retired_operation_error(&self) -> ExternalProviderRuntimeError {
@@ -349,9 +352,41 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         input_id: InputId,
         prompt: String,
     ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
+        self.steer_acp_blocks_with_input(
+            provider_session_id,
+            input_id,
+            vec![ContentBlock::Text(TextContent::new(prompt))],
+        )
+        .await
+    }
+
+    /// Steer with the same validated Session vocabulary used for prompts.
+    /// Optional ACP content types are checked before any command is queued.
+    pub async fn steer_contents_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        contents: Vec<PromptContent>,
+    ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
+        self.steer_acp_blocks_with_input(
+            provider_session_id,
+            input_id,
+            acp_blocks_from_prompt_content(contents),
+        )
+        .await
+    }
+
+    async fn steer_acp_blocks_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        blocks: Vec<ContentBlock>,
+    ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
         if !self.admission.supports_steering {
             return Err(ExternalProviderRuntimeError::UnsupportedSteering);
         }
+        let capabilities = self.capability_report(&provider_session_id).await;
+        let prompt = ProviderPromptContent::new(blocks, &capabilities)?;
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
             .send(ProviderCommand::Steer {

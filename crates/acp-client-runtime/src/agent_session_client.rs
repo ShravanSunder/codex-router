@@ -156,7 +156,7 @@ enum ProviderCommand<P: InteractionPort> {
     Steer {
         provider_session_id: String,
         input_id: InputId,
-        prompt: String,
+        prompt: ProviderPromptContent,
         reply: tokio::sync::oneshot::Sender<
             Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError>,
         >,
