@@ -649,7 +649,7 @@ async fn permission_arriving_after_router_cancel_is_answered_cancelled() -> Test
         history[0].state,
         collaboration_protocol::ApprovalState::Cancelled
     );
-    assert_eq!(history[0].reason.as_deref(), Some("turn cancelled"));
+    assert_eq!(history[0].reason.as_deref(), Some("turnCancelled"));
     runtime.shutdown().await;
     Ok(())
 }
@@ -701,7 +701,7 @@ async fn output_limit_cancels_pending_permission() -> TestResult {
         history[0].state,
         collaboration_protocol::ApprovalState::Cancelled
     );
-    assert_eq!(history[0].reason.as_deref(), Some("turn cancelled"));
+    assert_eq!(history[0].reason.as_deref(), Some("turnCancelled"));
     assert!(broker.list(true).await.approvals.is_empty());
     runtime.shutdown().await;
     Ok(())

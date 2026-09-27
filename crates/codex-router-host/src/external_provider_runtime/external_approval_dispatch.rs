@@ -28,9 +28,6 @@ pub(super) fn spawn_external_approval_dispatch(
     #[cfg(test)] permission_outcome: Arc<std::sync::atomic::AtomicU8>,
 ) -> Result<(), Error> {
     let request_cancellation = responder.cancellation();
-    let response_gate = context
-        .as_ref()
-        .map(|context| Arc::clone(&context.response_gate));
     connection.spawn(async move {
         let outcome = match (broker, context) {
             (Some(broker), Some(context)) => {
@@ -44,16 +41,6 @@ pub(super) fn spawn_external_approval_dispatch(
                 .await
             }
             _ => RequestPermissionOutcome::Cancelled,
-        };
-        let response_guard = response_gate.as_ref().and_then(|gate| gate.lock().ok());
-        let outcome = if response_gate.is_some()
-            && response_guard
-                .as_ref()
-                .is_none_or(|cancelling| **cancelling)
-        {
-            RequestPermissionOutcome::Cancelled
-        } else {
-            outcome
         };
         #[cfg(test)]
         permission_outcome.store(
@@ -75,7 +62,6 @@ async fn handle_contextual_permission_request(
     request: RequestPermissionRequest,
     request_cancellation: agent_client_protocol::RequestCancellation,
 ) -> RequestPermissionOutcome {
-    let approval_target = context.target.clone();
     let presentation = approval_presentation(&request.tool_call.fields);
     let operation_metadata = ExternalApprovalOperationMetadata {
         operation_id: context.operation_id.clone(),
@@ -87,11 +73,7 @@ async fn handle_contextual_permission_request(
         ExternalPermissionOptionMapping::Mapped(options) => (options, None),
         ExternalPermissionOptionMapping::Refused { reason, options } => (options, Some(reason)),
     };
-    if let Some(reason) = turn_cancellation
-        .is_cancelled()
-        .then_some("turn cancelled")
-        .or(refusal_reason)
-    {
+    if let Some(reason) = refusal_reason {
         if let Err(error) = broker
             .record_external_refusal(ExternalApprovalRefusal {
                 requester: context.requester,
@@ -116,6 +98,7 @@ async fn handle_contextual_permission_request(
         generation: context.binding_generation,
         retirement: context.binding_retirement,
         cancellation: cancellation.clone(),
+        turn_cancellation: turn_cancellation.clone(),
         operation_metadata,
         presentation: Some(presentation),
         options,
@@ -123,19 +106,12 @@ async fn handle_contextual_permission_request(
     tokio::pin!(broker_request);
     let result = tokio::select! {
         biased;
-        () = turn_cancellation.cancelled() => {
-            let _ = broker.cancel_all_for_session(&approval_target, "turn cancelled").await;
-            return RequestPermissionOutcome::Cancelled;
-        }
         () = request_cancellation.cancelled() => {
             cancellation.cancel();
             broker_request.await
         }
         result = &mut broker_request => result,
     };
-    if turn_cancellation.is_cancelled() {
-        return RequestPermissionOutcome::Cancelled;
-    }
     match result {
         Ok(collaboration_service::BrokeredApprovalOutcome::Selected { option_id }) => {
             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id))

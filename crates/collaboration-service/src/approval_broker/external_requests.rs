@@ -136,6 +136,19 @@ impl ServiceApprovalBroker {
             .await?;
             return Ok(BrokeredApprovalOutcome::Cancelled);
         }
+        if request.turn_cancellation.is_cancelled() {
+            self.record_external_refusal(ExternalApprovalRefusal {
+                requester: request.requester,
+                approver: request.approver,
+                generation: request.generation,
+                operation_metadata: request.operation_metadata,
+                offered_options: request.options,
+                presentation: request.presentation,
+                reason: "turnCancelled".to_owned(),
+            })
+            .await?;
+            return Ok(BrokeredApprovalOutcome::Cancelled);
+        }
         if request.retirement.is_cancelled() || request.cancellation.is_cancelled() {
             self.record_external_refusal(ExternalApprovalRefusal {
                 requester: request.requester,
@@ -188,9 +201,24 @@ impl ServiceApprovalBroker {
                 }))
             .to_rfc3339(),
         };
+        // Keep the pending map locked across persistence and insertion. A
+        // decision cannot observe a recorded row before admission completes.
+        let mut pending = self.pending.lock().await;
         self.record(record.clone()).await?;
+        #[cfg(test)]
+        if let Some(pause) = self.external_after_record.lock().await.take() {
+            let _ = pause.recorded.send(());
+            let _ = pause.resume.await;
+        }
+        if request.turn_cancellation.is_cancelled() {
+            let mut cancelled = record;
+            cancelled.state = ApprovalState::Cancelled;
+            cancelled.reason = Some("turnCancelled".to_owned());
+            self.record(cancelled).await?;
+            return Ok(BrokeredApprovalOutcome::Cancelled);
+        }
         let (completion, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(
+        pending.insert(
             request_id.clone(),
             PendingApproval {
                 record: record.clone(),
@@ -199,9 +227,17 @@ impl ServiceApprovalBroker {
                 generation_authority: ApprovalGenerationAuthority::External {
                     generation: record.generation.clone(),
                     retirement: request.retirement.clone(),
+                    turn_cancellation: request.turn_cancellation.clone(),
                 },
             },
         );
+        let cancelled_after_insert = request.turn_cancellation.is_cancelled();
+        drop(pending);
+        if cancelled_after_insert {
+            self.finish_pending(&request_id, ApprovalState::Cancelled, Some("turnCancelled"))
+                .await?;
+            return Ok(BrokeredApprovalOutcome::Cancelled);
+        }
         let mut cancellation = CancellationMarker {
             request_id: request_id.clone(),
             pending: Arc::clone(&self.pending),
@@ -215,6 +251,19 @@ impl ServiceApprovalBroker {
         tokio::pin!(delivery);
         let delivery_result = tokio::select! {
             biased;
+            () = request.turn_cancellation.cancelled() => {
+                let finished = self.finish_pending(
+                    &request_id,
+                    ApprovalState::Cancelled,
+                    Some("turnCancelled"),
+                ).await?;
+                cancellation.armed = false;
+                return Ok(if finished {
+                    BrokeredApprovalOutcome::Cancelled
+                } else {
+                    receiver.await.unwrap_or(BrokeredApprovalOutcome::Cancelled)
+                });
+            }
             () = request.retirement.cancelled() => {
                 let finished = self.finish_pending(
                     &request_id,
@@ -276,6 +325,19 @@ impl ServiceApprovalBroker {
         }
         tokio::select! {
             biased;
+            () = request.turn_cancellation.cancelled() => {
+                let finished = self.finish_pending(
+                    &request_id,
+                    ApprovalState::Cancelled,
+                    Some("turnCancelled"),
+                ).await?;
+                cancellation.armed = false;
+                if finished {
+                    Ok(BrokeredApprovalOutcome::Cancelled)
+                } else {
+                    Ok(receiver.await.unwrap_or(BrokeredApprovalOutcome::Cancelled))
+                }
+            }
             () = request.retirement.cancelled() => {
                 let finished = self.finish_pending(
                     &request_id,

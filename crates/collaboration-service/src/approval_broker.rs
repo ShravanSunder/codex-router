@@ -54,9 +54,16 @@ pub struct ExternalApprovalRequest {
     pub generation: collaboration_protocol::CodexGeneration,
     pub retirement: tokio_util::sync::CancellationToken,
     pub cancellation: tokio_util::sync::CancellationToken,
+    pub turn_cancellation: tokio_util::sync::CancellationToken,
     pub operation_metadata: ExternalApprovalOperationMetadata,
     pub presentation: Option<ApprovalPresentation>,
     pub options: Vec<ExternalApprovalOption>,
+}
+
+#[cfg(test)]
+struct ExternalAdmissionPause {
+    recorded: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +124,7 @@ enum ApprovalGenerationAuthority {
     External {
         generation: collaboration_protocol::CodexGeneration,
         retirement: tokio_util::sync::CancellationToken,
+        turn_cancellation: tokio_util::sync::CancellationToken,
     },
 }
 
@@ -170,6 +178,8 @@ pub struct ServiceApprovalBroker {
     pending: Arc<Mutex<BTreeMap<String, PendingApproval>>>,
     history_path: PathBuf,
     history: Arc<Mutex<Vec<ApprovalRequestRecord>>>,
+    #[cfg(test)]
+    external_after_record: Mutex<Option<ExternalAdmissionPause>>,
 }
 
 impl ServiceApprovalBroker {
@@ -205,6 +215,8 @@ impl ServiceApprovalBroker {
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             history_path,
             history: Arc::new(Mutex::new(history)),
+            #[cfg(test)]
+            external_after_record: Mutex::new(None),
         }))
     }
 
@@ -461,7 +473,19 @@ impl ServiceApprovalBroker {
             ApprovalGenerationAuthority::External {
                 generation,
                 retirement,
+                turn_cancellation,
             } => {
+                if turn_cancellation.is_cancelled() {
+                    drop(pending);
+                    self.finish_pending(
+                        &params.request_id,
+                        ApprovalState::Cancelled,
+                        Some("turnCancelled"),
+                    )
+                    .await
+                    .map_err(|_| "unavailable")?;
+                    return Err("approvalNotPending");
+                }
                 if retirement.is_cancelled() {
                     drop(pending);
                     self.expire_or_cancel_stale(&params.request_id, ApprovalState::Cancelled)
@@ -774,3 +798,7 @@ impl ApprovalBroker for ServiceApprovalBroker {
 #[cfg(test)]
 #[path = "approval_broker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "approval_broker/turn_cancellation_tests.rs"]
+mod turn_cancellation_tests;

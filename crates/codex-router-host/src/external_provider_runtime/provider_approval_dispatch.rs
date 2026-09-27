@@ -31,7 +31,6 @@ impl ExternalProviderRuntime {
                 ActiveApprovalContext {
                     approval: context,
                     cancelling: tokio_util::sync::CancellationToken::new(),
-                    response_gate: Arc::new(std::sync::Mutex::new(false)),
                 },
             );
         }

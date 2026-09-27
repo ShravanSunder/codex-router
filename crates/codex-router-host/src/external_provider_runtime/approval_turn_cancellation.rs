@@ -17,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct ActiveApprovalContext {
     pub(crate) approval: ExternalProviderApprovalContext,
     pub(crate) cancelling: CancellationToken,
-    pub(crate) response_gate: Arc<Mutex<bool>>,
 }
 
 pub(crate) fn active_turn_cancellation(
@@ -31,7 +30,6 @@ pub(crate) fn active_turn_cancellation(
             (operation_id.is_none() || Some(&context.approval.operation_id) == operation_id).then(
                 || ProviderTurnCancellation {
                     cancelling: context.cancelling.clone(),
-                    response_gate: Arc::clone(&context.response_gate),
                     target: context.approval.target.clone(),
                     approval_broker: Arc::clone(approval_broker),
                 },
@@ -42,16 +40,12 @@ pub(crate) fn active_turn_cancellation(
 
 pub(crate) struct ProviderTurnCancellation {
     pub(crate) cancelling: CancellationToken,
-    pub(crate) response_gate: Arc<std::sync::Mutex<bool>>,
     pub(crate) target: SessionRef,
     pub(crate) approval_broker: Arc<RwLock<Option<Weak<ServiceApprovalBroker>>>>,
 }
 
 impl ProviderTurnCancellation {
     pub(crate) fn mark_cancelling(&self) {
-        if let Ok(mut cancelling) = self.response_gate.lock() {
-            *cancelling = true;
-        }
         self.cancelling.cancel();
     }
 
@@ -126,9 +120,7 @@ pub(super) async fn cancel_pending_approvals(
         .as_ref()
         .and_then(Weak::upgrade);
     if let Some(broker) = broker
-        && let Err(error) = broker
-            .cancel_all_for_session(target, "turn cancelled")
-            .await
+        && let Err(error) = broker.cancel_all_for_session(target, "turnCancelled").await
     {
         tracing::error!(%error, "failed to cancel provider permissions for turn");
     }
