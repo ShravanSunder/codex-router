@@ -82,6 +82,7 @@ pub(crate) fn historical_turns(session: &SessionRef, snapshot: &[HubEvent]) -> V
 
 enum PendingAppServerInteraction {
     Approval {
+        session: SessionRef,
         request: Box<ApprovalRequest>,
         presentation: ApprovalPresentation,
     },
@@ -260,6 +261,7 @@ impl AppServerEventForwarding {
                         self.pending.insert(
                             id,
                             PendingAppServerInteraction::Approval {
+                                session: session.clone(),
                                 request: request.clone(),
                                 presentation,
                             },
@@ -317,13 +319,31 @@ impl AppServerEventForwarding {
         };
         match pending {
             PendingAppServerInteraction::Approval {
+                session,
                 request,
                 presentation,
             } => {
-                let Ok(ApprovalReply::Selected(option_id)) =
-                    map_approval_reply(&presentation, reply.get("result").unwrap_or(&Value::Null))
-                else {
-                    return Vec::new();
+                let option_id = match map_approval_reply(
+                    &presentation,
+                    reply.get("result").unwrap_or(&Value::Null),
+                ) {
+                    Ok(ApprovalReply::Selected(option_id)) => option_id,
+                    Ok(ApprovalReply::Cancelled) => {
+                        // TODO: Use the actor-checked broker Cancel decision once lane B lands it.
+                        tracing::warn!(request_id = %request.request_id, "provider TUI approval cancellation awaits broker Cancel decision");
+                        return Vec::new();
+                    }
+                    Err(_) => {
+                        return self
+                            .retry_approval_submission(
+                                broker.as_ref(),
+                                session,
+                                request,
+                                presentation,
+                                "malformedDecision",
+                            )
+                            .await;
+                    }
                 };
                 let acknowledge_persistent = request.options.iter().any(|option| {
                     option.option_id == option_id
@@ -332,7 +352,7 @@ impl AppServerEventForwarding {
                             session_event_model::ApprovalScope::Persistent { .. }
                         )
                 });
-                let _decision = broker
+                let decision = broker
                     .decide_typed_interaction(
                         &request.request_id,
                         &self.actor,
@@ -341,7 +361,26 @@ impl AppServerEventForwarding {
                         None,
                     )
                     .await;
-                Vec::new()
+                match decision {
+                    Ok(_) => Vec::new(),
+                    Err(error) => {
+                        let error_kind = match error {
+                            crate::InteractionHistoryError::WrongActor => "wrongActor",
+                            crate::InteractionHistoryError::AlreadySettled
+                            | crate::InteractionHistoryError::NotPending => "notPending",
+                            crate::InteractionHistoryError::Unavailable => "unavailable",
+                            _ => "rejected",
+                        };
+                        self.retry_approval_submission(
+                            broker.as_ref(),
+                            session,
+                            request,
+                            presentation,
+                            error_kind,
+                        )
+                        .await
+                    }
+                }
             }
             PendingAppServerInteraction::Question {
                 session,
@@ -412,6 +451,61 @@ impl AppServerEventForwarding {
                 }
             }
         }
+    }
+
+    async fn retry_approval_submission(
+        &mut self,
+        broker: &ServiceInteractionBroker,
+        session: SessionRef,
+        request: Box<ApprovalRequest>,
+        presentation: ApprovalPresentation,
+        error_kind: &'static str,
+    ) -> Vec<Value> {
+        tracing::warn!(
+            request_id = %request.request_id,
+            error_kind,
+            "provider TUI approval decision rejected"
+        );
+        let ApprovalPresentation::Interactive {
+            ref method,
+            ref params,
+            ..
+        } = presentation
+        else {
+            return Vec::new();
+        };
+        let thread_id = thread_alias(&session);
+        let turn_id = params.get("turnId").and_then(Value::as_str).unwrap_or("");
+        let still_pending = broker
+            .list_typed_approvals(true)
+            .await
+            .iter()
+            .any(|record| record.request_id == request.request_id);
+        let error = json!({"method":"error","params":{
+            "threadId":thread_id,"turnId":turn_id,
+            "willRetry":still_pending,
+            "error":{"message":format!("Decision for approval {} was rejected; choose again", request.request_id),
+                "codexErrorInfo":null}
+        }});
+        if !still_pending {
+            return vec![error];
+        }
+        let new_id = format!(
+            "router:approval:{}:{}:retry:{}",
+            session.session_id.as_str(),
+            request.request_id,
+            uuid::Uuid::now_v7()
+        );
+        let request_frame = json!({"id":new_id,"method":method,"params":params});
+        self.pending.insert(
+            new_id,
+            PendingAppServerInteraction::Approval {
+                session,
+                request,
+                presentation,
+            },
+        );
+        vec![error, request_frame]
     }
 
     async fn retry_question_submission(

@@ -130,7 +130,30 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
     assert_eq!(prompt["params"]["availableDecisions"][0], "accept");
     client
         .send(Message::Text(
-            json!({"id":prompt["id"],"result":{"decision":"accept"}})
+            json!({"id":prompt["id"],"result":{"decision":"unknown"}})
+                .to_string()
+                .into(),
+        ))
+        .await?;
+    let rejected_approval: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("approval rejection notification")??
+            .to_text()?,
+    )?;
+    assert_eq!(rejected_approval["method"], "error");
+    assert_eq!(rejected_approval["params"]["willRetry"], true);
+    let retried_approval: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("retried approval request")??
+            .to_text()?,
+    )?;
+    assert_eq!(retried_approval["method"], prompt["method"]);
+    assert_ne!(retried_approval["id"], prompt["id"]);
+    client
+        .send(Message::Text(
+            json!({"id":retried_approval["id"],"result":{"decision":"accept"}})
                 .to_string()
                 .into(),
         ))
