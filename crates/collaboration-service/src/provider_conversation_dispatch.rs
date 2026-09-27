@@ -5,13 +5,14 @@ use codex_conversation_inspection::{
     codex_reconcile, codex_record, codex_snapshot_response, codex_wait,
 };
 use collaboration_protocol::{
-    ConversationCancelRequest, ConversationCreateRequest, ConversationLoadRequest,
-    ConversationOperationFailure, ConversationOperationFailureKind,
+    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
+    ConversationLoadRequest, ConversationOperationFailure, ConversationOperationFailureKind,
     ConversationOperationFailureStage, ConversationOperationReconcileRequest,
     ConversationOperationShowRequest, ConversationOperationWaitRequest, ConversationPromptRequest,
-    EndpointAvailability, EndpointRef, NonEmptyText, OperationId, ProviderBindingIdentity,
-    ProviderOperationEffect, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
-    ProviderSettingsFailureKind, ProviderSettingsSetRequest, SessionRef,
+    ConversationResumeRequest, EndpointAvailability, EndpointRef, NonEmptyText, OperationId,
+    ProviderBindingIdentity, ProviderInspectFailure, ProviderInspectFailureKind,
+    ProviderOperationEffect, ProviderSessionInspectRequest, ProviderSettingsAcceptRequest,
+    ProviderSettingsFailure, ProviderSettingsFailureKind, ProviderSettingsSetRequest, SessionRef,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -25,12 +26,15 @@ pub(crate) async fn dispatch(
     match method {
         "conversation/create" => dispatch_create(id, parse(params), identity).await,
         "conversation/load" => dispatch_load(id, parse(params), identity).await,
+        "conversation/resume" => dispatch_resume(id, parse(params), identity).await,
+        "conversation/close" => dispatch_close(id, parse(params), identity).await,
         "conversation/prompt" => dispatch_prompt(id, parse(params), identity).await,
         "conversation/cancel" => dispatch_cancel(id, parse(params), identity).await,
         "conversation/settingsSet" => dispatch_settings_set(id, parse(params), identity).await,
         "conversation/settingsAccept" => {
             dispatch_settings_accept(id, parse(params), identity).await
         }
+        "provider/sessionInspect" => dispatch_provider_inspect(id, parse(params), identity).await,
         "conversation/operationShow" => {
             let request = parse::<ConversationOperationShowRequest>(params);
             if let Ok(request) = &request {
@@ -101,6 +105,19 @@ pub(crate) async fn dispatch(
 }
 
 pub(crate) fn overloaded(id: Value, method: &str, params: Value) -> Value {
+    if method == "provider/sessionInspect" {
+        return match parse::<ProviderSessionInspectRequest>(params) {
+            Ok(request) => inspect_failure_response(
+                id,
+                ProviderInspectFailure {
+                    kind: ProviderInspectFailureKind::Unavailable,
+                    target: request.target,
+                    message: "provider Session inspection is overloaded".into(),
+                },
+            ),
+            Err(()) => invalid_params(id),
+        };
+    }
     if matches!(
         method,
         "conversation/settingsSet" | "conversation/settingsAccept"
@@ -132,6 +149,10 @@ pub(crate) fn overloaded(id: Value, method: &str, params: Value) -> Value {
         }
         "conversation/load" => parse::<ConversationLoadRequest>(params)
             .map(|request| (request.operation_id, Some(request.target))),
+        "conversation/resume" => parse::<ConversationResumeRequest>(params)
+            .map(|request| (request.operation_id, Some(request.target))),
+        "conversation/close" => parse::<ConversationCloseRequest>(params)
+            .map(|request| (request.operation_id, Some(request.target))),
         "conversation/prompt" => parse::<ConversationPromptRequest>(params)
             .map(|request| (request.operation_id, Some(request.target))),
         "conversation/cancel" => parse::<ConversationCancelRequest>(params)
@@ -148,6 +169,34 @@ pub(crate) fn overloaded(id: Value, method: &str, params: Value) -> Value {
         return invalid_params(id);
     };
     local_failure_response(id, LocalFailure::Busy, operation_id, target)
+}
+
+async fn dispatch_provider_inspect(
+    id: Value,
+    request: Result<ProviderSessionInspectRequest, ()>,
+    identity: &ServiceIdentity,
+) -> Value {
+    let Ok(request) = request else {
+        return invalid_params(id);
+    };
+    let Some(backend) = identity.provider_conversations.as_deref() else {
+        return inspect_failure_response(
+            id,
+            ProviderInspectFailure {
+                kind: ProviderInspectFailureKind::Unavailable,
+                target: request.target,
+                message: "provider Session inspection is unavailable".into(),
+            },
+        );
+    };
+    match backend.inspect_session(request).await {
+        Ok(result) => success(id, result),
+        Err(failure) => inspect_failure_response(id, failure),
+    }
+}
+
+fn inspect_failure_response(id: Value, failure: ProviderInspectFailure) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":failure.message,"data":failure}})
 }
 
 async fn dispatch_settings_set(
@@ -357,6 +406,158 @@ async fn dispatch_load(
     }
     request.generation = Some(binding.generation.clone());
     result_response(id, backend.load(request).await)
+}
+
+async fn dispatch_resume(
+    id: Value,
+    request: Result<ConversationResumeRequest, ()>,
+    identity: &ServiceIdentity,
+) -> Value {
+    let Ok(mut request) = request else {
+        return invalid_params(id);
+    };
+    let target = Some(request.target.clone());
+    let Some(backend) = identity.provider_conversations.as_deref() else {
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
+    };
+    if request.target.endpoint.service_id != identity.service_id
+        || !actor_matches(&request.requested_by, identity)
+        || !actor_matches(&request.approver, identity)
+    {
+        return local_failure_response(
+            id,
+            LocalFailure::InvalidIdentity,
+            request.operation_id,
+            target,
+        );
+    }
+    if let Some(response) = duplicate_submission(&id, backend, &request.operation_id).await {
+        return response;
+    }
+    if !matches!(
+        provider_unavailability(&request.target.endpoint, identity),
+        Ok(None)
+    ) {
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
+    }
+    let Some(binding) = backend.binding(&request.target.endpoint) else {
+        return local_failure_response(
+            id,
+            LocalFailure::InvalidBinding,
+            request.operation_id,
+            target,
+        );
+    };
+    if !target_matches(&request.target, &binding, identity) {
+        return local_failure_response(
+            id,
+            LocalFailure::InvalidIdentity,
+            request.operation_id,
+            target,
+        );
+    }
+    if request
+        .generation
+        .as_ref()
+        .is_some_and(|expected| expected != &binding.generation)
+    {
+        return local_failure_response(
+            id,
+            LocalFailure::StaleGeneration,
+            request.operation_id,
+            target,
+        );
+    }
+    request.generation = Some(binding.generation.clone());
+    result_response(id, backend.resume(request).await)
+}
+
+async fn dispatch_close(
+    id: Value,
+    request: Result<ConversationCloseRequest, ()>,
+    identity: &ServiceIdentity,
+) -> Value {
+    let Ok(mut request) = request else {
+        return invalid_params(id);
+    };
+    let target = Some(request.target.clone());
+    let Some(backend) = identity.provider_conversations.as_deref() else {
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
+    };
+    if request.target.endpoint.service_id != identity.service_id
+        || !actor_matches(&request.requested_by, identity)
+        || !actor_matches(&request.approver, identity)
+    {
+        return local_failure_response(
+            id,
+            LocalFailure::InvalidIdentity,
+            request.operation_id,
+            target,
+        );
+    }
+    if let Some(response) = duplicate_submission(&id, backend, &request.operation_id).await {
+        return response;
+    }
+    if !matches!(
+        provider_unavailability(&request.target.endpoint, identity),
+        Ok(None)
+    ) {
+        return unavailable_provider_response(
+            id,
+            request.operation_id,
+            target,
+            &request.target.endpoint,
+            identity,
+        );
+    }
+    let Some(binding) = backend.binding(&request.target.endpoint) else {
+        return local_failure_response(
+            id,
+            LocalFailure::InvalidBinding,
+            request.operation_id,
+            target,
+        );
+    };
+    if !target_matches(&request.target, &binding, identity) {
+        return local_failure_response(
+            id,
+            LocalFailure::InvalidIdentity,
+            request.operation_id,
+            target,
+        );
+    }
+    if request
+        .generation
+        .as_ref()
+        .is_some_and(|expected| expected != &binding.generation)
+    {
+        return local_failure_response(
+            id,
+            LocalFailure::StaleGeneration,
+            request.operation_id,
+            target,
+        );
+    }
+    request.generation = Some(binding.generation.clone());
+    result_response(id, backend.close(request).await)
 }
 
 async fn dispatch_prompt(

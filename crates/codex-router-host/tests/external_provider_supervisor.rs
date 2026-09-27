@@ -4,18 +4,20 @@ use codex_router_host::{
 };
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecision, CodexGeneration, ConversationAdmissionState,
-    ConversationCancelRequest, ConversationCreateRequest, ConversationLoadRequest,
-    ConversationOperationFailureKind, ConversationOperationReconcileRequest,
-    ConversationOperationSettlement, ConversationOperationShowRequest,
-    ConversationOperationWaitOutput, ConversationOperationWaitRequest, ConversationPromptRequest,
+    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
+    ConversationLoadRequest, ConversationOperationFailureKind,
+    ConversationOperationReconcileRequest, ConversationOperationSettlement,
+    ConversationOperationShowRequest, ConversationOperationWaitOutput,
+    ConversationOperationWaitRequest, ConversationPromptRequest, ConversationResumeRequest,
     EndpointDescription, EndpointId, EndpointRef, GenerationNumber, MessageContent, MessageText,
     NonEmptyText, OperationId, PositiveSeconds, ProviderBindingId, ProviderBindingIdentity,
     ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationStage,
     ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
-    ProviderRequestedSettings, ProviderRuntimeIdentity, ProviderSettingName,
-    ProviderSettingsAcceptRequest, ProviderSettingsFailureKind, ProviderSettingsSetRequest,
-    ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef, UuidIdentity,
+    ProviderRequestedSettings, ProviderRuntimeIdentity, ProviderSessionInspectRequest,
+    ProviderSettingName, ProviderSettingsAcceptRequest, ProviderSettingsFailureKind,
+    ProviderSettingsSetRequest, ProviderTransport, ProviderWorkingDirectory, RouterAccess,
+    SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, NativeGenerationGate, ProviderConversationBackend,
@@ -199,7 +201,9 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                 let ConversationOperationWaitOutput::Available {
                     settlement:
                         ConversationOperationSettlement::Created {
-                            effective_settings, ..
+                            target,
+                            effective_settings,
+                            ..
                         },
                 } = settled.output
                 else {
@@ -207,6 +211,21 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                 };
                 ensure_eq!(effective_settings.mode.as_deref(), Some("ask"));
                 ensure_eq!(effective_settings.model.as_deref(), Some("b"));
+                let inspected = backend
+                    .inspect_session(ProviderSessionInspectRequest { target })
+                    .await
+                    .map_err(|error| error.message)?;
+                ensure_eq!(
+                    inspected.capabilities.auth_status,
+                    session_event_model::ProviderAuthStatus::NotReported
+                );
+                ensure_eq!(
+                    inspected
+                        .settings_catalog
+                        .as_ref()
+                        .and_then(|catalog| catalog.current_mode.as_deref()),
+                    Some("ask")
+                );
             }
             "partial" => {
                 let settled = operation(wait(&backend, operation_id).await)?;
@@ -310,6 +329,28 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
 request=json.loads(sys.stdin.readline())
 assert request['method']=='session/load'
 print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}})); sys.stdout.flush()
+sys.stdin.read()
+"#,
+    )
+}
+
+fn resume_close_fixture() -> ExternalProviderLaunch {
+    launch(
+        r#"
+import json,sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,
+    'agentCapabilities':{'sessionCapabilities':{'resume':{},'close':{}}},
+    'agentInfo':{'name':'lifecycle-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/resume',request
+send({'jsonrpc':'2.0','id':request['id'],'result':{}})
+request=read()
+assert request['method']=='session/close',request
+send({'jsonrpc':'2.0','id':request['id'],'result':{}})
 sys.stdin.read()
 "#,
     )
@@ -1158,6 +1199,92 @@ async fn load_and_multiple_endpoint_bindings_are_supported() -> TestResult {
     ensure_eq!(session_record.created_by, requester);
     ensure_eq!(session_record.approver, requester);
     stored.close().await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resume_and_close_are_durable_operations_and_resume_requires_advertisement() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let provider_endpoint = endpoint("cursor-local")?;
+    let requester = actor(provider_endpoint.clone(), "requester")?;
+    let target = actor(provider_endpoint.clone(), "restored-session")?;
+    let unsupported = supervisor(
+        &root,
+        vec![(
+            binding(provider_endpoint.clone(), "cursor")?,
+            ExternalProviderRuntime::initialize(load_fixture()).await?,
+        )],
+    )
+    .await?;
+    let unsupported_result = unsupported
+        .resume(ConversationResumeRequest {
+            operation_id: OperationId::generate(),
+            target: target.clone(),
+            generation: Some(generation()?),
+            working_directory: working_directory()?,
+            requested_by: requester.clone(),
+            approver: requester.clone(),
+            requested_policy: policy(),
+        })
+        .await;
+    ensure!(
+        matches!(unsupported_result, Err(failure) if failure.kind == ConversationOperationFailureKind::UnsupportedCapability)
+    );
+    unsupported.shutdown().await?;
+
+    let root = tempfile::tempdir()?;
+    let backend = supervisor(
+        &root,
+        vec![(
+            binding(provider_endpoint, "cursor")?,
+            ExternalProviderRuntime::initialize(resume_close_fixture()).await?,
+        )],
+    )
+    .await?;
+    let resume_id = OperationId::generate();
+    operation(
+        backend
+            .resume(ConversationResumeRequest {
+                operation_id: resume_id.clone(),
+                target: target.clone(),
+                generation: Some(generation()?),
+                working_directory: working_directory()?,
+                requested_by: requester.clone(),
+                approver: requester.clone(),
+                requested_policy: policy(),
+            })
+            .await,
+    )?;
+    let resumed = operation(wait(&backend, resume_id).await)?;
+    ensure!(matches!(
+        resumed.output,
+        ConversationOperationWaitOutput::Available {
+            settlement: ConversationOperationSettlement::Resumed {
+                history: collaboration_protocol::ProviderHistoryAvailability::HistoryUnavailable,
+                ..
+            }
+        }
+    ));
+    let close_id = OperationId::generate();
+    operation(
+        backend
+            .close(ConversationCloseRequest {
+                operation_id: close_id.clone(),
+                target: target.clone(),
+                generation: Some(generation()?),
+                requested_by: requester.clone(),
+                approver: requester,
+            })
+            .await,
+    )?;
+    let closed = operation(wait(&backend, close_id).await)?;
+    ensure!(
+        matches!(closed.output, ConversationOperationWaitOutput::Available {
+        settlement: ConversationOperationSettlement::Closed { target: closed_target }
+    } if closed_target == target)
+    );
+    backend.shutdown().await?;
     Ok(())
 }
 

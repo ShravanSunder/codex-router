@@ -1,12 +1,14 @@
 //! Host-owned execution boundary for external ACP conversation operations.
 use collaboration_protocol::{
-    ConversationCancelRequest, ConversationCreateRequest, ConversationLoadRequest,
-    ConversationOperationFailure, ConversationOperationReconcileRequest,
+    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
+    ConversationLoadRequest, ConversationOperationFailure, ConversationOperationReconcileRequest,
     ConversationOperationShowRequest, ConversationOperationSnapshot,
     ConversationOperationSubmission, ConversationOperationWaitRequest,
-    ConversationOperationWaitResult, ConversationPromptRequest, EndpointRef,
-    ProviderBindingIdentity, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
-    ProviderSettingsFailureKind, ProviderSettingsResult, ProviderSettingsSetRequest,
+    ConversationOperationWaitResult, ConversationPromptRequest, ConversationResumeRequest,
+    EndpointRef, ProviderBindingIdentity, ProviderInspectFailure, ProviderInspectFailureKind,
+    ProviderSessionInspectRequest, ProviderSessionInspectResult, ProviderSettingsAcceptRequest,
+    ProviderSettingsFailure, ProviderSettingsFailureKind, ProviderSettingsResult,
+    ProviderSettingsSetRequest,
 };
 use std::{future::Future, pin::Pin};
 
@@ -17,10 +19,30 @@ pub type ProviderSettingsFuture<'a> = Pin<
     Box<dyn Future<Output = Result<ProviderSettingsResult, ProviderSettingsFailure>> + Send + 'a>,
 >;
 
+pub type ProviderSessionInspectFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<ProviderSessionInspectResult, ProviderInspectFailure>>
+            + Send
+            + 'a,
+    >,
+>;
+
 /// Host-owned provider work. Dropping one returned future only detaches its caller;
 /// implementations retain ownership of admitted provider operations.
 pub trait ProviderConversationBackend: Send + Sync {
     fn binding(&self, endpoint: &EndpointRef) -> Option<ProviderBindingIdentity>;
+    fn inspect_session(
+        &self,
+        request: ProviderSessionInspectRequest,
+    ) -> ProviderSessionInspectFuture<'_> {
+        Box::pin(async move {
+            Err(ProviderInspectFailure {
+                kind: ProviderInspectFailureKind::Unavailable,
+                target: request.target,
+                message: "provider Session inspection is unavailable".into(),
+            })
+        })
+    }
     fn settings_set(&self, request: ProviderSettingsSetRequest) -> ProviderSettingsFuture<'_> {
         Box::pin(async move { Err(settings_unavailable(request.target)) })
     }
@@ -43,6 +65,14 @@ pub trait ProviderConversationBackend: Send + Sync {
     fn load(
         &self,
         request: ConversationLoadRequest,
+    ) -> ProviderConversationFuture<'_, ConversationOperationSubmission>;
+    fn resume(
+        &self,
+        request: ConversationResumeRequest,
+    ) -> ProviderConversationFuture<'_, ConversationOperationSubmission>;
+    fn close(
+        &self,
+        request: ConversationCloseRequest,
     ) -> ProviderConversationFuture<'_, ConversationOperationSubmission>;
     fn prompt(
         &self,

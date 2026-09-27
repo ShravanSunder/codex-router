@@ -14,22 +14,22 @@ mod provider_settings_contract;
 pub use conversation_create_outcome::ConversationCreateOutcome;
 pub use provider_conversation_contract::{
     AppliedProviderSetting, ConversationAdmissionState, ConversationBindingIdentity,
-    ConversationCancelRequest, ConversationCreateRequest, ConversationLoadRequest,
-    ConversationOperationFailure, ConversationOperationFailureKind,
+    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
+    ConversationLoadRequest, ConversationOperationFailure, ConversationOperationFailureKind,
     ConversationOperationFailureStage, ConversationOperationQueueState,
     ConversationOperationReconcileRequest, ConversationOperationSettlement,
     ConversationOperationShowRequest, ConversationOperationSnapshot,
     ConversationOperationSubmission, ConversationOperationWaitOutput,
     ConversationOperationWaitRequest, ConversationOperationWaitResult,
-    ConversationOutputUnavailableReason, ConversationPromptRequest, EffectiveProviderSettings,
-    FailedProviderSetting, InvalidProviderSetting, InvalidSettingSessionDisposition,
-    ProviderAuthenticationState, ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities,
-    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
-    ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationKind,
-    ProviderOperationStage, ProviderPermissionOutcome, ProviderPromptStopReason,
-    ProviderReconciliationState, ProviderRequestedPolicy, ProviderRequestedSettings,
-    ProviderRuntimeIdentity, ProviderSettingName, ProviderSettingsMappingStatus, ProviderTransport,
-    ProviderWorkingDirectory,
+    ConversationOutputUnavailableReason, ConversationPromptRequest, ConversationResumeRequest,
+    EffectiveProviderSettings, FailedProviderSetting, InvalidProviderSetting,
+    InvalidSettingSessionDisposition, ProviderAuthenticationState, ProviderBindingId,
+    ProviderBindingIdentity, ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence,
+    ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect,
+    ProviderOperationKind, ProviderOperationStage, ProviderPermissionOutcome,
+    ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
+    ProviderRequestedSettings, ProviderRuntimeIdentity, ProviderSettingName,
+    ProviderSettingsMappingStatus, ProviderTransport, ProviderWorkingDirectory,
 };
 pub use provider_settings_contract::{
     ProviderSettingsAcceptRequest, ProviderSettingsFailure, ProviderSettingsFailureKind,
@@ -39,7 +39,13 @@ mod access_contract;
 mod approval_contract;
 mod interaction_actor;
 mod permission_diagnostic;
+mod provider_session_inspect;
 mod provider_session_list;
+pub use provider_session_inspect::{
+    ProviderConfigOptionView, ProviderConfigValueView, ProviderHistoryAvailability,
+    ProviderInspectFailure, ProviderInspectFailureKind, ProviderSessionInspectRequest,
+    ProviderSessionInspectResult, ProviderSettingChoiceView, ProviderSettingsCatalogView,
+};
 mod question_contract;
 pub use access_contract::{
     RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,

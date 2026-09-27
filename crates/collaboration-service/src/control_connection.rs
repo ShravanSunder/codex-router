@@ -143,10 +143,13 @@ pub async fn serve_control_connection(
                         request.method.as_str(),
                         "conversation/create"
                             | "conversation/load"
+                            | "conversation/resume"
+                            | "conversation/close"
                             | "conversation/prompt"
                             | "conversation/cancel"
                             | "conversation/settingsSet"
                             | "conversation/settingsAccept"
+                            | "provider/sessionInspect"
                             | "conversation/operationShow"
                             | "conversation/operationWait"
                             | "conversation/operationReconcile"

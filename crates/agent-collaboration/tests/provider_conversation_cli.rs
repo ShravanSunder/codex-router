@@ -422,6 +422,56 @@ async fn provider_settings_set_and_accept_use_immediate_control_methods() {
     cleanup_fixture(&root);
 }
 
+#[tokio::test]
+async fn provider_session_inspect_shows_capabilities_and_last_settings() {
+    let root = fixture_directory("provider-session-inspect");
+    let listener = publish_fixture(&root);
+    let fixture = tokio::spawn(async move {
+        serve_one(&listener, "provider/sessionInspect", |request| {
+            assert_eq!(request["params"]["target"], target());
+            json!({"target":target(),"state":"idle","history":"available",
+                "capabilities":{"load":true,"resume":true,"close":true,"list":true,"steer":false,
+                    "queue":{"kind":"router","canCancel":true},"modes":true,"configOptions":true,
+                    "elicitation":true,"usage":false,"promptContent":{"image":false,"audio":false,"embeddedContext":false},
+                    "authStatus":{"kind":"account","label":"Signed in"}},
+                "settingsCatalog":{"currentMode":"ask","modes":[{"value":"ask","label":"Ask"}],"configOptions":[]}})
+        }).await;
+    });
+    let output = run_cli(
+        &root,
+        vec![
+            "session",
+            "inspect",
+            "--endpoint",
+            ENDPOINT_ID,
+            "--session",
+            "provider-thread",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .await;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("CLI result");
+    assert_eq!(
+        value["result"]["record"]["capabilities"]["authStatus"]["kind"],
+        "account"
+    );
+    assert_eq!(
+        value["result"]["record"]["settingsCatalog"]["currentMode"],
+        "ask"
+    );
+    fixture.await.expect("fixture");
+    cleanup_fixture(&root);
+}
+
 fn settings_result() -> Value {
     json!({"target":target(),"effectiveSettings":{
         "requestedPolicy":{"access":"workspace-write"},

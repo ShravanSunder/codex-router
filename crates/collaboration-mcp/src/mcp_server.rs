@@ -6,14 +6,15 @@ use collaboration_client::{
 };
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult,
-    ApprovalDetailedListResult, ApprovalListParams, ConversationCreateOutcome,
-    ConversationOperationSubmission, DeliveryOutcome, DeliveryReceipt, EndpointInventory,
-    JournalPage, JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
-    NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
-    NativeSessionListParams, NativeSessionListResult, OperationId, ProviderSessionListParams,
-    ProviderSessionListResult, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
-    ProviderSettingsResult, ProviderSettingsSetRequest, RouterExecutableRelation,
-    router_build_warning,
+    ApprovalDetailedListResult, ApprovalListParams, ConversationCloseRequest,
+    ConversationCreateOutcome, ConversationOperationSubmission, ConversationResumeRequest,
+    DeliveryOutcome, DeliveryReceipt, EndpointInventory, JournalPage, JournalReadParams,
+    JournalStatus, NativeInspectParams, NativeInspectResult, NativeInterruptParams,
+    NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
+    NativeSessionListResult, OperationId, ProviderInspectFailure, ProviderSessionInspectRequest,
+    ProviderSessionInspectResult, ProviderSessionListParams, ProviderSessionListResult,
+    ProviderSettingsAcceptRequest, ProviderSettingsFailure, ProviderSettingsResult,
+    ProviderSettingsSetRequest, RouterExecutableRelation, router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -261,6 +262,35 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::None)
     }
 
+    #[tool(name = "provider_session_inspect", description = "Inspects one Router-owned provider Session, including live state, capability report, authentication status, and last advertised settings options.", output_schema = rmcp::handler::server::tool::schema_for_type::<ProviderSessionInspectResult>())]
+    async fn provider_session_inspect(
+        &self,
+        Parameters(request): Parameters<ProviderSessionInspectRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.inspect_provider_session(request).await;
+        let _closed = client.close().await;
+        match result {
+            Ok(value) => structured_result(Ok(value), OperationEffect::None),
+            Err(error @ ClientError::Rejected { .. }) => {
+                let typed = match &error {
+                    ClientError::Rejected {
+                        data: Some(data), ..
+                    } => serde_json::from_value::<ProviderInspectFailure>(data.clone()).ok(),
+                    _ => None,
+                };
+                typed
+                    .and_then(|value| serde_json::to_value(value).ok())
+                    .map(CallToolResult::structured_error)
+                    .unwrap_or_else(|| failure(error, OperationEffect::None))
+            }
+            Err(error) => failure(error, OperationEffect::None),
+        }
+    }
+
     #[tool(name = "session_inspect", description = "Inspects one exact conversation target without changing its identity. Attachment or backend failures retain structured target/effect evidence.", output_schema = rmcp::handler::server::tool::schema_for_type::<NativeInspectResult>())]
     async fn session_inspect(
         &self,
@@ -417,6 +447,34 @@ impl CollaborationMcpServer {
         let result = client.accept_provider_conversation_settings(request).await;
         let _ = client.close().await;
         provider_settings_tool_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "conversation_resume", description = "Resumes one advertised provider Session as an inspectable operation. The agent supplies no history replay; inspect the operation ID after an uncertain response.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationOperationSubmission>())]
+    async fn conversation_resume(
+        &self,
+        Parameters(request): Parameters<ConversationResumeRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.resume_provider_conversation(request).await;
+        let _ = client.close().await;
+        structured_result(result, OperationEffect::Unknown)
+    }
+
+    #[tool(name = "conversation_close", description = "Closes one provider Session after its running Turn settles. The operation ID remains inspectable after an uncertain response.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationOperationSubmission>())]
+    async fn conversation_close(
+        &self,
+        Parameters(request): Parameters<ConversationCloseRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.close_provider_conversation(request).await;
+        let _ = client.close().await;
+        structured_result(result, OperationEffect::Unknown)
     }
 
     #[tool(name = "journal_status", description = "Reads lifecycle-journal availability and bounds without mutating state.", output_schema = rmcp::handler::server::tool::schema_for_type::<JournalStatus>())]

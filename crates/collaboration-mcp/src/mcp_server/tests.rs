@@ -110,15 +110,18 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let tools = server.resolved_tools();
-    assert_eq!(tools.len(), 100);
+    assert_eq!(tools.len(), 103);
     let mut names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 100);
+    assert_eq!(names.len(), 103);
+    assert!(names.contains(&"conversation_resume"));
+    assert!(names.contains(&"conversation_close"));
     assert!(names.contains(&"provider_sessions_list"));
+    assert!(names.contains(&"provider_session_inspect"));
     assert!(names.contains(&"question_list"));
     assert!(names.contains(&"question_answer"));
     for tool in tools {
@@ -1135,6 +1138,7 @@ fn expected_tool_name(method: &str) -> String {
         "endpoint/list" => return "endpoints_list".to_owned(),
         "codex/sessionList" => return "sessions_list".to_owned(),
         "provider/sessionList" => return "provider_sessions_list".to_owned(),
+        "provider/sessionInspect" => return "provider_session_inspect".to_owned(),
         "codex/sessionInspect" => return "session_inspect".to_owned(),
         "codex/sessionRename" => return "session_rename".to_owned(),
         "message/send" => return "message_send".to_owned(),

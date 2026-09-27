@@ -200,6 +200,35 @@ impl ProviderSessionEventHub {
         history.replay_epoch = replay_epoch;
         Ok(replay_epoch)
     }
+
+    /// A resumed Session has no replayable history. Invalidate retained events
+    /// and subscribers while keeping the newly connected Session idle.
+    pub async fn begin_history_unavailable(
+        &self,
+        session: SessionRef,
+    ) -> Result<u64, SessionEventHubError> {
+        let mut histories = self.histories.lock().await;
+        let history = histories
+            .entry(session)
+            .or_insert_with(|| SessionHistory::new(self.subscriber_capacity));
+        let replay_epoch = history
+            .replay_epoch
+            .checked_add(1)
+            .ok_or(SessionEventHubError::Unavailable)?;
+        let _ = history.sender.send(HubEvent {
+            sequence: history.next_sequence,
+            event: SessionEvent::ResyncRequired { replay_epoch },
+        });
+        let (sender, _) = broadcast::channel(self.subscriber_capacity);
+        history.sender = sender;
+        history.events.clear();
+        history.pending.clear();
+        history.turn_running = false;
+        history.state = SessionState::Idle;
+        history.next_sequence = 1;
+        history.replay_epoch = replay_epoch;
+        Ok(replay_epoch)
+    }
 }
 
 impl SessionEventHub for ProviderSessionEventHub {

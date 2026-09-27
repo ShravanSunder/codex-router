@@ -29,6 +29,18 @@ impl ProviderConversationBackend for DelayedWaitBackend {
     ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
         Box::pin(async { panic!("unused load") })
     }
+    fn resume(
+        &self,
+        _request: ConversationResumeRequest,
+    ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+        Box::pin(async { panic!("unused resume") })
+    }
+    fn close(
+        &self,
+        _request: ConversationCloseRequest,
+    ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+        Box::pin(async { panic!("unused close") })
+    }
     fn prompt(
         &self,
         _request: ConversationPromptRequest,

@@ -6,6 +6,10 @@ use super::*;
 mod reporting;
 use reporting::*;
 
+#[path = "conversation_client_lifecycle.rs"]
+mod lifecycle;
+pub(super) use lifecycle::{run_close, run_resume};
+
 pub(super) fn run_create(args: CreateArguments) -> i32 {
     if let Err(failure) = validate_create_endpoint_options(&args) {
         return crate::endpoint_commands::report_failure(

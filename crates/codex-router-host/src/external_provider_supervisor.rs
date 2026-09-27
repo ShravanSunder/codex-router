@@ -1,6 +1,8 @@
 //! Host-owned admission and settlement for external ACP provider operations.
 
 mod provider_operation_failure;
+mod provider_session_inspection;
+mod provider_session_lifecycle;
 mod provider_settings_control;
 use provider_operation_failure::{
     admission_failure, invalid_setting_failure, prompt_runtime_failure, runtime_failure,
@@ -14,24 +16,27 @@ use crate::provider_queue_operation_registry::ProviderQueueOperationRegistry;
 use crate::{ExternalProviderRuntime, ExternalProviderRuntimeError};
 use collaboration_protocol::{
     ConversationAdmissionState, ConversationBindingIdentity, ConversationCancelRequest,
-    ConversationCreateRequest, ConversationLoadRequest, ConversationOperationFailure,
-    ConversationOperationFailureKind, ConversationOperationFailureStage,
-    ConversationOperationReconcileRequest, ConversationOperationSettlement,
-    ConversationOperationShowRequest, ConversationOperationSnapshot,
-    ConversationOperationSubmission, ConversationOperationWaitOutput,
-    ConversationOperationWaitRequest, ConversationOperationWaitResult,
-    ConversationOutputUnavailableReason, ConversationPromptRequest, EndpointRef, NonEmptyText,
-    OperationId, ProviderBindingIdentity, ProviderOperationEffect, ProviderOperationKind,
-    ProviderOperationStage, ProviderReconciliationState, ProviderSettingsAcceptRequest,
-    ProviderSettingsSetRequest, SessionId, SessionRef, render_message,
+    ConversationCloseRequest, ConversationCreateRequest, ConversationLoadRequest,
+    ConversationOperationFailure, ConversationOperationFailureKind,
+    ConversationOperationFailureStage, ConversationOperationReconcileRequest,
+    ConversationOperationSettlement, ConversationOperationShowRequest,
+    ConversationOperationSnapshot, ConversationOperationSubmission,
+    ConversationOperationWaitOutput, ConversationOperationWaitRequest,
+    ConversationOperationWaitResult, ConversationOutputUnavailableReason,
+    ConversationPromptRequest, ConversationResumeRequest, EndpointRef, NonEmptyText, OperationId,
+    ProviderBindingIdentity, ProviderOperationEffect, ProviderOperationKind,
+    ProviderOperationStage, ProviderReconciliationState, ProviderSessionInspectRequest,
+    ProviderSettingsAcceptRequest, ProviderSettingsSetRequest, SessionId, SessionRef,
+    render_message,
 };
 use collaboration_service::{
     ProviderConversationBackend, ProviderConversationFuture, ProviderOperationAdmission,
     ProviderOperationAdmissionResult, ProviderOperationRecord, ProviderOperationStore,
-    ProviderSettingsFuture, conversation_operation_snapshot as snapshot_from_record,
+    ProviderSessionInspectFuture, ProviderSettingsFuture,
+    conversation_operation_snapshot as snapshot_from_record,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
@@ -55,6 +60,9 @@ struct SupervisorInner {
     store: Arc<Mutex<ProviderOperationStore>>,
     live_operations: StdMutex<LiveOperations>,
     queued_operations: ProviderQueueOperationRegistry,
+    hub: Option<Arc<collaboration_service::ProviderSessionEventHub>>,
+    history_unavailable: Mutex<HashSet<SessionRef>>,
+    settings_catalogs: Mutex<HashMap<SessionRef, acp_client_runtime::ProviderSettingsCatalog>>,
     started_at_ms: i64,
     #[cfg(test)]
     admission_test_pause: StdMutex<Option<AdmissionTestPause>>,
@@ -126,6 +134,14 @@ impl ExternalProviderSupervisor {
         bindings: Vec<ExternalProviderBinding>,
         store: Arc<Mutex<ProviderOperationStore>>,
     ) -> Result<Self, &'static str> {
+        Self::new_with_hub(bindings, store, None)
+    }
+
+    pub(crate) fn new_with_hub(
+        bindings: Vec<ExternalProviderBinding>,
+        store: Arc<Mutex<ProviderOperationStore>>,
+        hub: Option<Arc<collaboration_service::ProviderSessionEventHub>>,
+    ) -> Result<Self, &'static str> {
         let mut runtimes = HashMap::with_capacity(bindings.len());
         for binding in bindings {
             let endpoint = binding.identity.endpoint.clone();
@@ -148,6 +164,9 @@ impl ExternalProviderSupervisor {
                 store,
                 live_operations: StdMutex::new(LiveOperations::default()),
                 queued_operations: ProviderQueueOperationRegistry::default(),
+                hub,
+                history_unavailable: Mutex::new(HashSet::new()),
+                settings_catalogs: Mutex::new(HashMap::new()),
                 started_at_ms: now_ms(),
                 #[cfg(test)]
                 admission_test_pause: StdMutex::new(None),
@@ -506,6 +525,27 @@ where
 }
 
 impl ProviderConversationBackend for ExternalProviderSupervisor {
+    fn resume(
+        &self,
+        request: ConversationResumeRequest,
+    ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+        provider_session_lifecycle::resume(self, request)
+    }
+
+    fn close(
+        &self,
+        request: ConversationCloseRequest,
+    ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+        provider_session_lifecycle::close(self, request)
+    }
+
+    fn inspect_session(
+        &self,
+        request: ProviderSessionInspectRequest,
+    ) -> ProviderSessionInspectFuture<'_> {
+        Box::pin(provider_session_inspection::inspect(self, request))
+    }
+
     fn settings_set(&self, request: ProviderSettingsSetRequest) -> ProviderSettingsFuture<'_> {
         Box::pin(provider_settings_control::set(self, request))
     }
@@ -569,6 +609,7 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                     let created_by = request.created_by;
                     let approver = request.approver;
                     let requested_settings = request.settings.unwrap_or_default();
+                    let completion_inner = Arc::clone(&backend.inner);
                     backend.spawn_operation(operation_id.clone(), live, async move {
                         match runtime
                             .create_session_with_settings(
@@ -582,12 +623,16 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                             .await
                         {
                             Ok(created) => {
+                                let catalog = runtime.settings_catalog(&created.provider_session_id).await;
                                 match SessionId::try_from(created.provider_session_id) {
                                     Ok(session_id) => {
                                         let target = SessionRef {
                                             endpoint,
                                             session_id,
                                         };
+                                        if let Some(catalog) = catalog {
+                                            completion_inner.settings_catalogs.lock().await.insert(target.clone(), catalog);
+                                        }
                                         let mut observed = effective_settings(requested_policy.clone());
                                         observed.mode = created.effective_settings.mode;
                                         observed.model = created.effective_settings.model;
@@ -623,9 +668,14 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                                 provider_session_id,
                                 applied,
                                 failed,
-                            }) => match SessionId::try_from(provider_session_id) {
+                            }) => {
+                                let catalog = runtime.settings_catalog(&provider_session_id).await;
+                                match SessionId::try_from(provider_session_id) {
                                 Ok(session_id) => {
                                     let target = SessionRef { endpoint, session_id };
+                                    if let Some(catalog) = catalog {
+                                        completion_inner.settings_catalogs.lock().await.insert(target.clone(), catalog);
+                                    }
                                     ProviderOperationCompletion::Success {
                                         settlement: ConversationOperationSettlement::CreatedWithoutSettings {
                                             target: target.clone(),
@@ -650,7 +700,8 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                                     operation_id,
                                     None,
                                 )),
-                            },
+                                }
+                            }
                             Err(ExternalProviderRuntimeError::InvalidSetting {
                                 setting,
                                 value,
@@ -740,30 +791,50 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                     let created_by = request.requested_by;
                     let approver = request.approver;
                     let completion_target = target.clone();
+                    let completion_inner = Arc::clone(&backend.inner);
                     backend.spawn_operation(operation_id.clone(), live, async move {
                         match runtime
                             .load_session(
-                                provider_session_id,
+                                provider_session_id.clone(),
                                 PathBuf::from(String::from(working_directory.clone())),
                             )
                             .await
                         {
-                            Ok(()) => ProviderOperationCompletion::Success {
-                                settlement: ConversationOperationSettlement::Loaded {
-                                    target: completion_target.clone(),
-                                    effective_settings: effective_settings(
-                                        requested_policy.clone(),
-                                    ),
-                                },
-                                target: Some(completion_target.clone()),
-                                session_record: Some(Box::new(provider_session_record(
-                                    completion_target,
-                                    working_directory,
-                                    requested_policy,
-                                    created_by,
-                                    approver,
-                                ))),
-                            },
+                            Ok(()) => {
+                                let mut observed = effective_settings(requested_policy.clone());
+                                if let Some(catalog) =
+                                    runtime.settings_catalog(&provider_session_id).await
+                                {
+                                    let effective = catalog.effective_settings();
+                                    observed.mode = effective.mode;
+                                    observed.model = effective.model;
+                                    observed.effort = effective.effort;
+                                    completion_inner
+                                        .settings_catalogs
+                                        .lock()
+                                        .await
+                                        .insert(completion_target.clone(), catalog);
+                                }
+                                completion_inner
+                                    .history_unavailable
+                                    .lock()
+                                    .await
+                                    .remove(&completion_target);
+                                ProviderOperationCompletion::Success {
+                                    settlement: ConversationOperationSettlement::Loaded {
+                                        target: completion_target.clone(),
+                                        effective_settings: observed,
+                                    },
+                                    target: Some(completion_target.clone()),
+                                    session_record: Some(Box::new(provider_session_record(
+                                        completion_target,
+                                        working_directory,
+                                        requested_policy,
+                                        created_by,
+                                        approver,
+                                    ))),
+                                }
+                            }
                             Err(error) => ProviderOperationCompletion::Failure(runtime_failure(
                                 operation_id,
                                 Some(completion_target),

@@ -365,3 +365,22 @@ async fn replay_reset_replaces_lost_history_and_resyncs_old_subscribers() -> Tes
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn resume_without_replay_invalidates_old_history_and_subscribers() -> TestResult {
+    let (_root, hub) = hub(8).await?;
+    let target = session()?;
+    hub.publish(target.clone(), user_item("old-message"))
+        .await?;
+    let mut stale = hub.attach(target.clone()).await?;
+
+    ensure_eq!(hub.begin_history_unavailable(target.clone()).await?, 1);
+    ensure_eq!(
+        receive_hub_event(&mut stale.receiver).await,
+        Err(HubReceiveError::ResyncRequired)
+    );
+    let current = hub.attach(target.clone()).await?;
+    ensure!(current.snapshot.is_empty());
+    ensure_eq!(hub.state(target).await?, SessionState::Idle);
+    Ok(())
+}

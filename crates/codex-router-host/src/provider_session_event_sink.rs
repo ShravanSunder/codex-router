@@ -28,6 +28,10 @@ enum HubCommand {
         session: SessionRef,
         completion: oneshot::Sender<Result<(), HistoryReplayUnavailable>>,
     },
+    BeginUnavailable {
+        session: SessionRef,
+        completion: oneshot::Sender<Result<(), HistoryReplayUnavailable>>,
+    },
 }
 
 /// One provider connection has one queue and one consumer. The synchronous ACP
@@ -71,6 +75,20 @@ impl HubSessionEventSink {
                             .map(|_| ())
                             .map_err(|error| {
                                 tracing::error!(%error, session_id = %session.session_id.as_str(), "provider Session replay reset failed");
+                                HistoryReplayUnavailable
+                            });
+                        let _ = completion.send(result);
+                    }
+                    HubCommand::BeginUnavailable {
+                        session,
+                        completion,
+                    } => {
+                        let result = hub
+                            .begin_history_unavailable(session.clone())
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| {
+                                tracing::error!(%error, session_id = %session.session_id.as_str(), "provider Session history invalidation failed");
                                 HistoryReplayUnavailable
                             });
                         let _ = completion.send(result);
@@ -143,6 +161,23 @@ impl HubSessionEventSink {
             consumer.await.map_err(|_| HistoryReplayUnavailable)?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn begin_history_unavailable(
+        &self,
+        session_id: &str,
+    ) -> Result<(), HistoryReplayUnavailable> {
+        let session = self.session(session_id)?;
+        let (completion, result) = oneshot::channel();
+        self.enqueue(
+            session_id,
+            HubCommand::BeginUnavailable {
+                session,
+                completion,
+            },
+        )
+        .map_err(|_| HistoryReplayUnavailable)?;
+        result.await.map_err(|_| HistoryReplayUnavailable)?
     }
 }
 

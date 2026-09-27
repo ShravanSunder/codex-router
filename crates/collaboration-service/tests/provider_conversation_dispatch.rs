@@ -4,11 +4,12 @@ use collaboration_protocol::{
     ConversationOperationShowRequest, ConversationOperationSnapshot,
     ConversationOperationSubmission, ConversationOperationWaitRequest,
     ConversationOperationWaitResult, ConversationPromptRequest, EndpointDescription, EndpointRef,
-    ProviderBindingIdentity, ProviderSettingsAcceptRequest, ProviderSettingsResult,
-    ProviderSettingsSetRequest,
+    ProviderBindingIdentity, ProviderSessionInspectRequest, ProviderSessionInspectResult,
+    ProviderSettingsAcceptRequest, ProviderSettingsResult, ProviderSettingsSetRequest,
 };
 use collaboration_service::{
-    ProviderConversationBackend, ProviderSettingsFuture, ServiceIdentity, serve_control_connection,
+    ProviderConversationBackend, ProviderSessionInspectFuture, ProviderSettingsFuture,
+    ServiceIdentity, serve_control_connection,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -37,6 +38,24 @@ struct RecordingBackend {
 }
 
 impl ProviderConversationBackend for RecordingBackend {
+    fn inspect_session(
+        &self,
+        request: ProviderSessionInspectRequest,
+    ) -> ProviderSessionInspectFuture<'_> {
+        let calls = Arc::clone(&self.calls);
+        Box::pin(async move {
+            let target = request.target.clone();
+            calls.lock().await.push(("providerInspect", json!(request)));
+            Ok(ProviderSessionInspectResult {
+                target,
+                state: collaboration_protocol::ProviderSessionState::Unloaded,
+                capabilities: session_event_model::CapabilityReport::default(),
+                history: collaboration_protocol::ProviderHistoryAvailability::HistoryUnavailable,
+                settings_catalog: None,
+            })
+        })
+    }
+
     fn settings_set(&self, request: ProviderSettingsSetRequest) -> ProviderSettingsFuture<'_> {
         let calls = Arc::clone(&self.calls);
         Box::pin(async move {
@@ -83,6 +102,18 @@ impl ProviderConversationBackend for RecordingBackend {
         request: ConversationLoadRequest,
     ) -> BackendFuture<'_, ConversationOperationSubmission> {
         self.record("load", request, self.submission.clone())
+    }
+    fn resume(
+        &self,
+        request: collaboration_protocol::ConversationResumeRequest,
+    ) -> BackendFuture<'_, ConversationOperationSubmission> {
+        self.record("resume", request, self.submission.clone())
+    }
+    fn close(
+        &self,
+        request: collaboration_protocol::ConversationCloseRequest,
+    ) -> BackendFuture<'_, ConversationOperationSubmission> {
+        self.record("close", request, self.submission.clone())
     }
     fn prompt(
         &self,
@@ -174,6 +205,68 @@ async fn settings_methods_forward_typed_actor_without_operation_id() -> TestResu
     ensure(
         *backend.calls.lock().await == vec![("settingsSet", set), ("settingsAccept", accept)],
         "settings calls changed".into(),
+    )?;
+    let inspected = call(
+        &mut writer,
+        &mut reader,
+        "inspect",
+        "provider/sessionInspect",
+        json!({"target":session("provider-conversation")}),
+    )
+    .await?;
+    ensure(
+        inspected["result"]["capabilities"]["authStatus"]["kind"] == "notReported",
+        format!("inspect: {inspected}"),
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_and_close_dispatch_as_inspectable_provider_operations() -> TestResult {
+    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let resume = json!({
+        "operationId":operation_id(),
+        "target":session("provider-conversation"),
+        "generation":generation(),
+        "workingDirectory":"/tmp",
+        "requestedBy":actor("creator"),
+        "approver":actor("creator"),
+        "requestedPolicy":{"access":"workspace-write"}
+    });
+    let response = call(
+        &mut writer,
+        &mut reader,
+        "resume",
+        "conversation/resume",
+        resume.clone(),
+    )
+    .await?;
+    ensure(
+        response["result"]["admission"] == "admitted",
+        format!("resume: {response}"),
+    )?;
+    let close = json!({
+        "operationId":operation_id(),
+        "target":session("provider-conversation"),
+        "generation":generation(),
+        "requestedBy":actor("creator"),
+        "approver":actor("creator")
+    });
+    let response = call(
+        &mut writer,
+        &mut reader,
+        "close",
+        "conversation/close",
+        close.clone(),
+    )
+    .await?;
+    ensure(
+        response["result"]["admission"] == "admitted",
+        format!("close: {response}"),
+    )?;
+    ensure(
+        *backend.calls.lock().await == vec![("resume", resume), ("close", close)],
+        "lifecycle requests changed at Control dispatch".into(),
     )?;
     Ok(())
 }

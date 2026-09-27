@@ -187,12 +187,21 @@ pub fn control_schema_document(
     assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
     assembly.add_type::<ConversationOperationFailure>("conversation-operation-failure")?;
     assembly.add_type::<ProviderSettingsFailure>("provider-settings-failure")?;
+    assembly.add_type::<ProviderInspectFailure>("provider-inspect-failure")?;
     assembly.add_method::<ConversationCreateRequest, ConversationOperationSubmission>(
         "conversation/create",
         &[],
     )?;
     assembly.add_method::<ConversationLoadRequest, ConversationOperationSubmission>(
         "conversation/load",
+        &[],
+    )?;
+    assembly.add_method::<ConversationResumeRequest, ConversationOperationSubmission>(
+        "conversation/resume",
+        &[],
+    )?;
+    assembly.add_method::<ConversationCloseRequest, ConversationOperationSubmission>(
+        "conversation/close",
         &[],
     )?;
     assembly.add_method::<ConversationPromptRequest, ConversationOperationSubmission>(
@@ -209,6 +218,10 @@ pub fn control_schema_document(
     )?;
     assembly.add_method::<ProviderSettingsAcceptRequest, ProviderSettingsResult>(
         "conversation/settingsAccept",
+        &[],
+    )?;
+    assembly.add_method::<ProviderSessionInspectRequest, ProviderSessionInspectResult>(
+        "provider/sessionInspect",
         &[],
     )?;
     assembly.add_method::<ConversationOperationShowRequest, ConversationOperationSnapshot>(
@@ -617,6 +630,9 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
         "conversation/settingsSet" | "conversation/settingsAccept"
     ) {
         data = vec![reference("provider-settings-failure")];
+    }
+    if method == "provider/sessionInspect" {
+        data = vec![reference("provider-inspect-failure")];
     }
     if matches!(
         method,

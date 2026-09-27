@@ -326,6 +326,30 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
                 })
             })
         }
+        fn resume(
+            &self,
+            _: collaboration_protocol::ConversationResumeRequest,
+        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+            let operation = self.admitted.clone();
+            Box::pin(async move {
+                Ok(ConversationOperationSubmission {
+                    admission: ConversationAdmissionState::Admitted,
+                    operation,
+                })
+            })
+        }
+        fn close(
+            &self,
+            _: collaboration_protocol::ConversationCloseRequest,
+        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+            let operation = self.admitted.clone();
+            Box::pin(async move {
+                Ok(ConversationOperationSubmission {
+                    admission: ConversationAdmissionState::Admitted,
+                    operation,
+                })
+            })
+        }
         fn prompt(
             &self,
             _: ConversationPromptRequest,

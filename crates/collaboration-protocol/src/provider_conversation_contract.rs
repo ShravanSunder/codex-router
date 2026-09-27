@@ -344,6 +344,8 @@ pub struct InvalidProviderSetting {
 pub enum ProviderOperationKind {
     ConversationCreate,
     ConversationLoad,
+    ConversationResume,
+    ConversationClose,
     ConversationPrompt,
     ConversationCancel,
 }
@@ -456,6 +458,30 @@ pub struct ConversationLoadRequest {
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationResumeRequest {
+    pub operation_id: OperationId,
+    pub target: SessionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<CodexGeneration>,
+    pub working_directory: ProviderWorkingDirectory,
+    pub requested_by: SessionRef,
+    pub approver: SessionRef,
+    pub requested_policy: ProviderRequestedPolicy,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationCloseRequest {
+    pub operation_id: OperationId,
+    pub target: SessionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<CodexGeneration>,
+    pub requested_by: SessionRef,
+    pub approver: SessionRef,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationPromptRequest {
     pub operation_id: OperationId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -529,6 +555,14 @@ pub enum ConversationOperationSettlement {
     Loaded {
         target: SessionRef,
         effective_settings: EffectiveProviderSettings,
+    },
+    Resumed {
+        target: SessionRef,
+        effective_settings: EffectiveProviderSettings,
+        history: crate::ProviderHistoryAvailability,
+    },
+    Closed {
+        target: SessionRef,
     },
     PromptCompleted {
         target: SessionRef,

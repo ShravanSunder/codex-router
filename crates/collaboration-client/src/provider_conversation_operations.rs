@@ -2,11 +2,13 @@
 
 use crate::{ClientError, ControlClient};
 use collaboration_protocol::{
-    ConversationCancelRequest, ConversationCreateRequest, ConversationLoadRequest,
-    ConversationOperationReconcileRequest, ConversationOperationShowRequest,
-    ConversationOperationSnapshot, ConversationOperationSubmission,
-    ConversationOperationWaitRequest, ConversationOperationWaitResult, ConversationPromptRequest,
-    OperationId, ProviderSettingsAcceptRequest, ProviderSettingsResult, ProviderSettingsSetRequest,
+    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
+    ConversationLoadRequest, ConversationOperationReconcileRequest,
+    ConversationOperationShowRequest, ConversationOperationSnapshot,
+    ConversationOperationSubmission, ConversationOperationWaitRequest,
+    ConversationOperationWaitResult, ConversationPromptRequest, ConversationResumeRequest,
+    OperationId, ProviderSessionInspectRequest, ProviderSessionInspectResult,
+    ProviderSettingsAcceptRequest, ProviderSettingsResult, ProviderSettingsSetRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
@@ -14,6 +16,14 @@ use std::time::Duration;
 const PROVIDER_WAIT_TRANSPORT_ALLOWANCE: Duration = Duration::from_secs(5);
 
 impl ControlClient {
+    pub async fn inspect_provider_session(
+        &mut self,
+        request: ProviderSessionInspectRequest,
+    ) -> Result<ProviderSessionInspectResult, ClientError> {
+        self.call_provider_operation("provider/sessionInspect", request)
+            .await
+    }
+
     pub async fn set_provider_conversation_setting(
         &mut self,
         request: ProviderSettingsSetRequest,
@@ -43,6 +53,22 @@ impl ControlClient {
         request: ConversationLoadRequest,
     ) -> Result<ConversationOperationSubmission, ClientError> {
         self.submit_provider_operation("conversation/load", request.operation_id.clone(), request)
+            .await
+    }
+
+    pub async fn resume_provider_conversation(
+        &mut self,
+        request: ConversationResumeRequest,
+    ) -> Result<ConversationOperationSubmission, ClientError> {
+        self.submit_provider_operation("conversation/resume", request.operation_id.clone(), request)
+            .await
+    }
+
+    pub async fn close_provider_conversation(
+        &mut self,
+        request: ConversationCloseRequest,
+    ) -> Result<ConversationOperationSubmission, ClientError> {
+        self.submit_provider_operation("conversation/close", request.operation_id.clone(), request)
             .await
     }
 

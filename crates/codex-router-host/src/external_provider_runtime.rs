@@ -298,6 +298,43 @@ impl ExternalProviderRuntime {
         self.client.load_session(provider_session_id, cwd).await
     }
 
+    pub async fn resume_session(
+        &self,
+        provider_session_id: String,
+        cwd: PathBuf,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        self.client
+            .resume_session(provider_session_id.clone(), cwd)
+            .await?;
+        if let Some(event_sink) = &self.event_sink {
+            event_sink
+                .begin_history_unavailable(&provider_session_id)
+                .await
+                .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+        }
+        Ok(())
+    }
+
+    pub async fn close_session(
+        &self,
+        provider_session_id: String,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        self.client
+            .close_session(provider_session_id.clone())
+            .await?;
+        if let Some(event_sink) = &self.event_sink {
+            acp_client_runtime::SessionEventSink::publish(
+                event_sink.as_ref(),
+                &provider_session_id,
+                session_event_model::SessionEvent::StateChanged {
+                    state: session_event_model::SessionState::Closed,
+                },
+            )
+            .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+        }
+        Ok(())
+    }
+
     pub async fn steer_session(
         &self,
         provider_session_id: String,
