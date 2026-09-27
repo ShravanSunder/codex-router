@@ -2,6 +2,45 @@
 use collaboration_protocol::OperationId;
 
 #[test]
+fn codex_running_prompt_is_a_successful_typed_tool_result() {
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"active-thread"
+    }))
+    .expect("target");
+    let result = super::conversation_tool_result::<collaboration_client::ConversationOperationResult>(
+        Ok(collaboration_client::ConversationOperationResult::running_codex_turn(target.clone())),
+        None,
+    );
+    assert_ne!(result.is_error, Some(true));
+    let structured = result
+        .structured_content
+        .expect("structured running outcome");
+    assert_eq!(structured["kind"], "running");
+    assert_eq!(structured["target"], serde_json::json!(target));
+    assert_eq!(
+        structured["followUp"],
+        "Turn continues. Follow with: agent-collaboration events listen --endpoint codex-local --session active-thread --attach; or agent-collaboration session inspect --endpoint codex-local --session active-thread --json"
+    );
+
+    let server = super::CollaborationMcpServer::new(
+        tempfile::tempdir().expect("directory").path().to_owned(),
+    );
+    let schema = server
+        .resolved_tools()
+        .into_iter()
+        .find(|tool| tool.name == "conversation_prompt")
+        .and_then(|tool| tool.output_schema)
+        .expect("prompt output schema");
+    let schema = serde_json::Value::Object((*schema).clone());
+    assert!(
+        jsonschema::validator_for(&schema)
+            .expect("valid schema")
+            .is_valid(&structured)
+    );
+}
+
+#[test]
 fn unavailable_provider_error_keeps_catalog_endpoint_reason_and_fix() {
     let operation_id = OperationId::generate();
     let endpoint = serde_json::json!({

@@ -205,9 +205,11 @@ impl AcpSessionRegistry {
     }
     /// Closes only this connection's prompt actors; the Host/backend lifecycle remains separate.
     pub async fn shutdown(mut self) {
-        for slot in self.sessions.values() {
-            if let SessionSlot::Busy(sender) = slot {
-                let _sent = sender.try_send(PromptCommand::Cancel);
+        // Closing the ACP frontend detaches its prompt actors. Dropping their
+        // command senders lets them observe EOF and keep draining native turns.
+        for slot in self.sessions.values_mut() {
+            if matches!(slot, SessionSlot::Busy(_)) {
+                *slot = SessionSlot::Detached;
             }
         }
         let drained = tokio::time::timeout(std::time::Duration::from_secs(30), async {

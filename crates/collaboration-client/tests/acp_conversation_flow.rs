@@ -318,7 +318,7 @@ async fn streamed_prompt_updates_hit_aggregate_count_bound_and_retain_target() {
 }
 
 #[tokio::test]
-async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles_cancel() {
+async fn reusable_acp_client_orders_load_updates_and_detaches_on_caller_cancel() {
     // Arrange: actual Unix discovery and a deterministic independent ACP peer.
     let root = std::path::PathBuf::from(format!("/tmp/acp-client-flow-{}", std::process::id()));
     std::fs::DirBuilder::new()
@@ -386,20 +386,14 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(prompt["method"], "session/prompt");
         let _signalled = prompt_started.send(());
-        let cancel: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        assert_eq!(cancel["method"], "session/cancel");
-        assert_eq!(cancel["params"]["sessionId"], "owned");
-        writer
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"cancelled"}})
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none(),
+            "caller detaches without session/cancel"
+        );
     });
     // Act: client initialization, load buffering, permission denial, same-connection cancellation.
     let mut client = AcpConversation::connect(&root, "codex-local".to_owned().try_into().unwrap())
@@ -467,7 +461,7 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
             )
             .await
             .unwrap(),
-        ConversationEnd::Cancelled
+        ConversationEnd::Detached
     );
     canceller.await.unwrap();
     let already_cancelled = CancellationToken::new();
@@ -509,7 +503,7 @@ async fn reusable_acp_client_orders_load_updates_cancels_permissions_and_settles
             .iter()
             .filter(|e| matches!(e, ConversationEvent::PromptResult { .. }))
             .count(),
-        2
+        1
     );
     std::fs::remove_file(root.join("acp.sock")).unwrap();
     std::fs::remove_dir(root).unwrap();

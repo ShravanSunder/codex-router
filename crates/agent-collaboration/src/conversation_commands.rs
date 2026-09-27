@@ -43,7 +43,8 @@ enum ConversationCommand {
         long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. --model and --effort are required for Codex endpoints and rejected for provider endpoints. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
     )]
     Create(CreateArguments),
-    /// Run an ACP prompt and wait for settlement. For an empty conversation returned by
+    /// Run an ACP prompt and wait up to the caller deadline. A detached Codex turn
+    /// returns `running` with exit code 0 and a follow-up command. For an empty conversation returned by
     /// `conversation create`, submit its first input with `message send`; alternatively use
     /// `conversation prompt --new`. Permission requests are never automatically approved.
     Prompt(PromptArguments),
@@ -361,6 +362,26 @@ fn run_prompt(args: PromptArguments) -> i32 {
         }.await;
         signal_task.abort();let _joined=signal_task.await;
         match result{
+            Ok(ConversationEnd::Detached) => match target {
+                Some(target) => {
+                    let outcome = ConversationOperationResult::running_codex_turn(target);
+                    if let ConversationOperationResult::Running { follow_up, .. } = &outcome
+                        && !args.json
+                    {
+                        let _written = writeln!(io::stderr(), "{follow_up}");
+                    }
+                    let encoded = if args.json {
+                        serde_json::to_string(&outcome)
+                    } else {
+                        serde_json::to_string_pretty(&outcome)
+                    };
+                    match encoded {
+                        Ok(encoded) => writeln!(io::stdout(), "{encoded}").map_or(3, |()| 0),
+                        Err(_) => 3,
+                    }
+                }
+                None => 3,
+            },
             Ok(end) => conversation_end_exit(end),
             Err(error)=>{
                 if let Some(exit) = permission_exit {
@@ -409,6 +430,7 @@ const fn conversation_end_exit(end: ConversationEnd) -> i32 {
         ConversationEnd::Completed => 0,
         ConversationEnd::TimedOut => 124,
         ConversationEnd::Cancelled => 130,
+        ConversationEnd::Detached => 0,
     }
 }
 fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
@@ -572,6 +594,7 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
                     ConversationEnd::Cancelled | ConversationEnd::Completed => {
                         ConversationTerminalReason::Cancelled
                     }
+                    ConversationEnd::Detached => return Ok(()),
                 };
                 let record = settlement_record(target, terminal_reason, result);
                 if machine {
@@ -855,6 +878,10 @@ mod tests {
         assert_eq!(
             conversation_end_exit(collaboration_client::ConversationEnd::TimedOut),
             124
+        );
+        assert_eq!(
+            conversation_end_exit(collaboration_client::ConversationEnd::Detached),
+            0
         );
     }
 }
