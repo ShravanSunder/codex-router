@@ -152,6 +152,8 @@ pub enum ExternalProviderRuntimeError {
     ProviderRejected { code: i64 },
     #[error("provider operation response was unavailable")]
     TransportFailure,
+    #[error("session history replay could not begin")]
+    HistoryReplayUnavailable,
     #[error(
         "provider prompt output exceeded the retained output limit; cancellation was requested and settled"
     )]
