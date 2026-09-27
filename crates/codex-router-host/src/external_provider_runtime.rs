@@ -260,14 +260,20 @@ impl ExternalProviderRuntime {
         &self,
         cwd: PathBuf,
     ) -> Result<String, ExternalProviderRuntimeError> {
-        self.client.create_session(cwd).await
+        self.create_session_with_observation(cwd)
+            .await
+            .map(|created| created.provider_session_id)
     }
 
     pub async fn create_session_with_observation(
         &self,
         cwd: PathBuf,
     ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
-        self.client.create_session_with_observation(cwd).await
+        self.create_session_with_settings(
+            cwd,
+            acp_client_runtime::RequestedProviderSettings::default(),
+        )
+        .await
     }
 
     pub async fn create_session_with_settings(
@@ -275,9 +281,27 @@ impl ExternalProviderRuntime {
         cwd: PathBuf,
         settings: acp_client_runtime::RequestedProviderSettings,
     ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
-        self.client
+        let created = self
+            .client
             .create_session_with_settings(cwd, settings)
-            .await
+            .await;
+        let active_session = match &created {
+            Ok(created) => Some(created.provider_session_id.as_str()),
+            Err(ExternalProviderRuntimeError::CreatedWithoutSettings {
+                provider_session_id,
+                ..
+            }) => Some(provider_session_id.as_str()),
+            Err(ExternalProviderRuntimeError::InvalidSetting {
+                provider_session_id,
+                disposition: acp_client_runtime::InvalidSettingSessionDisposition::RemainsCreated,
+                ..
+            }) => Some(provider_session_id.as_str()),
+            _ => None,
+        };
+        if let Some(session_id) = active_session {
+            self.publish_active_session(session_id).await?;
+        }
+        created
     }
 
     pub async fn settings_unresolved(&self, provider_session_id: &str) -> bool {
@@ -316,7 +340,10 @@ impl ExternalProviderRuntime {
         provider_session_id: String,
         cwd: PathBuf,
     ) -> Result<(), ExternalProviderRuntimeError> {
-        self.client.load_session(provider_session_id, cwd).await
+        self.client
+            .load_session(provider_session_id.clone(), cwd)
+            .await?;
+        self.publish_active_session(&provider_session_id).await
     }
 
     pub async fn resume_session(
@@ -332,6 +359,30 @@ impl ExternalProviderRuntime {
                 .begin_history_unavailable(&provider_session_id)
                 .await
                 .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+        }
+        self.publish_active_session(&provider_session_id).await
+    }
+
+    async fn publish_active_session(
+        &self,
+        provider_session_id: &str,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        if let Some(event_sink) = &self.event_sink {
+            let capabilities = self
+                .client
+                .capability_report(provider_session_id)
+                .await
+                .to_session_model();
+            acp_client_runtime::SessionEventSink::publish(
+                event_sink.as_ref(),
+                provider_session_id,
+                session_event_model::SessionEvent::CapabilitiesChanged { capabilities },
+            )
+            .map_err(|_| ExternalProviderRuntimeError::SinkClosed)?;
+            event_sink
+                .publish_idle(provider_session_id)
+                .await
+                .map_err(|_| ExternalProviderRuntimeError::SinkClosed)?;
         }
         Ok(())
     }

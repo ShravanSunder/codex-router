@@ -11,6 +11,7 @@ use crate::{
     EffectiveProviderSettings, InvalidSettingSessionDisposition, ProviderSettingKind,
     RequestedProviderSettings,
 };
+use session_event_model::SessionEvent;
 
 pub(crate) async fn apply_loaded_setting(
     session: &ActiveSession<'_, Agent>,
@@ -73,6 +74,22 @@ pub(crate) async fn apply_loaded_setting(
             let mut unresolved = handles.settings_unresolved.write().await;
             if unresolved.get(&provider_session_id) == Some(&kind) {
                 unresolved.remove(&provider_session_id);
+            }
+            drop(unresolved);
+            if let Some(capabilities) = handles
+                .session_capabilities
+                .read()
+                .await
+                .get(&provider_session_id)
+                .map(crate::ProviderCapabilityReport::to_session_model)
+            {
+                handles
+                    .event_sink
+                    .publish(
+                        &provider_session_id,
+                        SessionEvent::CapabilitiesChanged { capabilities },
+                    )
+                    .map_err(|_| ExternalProviderRuntimeError::SinkClosed)?;
             }
             Ok(effective)
         }
