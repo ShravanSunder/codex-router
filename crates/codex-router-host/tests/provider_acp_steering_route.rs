@@ -114,6 +114,7 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -249,6 +250,7 @@ assert steer['method']=='_session/steering'
 "#
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -266,6 +268,7 @@ print(json.dumps({'jsonrpc':'2.0','id':create['id'],'result':{'sessionId':'fixtu
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script.to_owned()],
         environment: Vec::new(),
@@ -298,6 +301,7 @@ sys.stdin.read()
         event_socket = event_socket.display().to_string(),
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),

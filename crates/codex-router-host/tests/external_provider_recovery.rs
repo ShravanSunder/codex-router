@@ -123,6 +123,7 @@ fn working_directory() -> TestResult<ProviderWorkingDirectory> {
 
 fn launch(script: String) -> ExternalProviderLaunch {
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: vec![],

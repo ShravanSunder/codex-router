@@ -153,6 +153,7 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -176,6 +177,7 @@ for line in sys.stdin:
         error_code = error_code,
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -193,6 +195,7 @@ for line in sys.stdin:
  print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})); sys.stdout.flush()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script.to_owned()],
         environment: Vec::new(),
@@ -211,6 +214,7 @@ sys.exit(0)
         exit_marker.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),

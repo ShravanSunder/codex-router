@@ -18,7 +18,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, NativeGenerationGate, ProviderConversationBackend,
-    ProviderOperationStore, ServiceApprovalBroker,
+    ProviderOperationStore, ServiceInteractionBroker,
 };
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -115,6 +115,7 @@ fn working_directory() -> TestResult<ProviderWorkingDirectory> {
 
 fn launch(script: &str) -> ExternalProviderLaunch {
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script.to_owned()],
         environment: vec![],
@@ -295,7 +296,7 @@ async fn approval_broker_fixture(
     service_id: &UuidIdentity,
     approver: &SessionRef,
 ) -> TestResult<(
-    Arc<ServiceApprovalBroker>,
+    Arc<ServiceInteractionBroker>,
     tokio::task::JoinHandle<Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>>>,
 )> {
     let socket_path = root.path().join("native-approver.sock");
@@ -347,7 +348,7 @@ async fn approval_broker_fixture(
         endpoint: approver.endpoint.clone(),
         gate,
     };
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.clone(),
         native_backend.clone(),
         root.path().join("approval-routes.json"),

@@ -154,7 +154,7 @@ impl ExternalProviderSupervisor {
 
     pub async fn install_approval_broker(
         &self,
-        broker: Arc<collaboration_service::ServiceApprovalBroker>,
+        broker: Arc<collaboration_service::ServiceInteractionBroker>,
     ) {
         for binding in self.inner.bindings.values() {
             binding

@@ -7,10 +7,13 @@ use std::{path::PathBuf, sync::Arc};
 use acp_client_runtime::AgentSessionClient;
 pub(crate) use acp_client_runtime::ProviderPromptDispatchObservation;
 use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
-use collaboration_service::ServiceApprovalBroker;
+use collaboration_service::ProviderSessionEventHub;
+use collaboration_service::ServiceInteractionBroker;
+use message_board::SessionEndpointRef;
 use tokio_util::sync::CancellationToken;
 
 use crate::acp_interaction_port::{HostInteractionPort, NoopSessionEventSink};
+use crate::provider_session_event_sink::HubSessionEventSink;
 #[cfg(test)]
 use crate::{ProviderSessionActivity, ProviderSteeringOutcome};
 #[cfg(test)]
@@ -103,6 +106,7 @@ mod prompt_projection_tests {
 pub struct ExternalProviderRuntime {
     client: AgentSessionClient<HostInteractionPort>,
     interaction_port: Arc<HostInteractionPort>,
+    event_sink: Option<Arc<HubSessionEventSink>>,
 }
 
 impl std::fmt::Debug for ExternalProviderRuntime {
@@ -128,6 +132,7 @@ impl ExternalProviderRuntime {
         Ok(Self {
             client,
             interaction_port,
+            event_sink: None,
         })
     }
 
@@ -148,6 +153,42 @@ impl ExternalProviderRuntime {
         Ok(Self {
             client,
             interaction_port,
+            event_sink: None,
+        })
+    }
+
+    pub(crate) async fn initialize_with_mcp_http_and_hub(
+        launch: ExternalProviderLaunch,
+        server_name: impl Into<String>,
+        server_url: impl Into<String>,
+        hub: Arc<ProviderSessionEventHub>,
+        endpoint: SessionEndpointRef,
+    ) -> Result<Self, ExternalProviderRuntimeError> {
+        let interaction_port = Arc::new(HostInteractionPort::default());
+        let event_sink = Arc::new(HubSessionEventSink::new(hub, endpoint));
+        let published_sink: Arc<dyn acp_client_runtime::SessionEventSink> = event_sink.clone();
+        interaction_port
+            .install_event_sink(Arc::clone(&published_sink))
+            .await;
+        let result = AgentSessionClient::initialize_with_mcp_http(
+            launch,
+            server_name,
+            server_url,
+            Arc::clone(&interaction_port),
+            published_sink,
+        )
+        .await;
+        let client = match result {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = event_sink.shutdown().await;
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            client,
+            interaction_port,
+            event_sink: Some(event_sink),
         })
     }
 
@@ -167,10 +208,11 @@ impl ExternalProviderRuntime {
         Ok(Self {
             client,
             interaction_port,
+            event_sink: None,
         })
     }
 
-    pub async fn install_approval_broker(&self, broker: Arc<ServiceApprovalBroker>) {
+    pub async fn install_approval_broker(&self, broker: Arc<ServiceInteractionBroker>) {
         self.interaction_port.install_broker(broker).await;
     }
 
@@ -257,6 +299,11 @@ impl ExternalProviderRuntime {
 
     pub async fn shutdown(&self) {
         self.client.shutdown().await;
+        if let Some(event_sink) = &self.event_sink
+            && let Err(error) = event_sink.shutdown().await
+        {
+            tracing::error!(%error, "provider Session event consumer failed to drain");
+        }
     }
 
     pub fn shutdown_failed(&self) -> bool {

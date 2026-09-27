@@ -90,7 +90,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .unwrap_or_else(|error| panic!("routes: {error}")),
     )
     .unwrap_or_else(|error| panic!("routes file: {error}"));
-    let broker = collaboration_service::ServiceApprovalBroker::load(
+    let broker = collaboration_service::ServiceInteractionBroker::load(
         service_id
             .to_owned()
             .try_into()

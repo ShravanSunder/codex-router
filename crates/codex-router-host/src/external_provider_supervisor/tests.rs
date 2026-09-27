@@ -10,6 +10,7 @@ use collaboration_protocol::{
 
 fn create_fixture() -> ExternalProviderLaunch {
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -29,6 +30,7 @@ sys.stdin.read()
 
 fn pending_prompt_fixture() -> ExternalProviderLaunch {
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -71,6 +73,7 @@ sys.stdin.read()
         socket_path.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),

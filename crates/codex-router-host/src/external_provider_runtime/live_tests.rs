@@ -5,7 +5,7 @@ use collaboration_protocol::{
     GenerationNumber, OperationId, SessionId, UuidIdentity,
 };
 use collaboration_service::{
-    EndpointDirectory, NativeControlBackend, NativeGenerationGate, ServiceApprovalBroker,
+    EndpointDirectory, NativeControlBackend, NativeGenerationGate, ServiceInteractionBroker,
 };
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -130,6 +130,7 @@ fn provider_output_classifier_reports_only_bounded_uuid_metadata() {
 
 fn owned_host_endpoint_fixture() -> ExternalProviderLaunch {
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -164,7 +165,7 @@ async fn approval_broker_fixture(
     service_id: &UuidIdentity,
     approver: &SessionRef,
 ) -> TestResult<(
-    Arc<ServiceApprovalBroker>,
+    Arc<ServiceInteractionBroker>,
     tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
 )> {
     let socket_path = root.path().join("native-approver.sock");
@@ -219,7 +220,7 @@ async fn approval_broker_fixture(
         endpoint: approver.endpoint.clone(),
         gate,
     };
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.clone(),
         native_backend.clone(),
         root.path().join("approval-routes.json"),
@@ -303,6 +304,7 @@ send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -331,6 +333,7 @@ send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: Vec::new(),
@@ -548,6 +551,7 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
     };
     let runtime = ExternalProviderRuntime::initialize_with_mcp_http(
         ExternalProviderLaunch {
+            persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
             executable,
             arguments,
             environment: Vec::new(),

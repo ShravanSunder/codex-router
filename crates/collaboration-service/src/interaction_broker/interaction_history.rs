@@ -11,7 +11,8 @@ pub use collaboration_protocol::QuestionResponse;
 use message_board::{Identity, SessionRef};
 use serde::{Deserialize, Serialize};
 use session_event_model::{
-    ApprovalRequest, ApprovalScope, OfferedOptionId, QuestionField, QuestionRequest,
+    ApprovalRequest, ApprovalScope, ApprovalSubject, OfferedOptionId, QuestionField,
+    QuestionRequest,
 };
 use tokio::sync::Mutex;
 
@@ -30,6 +31,30 @@ pub enum InteractionHistoryRecord {
         request: QuestionRequest,
         state: QuestionHistoryState,
     },
+    RefusedApproval {
+        requester: SessionRef,
+        approver: Identity,
+        refusal: RefusedTypedApproval,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefusedTypedApproval {
+    pub request_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub subject: Option<ApprovalSubject>,
+    pub options: Vec<RefusedApprovalOption>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefusedApprovalOption {
+    pub option_id: String,
+    pub label: String,
+    pub provider_kind: String,
 }
 
 impl InteractionHistoryRecord {
@@ -38,6 +63,7 @@ impl InteractionHistoryRecord {
         match self {
             Self::Approval { request, .. } => &request.request_id,
             Self::Question { request, .. } => &request.request_id,
+            Self::RefusedApproval { refusal, .. } => &refusal.request_id,
         }
     }
 
@@ -46,6 +72,7 @@ impl InteractionHistoryRecord {
         match self {
             Self::Approval { request, .. } => Some(request),
             Self::Question { .. } => None,
+            Self::RefusedApproval { .. } => None,
         }
     }
 
@@ -54,6 +81,7 @@ impl InteractionHistoryRecord {
         match self {
             Self::Approval { state, .. } => Some(state),
             Self::Question { .. } => None,
+            Self::RefusedApproval { .. } => None,
         }
     }
 
@@ -61,6 +89,7 @@ impl InteractionHistoryRecord {
         match self {
             Self::Approval { approver, .. } => approver,
             Self::Question { approver, .. } => approver,
+            Self::RefusedApproval { approver, .. } => approver,
         }
     }
 
@@ -102,6 +131,15 @@ impl InteractionHistoryRecord {
                             validate_question_content(request, content).is_ok()
                         }
                     }
+            }
+            Self::RefusedApproval {
+                requester,
+                approver,
+                refusal,
+            } => {
+                !refusal.request_id.is_empty()
+                    && !refusal.reason.trim().is_empty()
+                    && !matches!(approver, Identity::Session { session } if session == requester)
             }
         }
     }
@@ -298,6 +336,119 @@ impl InteractionHistoryStore {
         Ok(())
     }
 
+    pub(super) async fn record_refused_approval(
+        &self,
+        requester: SessionRef,
+        approver: Identity,
+        refusal: RefusedTypedApproval,
+    ) -> Result<(), InteractionHistoryError> {
+        let record = InteractionHistoryRecord::RefusedApproval {
+            requester,
+            approver,
+            refusal,
+        };
+        if !record.is_valid_stored_value() {
+            return Err(InteractionHistoryError::Unavailable);
+        }
+        let mut records = self.records.lock().await;
+        if records.contains_key(record.request_id()) {
+            return Err(InteractionHistoryError::AlreadyExists);
+        }
+        let mut next = records.clone();
+        next.insert(record.request_id().to_owned(), record);
+        self.persist(&next).await?;
+        *records = next;
+        Ok(())
+    }
+
+    pub(super) async fn record_cancelled_approval(
+        &self,
+        requester: SessionRef,
+        approver: Identity,
+        request: ApprovalRequest,
+        reason: &str,
+    ) -> Result<(), InteractionHistoryError> {
+        let record = InteractionHistoryRecord::Approval {
+            requester,
+            approver,
+            request,
+            state: InteractionHistoryState::Cancelled {
+                reason: reason.to_owned(),
+            },
+        };
+        if !record.is_valid_stored_value() {
+            return Err(InteractionHistoryError::Unavailable);
+        }
+        let mut records = self.records.lock().await;
+        if records.contains_key(record.request_id()) {
+            return Err(InteractionHistoryError::AlreadyExists);
+        }
+        let mut next = records.clone();
+        next.insert(record.request_id().to_owned(), record);
+        self.persist(&next).await?;
+        *records = next;
+        Ok(())
+    }
+
+    pub(super) async fn cancel_approval(
+        &self,
+        request_id: &str,
+        reason: &str,
+    ) -> Result<(), InteractionHistoryError> {
+        if reason.trim().is_empty() {
+            return Err(InteractionHistoryError::Unavailable);
+        }
+        let mut records = self.records.lock().await;
+        let mut next = records.clone();
+        let Some(InteractionHistoryRecord::Approval { state, .. }) = next.get_mut(request_id)
+        else {
+            return Err(InteractionHistoryError::NotPending);
+        };
+        if state != &InteractionHistoryState::Pending {
+            return Err(InteractionHistoryError::AlreadySettled);
+        }
+        *state = InteractionHistoryState::Cancelled {
+            reason: reason.to_owned(),
+        };
+        self.persist(&next).await?;
+        *records = next;
+        Ok(())
+    }
+
+    pub(super) async fn cancel_approvals(
+        &self,
+        requester: &SessionRef,
+        reason: &str,
+    ) -> Result<Vec<String>, InteractionHistoryError> {
+        if reason.trim().is_empty() {
+            return Err(InteractionHistoryError::Unavailable);
+        }
+        let mut records = self.records.lock().await;
+        let mut next = records.clone();
+        let mut cancelled = Vec::new();
+        for (request_id, record) in &mut next {
+            if let InteractionHistoryRecord::Approval {
+                requester: owner,
+                state,
+                ..
+            } = record
+                && owner == requester
+                && state == &InteractionHistoryState::Pending
+            {
+                *state = InteractionHistoryState::Cancelled {
+                    reason: reason.to_owned(),
+                };
+                cancelled.push(request_id.clone());
+            }
+        }
+        if cancelled.is_empty() {
+            return Ok(cancelled);
+        }
+        self.persist(&next).await?;
+        *records = next;
+        Ok(cancelled)
+    }
+
     pub(super) async fn list_approvals(&self, pending_only: bool) -> Vec<InteractionHistoryRecord> {
         self.records
             .lock()
@@ -310,6 +461,10 @@ impl InteractionHistoryStore {
 
     pub(super) async fn interaction(&self, request_id: &str) -> Option<InteractionHistoryRecord> {
         self.records.lock().await.get(request_id).cloned()
+    }
+
+    pub(super) async fn list_all(&self) -> Vec<InteractionHistoryRecord> {
+        self.records.lock().await.values().cloned().collect()
     }
 
     pub(super) async fn record_question(

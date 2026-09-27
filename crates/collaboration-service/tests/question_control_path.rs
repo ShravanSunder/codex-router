@@ -1,7 +1,7 @@
 use collaboration_client::ControlClient;
 use collaboration_protocol::{EndpointRef, QuestionAnswerParams, QuestionResponse, QuestionState};
 use collaboration_service::{
-    NativeControlBackend, NativeGenerationGate, ServiceApprovalBroker, ServiceIdentity,
+    NativeControlBackend, NativeGenerationGate, ServiceIdentity, ServiceInteractionBroker,
     serve_control_connection,
 };
 use message_board::{HumanId, Identity, SessionEndpointRef, SessionId, SessionRef};
@@ -18,7 +18,7 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
         "serviceId":service_id,"endpointId":"claude-local"
     }))
     .expect("endpoint");
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.to_owned().try_into().expect("service ID"),
         NativeControlBackend {
             endpoint,
