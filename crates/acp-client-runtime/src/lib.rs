@@ -34,29 +34,36 @@
 
 mod acp_protocol_version;
 mod agent_session_client;
-mod approval_offer;
 mod approval_presentation;
 mod external_permission_options;
 mod interaction_port;
 mod provider_capability_report;
+mod provider_persistence_target;
 mod provider_prompt_content;
 mod provider_prompt_observation;
 mod provider_prompt_result_codec;
 mod provider_session_actor;
+mod provider_session_settings;
 mod provider_update_kind;
 mod session_event_sink;
 
 pub use acp_protocol_version::AcpProtocolVersion;
 pub use agent_session_client::*;
-pub use approval_offer::*;
-pub(crate) use approval_presentation::approval_presentation;
-pub use external_permission_options::ExternalPermissionOptionMapping;
-pub(crate) use external_permission_options::map_external_permission_options;
-pub use interaction_port::{ApprovalPortOutcome, InteractionFuture, InteractionPort};
+pub(crate) use approval_presentation::reviewed_approval_fields;
+pub use external_permission_options::RefusedPermissionOption;
+pub(crate) use external_permission_options::map_permission_options;
+pub use interaction_port::{
+    ApprovalPortOutcome, InteractionFuture, InteractionPort, RefusedApprovalOffer,
+};
 pub use provider_capability_report::ProviderCapabilityReport;
+pub use provider_persistence_target::ProviderPersistenceTarget;
 pub use provider_prompt_content::ProviderPromptContent;
 pub use provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSteeringOutcome,
+};
+pub use provider_session_settings::{
+    AppliedProviderSetting, EffectiveProviderSettings, FailedProviderSetting,
+    InvalidSettingSessionDisposition, ProviderSettingKind, RequestedProviderSettings,
 };
 pub use session_event_sink::{
     EventSinkOverflow, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,

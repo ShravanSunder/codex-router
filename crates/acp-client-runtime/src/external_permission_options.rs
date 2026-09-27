@@ -1,193 +1,174 @@
-//! Keep supported ACP permission choices usable when a provider adds an unknown choice.
+//! Decode ACP option kinds into ordered, exact-ID approval choices.
 
-use crate::{ExternalApprovalOption, ExternalApprovalOptionScope};
-use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};
 use std::collections::BTreeSet;
 
+use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};
+use session_event_model::{
+    ApprovalChoice, ApprovalEffect, ApprovalScope, OfferedOption, OfferedOptionId, OfferedOptions,
+};
+
+use crate::ProviderPersistenceTarget;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ExternalPermissionOptionMapping {
-    Mapped(Vec<ExternalApprovalOption>),
-    Refused {
-        reason: &'static str,
-        options: Vec<ExternalApprovalOption>,
-    },
+pub struct RefusedPermissionOption {
+    pub option_id: String,
+    pub label: String,
+    pub provider_kind: String,
 }
 
-#[derive(Clone)]
-enum ExternalPermissionKind {
-    AllowOnce,
-    AllowAlways,
-    RejectOnce,
-    RejectAlways,
-    Unsupported { provider_kind: String },
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefusedPermissionOptions {
+    pub reason: &'static str,
+    pub options: Vec<RefusedPermissionOption>,
 }
 
-pub(crate) fn map_external_permission_options(
+pub(crate) fn map_permission_options(
     options: Vec<PermissionOption>,
-) -> ExternalPermissionOptionMapping {
-    map_classified_options(options.into_iter().map(|option| {
-        let kind = match option.kind {
-            PermissionOptionKind::AllowOnce => ExternalPermissionKind::AllowOnce,
-            PermissionOptionKind::AllowAlways => ExternalPermissionKind::AllowAlways,
-            PermissionOptionKind::RejectOnce => ExternalPermissionKind::RejectOnce,
-            PermissionOptionKind::RejectAlways => ExternalPermissionKind::RejectAlways,
-            kind => ExternalPermissionKind::Unsupported {
-                provider_kind: format!("{kind:?}"),
-            },
-        };
-        (
-            option.option_id.0.to_string(),
-            bounded_option_label(&option.name),
-            kind,
-        )
-    }))
-}
+    persistent_target: ProviderPersistenceTarget,
+) -> Result<OfferedOptions, RefusedPermissionOptions> {
+    let original_options = options
+        .iter()
+        .map(|option| RefusedPermissionOption {
+            option_id: option.option_id.0.to_string(),
+            label: bounded_option_label(&option.name),
+            provider_kind: format!("{:?}", option.kind),
+        })
+        .collect::<Vec<_>>();
+    let refusal = |reason| RefusedPermissionOptions {
+        reason,
+        options: original_options.clone(),
+    };
+    if options.is_empty() {
+        return Err(refusal("permission options are empty"));
+    }
 
-fn map_classified_options(
-    options: impl IntoIterator<Item = (String, Option<String>, ExternalPermissionKind)>,
-) -> ExternalPermissionOptionMapping {
-    let mut mapped = Vec::new();
-    let mut has_allow_once = false;
-    let mut saw_unsupported_kind = false;
     let mut identifiers = BTreeSet::new();
-    let mut decision_kinds = BTreeSet::new();
-    let mut malformed_options = None;
-
-    for (option_id, label, kind) in options {
+    let mut mapped = Vec::with_capacity(options.len());
+    for option in options {
+        let option_id = option.option_id.0.to_string();
+        if option_id.is_empty() {
+            return Err(refusal("permission option identifier is empty"));
+        }
         if !identifiers.insert(option_id.clone()) {
-            malformed_options = Some("permission options contain a duplicate identifier");
+            return Err(refusal("permission options contain a duplicate identifier"));
         }
-        let one_time_decision = match kind {
-            ExternalPermissionKind::AllowOnce => Some("allowOnce"),
-            ExternalPermissionKind::RejectOnce => Some("rejectOnce"),
-            ExternalPermissionKind::AllowAlways
-            | ExternalPermissionKind::RejectAlways
-            | ExternalPermissionKind::Unsupported { .. } => None,
-        };
-        if one_time_decision.is_some_and(|decision| !decision_kinds.insert(decision)) {
-            malformed_options = Some("permission options contain duplicate one-time decisions");
-        }
-        let scope = match kind {
-            ExternalPermissionKind::AllowOnce => {
-                has_allow_once = true;
-                ExternalApprovalOptionScope::AllowOnce
+        let choice = match option.kind {
+            PermissionOptionKind::AllowOnce => {
+                ApprovalChoice::new(ApprovalEffect::Allow, ApprovalScope::Once)
             }
-            ExternalPermissionKind::AllowAlways => ExternalApprovalOptionScope::AllowAlways,
-            ExternalPermissionKind::RejectOnce => ExternalApprovalOptionScope::RejectOnce,
-            ExternalPermissionKind::RejectAlways => ExternalApprovalOptionScope::RejectAlways,
-            ExternalPermissionKind::Unsupported { provider_kind } => {
-                saw_unsupported_kind = true;
-                ExternalApprovalOptionScope::Unsupported { provider_kind }
+            PermissionOptionKind::RejectOnce => {
+                ApprovalChoice::new(ApprovalEffect::Decline, ApprovalScope::Once)
             }
+            PermissionOptionKind::AllowAlways => ApprovalChoice::new(
+                ApprovalEffect::Allow,
+                ApprovalScope::persistent(persistent_target.disclosure())
+                    .map_err(|_| refusal("persistent permission destination is unavailable"))?,
+            ),
+            PermissionOptionKind::RejectAlways => ApprovalChoice::new(
+                ApprovalEffect::Decline,
+                ApprovalScope::persistent(persistent_target.disclosure())
+                    .map_err(|_| refusal("persistent permission destination is unavailable"))?,
+            ),
+            _ => return Err(refusal("permission option kind is unrecognized")),
         };
-        mapped.push(ExternalApprovalOption {
+        let option_id = OfferedOptionId::new(option_id)
+            .map_err(|_| refusal("permission option identifier is empty"))?;
+        mapped.push(OfferedOption {
             option_id,
-            label,
-            scope,
+            label: bounded_option_label(&option.name),
+            choice,
         });
     }
-
-    if let Some(reason) = malformed_options {
-        ExternalPermissionOptionMapping::Refused {
-            reason,
-            options: mapped,
-        }
-    } else if has_allow_once {
-        ExternalPermissionOptionMapping::Mapped(mapped)
-    } else if saw_unsupported_kind {
-        ExternalPermissionOptionMapping::Refused {
-            reason: "no supported allow option remains after ignoring an unsupported permission option kind",
-            options: mapped,
-        }
-    } else {
-        ExternalPermissionOptionMapping::Refused {
-            reason: "no one-time allow option is available",
-            options: mapped,
-        }
-    }
+    OfferedOptions::new(mapped)
+        .map_err(|_| refusal("permission options are empty or contain duplicate identifiers"))
 }
 
-fn bounded_option_label(label: &str) -> Option<String> {
-    Some(label.chars().take(120).collect())
+fn bounded_option_label(label: &str) -> String {
+    label.chars().take(120).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Oracle: specification R17 requires persistent scope and disclosure before selection.
     #[test]
-    fn unknown_option_kind_does_not_discard_a_mappable_allow() {
-        let mapping = map_classified_options(vec![
+    fn persistent_options_keep_effect_order_and_provider_destination() {
+        let options = vec![
+            PermissionOption::new("always", "Always allow", PermissionOptionKind::AllowAlways),
+            PermissionOption::new("never", "Always reject", PermissionOptionKind::RejectAlways),
+        ];
+        for (target, disclosure) in [
             (
-                "allow".to_owned(),
-                Some("Allow".to_owned()),
-                ExternalPermissionKind::AllowOnce,
+                ProviderPersistenceTarget::CursorAllowlist,
+                "Cursor allowlist (Cursor decides whether global or per-project)",
             ),
             (
-                "unknown".to_owned(),
-                Some("Continue".to_owned()),
-                ExternalPermissionKind::Unsupported {
-                    provider_kind: "Future".to_owned(),
-                },
+                ProviderPersistenceTarget::ClaudeSettingsRule,
+                "Claude Code permission rule in its settings",
             ),
             (
-                "deny".to_owned(),
-                Some("Reject".to_owned()),
-                ExternalPermissionKind::RejectOnce,
+                ProviderPersistenceTarget::Unspecified,
+                "the agent's own persistent permissions (location not reported)",
             ),
-        ]);
-
-        let ExternalPermissionOptionMapping::Mapped(options) = mapping else {
-            panic!("mappable allow option should be retained");
-        };
-        assert_eq!(options.len(), 3);
-        assert_eq!(options[0].scope, ExternalApprovalOptionScope::AllowOnce);
-        assert_eq!(
-            options[1].scope,
-            ExternalApprovalOptionScope::Unsupported {
-                provider_kind: "Future".to_owned()
+        ] {
+            let mapped = map_permission_options(options.clone(), target)
+                .expect("persistent-only offer is valid");
+            let ordered: Vec<_> = mapped.iter().collect();
+            assert_eq!(ordered[0].option_id.as_str(), "always");
+            assert_eq!(ordered[0].choice.effect, ApprovalEffect::Allow);
+            assert_eq!(ordered[1].option_id.as_str(), "never");
+            assert_eq!(ordered[1].choice.effect, ApprovalEffect::Decline);
+            for option in ordered {
+                let ApprovalScope::Persistent { where_stored } = &option.choice.scope else {
+                    panic!("always choice must be persistent");
+                };
+                assert_eq!(where_stored.as_str(), disclosure);
             }
-        );
-        assert_eq!(options[2].scope, ExternalApprovalOptionScope::RejectOnce);
+        }
     }
 
+    /// Oracle: specification R17 permits every offered persistent choice;
+    /// there is no requirement for an allow-once companion.
     #[test]
-    fn no_allow_option_returns_a_visible_refusal_reason() {
-        let mapping = map_classified_options(vec![(
-            "deny".to_owned(),
-            Some("Reject".to_owned()),
-            ExternalPermissionKind::RejectOnce,
-        )]);
-
-        let ExternalPermissionOptionMapping::Refused { reason, .. } = mapping else {
-            panic!("deny-only options must fail closed");
-        };
-        assert_eq!(reason, "no one-time allow option is available");
+    fn allow_always_only_is_a_normal_offer() {
+        let mapped = map_permission_options(
+            vec![PermissionOption::new(
+                "allow-always",
+                "Always allow",
+                PermissionOptionKind::AllowAlways,
+            )],
+            ProviderPersistenceTarget::CursorAllowlist,
+        )
+        .expect("allow-always alone is selectable");
+        assert_eq!(mapped.iter().count(), 1);
     }
 
+    /// Oracle: specification E10 requires one offered choice per exact option ID.
     #[test]
-    fn unknown_option_without_a_supported_allow_is_refused_with_reason() {
-        let mapping = map_classified_options(vec![
-            (
-                "deny".to_owned(),
-                Some("Reject".to_owned()),
-                ExternalPermissionKind::RejectOnce,
-            ),
-            (
-                "future".to_owned(),
-                Some("Future".to_owned()),
-                ExternalPermissionKind::Unsupported {
-                    provider_kind: "Future".to_owned(),
-                },
-            ),
-        ]);
-
-        let ExternalPermissionOptionMapping::Refused { reason, .. } = mapping else {
-            panic!("unknown kind without a supported allow must fail closed");
-        };
+    fn duplicate_option_id_is_refused_with_original_order() {
+        let refused = map_permission_options(
+            vec![
+                PermissionOption::new("same", "Allow", PermissionOptionKind::AllowOnce),
+                PermissionOption::new("same", "Reject", PermissionOptionKind::RejectOnce),
+            ],
+            ProviderPersistenceTarget::Unspecified,
+        )
+        .expect_err("duplicate IDs are malformed");
         assert_eq!(
-            reason,
-            "no supported allow option remains after ignoring an unsupported permission option kind"
+            refused.reason,
+            "permission options contain a duplicate identifier"
         );
+        assert_eq!(refused.options.len(), 2);
+        assert_eq!(refused.options[0].label, "Allow");
+        assert_eq!(refused.options[1].label, "Reject");
+    }
+
+    #[test]
+    fn unclassifiable_kind_is_refused() {
+        // An empty set is the parser-independent malformed-offer case.
+        let refused = map_permission_options(Vec::new(), ProviderPersistenceTarget::Unspecified)
+            .expect_err("no choice can be offered");
+        assert_eq!(refused.reason, "permission options are empty");
     }
 }

@@ -60,6 +60,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         event_sink: Arc<dyn SessionEventSink>,
     ) -> Result<Self, ExternalProviderRuntimeError> {
         let agent = AcpAgent::new(launch.sdk_config());
+        let persistence_target = launch.persistence_target;
         let (stdin, stdout, mut stderr, mut child) = agent
             .spawn_process()
             .map_err(|error| ExternalProviderRuntimeError::Launch(error.to_string()))?;
@@ -163,6 +164,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                             interaction_port: Arc::clone(&callback_interaction_port),
                             refusal_reasons: Arc::clone(&callback_permission_refusal_reasons),
                             endpoint_id: Arc::clone(&callback_endpoint_id),
+                            persistence_target,
                             #[cfg(any(test, feature = "test-observation"))]
                             refusal_warnings: Arc::clone(&callback_approval_refusal_warnings),
                             #[cfg(any(test, feature = "test-observation"))]
