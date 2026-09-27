@@ -1032,6 +1032,25 @@ async fn initialized_http_message_response_loss_retains_known_target() {
         .await
         .expect("MCP initialized");
     assert!(initialized.status().is_success());
+    let listed = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id.clone())
+        .header("mcp-protocol-version", "2025-11-25")
+        .json(&json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}))
+        .send()
+        .await
+        .expect("MCP tools/list response");
+    let listed = protocol_response_json(listed).await;
+    let output_schema = listed["result"]["tools"]
+        .as_array()
+        .expect("advertised tools")
+        .iter()
+        .find(|tool| tool["name"] == "message_send")
+        .and_then(|tool| tool.get("outputSchema"))
+        .expect("message_send output schema");
+    let validator = jsonschema::validator_for(output_schema).expect("advertised JSON Schema");
     let result = client
             .post(listener.local_url())
             .header(CONTENT_TYPE, "application/json")
@@ -1055,6 +1074,12 @@ async fn initialized_http_message_response_loss_retains_known_target() {
         body.pointer("/result/structuredContent/effect"),
         Some(&json!("unknown"))
     );
+    let structured = body
+        .pointer("/result/structuredContent")
+        .expect("post-submission structured content");
+    validator.validate(structured).unwrap_or_else(|error| {
+        panic!("HTTP message_send result violates advertised schema: {error}; {structured}")
+    });
     listener.shutdown().await.expect("listener shutdown");
     peer.await.expect("peer join");
     drop(publication);

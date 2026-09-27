@@ -666,6 +666,7 @@ dependencies = [
  "indicatif",
  "iocraft",
  "message-board",
+ "nix",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",

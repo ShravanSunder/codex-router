@@ -8,7 +8,9 @@ macro_rules! typed_domain_tool {
                 operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
-            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
+            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<
+                McpToolOutput<$result>,
+            >()),
             |context: ToolCallContext<'_, CollaborationMcpServer>| {
                 Box::pin(async move {
                     let request = match serde_json::from_value::<$request>(
@@ -249,7 +251,9 @@ macro_rules! automation_inspection_tool {
                 operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
-            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
+            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<
+                McpToolOutput<$result>,
+            >()),
             |context: ToolCallContext<'_, CollaborationMcpServer>| {
                 Box::pin(async move {
                     let request = match serde_json::from_value::<$request>(
@@ -380,7 +384,9 @@ macro_rules! board_tool {
                 operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
-            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
+            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<
+                McpToolOutput<$result>,
+            >()),
             |context: ToolCallContext<'_, CollaborationMcpServer>| {
                 Box::pin(async move {
                     let request = match serde_json::from_value::<$request>(
