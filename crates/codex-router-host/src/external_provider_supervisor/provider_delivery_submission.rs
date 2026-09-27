@@ -1,7 +1,7 @@
 //! Delivery prompt admission waits for the ACP request to enter the session actor.
 use super::*;
+use crate::external_provider_runtime::ProviderPromptDispatchObservation;
 use crate::provider_operation_settlement::{ProviderOperationCompletion, optional_message_text};
-use crate::provider_session_actor::ProviderPromptDispatchObservation;
 
 const DELIVERY_DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 

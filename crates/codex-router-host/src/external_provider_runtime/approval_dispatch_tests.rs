@@ -655,6 +655,129 @@ async fn permission_arriving_after_router_cancel_is_answered_cancelled() -> Test
 }
 
 #[tokio::test]
+async fn provider_option_sets_keep_order_scope_and_selected_id() -> TestResult {
+    // PR 1 baseline: survey-cursor.md:54 and claude-adapter-and-sdk.md:153-155
+    // describe these agent-offered choices. Extraction preserves their order,
+    // disclosed scopes, and the verbatim option ID sent back to the agent.
+    let cases = [
+        (
+            "cursor",
+            serde_json::json!([
+                {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+                {"optionId":"allow-always","name":"Always allow","kind":"allow_always"},
+                {"optionId":"reject-once","name":"Reject","kind":"reject_once"}
+            ]),
+            serde_json::json!([
+                {"optionId":"allow-once","label":"Allow once","scope":{"kind":"allowOnce"}},
+                {"optionId":"allow-always","label":"Always allow","scope":{"kind":"allowAlways"}},
+                {"optionId":"reject-once","label":"Reject","scope":{"kind":"rejectOnce"}}
+            ]),
+        ),
+        (
+            "claude",
+            serde_json::json!([
+                {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+                {"optionId":"allow-with-updates","name":"Allow with updates","kind":"allow_always"},
+                {"optionId":"allow-skill-exact","name":"Allow this skill","kind":"allow_always"},
+                {"optionId":"reject","name":"Reject","kind":"reject_once"}
+            ]),
+            serde_json::json!([
+                {"optionId":"allow-once","label":"Allow once","scope":{"kind":"allowOnce"}},
+                {"optionId":"allow-with-updates","label":"Allow with updates","scope":{"kind":"allowAlways"}},
+                {"optionId":"allow-skill-exact","label":"Allow this skill","scope":{"kind":"allowAlways"}},
+                {"optionId":"reject","label":"Reject","scope":{"kind":"rejectOnce"}}
+            ]),
+        ),
+    ];
+    for (agent_name, options, expected_options) in cases {
+        let reject_id = if agent_name == "cursor" {
+            "reject-once"
+        } else {
+            "reject"
+        };
+        for (decision, selected_id) in [
+            (ApprovalDecision::Allow, "allow-once"),
+            (ApprovalDecision::Deny, reject_id),
+        ] {
+            let root = tempfile::tempdir()?;
+            let service_id =
+                UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
+            let generation = CodexGeneration {
+                service_epoch: service_id.clone(),
+                generation: GenerationNumber::try_from(1)?,
+            };
+            let fixture = acp_scripted_fixture::AcpFixtureScript::new()
+            .expect_request("initialize", "initialize", serde_json::json!({"protocolVersion":1}))
+            .respond("initialize", serde_json::json!({"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":agent_name,"version":"1"}}))
+            .expect_request("create", "session/new", serde_json::json!({}))
+            .respond("create", serde_json::json!({"sessionId":"session-a"}))
+            .expect_request("prompt", "session/prompt", serde_json::json!({"sessionId":"session-a"}))
+            .send(serde_json::json!({"jsonrpc":"2.0","id":91,"method":"session/request_permission","params":{"sessionId":"session-a","toolCall":{"toolCallId":"tool-a","title":"Run command","kind":"execute"},"options":options.clone()}}))
+            .expect_message(serde_json::json!({"jsonrpc":"2.0","id":91,"result":{"outcome":{"outcome":"selected","optionId":selected_id}}}))
+            .respond("prompt", serde_json::json!({"stopReason":"end_turn"}))
+            .launch();
+            let runtime = ExternalProviderRuntime::initialize(fixture).await?;
+            let (broker, approval_notice) =
+                approval_broker_fixture(&root, &service_id, &generation).await?;
+            runtime.install_approval_broker(Arc::clone(&broker)).await;
+            runtime.create_session(root.path().to_owned()).await?;
+            let approver = session_ref(&service_id, "codex-local", "approver")?;
+            let mut prompt = Box::pin(runtime.prompt_with_approval_context(
+                "session-a".to_owned(),
+                "Run command.".to_owned(),
+                ExternalProviderApprovalContext {
+                    requester: approver.clone(),
+                    approver: approver.clone(),
+                    target: session_ref(&service_id, "cursor-local", "session-a")?,
+                    operation_id: OperationId::generate(),
+                    binding_generation: generation,
+                    binding_retirement: CancellationToken::new(),
+                },
+            ));
+            wait_for_pending_approval(&broker, &approval_notice, prompt.as_mut()).await?;
+            let pending = broker.list(true).await.approvals;
+            assert_eq!(pending.len(), 1, "{agent_name}");
+            assert_eq!(
+                serde_json::to_value(&pending[0].offered_options)?,
+                expected_options,
+                "{agent_name}"
+            );
+            assert_eq!(
+                serde_json::to_value(&pending[0].presentation)?,
+                serde_json::json!({"title":"Run command","kind":"Execute"}),
+                "{agent_name}"
+            );
+            assert!(matches!(
+                broker
+                    .decide(ApprovalDecideParams {
+                        request_id: pending[0].request_id.clone(),
+                        decision: ApprovalDecision::AllowForSession,
+                        actor: approver.clone(),
+                    })
+                    .await,
+                Err("decisionNotOffered")
+            ));
+            assert_eq!(broker.list(true).await.approvals.len(), 1);
+            broker
+                .decide(ApprovalDecideParams {
+                    request_id: pending[0].request_id.clone(),
+                    decision,
+                    actor: approver,
+                })
+                .await?;
+            let outcome = tokio::time::timeout(Duration::from_secs(5), &mut prompt).await??;
+            assert_eq!(outcome.stop_reason, ProviderPromptStopReason::EndTurn);
+            assert_eq!(
+                broker.list(false).await.approvals[0].state,
+                collaboration_protocol::ApprovalState::Decided
+            );
+            runtime.shutdown().await;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn output_limit_cancels_pending_permission() -> TestResult {
     let root = tempfile::tempdir()?;
     let event_socket = root.path().join("output-limit-event.sock");

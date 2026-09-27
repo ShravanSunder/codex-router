@@ -1,8 +1,9 @@
 //! One provider session's prompt, cancellation, and steering actor.
-#[cfg(test)]
-use crate::external_provider_runtime::ExternalProviderToolCall;
-use crate::external_provider_runtime::ProviderTurnCancellation;
-use crate::external_provider_runtime::{
+use crate::InteractionPort;
+#[cfg(any(test, feature = "test-observation"))]
+use crate::agent_session_client::ExternalProviderToolCall;
+use crate::agent_session_client::ProviderTurnCancellation;
+use crate::agent_session_client::{
     ExternalProviderPromptOutcome, ExternalProviderRuntimeError, ProviderFrameObservation,
     acp_operation_error,
 };
@@ -10,7 +11,6 @@ use crate::provider_prompt_content::ProviderPromptContent;
 use crate::provider_prompt_observation::read_bounded_prompt;
 use agent_client_protocol::schema::v1::{CancelNotification, PromptRequest};
 use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, JsonRpcMessage, UntypedMessage};
-use collaboration_protocol::OperationId;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 const STEERING_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProviderSteeringOutcome {
+pub enum ProviderSteeringOutcome<OperationId> {
     Injected {
         running_operation_id: Option<OperationId>,
     },
@@ -29,7 +29,7 @@ pub enum ProviderSteeringOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProviderPromptDispatchObservation {
+pub enum ProviderPromptDispatchObservation {
     Submitted,
     NotSubmitted,
 }
@@ -41,24 +41,24 @@ pub enum ProviderSessionActivity {
     Running,
 }
 
-pub(crate) enum ProviderSessionCommand {
+pub(crate) enum ProviderSessionCommand<P: InteractionPort> {
     Prompt {
-        operation_id: Option<OperationId>,
+        operation_id: Option<P::OperationId>,
         prompt: ProviderPromptContent,
-        turn_cancellation: Option<ProviderTurnCancellation>,
+        turn_cancellation: Option<ProviderTurnCancellation<P>>,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>,
         >,
     },
     Cancel {
-        expected_operation_id: Option<OperationId>,
+        expected_operation_id: Option<P::OperationId>,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
     Steer {
         prompt: String,
         reply: tokio::sync::oneshot::Sender<
-            Result<ProviderSteeringOutcome, ExternalProviderRuntimeError>,
+            Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError>,
         >,
     },
     Inspect {
@@ -69,12 +69,14 @@ pub(crate) enum ProviderSessionCommand {
     },
 }
 
-pub(crate) async fn run_provider_session(
+pub(crate) async fn run_provider_session<P: InteractionPort>(
     mut session: ActiveSession<'_, Agent>,
-    mut commands: tokio::sync::mpsc::Receiver<ProviderSessionCommand>,
+    mut commands: tokio::sync::mpsc::Receiver<ProviderSessionCommand<P>>,
     shutdown: CancellationToken,
     frame_observation: Arc<ProviderFrameObservation>,
-    #[cfg(test)] test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
+    #[cfg(any(test, feature = "test-observation"))] test_tool_calls: Arc<
+        std::sync::Mutex<Vec<ExternalProviderToolCall>>,
+    >,
 ) {
     loop {
         tokio::select! {
@@ -131,7 +133,7 @@ pub(crate) async fn run_provider_session(
                             terminal_rx,
                             output_limit_tx,
                             Arc::clone(&frame_observation),
-                            #[cfg(test)]
+                            #[cfg(any(test, feature = "test-observation"))]
                             Arc::clone(&test_tool_calls),
                         ));
                         let mut output_limit_cancelled = false;
@@ -185,7 +187,7 @@ pub(crate) async fn run_provider_session(
                                             let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
                                         }
                                         Some(ProviderSessionCommand::Steer { prompt, reply }) => {
-                                            let result = steer_provider_turn(&provider_connection, &provider_session_id, prompt, operation_id.clone()).await;
+                                            let result = steer_provider_turn::<P>(&provider_connection, &provider_session_id, prompt, operation_id.clone()).await;
                                             let _result = reply.send(result);
                                         }
                                         Some(ProviderSessionCommand::Inspect { reply }) => {
@@ -202,7 +204,7 @@ pub(crate) async fn run_provider_session(
                         let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                     }
                     ProviderSessionCommand::Steer { prompt, reply } => {
-                        let result = steer_provider_turn(session.connection(), session.session_id(), prompt, None).await;
+                        let result = steer_provider_turn::<P>(session.connection(), session.session_id(), prompt, None).await;
                         let _result = reply.send(result);
                     }
                     ProviderSessionCommand::Inspect { reply } => {
@@ -238,12 +240,12 @@ async fn reject_unhandled_session_request(
     }
 }
 
-async fn steer_provider_turn(
+async fn steer_provider_turn<P: InteractionPort>(
     connection: &ConnectionTo<Agent>,
     session_id: &agent_client_protocol::schema::v1::SessionId,
     prompt: String,
-    running_operation_id: Option<OperationId>,
-) -> Result<ProviderSteeringOutcome, ExternalProviderRuntimeError> {
+    running_operation_id: Option<P::OperationId>,
+) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
     let message = UntypedMessage::new(
         "_session/steering",
         json!({

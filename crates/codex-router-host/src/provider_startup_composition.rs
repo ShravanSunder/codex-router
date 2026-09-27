@@ -302,7 +302,7 @@ mod tests {
             agent_client_protocol::Error::new(-32001, format!("denied {token_sentinel}"))
                 .data(serde_json::json!({"account": account_sentinel, "token": token_sentinel}));
         let runtime_error = crate::ExternalProviderRuntimeError::Initialize(
-            crate::external_provider_runtime::sanitized_initialization_error(&source_error),
+            acp_client_runtime::sanitized_initialization_error_for_test(&source_error),
         );
 
         let reason = provider_startup_failure_reason("/fixture/acp-provider", &runtime_error);

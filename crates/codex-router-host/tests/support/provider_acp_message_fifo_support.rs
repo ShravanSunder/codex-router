@@ -121,6 +121,7 @@ assert request['method']=='session/prompt'
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({:?})
  event.sendall(b'second')
+ event.recv(1)
 print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 sys.stdin.read()
 "#,

@@ -702,8 +702,8 @@ async fn capability_report_uses_initialize_and_session_advertisements() {
 fn prompt_content_gate_matches_advertised_optional_types() {
     // ACP v1 initialization.mdx:202-217: text and resource links are baseline;
     // image, audio and embedded resources require promptCapabilities.
-    use crate::provider_capability_report::ProviderCapabilityReport;
-    use crate::provider_prompt_content::ProviderPromptContent;
+    use acp_client_runtime::ProviderCapabilityReport;
+    use acp_client_runtime::ProviderPromptContent;
     use agent_client_protocol::schema::v1::ContentBlock;
 
     let examples = [
@@ -735,7 +735,7 @@ fn prompt_content_gate_matches_advertised_optional_types() {
         for (content_type, wire_block) in &examples {
             let block: ContentBlock =
                 serde_json::from_value(wire_block.clone()).expect("ACP content example");
-            let result = ProviderPromptContent::new(vec![block], &report);
+            let result = ProviderPromptContent::new_for_test(vec![block], &report);
             let accepted = match *content_type {
                 "text" | "resourceLink" => true,
                 "image" => report.accepts_image,
@@ -850,11 +850,15 @@ async fn unsupported_protocol_version_is_rejected() {
         .await
         .expect_err("v0 must not be admitted");
 
+    assert_eq!(
+        error.to_string(),
+        "provider selected unsupported ACP protocol version ProtocolVersion(0)"
+    );
     assert!(matches!(
-        error,
+        &error,
         ExternalProviderRuntimeError::UnsupportedProtocol {
-            actual: ProtocolVersion::V0
-        }
+            actual
+        } if *actual == acp_client_runtime::AcpProtocolVersion::new(0)
     ));
     assert_process_reaped(&process_id_path).await;
 }
@@ -1297,21 +1301,12 @@ async fn overlapping_prompt_cannot_replace_context_and_dropped_waiter_cleans_it(
     assert!(matches!(second, ExternalProviderRuntimeError::LocalBusy));
     assert_eq!(
         runtime
-            .approval_contexts
-            .lock()
-            .expect("approval contexts")
-            .get("fixture-session")
-            .map(|context| String::from(context.approval.operation_id.clone())),
+            .active_approval_operation("fixture-session")
+            .map(String::from),
         Some(first_operation.to_owned())
     );
     drop(first);
-    assert!(
-        runtime
-            .approval_contexts
-            .lock()
-            .expect("approval contexts")
-            .is_empty()
-    );
+    assert!(runtime.active_approval_count() == 0);
     runtime.shutdown().await;
 }
 
@@ -1344,13 +1339,7 @@ async fn shutdown_records_runtime_owner_join_failure() {
     let runtime = ExternalProviderRuntime::initialize(conversation_fixture())
         .await
         .expect("fixture initializes");
-    runtime
-        .task
-        .lock()
-        .await
-        .as_ref()
-        .expect("runtime owner")
-        .abort();
+    runtime.abort_owner_for_test().await;
     runtime.shutdown().await;
     assert!(runtime.shutdown_failed());
 }
