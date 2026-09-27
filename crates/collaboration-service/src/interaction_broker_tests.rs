@@ -3,6 +3,98 @@ use collaboration_protocol::{CodexGeneration, EndpointId, EndpointRef};
 
 struct FakeApprovalDelivery(DeliveryOutcome);
 
+struct CapturingInteractionDelivery(Arc<Mutex<Vec<crate::DeliveryRequest>>>);
+
+impl crate::SessionMessageDelivery for CapturingInteractionDelivery {
+    fn deliver<'a>(
+        &'a self,
+        request: crate::DeliveryRequest,
+        _: &'a dyn crate::AttemptEvidenceSink,
+    ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
+        Box::pin(async move {
+            self.0.lock().await.push(request);
+            Ok(collaboration_protocol::DeliveryReceipt {
+                outcome: DeliveryOutcome::Started,
+                reachability: Some(collaboration_protocol::SessionReachability::CodexAppServer),
+                client: None,
+            })
+        })
+    }
+
+    fn reconcile_attempt(
+        &self,
+        _: crate::AttemptReconciliationContext,
+    ) -> crate::DeliveryFuture<'_, crate::AttemptReconciliation> {
+        Box::pin(async { Ok(crate::AttemptReconciliation::StillUnknown) })
+    }
+}
+
+#[tokio::test]
+async fn typed_approval_and_question_notify_their_session_approver() {
+    let (broker, _, _) = fixture_broker().await;
+    let requester =
+        board_session_ref(&session(&broker.service_id, "provider-session")).expect("requester");
+    let approver =
+        board_session_ref(&session(&broker.service_id, "approver-session")).expect("approver");
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    broker
+        .install_session_delivery(Arc::new(CapturingInteractionDelivery(Arc::clone(&notices))))
+        .expect("delivery route");
+    let approver_identity = message_board::Identity::Session {
+        session: approver.clone(),
+    };
+    let _approval = broker
+        .request_typed_approval(
+            requester.clone(),
+            approver_identity.clone(),
+            typed_approval_request("approval-1"),
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("approval pending");
+    let question = serde_json::from_value(json!({
+        "requestId":"question-1","prompt":"Choose?","fields":[
+            {"kind":"text","fieldId":"answer","label":"Answer","description":null,"required":true}
+        ]
+    }))
+    .expect("question");
+    let _question = broker
+        .request_question(requester.clone(), approver_identity, question)
+        .await
+        .expect("question pending");
+    let notices = notices.lock().await;
+    assert_eq!(notices.len(), 2);
+    for notice in notices.iter() {
+        assert_eq!(
+            String::from(notice.target.session_id.clone()),
+            "approver-session"
+        );
+        assert_eq!(notice.mode, collaboration_protocol::MessageDelivery::Auto);
+        let collaboration_protocol::MessageContent::Agent { sender, text } = &notice.message else {
+            panic!("interaction notice must keep the requester attribution");
+        };
+        assert_eq!(String::from(sender.session_id.clone()), "provider-session");
+        let body: serde_json::Value = serde_json::from_str(text.as_str()).expect("notice JSON");
+        assert_eq!(body["requester"]["sessionId"], "provider-session");
+        assert_eq!(body["approver"]["session"]["sessionId"], "approver-session");
+    }
+    let approval_body = serde_json::to_value(&notices[0].message).expect("approval notice");
+    assert!(
+        approval_body
+            .to_string()
+            .contains("externalProviderPermission")
+    );
+    assert!(approval_body.to_string().contains("--option-id"));
+    let question_body = serde_json::to_value(&notices[1].message).expect("question notice");
+    assert!(
+        question_body
+            .to_string()
+            .contains("externalProviderQuestion")
+    );
+    assert!(question_body.to_string().contains("question answer"));
+}
+
 impl crate::SessionMessageDelivery for FakeApprovalDelivery {
     fn deliver<'a>(
         &'a self,

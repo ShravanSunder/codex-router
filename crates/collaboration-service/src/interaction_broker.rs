@@ -26,6 +26,7 @@ use std::{
 use tokio::sync::{Mutex, oneshot};
 
 mod interaction_history;
+mod typed_interaction_notice;
 use interaction_history::InteractionHistoryStore;
 pub use interaction_history::{
     InteractionHistoryError, InteractionHistoryRecord, InteractionHistoryState,
@@ -358,6 +359,9 @@ impl ServiceInteractionBroker {
             return Err(InteractionHistoryError::NotPending);
         }
         let requester_for_pending = requester.clone();
+        let notice_requester = requester.clone();
+        let notice_approver = approver.clone();
+        let notice_request = request.clone();
         self.interaction_history
             .record(InteractionHistoryRecord::Approval {
                 requester,
@@ -404,6 +408,21 @@ impl ServiceInteractionBroker {
             pending.remove(&request_id);
             return Err(InteractionHistoryError::NotPending);
         }
+        drop(pending);
+        if typed_interaction_notice::deliver_approval_notice(
+            self,
+            &notice_requester,
+            &notice_approver,
+            &notice_request,
+        )
+        .await
+        .is_err()
+        {
+            let _ = self
+                .cancel_typed_approval(&request_id, "approverUnreachable")
+                .await;
+            return Err(InteractionHistoryError::Unavailable);
+        }
         Ok(receiver)
     }
 
@@ -447,6 +466,9 @@ impl ServiceInteractionBroker {
             return Err(InteractionHistoryError::Unavailable);
         }
         let request_id = request.request_id.clone();
+        let notice_requester = requester.clone();
+        let notice_approver = approver.clone();
+        let notice_request = request.clone();
         let mut pending = self.pending_questions.lock().await;
         if pending.contains_key(&request_id) {
             return Err(InteractionHistoryError::AlreadyExists);
@@ -455,7 +477,22 @@ impl ServiceInteractionBroker {
             .record_question(requester, approver, request)
             .await?;
         let (sender, receiver) = oneshot::channel();
-        pending.insert(request_id, sender);
+        pending.insert(request_id.clone(), sender);
+        drop(pending);
+        if typed_interaction_notice::deliver_question_notice(
+            self,
+            &notice_requester,
+            &notice_approver,
+            &notice_request,
+        )
+        .await
+        .is_err()
+        {
+            let _ = self
+                .cancel_question(&request_id, "approverUnreachable")
+                .await;
+            return Err(InteractionHistoryError::Unavailable);
+        }
         Ok(receiver)
     }
 
@@ -1059,10 +1096,20 @@ impl ServiceInteractionBroker {
 
     async fn deliver(&self, record: &ApprovalRequestRecord) -> Result<(), ApprovalBrokerError> {
         let text = serde_json::to_string(record).map_err(|_| ApprovalBrokerError::Unavailable)?;
+        self.deliver_message(record.requester.clone(), record.approver.clone(), text)
+            .await
+    }
+
+    async fn deliver_message(
+        &self,
+        requester: SessionRef,
+        approver: SessionRef,
+        text: String,
+    ) -> Result<(), ApprovalBrokerError> {
         let request = DeliveryRequest {
-            target: record.approver.clone(),
+            target: approver,
             message: MessageContent::Agent {
-                sender: record.requester.clone(),
+                sender: requester,
                 text: text
                     .try_into()
                     .map_err(|_| ApprovalBrokerError::Unavailable)?,
