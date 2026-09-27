@@ -2,6 +2,9 @@
 
 use super::{AgentSessionClient, ExternalProviderRuntimeError, ProviderCommand};
 use crate::InteractionPort;
+use crate::provider_connection_activity::ProviderConnectionActivity;
+use agent_client_protocol::schema::v1::{CancelNotification, SessionId};
+use agent_client_protocol::{Agent, ConnectionTo, Error};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -56,6 +59,34 @@ impl<P: InteractionPort> ProviderTurnCancellation<P> {
             .cancel_all(self.approval.clone(), "turnCancelled")
             .await;
     }
+}
+
+/// Apply the same approval settlement as a Router cancel when an event sink
+/// rejects a connection-level update outside the prompt observer.
+pub(crate) async fn cancel_turn_after_event_overflow<P: InteractionPort>(
+    connection_activity: &ProviderConnectionActivity,
+    contexts: &Arc<Mutex<HashMap<String, ActiveApprovalContext<P>>>>,
+    interaction_port: &Arc<P>,
+    connection: &ConnectionTo<Agent>,
+    session_id: &str,
+) -> Result<bool, Error> {
+    let Some(first_overflow) = connection_activity.mark_output_overflow(session_id) else {
+        return Ok(false);
+    };
+    if !first_overflow {
+        return Ok(true);
+    }
+    let turn_cancellation = active_turn_cancellation(contexts, interaction_port, session_id, None);
+    if let Some(turn_cancellation) = &turn_cancellation {
+        turn_cancellation.mark_cancelling();
+    }
+    let send_result =
+        connection.send_notification(CancelNotification::new(SessionId::new(session_id)));
+    if let Some(turn_cancellation) = &turn_cancellation {
+        turn_cancellation.settle_pending_approvals().await;
+    }
+    send_result?;
+    Ok(true)
 }
 
 impl<P: InteractionPort> AgentSessionClient<P> {

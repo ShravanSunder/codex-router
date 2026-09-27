@@ -80,6 +80,10 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             ActiveApprovalContext<P>,
         >::new()));
         let callback_approval_contexts = Arc::clone(&approval_contexts);
+        let callback_auth_contexts = Arc::clone(&approval_contexts);
+        let callback_auth_port = Arc::clone(&interaction_port);
+        let callback_todo_contexts = Arc::clone(&approval_contexts);
+        let callback_todo_port = Arc::clone(&interaction_port);
         let callback_question_contexts = Arc::clone(&approval_contexts);
         let callback_question_port = Arc::clone(&interaction_port);
         let callback_plan_contexts = Arc::clone(&approval_contexts);
@@ -185,6 +189,9 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     callback_auth_status,
                     callback_session_capabilities,
                     callback_event_sink,
+                    Arc::clone(&tool_registry),
+                    callback_auth_contexts,
+                    callback_auth_port,
                 ))
                 .with_handler(ProviderCursorQuestionHandler::new(
                     Arc::clone(&tool_registry),
@@ -206,6 +213,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     tool_registry,
                     todo_state,
                     Arc::clone(&task_event_sink),
+                    callback_todo_contexts,
+                    callback_todo_port,
                 ))
                 .with_handler(ProviderRequestFallback)
                 .connect_with(

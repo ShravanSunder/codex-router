@@ -212,6 +212,9 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                     }
                                 }
                                 result = &mut prompt_result => {
+                                    output_limit_cancelled |= runtime_handles
+                                        .tool_registry
+                                        .output_overflowed(provider_session_id.0.as_ref());
                                     let outcome = match &result {
                                         Ok(prompt) => TurnOutcome::Ended {
                                             stop_reason: prompt.stop_reason.clone(),
