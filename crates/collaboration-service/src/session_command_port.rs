@@ -35,6 +35,7 @@ pub struct CreateSessionCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PromptSessionCommand {
     pub target: SessionRef,
+    pub input_id: session_event_model::InputId,
     pub content: Vec<CommandContent>,
     pub actor: Identity,
 }
@@ -42,6 +43,7 @@ pub struct PromptSessionCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteerSessionCommand {
     pub target: SessionRef,
+    pub input_id: session_event_model::InputId,
     pub expected_turn_id: String,
     pub content: Vec<CommandContent>,
     pub actor: Identity,
@@ -275,6 +277,7 @@ mod tests {
         );
         port.prompt(PromptSessionCommand {
             target: session.clone(),
+            input_id: session_event_model::InputId::new("input-prompt").expect("input id"),
             content: content.clone(),
             actor: actor.clone(),
         })
@@ -284,6 +287,7 @@ mod tests {
         port.resume_session(target.clone()).await.expect("resume");
         port.steer(SteerSessionCommand {
             target: session.clone(),
+            input_id: session_event_model::InputId::new("input-steer").expect("input id"),
             expected_turn_id: "turn-1".into(),
             content: content.clone(),
             actor: actor.clone(),
@@ -314,6 +318,10 @@ mod tests {
 
         let recorded = recorded.lock().expect("test lock");
         assert_eq!(recorded.len(), 11);
+        assert!(recorded.iter().any(|command| matches!(command,
+            RecordedCommand::Prompt(prompt) if prompt.input_id.as_str() == "input-prompt")));
+        assert!(recorded.iter().any(|command| matches!(command,
+            RecordedCommand::Steer(steer) if steer.input_id.as_str() == "input-steer")));
         assert!(recorded.iter().all(|command| match command {
             RecordedCommand::Create(command) => command.actor == actor,
             RecordedCommand::Prompt(command) => command.actor == actor,

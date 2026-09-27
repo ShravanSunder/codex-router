@@ -102,6 +102,7 @@ impl SessionCommandPort for ScriptedSessionBackend {
         Box::pin(async { Ok(()) })
     }
     fn prompt(&self, command: PromptSessionCommand) -> CommandFuture<'_, SessionTurnHandle> {
+        let input_id = command.input_id.clone();
         self.prompt_commands
             .lock()
             .expect("test lock")
@@ -114,7 +115,7 @@ impl SessionCommandPort for ScriptedSessionBackend {
             sequence: 1,
             event: SessionEvent::TurnStarted {
                 turn_id: "turn-1".into(),
-                input_id: session_event_model::InputId::new("input-1").expect("test input id"),
+                input_id,
             },
         });
         Box::pin(async {

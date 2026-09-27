@@ -438,6 +438,7 @@ async fn serve_provider_sessions(
                             Ok(attachment) => {
                                 let command = PromptSessionCommand {
                                     target: session.clone(),
+                                    input_id: session_event_model::InputId::generate(),
                                     content,
                                     actor,
                                 };
@@ -489,6 +490,7 @@ async fn serve_provider_sessions(
                                 .commands
                                 .steer(SteerSessionCommand {
                                     target: session,
+                                    input_id: session_event_model::InputId::generate(),
                                     expected_turn_id,
                                     content,
                                     actor,

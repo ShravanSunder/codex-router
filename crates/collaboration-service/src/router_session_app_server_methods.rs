@@ -248,6 +248,7 @@ pub(super) async fn handle_app_server_turn_request(
             let handle = commands
                 .prompt(PromptSessionCommand {
                     target: session,
+                    input_id: session_event_model::InputId::generate(),
                     content,
                     actor,
                 })
@@ -265,9 +266,11 @@ pub(super) async fn handle_app_server_turn_request(
                 .ok_or(ThreadMethodError::InvalidParams)?
                 .to_owned();
             let content = parse_turn_input(&params)?;
+            let input_id = session_event_model::InputId::generate();
             let outcome = commands
                 .steer(SteerSessionCommand {
                     target: session.clone(),
+                    input_id: input_id.clone(),
                     expected_turn_id,
                     content: content.clone(),
                     actor: actor.clone(),
@@ -281,6 +284,7 @@ pub(super) async fn handle_app_server_turn_request(
                     commands
                         .prompt(PromptSessionCommand {
                             target: session,
+                            input_id,
                             content,
                             actor,
                         })
