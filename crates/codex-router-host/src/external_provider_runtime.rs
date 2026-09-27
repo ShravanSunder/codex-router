@@ -57,10 +57,8 @@ fn host_prompt_outcome(
         }
         session_event_model::StopReason::Refusal => ProviderPromptStopReason::Refusal,
         session_event_model::StopReason::Cancelled => ProviderPromptStopReason::Cancelled,
-        session_event_model::StopReason::Unknown(_) => {
-            return Err(ExternalProviderRuntimeError::UnknownStopReason {
-                suffix: String::new(),
-            });
+        session_event_model::StopReason::Unknown(value) => {
+            return Err(ExternalProviderRuntimeError::unknown_stop_reason(&value));
         }
     };
     Ok(ExternalProviderPromptOutcome {
@@ -68,6 +66,38 @@ fn host_prompt_outcome(
         stop_reason,
         permission_refusal_reason: outcome.permission_refusal_reason,
     })
+}
+
+#[cfg(test)]
+mod prompt_projection_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_stop_reason_keeps_only_its_safe_suffix() {
+        let outcome = acp_client_runtime::ExternalProviderPromptOutcome {
+            output: "known output".to_owned(),
+            stop_reason: session_event_model::StopReason::Unknown("future_stop".to_owned()),
+            permission_refusal_reason: None,
+        };
+        let error = host_prompt_outcome(outcome).expect_err("unknown stop reason");
+        assert!(matches!(
+            error,
+            ExternalProviderRuntimeError::UnknownStopReason { suffix }
+                if suffix == " (future_stop)"
+        ));
+
+        let untrusted = acp_client_runtime::ExternalProviderPromptOutcome {
+            output: String::new(),
+            stop_reason: session_event_model::StopReason::Unknown("../token=value".to_owned()),
+            permission_refusal_reason: None,
+        };
+        assert_eq!(
+            host_prompt_outcome(untrusted)
+                .expect_err("unknown stop reason")
+                .to_string(),
+            "agent ended the turn with an unrecognized stop reason"
+        );
+    }
 }
 
 pub struct ExternalProviderRuntime {

@@ -17,9 +17,7 @@ pub(crate) fn decode_prompt_result(
         "max_turn_requests" => Ok(ProviderPromptStopReason::MaxTurnRequests),
         "refusal" => Ok(ProviderPromptStopReason::Refusal),
         "cancelled" => Ok(ProviderPromptStopReason::Cancelled),
-        unknown => Err(ExternalProviderRuntimeError::UnknownStopReason {
-            suffix: safe_unknown_suffix(unknown),
-        }),
+        unknown => Err(ExternalProviderRuntimeError::unknown_stop_reason(unknown)),
     }
 }
 
@@ -33,19 +31,6 @@ pub(crate) fn decode_typed_stop_reason(
         StopReason::Refusal => Ok(ProviderPromptStopReason::Refusal),
         StopReason::Cancelled => Ok(ProviderPromptStopReason::Cancelled),
         _ => Err(ExternalProviderRuntimeError::FrameDecodeFailure),
-    }
-}
-
-fn safe_unknown_suffix(reason: &str) -> String {
-    if !reason.is_empty()
-        && reason.len() <= 32
-        && reason
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-    {
-        format!(" ({reason})")
-    } else {
-        String::new()
     }
 }
 
