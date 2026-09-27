@@ -16,6 +16,9 @@ pub struct ProviderCapabilityReport {
     pub supports_cancel_queued: bool,
     pub supports_modes: bool,
     pub supports_config_options: bool,
+    /// Router advertises ACP form elicitation and can route this Session's
+    /// Questions to an answerer. This is a client/back-door capability, not
+    /// an advertisement made by the agent.
     pub supports_elicitation: bool,
     pub supports_usage: bool,
     pub accepts_image: bool,
@@ -37,7 +40,7 @@ impl ProviderCapabilityReport {
             supports_cancel_queued: true,
             supports_modes: false,
             supports_config_options: false,
-            supports_elicitation: false,
+            supports_elicitation: true,
             supports_usage: false,
             accepts_image: advertised.prompt_capabilities.image,
             accepts_audio: advertised.prompt_capabilities.audio,
@@ -95,6 +98,7 @@ fn advertises_steering(meta: Option<&serde_json::Map<String, serde_json::Value>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::ProtocolVersion;
     use session_event_model::ProviderAuthStatus;
 
     /// Oracle: specification E13/R23 keeps connection auth status separate
@@ -105,5 +109,15 @@ mod tests {
             ProviderCapabilityReport::default().auth_status,
             ProviderAuthStatus::NotReported
         );
+    }
+
+    /// The initialize wire fixture proves Router advertises form elicitation;
+    /// its Session report must expose that back-door ability to answer Questions.
+    #[test]
+    fn advertised_form_elicitation_is_reported_for_each_session() {
+        let response = InitializeResponse::new(ProtocolVersion::V1);
+        let report = ProviderCapabilityReport::from_initialize(&response);
+        assert!(report.supports_elicitation);
+        assert!(report.to_session_model().elicitation);
     }
 }
