@@ -8,14 +8,8 @@ use std::{future::Future, path::PathBuf, pin::Pin};
 pub type CommandFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, CommandFailure>> + Send + 'a>>;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CommandContent {
-    Text(String),
-    ResourceLink { uri: String, name: String },
-    Image { mime_type: String, bytes: Vec<u8> },
-    Audio { mime_type: String, bytes: Vec<u8> },
-    EmbeddedResource { uri: String, text: String },
-}
+/// The face and Host share the validated provider-neutral content vocabulary.
+pub use session_event_model::PromptContent as CommandContent;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionSettingsCommand {
@@ -262,7 +256,7 @@ mod tests {
             target: session.clone(),
             actor: actor.clone(),
         };
-        let content = vec![CommandContent::Text("hello".into())];
+        let content = vec![CommandContent::text("hello".into()).expect("test content")];
 
         assert_eq!(
             port.create(CreateSessionCommand {

@@ -123,6 +123,14 @@ impl RouterSessionAppServerListener {
 enum ThreadMethodError {
     #[error("invalid thread parameters")]
     InvalidParams,
+    #[error("image input could not be read")]
+    ImageUnreadable,
+    #[error("image input exceeds the 1 MiB message limit")]
+    ImageTooLarge,
+    #[error("turn input exceeds the 1 MiB message limit")]
+    PromptTooLarge,
+    #[error("image input type is unsupported")]
+    ImageUnsupportedType,
     #[error("thread not found")]
     NotFound,
     #[error("provider session unavailable")]
@@ -217,7 +225,11 @@ pub async fn serve_router_session_app_server_connection(
                 Ok(result) => json!({"id":id,"result":result}),
                 Err(error) => {
                     let code = match error {
-                        ThreadMethodError::InvalidParams => -32602,
+                        ThreadMethodError::InvalidParams
+                        | ThreadMethodError::ImageUnreadable
+                        | ThreadMethodError::ImageTooLarge
+                        | ThreadMethodError::PromptTooLarge
+                        | ThreadMethodError::ImageUnsupportedType => -32602,
                         ThreadMethodError::NotFound => -32002,
                         ThreadMethodError::Unavailable => -32000,
                     };

@@ -61,6 +61,41 @@ fn steering_request_and_all_four_outcomes_round_trip() {
     }
 }
 
+#[test]
+fn steering_and_queue_share_validated_multi_block_content_codec() {
+    let blocks = json!([
+        {"type":"text","text":"read this"},
+        {"type":"resourceLink","uri":"https://example.test/spec","name":"Specification"},
+        {"type":"image","mimeType":"image/png","data":"aGVsbG8=","uri":"file:///image.png"},
+        {"type":"audio","mimeType":"audio/wav","data":"aGVsbG8="},
+        {"type":"embeddedResource","uri":"resource://fixture","blob":"aGVsbG8="}
+    ]);
+    let steer: SteeringRequest = serde_json::from_value(json!({
+        "sessionId":"s1","prompt":blocks,
+    }))
+    .expect("multi-block steer");
+    assert_eq!(
+        serde_json::to_value(&steer).expect("steer wire")["prompt"],
+        blocks
+    );
+    let queue: QueueAddRequest = serde_json::from_value(json!({
+        "sessionId":"s1","prompt":blocks,
+    }))
+    .expect("multi-block queue");
+    assert_eq!(
+        serde_json::to_value(queue).expect("queue wire")["prompt"],
+        blocks
+    );
+    for invalid in [
+        json!({"type":"resourceLink","uri":"https://example.test/spec"}),
+        json!({"type":"image","mimeType":"image/png","uri":"file:///image.png"}),
+        json!({"type":"image","mimeType":"image/png","data":"not-base64!"}),
+        json!({"type":"embeddedResource","uri":"resource://fixture","text":"x","blob":"eA=="}),
+    ] {
+        assert!(serde_json::from_value::<session_event_model::PromptContent>(invalid).is_err());
+    }
+}
+
 // R20, Program Design: queue operations carry the Session ID on every request.
 #[test]
 fn queue_requests_have_distinct_methods_and_typed_ids() {

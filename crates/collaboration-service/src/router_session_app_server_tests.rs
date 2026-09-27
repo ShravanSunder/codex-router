@@ -390,7 +390,7 @@ async fn turn_methods_forward_input_and_actor_to_the_port() -> Result<(), Box<dy
     );
     assert_eq!(
         backend.prompt_commands.lock().expect("test lock")[0].content,
-        vec![crate::CommandContent::Text("hello".into())]
+        vec![crate::CommandContent::text("hello".into())?]
     );
 
     let steered = handle_app_server_turn_request(

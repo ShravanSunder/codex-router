@@ -7,6 +7,7 @@ use message_board::{EndpointId, Identity, SessionRef};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+pub use crate::PromptContent;
 use crate::{
     ApprovalChoice, ApprovalEffect, ApprovalScope, CapabilityReport, InteractionKind,
     ProviderAuthStatus, SessionItem, SessionItemKind,
@@ -116,15 +117,135 @@ impl std::fmt::Display for ProfileError {
 
 impl std::error::Error for ProfileError {}
 
-/// ACP v1 content types, represented without an ACP SDK dependency.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum PromptContent {
-    Text { text: String },
-    ResourceLink { uri: String, name: String },
-    Image { data: String, mime_type: String },
-    Audio { data: String, mime_type: String },
-    EmbeddedResource { uri: String, text: String },
+/// The profile wire is a codec over the same validated content vocabulary the
+/// Host and ACP client use internally.
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum PromptContentWire {
+    Text {
+        text: String,
+    },
+    ResourceLink {
+        uri: String,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+    },
+    Image {
+        mime_type: String,
+        data: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uri: Option<String>,
+    },
+    Audio {
+        mime_type: String,
+        data: String,
+    },
+    EmbeddedResource {
+        uri: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        blob: Option<String>,
+    },
+}
+
+impl Serialize for PromptContent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let wire = match self {
+            Self::Text { text } => PromptContentWire::Text {
+                text: text.as_str().to_owned(),
+            },
+            Self::ResourceLink {
+                uri,
+                name,
+                mime_type,
+            } => PromptContentWire::ResourceLink {
+                uri: uri.as_str().to_owned(),
+                name: name.as_str().to_owned(),
+                mime_type: mime_type.as_ref().map(|value| value.as_str().to_owned()),
+            },
+            Self::Image {
+                mime_type,
+                data,
+                uri,
+            } => PromptContentWire::Image {
+                mime_type: mime_type.as_str().to_owned(),
+                data: data.as_str().to_owned(),
+                uri: uri.as_ref().map(|value| value.as_str().to_owned()),
+            },
+            Self::Audio { mime_type, data } => PromptContentWire::Audio {
+                mime_type: mime_type.as_str().to_owned(),
+                data: data.as_str().to_owned(),
+            },
+            Self::EmbeddedResource {
+                uri,
+                mime_type,
+                source,
+            } => {
+                let (text, blob) = match source {
+                    crate::PromptEmbeddedSource::Text(text) => {
+                        (Some(text.as_str().to_owned()), None)
+                    }
+                    crate::PromptEmbeddedSource::Blob(data) => {
+                        (None, Some(data.as_str().to_owned()))
+                    }
+                };
+                PromptContentWire::EmbeddedResource {
+                    uri: uri.as_str().to_owned(),
+                    mime_type: mime_type.as_ref().map(|value| value.as_str().to_owned()),
+                    text,
+                    blob,
+                }
+            }
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PromptContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = PromptContentWire::deserialize(deserializer)?;
+        let content = match wire {
+            PromptContentWire::Text { text } => Self::text(text),
+            PromptContentWire::ResourceLink {
+                uri,
+                name,
+                mime_type,
+            } => Self::resource_link(uri, name, mime_type),
+            PromptContentWire::Image {
+                mime_type,
+                data,
+                uri,
+            } => Self::image(mime_type, data, uri),
+            PromptContentWire::Audio { mime_type, data } => Self::audio(mime_type, data),
+            PromptContentWire::EmbeddedResource {
+                uri,
+                mime_type,
+                text: Some(text),
+                blob: None,
+            } => Self::embedded_text(uri, mime_type, text),
+            PromptContentWire::EmbeddedResource {
+                uri,
+                mime_type,
+                text: None,
+                blob: Some(blob),
+            } => Self::embedded_blob(uri, mime_type, blob),
+            PromptContentWire::EmbeddedResource { .. } => {
+                return Err(serde::de::Error::custom(
+                    "embedded resource requires exactly one of text or blob",
+                ));
+            }
+        };
+        content.map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
