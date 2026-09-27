@@ -330,15 +330,20 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                         }
                                         PendingSessionAdmission::Restore { provider_session_id, result, reply } => {
                                             pending_loads.remove(&provider_session_id);
-                                            let report = result.as_ref().as_ref().ok().map(|session| {
-                                                base_capabilities.with_session_response(&session.response())
+                                            let report = result.as_ref().as_ref().ok().map(|restored| {
+                                                base_capabilities.with_session_response(&restored.session.response())
                                             });
-                                            let catalog = result.as_ref().as_ref().ok().map(|session| {
-                                                crate::provider_settings_catalog_codec::catalog_from_session_response(&session.response())
+                                            let catalog = result.as_ref().as_ref().ok().map(|restored| {
+                                                restored.settings_catalog.clone()
                                             });
-                                            let result = (*result).and_then(|session| {
+                                            let (activation, ready) = tokio::sync::oneshot::channel();
+                                            let result = (*result).and_then(|restored| {
                                                 register_static_provider_session(
-                                                    session,
+                                                    StaticSessionActivation {
+                                                        session: restored.session,
+                                                        item_projection: restored.item_projection,
+                                                        activation: ready,
+                                                    },
                                                     &mut sessions,
                                                     &mut session_tasks,
                                                     task_shutdown.clone(),
@@ -356,6 +361,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     task_session_settings.write().await.insert(provider_session_id.clone(), catalog.clone());
                                                     *task_last_settings_catalog.write().await = Some(catalog);
                                                 }
+                                                let _result = activation.send(());
                                             }
                                             let _result = reply.send(result);
                                         }

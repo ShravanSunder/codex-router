@@ -2,6 +2,7 @@
 
 use super::provider_setting_application::{SettingSetupFailure, apply_initial_settings};
 use super::*;
+use crate::provider_item_projection::ProviderItemProjection;
 use agent_client_protocol::schema::v1::CloseSessionRequest;
 
 pub(super) fn register_provider_session<P: InteractionPort>(
@@ -23,8 +24,14 @@ pub(super) fn register_provider_session<P: InteractionPort>(
     })
 }
 
+pub(super) struct StaticSessionActivation {
+    pub(super) session: ActiveSession<'static, Agent>,
+    pub(super) item_projection: Option<ProviderItemProjection>,
+    pub(super) activation: tokio::sync::oneshot::Receiver<()>,
+}
+
 pub(super) fn register_static_provider_session<P: InteractionPort>(
-    session: ActiveSession<'static, Agent>,
+    admission: StaticSessionActivation,
     sessions: &mut HashMap<String, tokio::sync::mpsc::Sender<ProviderSessionCommand<P>>>,
     session_tasks: &mut tokio::task::JoinSet<()>,
     shutdown: CancellationToken,
@@ -34,6 +41,11 @@ pub(super) fn register_static_provider_session<P: InteractionPort>(
         std::sync::Mutex<Vec<ExternalProviderToolCall>>,
     >,
 ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
+    let StaticSessionActivation {
+        session,
+        item_projection,
+        activation,
+    } = admission;
     let provider_session_id = session.session_id().to_string();
     if sessions.contains_key(&provider_session_id) {
         return Err(ExternalProviderRuntimeError::Operation(
@@ -42,15 +54,21 @@ pub(super) fn register_static_provider_session<P: InteractionPort>(
     }
     let (commands, command_rx) = tokio::sync::mpsc::channel(16);
     sessions.insert(provider_session_id.clone(), commands);
-    session_tasks.spawn(run_provider_session(
-        session,
-        command_rx,
-        shutdown,
-        frame_observation,
-        runtime_handles,
-        #[cfg(any(test, feature = "test-observation"))]
-        test_tool_calls,
-    ));
+    session_tasks.spawn(async move {
+        if activation.await.is_ok() {
+            run_provider_session(
+                session,
+                command_rx,
+                shutdown,
+                frame_observation,
+                runtime_handles,
+                item_projection,
+                #[cfg(any(test, feature = "test-observation"))]
+                test_tool_calls,
+            )
+            .await;
+        }
+    });
     Ok(ExternalProviderCreatedSession {
         provider_session_id,
         effective_settings: crate::EffectiveProviderSettings::default(),
@@ -198,6 +216,7 @@ pub(super) async fn run_create_admission<P: InteractionPort>(inputs: CreateAdmis
                 session_shutdown,
                 session_frame_observation,
                 runtime_handles,
+                None,
                 #[cfg(any(test, feature = "test-observation"))]
                 test_tool_calls,
             )

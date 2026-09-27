@@ -2,7 +2,7 @@
 
 use agent_client_protocol::schema::v1::{
     NewSessionResponse, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOptions,
+    SessionConfigSelectOptions, SessionUpdate,
 };
 
 use crate::{
@@ -47,6 +47,38 @@ pub(crate) fn replace_catalog_config_options(
     options: &[SessionConfigOption],
 ) {
     catalog.config_options = options.iter().filter_map(project_config_option).collect();
+}
+
+/// Apply agent-reported settings without losing the initial choice catalog.
+/// Replay and live updates use the same rule.
+pub(crate) fn apply_settings_update(
+    catalog: &mut ProviderSettingsCatalog,
+    update: &SessionUpdate,
+) -> bool {
+    match update {
+        SessionUpdate::CurrentModeUpdate(mode) => {
+            let current_mode = mode.current_mode_id.0.to_string();
+            catalog.current_mode = Some(current_mode.clone());
+            if let Some(option) = catalog
+                .config_options
+                .iter_mut()
+                .find(|option| option.category == Some(ProviderSettingKind::Mode))
+            {
+                option.current_value = ProviderConfigValue::Select(current_mode);
+            }
+            true
+        }
+        SessionUpdate::ConfigOptionUpdate(config) => {
+            replace_catalog_config_options(catalog, &config.config_options);
+            if let Some(mode) = catalog.config_option(ProviderSettingKind::Mode)
+                && let ProviderConfigValue::Select(value) = &mode.current_value
+            {
+                catalog.current_mode = Some(value.clone());
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 fn project_config_option(option: &SessionConfigOption) -> Option<ProviderConfigOption> {

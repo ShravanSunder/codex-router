@@ -10,7 +10,7 @@ use crate::agent_session_client::{
 use crate::provider_item_projection::ProviderItemProjection;
 use crate::provider_prompt_result_codec::{decode_prompt_result, decode_typed_stop_reason};
 use crate::provider_session_actor::ProviderSessionRuntimeHandles;
-use crate::provider_settings_catalog_codec::replace_catalog_config_options;
+use crate::provider_settings_catalog_codec::apply_settings_update;
 use crate::provider_update_kind::{
     has_unknown_informational_value, is_known_update_kind, is_session_update_notification,
     safe_update_kind, session_update_kind,
@@ -170,33 +170,18 @@ async fn update_live_settings(
     handles: &ProviderSessionRuntimeHandles,
     session_id: &str,
 ) -> Result<(), crate::EventSinkOverflow> {
-    let (catalog, capability_change) = match update {
-        SessionUpdate::CurrentModeUpdate(mode) => {
-            let mut catalogs = handles.session_settings.write().await;
-            let catalog = catalogs.entry(session_id.to_owned()).or_default();
-            let current_mode = mode.current_mode_id.0.to_string();
-            catalog.current_mode = Some(current_mode.clone());
-            if let Some(option) = catalog
-                .config_options
-                .iter_mut()
-                .find(|option| option.category == Some(crate::ProviderSettingKind::Mode))
-            {
-                option.current_value = crate::ProviderConfigValue::Select(current_mode);
-            }
-            (Some(catalog.clone()), Some(true))
-        }
-        SessionUpdate::ConfigOptionUpdate(config) => {
-            let mut catalogs = handles.session_settings.write().await;
-            let catalog = catalogs.entry(session_id.to_owned()).or_default();
-            replace_catalog_config_options(catalog, &config.config_options);
-            if let Some(mode) = catalog.config_option(crate::ProviderSettingKind::Mode)
-                && let crate::ProviderConfigValue::Select(value) = &mode.current_value
-            {
-                catalog.current_mode = Some(value.clone());
-            }
-            (Some(catalog.clone()), Some(false))
-        }
-        _ => (None, None),
+    let capability_change = match update {
+        SessionUpdate::CurrentModeUpdate(_) => Some(true),
+        SessionUpdate::ConfigOptionUpdate(_) => Some(false),
+        _ => None,
+    };
+    let catalog = if capability_change.is_some() {
+        let mut catalogs = handles.session_settings.write().await;
+        let catalog = catalogs.entry(session_id.to_owned()).or_default();
+        apply_settings_update(catalog, update);
+        Some(catalog.clone())
+    } else {
+        None
     };
     if let Some(catalog) = catalog {
         *handles.last_settings_catalog.write().await = Some(catalog);

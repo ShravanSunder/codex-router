@@ -105,14 +105,17 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
     shutdown: CancellationToken,
     frame_observation: Arc<ProviderFrameObservation>,
     runtime_handles: ProviderSessionRuntimeHandles,
+    initial_projection: Option<ProviderItemProjection>,
     #[cfg(any(test, feature = "test-observation"))] test_tool_calls: Arc<
         std::sync::Mutex<Vec<ExternalProviderToolCall>>,
     >,
 ) {
-    let mut item_projection = ProviderItemProjection::new(
-        session.session_id().to_string(),
-        Arc::clone(&runtime_handles.event_sink),
-    );
+    let mut item_projection = initial_projection.unwrap_or_else(|| {
+        ProviderItemProjection::new(
+            session.session_id().to_string(),
+            Arc::clone(&runtime_handles.event_sink),
+        )
+    });
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
