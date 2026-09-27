@@ -258,7 +258,7 @@ impl AcpSessionBinding {
             None => inherited.effort.clone(),
         };
         let mut native = json!({
-            "cwd":cwd,
+            "cwd":expected_cwd,
             "experimentalRawEvents":false,
             "model":model,
             "allowProviderModelFallback":false,
@@ -720,7 +720,13 @@ fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
             other => normalized.push(other.as_os_str()),
         }
     }
-    Ok(normalized)
+    match std::fs::canonicalize(&normalized) {
+        Ok(canonical) => Ok(canonical),
+        // Native setup will reject an absent cwd. Keep lexical normalization
+        // here so a native rejection retains its existing error category.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(normalized),
+        Err(_) => Err(SessionSetupError::InvalidParameters),
+    }
 }
 fn map_native_failure(error: NativeConnectionError) -> SessionSetupError {
     match error {
@@ -735,7 +741,32 @@ fn map_native_failure(error: NativeConnectionError) -> SessionSetupError {
 #[cfg(test)]
 mod access_validation_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn cwd_comparison_resolves_existing_directory_symlinks() {
+        let root = std::env::temp_dir().join(format!("acp-cwd-alias-{}", std::process::id()));
+        let real = root.join("real");
+        let alias = root.join("alias");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        assert_eq!(
+            normalized_directory(alias.to_str().unwrap()).unwrap(),
+            normalized_directory(real.to_str().unwrap()).unwrap()
+        );
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_dir(real).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cwd_comparison_resolves_the_system_tmp_symlink() {
+        assert_eq!(
+            normalized_directory("/tmp").unwrap(),
+            normalized_directory("/private/tmp").unwrap()
+        );
+    }
 
     #[test]
     fn scratch_metadata_is_required_private_and_scope_bound() {

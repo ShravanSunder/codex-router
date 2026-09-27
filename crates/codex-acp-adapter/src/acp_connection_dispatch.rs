@@ -179,7 +179,7 @@ async fn route_connection(
                     let holder=Arc::clone(&inputs.holder);
                     if create_new {
                         let (result_sender,result_receiver)=tokio::sync::oneshot::channel();
-                        holder.create_tasks().spawn(async move {
+                        holder.host_tasks().spawn(async move {
                             let mut outcome=run_session_setup(setup).await;
                             if let Some(binding)=outcome.binding.take() {
                                 holder.hold(binding);

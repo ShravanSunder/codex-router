@@ -22,6 +22,10 @@ pub enum PromptExecutionError {
     Native(#[from] NativeConnectionError),
     #[error("native prompt projection failed")]
     Projection,
+    #[error("native session has an active turn")]
+    Busy,
+    #[error("native thread activity status unavailable")]
+    NativeThreadStatusUnavailable,
     #[error("native prompt receipt projection failed at {0}")]
     ReceiptProjection(&'static str),
     #[error("requested effort {requested} but native runtime reported {effective}")]
@@ -94,6 +98,24 @@ impl PendingAcpPrompt {
             .settlement
             .mark_dispatched()
             .map_err(|_| PromptExecutionError::InvalidPrompt)?;
+        let thread_state = pending
+            .session
+            .connection
+            .request_validated(
+                &pending.session.schemas,
+                NativeOperation::ReadThread,
+                json!({"threadId":pending.session.session_id,"includeTurns":false}),
+            )
+            .await?;
+        match crate::session_creation::native_thread_activity(&thread_state) {
+            crate::session_creation::NativeThreadActivity::Idle => {}
+            crate::session_creation::NativeThreadActivity::Active => {
+                return Err(PromptExecutionError::Busy);
+            }
+            crate::session_creation::NativeThreadActivity::Invalid => {
+                return Err(PromptExecutionError::NativeThreadStatusUnavailable);
+            }
+        }
         // Without a requested effort the turn inherits the thread's own.
         let mut turn = json!({"threadId":pending.session.session_id,"input":translated.input()});
         if let (Some(fields), Some(effort)) =
@@ -262,7 +284,10 @@ impl PendingAcpPrompt {
             let mut terminal = self
                 .settlement
                 .observe_terminal(turn.get("id").and_then(Value::as_str), status);
-            if let Some(response) = terminal.as_mut() {
+            if let Some(response) = terminal
+                .as_mut()
+                .filter(|response| response.get("result").is_some())
+            {
                 let read = self
                     .session
                     .connection
