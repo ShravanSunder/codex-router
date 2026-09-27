@@ -216,7 +216,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             let result = if method == "initialize" {
                 json!({})
             } else {
-                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"created-thread","cwd":"/work","turns":[]}})
+                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"created-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}})
             };
             if method != "initialize" {
                 setup_entered.send(method).await.unwrap();
@@ -431,7 +431,7 @@ async fn detached_create_finishes_and_holds_its_empty_thread()
                     "approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
                     "sandbox":{"type":"workspaceWrite","writableRoots":[native_scratch]},
-                    "thread":{"id":"detached-thread","cwd":"/work","turns":[]}})
+                    "thread":{"id":"detached-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}})
             };
             let _sent = wire
                 .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -538,7 +538,7 @@ async fn closed_create_connection_loads_held_binding_without_native_resume_and_p
                     "approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
                     "sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},
-                    "thread":{"id":"created-thread","cwd":"/work","turns":[]}
+                    "thread":{"id":"created-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}
                 }),
                 "turn/start" => json!({"turn":{"id":"turn-one"}}),
                 _ => {

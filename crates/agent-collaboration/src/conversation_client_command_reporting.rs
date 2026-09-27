@@ -376,6 +376,11 @@ pub(super) fn emit_operation_outcome(
     outcome: &ConversationOperationResult,
     json_output: bool,
 ) -> io::Result<()> {
+    if let ConversationOperationResult::Running { follow_up, .. } = outcome
+        && !json_output
+    {
+        writeln!(io::stderr(), "{follow_up}")?;
+    }
     let encoded = if json_output {
         serde_json::to_string(outcome)
     } else {
@@ -393,6 +398,7 @@ pub(super) fn operation_result_exit(outcome: &ConversationOperationResult) -> i3
             _ => 0,
         },
         ConversationOperationResult::Pending { .. } => 0,
+        ConversationOperationResult::Running { .. } => 0,
     }
 }
 

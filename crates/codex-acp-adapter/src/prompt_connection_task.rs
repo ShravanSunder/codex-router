@@ -51,32 +51,46 @@ pub async fn run_prompt_task(mut inputs: PromptTaskInputs) -> PromptTaskCompleti
             };
         }
     };
-    let start = PendingAcpPrompt::start(
-        inputs.session,
-        &mut catalog,
-        inputs.request_id.clone(),
-        &inputs.params,
-    );
-    let pending = tokio::select! {
-        biased;
-        _=inputs.retired.cancelled()=>return PromptTaskCompletion::default(),
-        command=inputs.commands.recv()=>{
-            let terminal=match command {
-                Some(PromptCommand::Cancel)=>Some(cancelled_response(&inputs.request_id,"unknown")),
-                None=>None,
-            };
-            return PromptTaskCompletion {cancellation_barrier:Some(crate::CancellationBarrier::UnknownTurn),binding:None,terminal};
-        },
-        result=start=>result,
+    let mut commands_open = true;
+    let mut frontend_detached = false;
+    let pending = {
+        let start = PendingAcpPrompt::start(
+            inputs.session,
+            &mut catalog,
+            inputs.request_id.clone(),
+            &inputs.params,
+        );
+        tokio::pin!(start);
+        tokio::select! {
+            biased;
+            _=inputs.retired.cancelled()=>return PromptTaskCompletion::default(),
+            command=inputs.commands.recv(),if commands_open=>{
+                let terminal=match command {
+                    Some(PromptCommand::Cancel)=>Some(cancelled_response(&inputs.request_id,"unknown")),
+                    None=>{
+                        commands_open=false;
+                        frontend_detached=true;
+                        inputs.commands.close();
+                        None
+                    },
+                };
+                if commands_open || terminal.is_some() {
+                    return PromptTaskCompletion {cancellation_barrier:Some(crate::CancellationBarrier::UnknownTurn),binding:None,terminal};
+                }
+                start.await
+            },
+            result=&mut start=>result,
+        }
     };
     let mut pending = match pending {
         Ok(pending) => pending,
         Err(error) => {
             let message = error.to_string();
             return PromptTaskCompletion {
-                cancellation_barrier: None,
+                cancellation_barrier: frontend_detached
+                    .then_some(crate::CancellationBarrier::UnknownTurn),
                 binding: None,
-                terminal: Some(failure(&inputs.request_id, &message)),
+                terminal: (!frontend_detached).then(|| failure(&inputs.request_id, &message)),
             };
         }
     };
@@ -85,30 +99,41 @@ pub async fn run_prompt_task(mut inputs: PromptTaskInputs) -> PromptTaskCompleti
             biased;
             _=inputs.retired.cancelled()=>return PromptTaskCompletion {
                 cancellation_barrier: None,binding:None,terminal:Some(failure(&inputs.request_id,"Native backend connection lost"))},
-            command=inputs.commands.recv()=>match command {
+            command=inputs.commands.recv(),if commands_open=>match command {
                 Some(PromptCommand::Cancel)=>{
                     let terminal=pending.cancel().await;
                     let cancellation_barrier=pending.blocks_next_prompt().then(|| pending.cancellation_barrier());
                     return PromptTaskCompletion {cancellation_barrier,binding:pending.into_session().ok(),terminal};
                 },
-                None=>{let _cancel=pending.cancel().await;return PromptTaskCompletion::default();},
+                None=>{
+                    commands_open=false;
+                    frontend_detached=true;
+                    inputs.commands.close();
+                },
             },
             event=pending.next_event(&mut catalog)=>match event {
                 Ok(Some(PromptEvent::Update(frame)))=>{
-                    if inputs.output.send(frame).await.is_err() {let _cancel=pending.cancel().await;return PromptTaskCompletion::default();}
+                    if !frontend_detached && inputs.output.send(frame).await.is_err() {
+                        frontend_detached=true;
+                        commands_open=false;
+                        inputs.commands.close();
+                    }
                 },
                 Ok(Some(PromptEvent::Terminal(frame)))=>return PromptTaskCompletion {
-                cancellation_barrier: None,binding:pending.into_session().ok(),terminal:Some(frame)},
+                cancellation_barrier: pending.blocks_next_prompt().then(|| pending.cancellation_barrier()),
+                binding:pending.into_session().ok(),terminal:(!frontend_detached).then_some(frame)},
                 Ok(Some(PromptEvent::NativeCallback(_)))=>{
-                    let _cancel=pending.cancel().await;
+                    if !frontend_detached {let _cancel=pending.cancel().await;}
                     return PromptTaskCompletion {
-                cancellation_barrier: None,binding:None,terminal:Some(failure(&inputs.request_id,"Unsupported native interaction or invalid update"))};
+                cancellation_barrier: frontend_detached.then(|| pending.cancellation_barrier()),
+                binding:None,terminal:(!frontend_detached).then(|| failure(&inputs.request_id,"Unsupported native interaction or invalid update"))};
                 },
                 Err(error)=>{
                     let message=error.to_string();
-                    let _cancel=pending.cancel().await;
+                    if !frontend_detached {let _cancel=pending.cancel().await;}
                     return PromptTaskCompletion {
-                cancellation_barrier: None,binding:None,terminal:Some(failure(&inputs.request_id,&message))};
+                cancellation_barrier: frontend_detached.then(|| pending.cancellation_barrier()),
+                binding:None,terminal:(!frontend_detached).then(|| failure(&inputs.request_id,&message))};
                 },
                 Ok(Some(PromptEvent::NativeNotification(_))|None)=>{},
             }

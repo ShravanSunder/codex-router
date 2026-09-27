@@ -97,6 +97,8 @@ pub enum ConversationEnd {
     Completed,
     TimedOut,
     Cancelled,
+    /// The caller stopped waiting after submission; the native turn continues.
+    Detached,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

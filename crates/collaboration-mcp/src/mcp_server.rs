@@ -546,7 +546,7 @@ impl CollaborationMcpServer {
         conversation_tool_result(result, operation_id)
     }
 
-    #[tool(name = "conversation_prompt", description = "Prompts one conversation through its advertised client. External providers require a caller UUIDv7 operation ID; Codex prompt must omit it because it is not inspectable. The result records a completed turn or a pending provider operation. Caller cancellation detaches from provider work while Codex uses its native cancellation path.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationOperationResult>())]
+    #[tool(name = "conversation_prompt", description = "Prompts one conversation through its advertised client. External providers require a caller UUIDv7 operation ID; Codex prompt must omit it because it is not inspectable. A wait deadline or caller cancellation detaches from a running Codex turn without interrupting it. The result records a completed turn, a running Codex turn, or a pending provider operation.", output_schema = rmcp::handler::server::tool::schema_for_type::<ConversationOperationResult>())]
     async fn conversation_prompt(
         &self,
         Parameters(request): Parameters<ConversationPromptToolRequest>,

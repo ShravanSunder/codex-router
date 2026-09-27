@@ -270,6 +270,15 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
 fn setup_error(id: Value, failure: &crate::SessionSetupError) -> Value {
+    if matches!(failure, crate::SessionSetupError::Busy) {
+        return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":"Native session has an active turn","data":{"kind":"busy"}}});
+    }
+    if matches!(
+        failure,
+        crate::SessionSetupError::NativeThreadStatusUnavailable
+    ) {
+        return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"Native session status unavailable","data":{"kind":"invalidThreadStatus"}}});
+    }
     let code = if matches!(
         failure,
         crate::SessionSetupError::InvalidParameters

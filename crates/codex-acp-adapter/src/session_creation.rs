@@ -16,6 +16,10 @@ use std::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionSetupError {
+    #[error("native session has an active turn")]
+    Busy,
+    #[error("native resume returned invalid thread activity status")]
+    NativeThreadStatusUnavailable,
     #[error("native cancellation remains unresolved")]
     CancellationUnresolved,
     #[error("invalid ACP session parameters")]
@@ -43,6 +47,7 @@ pub enum SessionSetupError {
 }
 /// Retains one connection and a receipt minted only by successful fresh thread/start.
 mod session_load_adoption;
+pub(crate) use session_load_adoption::{NativeThreadActivity, native_thread_activity};
 
 pub struct AcpSessionBinding {
     pub(crate) session_id: String,
@@ -524,6 +529,15 @@ impl AcpSessionBinding {
         let response = session
             .resume_with_receipt(catalog, &inputs.generation, &inputs.params)
             .await?;
+        match session_load_adoption::native_thread_activity(&response) {
+            session_load_adoption::NativeThreadActivity::Idle => {}
+            session_load_adoption::NativeThreadActivity::Active => {
+                return Err(SessionSetupError::Busy);
+            }
+            session_load_adoption::NativeThreadActivity::Invalid => {
+                return Err(SessionSetupError::NativeThreadStatusUnavailable);
+            }
+        }
         session.persisted_effort = response
             .pointer("/thread/reasoningEffort")
             .or_else(|| response.get("reasoningEffort"))
