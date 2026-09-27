@@ -114,9 +114,12 @@ mod native_endpoint_selector;
 pub use native_endpoint_selector::resolve_public_native;
 
 mod observation_session;
-pub use observation_session::{
-    BoundedObservationRequest, BoundedObservationResult, NativeObservation, ObservationEndReason,
+mod provider_session_observation;
+pub use collaboration_protocol::{
+    BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
 };
+pub use observation_session::NativeObservation;
+pub use provider_session_observation::SessionObservation;
 
 mod acp_conversation;
 pub use acp_conversation::AcpConversation;

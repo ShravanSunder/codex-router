@@ -40,7 +40,7 @@ struct ConversationArguments {
 enum ConversationCommand {
     /// Create a conversation and return its stable SessionRef without submitting a prompt.
     #[command(
-        long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. --model and --effort are required for Codex endpoints and rejected for provider endpoints. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
+        long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. --model and --effort are required for Codex endpoints; provider endpoints accept advertised --mode, --model and --effort values. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
     )]
     Create(CreateArguments),
     /// Run an ACP prompt and wait up to the caller deadline. A detached Codex turn
@@ -50,8 +50,14 @@ enum ConversationCommand {
     Prompt(PromptArguments),
     /// Load an existing conversation binding and wait for its settlement.
     Load(LoadArguments),
+    /// Resume an advertised provider Session without replaying history.
+    Resume(LoadArguments),
+    /// Close an advertised provider Session after its running Turn settles.
+    Close(CloseArguments),
     /// Cancel one exact active provider operation.
     Cancel(CancelArguments),
+    /// Set or accept the effective settings of a provider Session.
+    Settings(crate::conversation_settings_commands::SettingsArguments),
     /// Inspect, wait for, or reconcile one exact conversation operation.
     Operation {
         #[command(subcommand)]
@@ -62,10 +68,13 @@ enum ConversationCommand {
 struct CreateArguments {
     #[arg(long)]
     endpoint: String,
-    /// Required for Codex endpoints; rejected for provider endpoints.
+    /// Provider mode option value advertised by the agent.
+    #[arg(long)]
+    mode: Option<String>,
+    /// Required for Codex endpoints; provider value must be advertised by the agent.
     #[arg(long)]
     model: Option<String>,
-    /// Required for Codex endpoints; rejected for provider endpoints.
+    /// Required for Codex endpoints; provider value must be advertised by the agent.
     #[arg(long)]
     effort: Option<String>,
     #[arg(long)]
@@ -187,6 +196,24 @@ struct CancelArguments {
     #[arg(long)]
     json: bool,
 }
+
+#[derive(Args)]
+struct CloseArguments {
+    #[arg(long)]
+    target: String,
+    #[arg(long)]
+    generation: Option<String>,
+    #[arg(long)]
+    operation_id: Option<String>,
+    #[arg(long)]
+    from: Option<String>,
+    #[arg(long)]
+    approver: Option<String>,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
 #[derive(Clone, Copy, ValueEnum)]
 enum ConversationAccess {
     WriteRestricted,
@@ -211,7 +238,10 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
         ConversationCommand::Create(args) => client_commands::run_create(args),
         ConversationCommand::Prompt(args) => run_prompt(args),
         ConversationCommand::Load(args) => client_commands::run_load(args),
+        ConversationCommand::Resume(args) => client_commands::run_resume(args),
+        ConversationCommand::Close(args) => client_commands::run_close(args),
         ConversationCommand::Cancel(args) => client_commands::run_cancel(args),
+        ConversationCommand::Settings(args) => crate::conversation_settings_commands::run(args),
         ConversationCommand::Operation { command } => {
             crate::conversation_operation_commands::run_conversation_operation_command(command)
         }
@@ -768,6 +798,34 @@ mod tests {
     }
 
     #[test]
+    fn provider_lifecycle_commands_accept_exact_targets_and_operation_ids() {
+        let resume = ConversationArguments::try_parse_from([
+            "agent-collaboration conversation",
+            "resume",
+            "--target",
+            "target-json",
+            "--cwd",
+            "/tmp/project",
+            "--access",
+            "workspace-write",
+            "--operation-id",
+            "019f0000-0000-7000-8000-000000000011",
+        ])
+        .expect("resume arguments");
+        assert!(matches!(resume.command, ConversationCommand::Resume(_)));
+        let close = ConversationArguments::try_parse_from([
+            "agent-collaboration conversation",
+            "close",
+            "--target",
+            "target-json",
+            "--operation-id",
+            "019f0000-0000-7000-8000-000000000012",
+        ])
+        .expect("close arguments");
+        assert!(matches!(close.command, ConversationCommand::Close(_)));
+    }
+
+    #[test]
     fn create_accepts_from_session_ref_override() {
         let parsed = ConversationArguments::try_parse_from([
             "agent-collaboration conversation",
@@ -798,7 +856,10 @@ mod tests {
             }
             ConversationCommand::Prompt(_)
             | ConversationCommand::Load(_)
+            | ConversationCommand::Resume(_)
+            | ConversationCommand::Close(_)
             | ConversationCommand::Cancel(_)
+            | ConversationCommand::Settings(_)
             | ConversationCommand::Operation { .. } => {
                 panic!("create parse selected another command")
             }

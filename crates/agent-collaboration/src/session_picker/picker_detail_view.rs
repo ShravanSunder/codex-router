@@ -40,6 +40,42 @@ pub(super) fn render_details(
     selected_conversation: Option<&SessionConversationPreview>,
     height: usize,
 ) -> AnyElement<'static> {
+    if record.identity.is_provider() {
+        let detail_width = width.saturating_sub(4);
+        let endpoint = record.endpoint_label.as_deref().unwrap_or("Provider");
+        let state = match record.provider_state {
+            Some(collaboration_client::protocol::ProviderSessionState::Unloaded) => "Unloaded",
+            Some(collaboration_client::protocol::ProviderSessionState::Idle) => "Idle",
+            Some(collaboration_client::protocol::ProviderSessionState::Running) => "Running",
+            Some(collaboration_client::protocol::ProviderSessionState::RequiresAction) => {
+                "Requires action"
+            }
+            Some(collaboration_client::protocol::ProviderSessionState::AuthenticationRequired) => {
+                "Authentication required"
+            }
+            Some(collaboration_client::protocol::ProviderSessionState::Closed) => "Closed",
+            None => "Unknown",
+        };
+        return element! {
+            View(
+                width: width as u32,
+                height: height.max(1) as u32,
+                flex_direction: FlexDirection::Column,
+                border_style: BorderStyle::Single,
+                border_color: Color::DarkGrey,
+                overflow: Overflow::Hidden,
+                padding_left: 1,
+                padding_right: 1,
+            ) {
+                Text(content: fit_line(&format!("Session ID: {}", record.session_id), detail_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: fit_line(&format!("Endpoint: {endpoint}"), detail_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: fit_line(&format!("State: {state}"), detail_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: fit_line(&format!("Working directory: {}", record.cwd.as_deref().unwrap_or("-")), detail_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: "Read-only here; provider resume is unavailable.", color: Color::Yellow, wrap: TextWrap::Wrap)
+            }
+        }
+        .into_any();
+    }
     let conversation = selected_conversation.unwrap_or(&record.conversation);
     let panel_height = height.max(1);
     let conversation_rows = if conversation.snippets.is_empty() {

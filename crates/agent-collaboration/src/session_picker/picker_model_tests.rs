@@ -6,6 +6,58 @@ use crate::presentation::session_picker::picker_model::SessionsPickerRuntimeView
 use crate::presentation::session_picker::test_support::observed_records;
 use crate::presentation::session_picker::test_support::picker_record;
 use crate::presentation::session_picker::test_support::picker_request;
+use crate::sessions::SessionPickerIdentity;
+use collaboration_client::protocol::{ProviderSessionSummary, SessionRef};
+use serde_json::json;
+
+#[test]
+fn hosted_picker_keeps_equal_codex_and_provider_ids_distinct_and_provider_read_only() {
+    let mut request = picker_request();
+    let codex_target: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"thread-a"
+    }))
+    .expect("Codex target");
+    let provider: ProviderSessionSummary = serde_json::from_value(json!({
+        "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},"sessionId":"thread-a"},
+        "workingDirectory":"/repo/project-a","updatedAt":3,
+        "state":"unloaded",
+        "approver":{"kind":"human","humanId":"owner"},
+        "createdBy":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"creator"}
+    }))
+    .expect("provider row");
+    let mut codex = request.records.remove(0);
+    codex.identity = SessionPickerIdentity::HostedCodex(codex_target.clone());
+    request.records = vec![
+        codex,
+        crate::sessions::SessionPickerRecord::from_provider_summary(&provider, "Claude fixture"),
+    ];
+    let mut model = SessionsPickerModel::new(request.clone(), 120);
+    assert_eq!(model.visible_record_len(), 2);
+    assert!(model.render_snapshot().contains("Claude fixture"));
+    assert!(model.focus_visible_identity(&SessionPickerIdentity::HostedProvider(provider.target)));
+    assert_eq!(model.activation_outcome_for_focus(), None);
+    assert_eq!(model.fork_outcome_for_focus(), None);
+    assert!(model.focus_visible_identity(&SessionPickerIdentity::HostedCodex(codex_target)));
+    assert_eq!(
+        model.activation_outcome_for_focus(),
+        Some(SessionsPickerOutcome::ResumeSession("thread-a".to_owned()))
+    );
+    assert_eq!(
+        model.fork_outcome_for_focus(),
+        Some(SessionsPickerOutcome::ForkSession("thread-a".to_owned()))
+    );
+
+    request.source = crate::sessions::SessionsSource::Subagents;
+    let subagent_filter = SessionsPickerModel::new(request, 120);
+    assert_eq!(subagent_filter.visible_record_len(), 1);
+    assert!(subagent_filter.render_snapshot().contains("Claude fixture"));
+    assert!(
+        !subagent_filter
+            .render_snapshot()
+            .contains("Feature design session")
+    );
+}
 
 #[test]
 fn default_picker_excludes_helper_threads_even_with_interactive_origin() {

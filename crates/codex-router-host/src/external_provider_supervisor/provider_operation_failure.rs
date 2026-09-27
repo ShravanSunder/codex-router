@@ -4,8 +4,44 @@ use super::{failure, failure_with_provider_code};
 use crate::ExternalProviderRuntimeError;
 use collaboration_protocol::{
     ConversationOperationFailure, ConversationOperationFailureKind,
-    ConversationOperationFailureStage, OperationId, ProviderOperationEffect, SessionRef,
+    ConversationOperationFailureStage, InvalidProviderSetting, InvalidSettingSessionDisposition,
+    OperationId, ProviderOperationEffect, SessionRef,
 };
+
+pub(super) fn invalid_setting_failure(
+    operation_id: OperationId,
+    target: Option<SessionRef>,
+    setting: acp_client_runtime::ProviderSettingKind,
+    value: String,
+    advertised: Vec<String>,
+    disposition: acp_client_runtime::InvalidSettingSessionDisposition,
+) -> ConversationOperationFailure {
+    let (message, disposition) = match disposition {
+        acp_client_runtime::InvalidSettingSessionDisposition::Closed => (
+            "invalid provider setting; see advertised values; new Session was closed",
+            InvalidSettingSessionDisposition::Closed,
+        ),
+        acp_client_runtime::InvalidSettingSessionDisposition::RemainsCreated => (
+            "invalid provider setting; see advertised values; new Session remains created and idle",
+            InvalidSettingSessionDisposition::RemainsCreated,
+        ),
+    };
+    let mut result = failure(
+        ConversationOperationFailureKind::InvalidSetting,
+        ConversationOperationFailureStage::Settlement,
+        ProviderOperationEffect::Applied,
+        message,
+        operation_id,
+        target,
+    );
+    result.invalid_setting = Some(InvalidProviderSetting {
+        setting: crate::provider_operation_settlement::provider_setting_name(setting),
+        value,
+        advertised,
+        session_disposition: disposition,
+    });
+    result
+}
 
 pub(super) fn prompt_runtime_failure(
     operation_id: OperationId,
@@ -21,22 +57,6 @@ pub(super) fn prompt_runtime_failure(
             operation_id,
             target,
         );
-    }
-    if let ExternalProviderRuntimeError::UnknownStopReason { suffix } = error {
-        let mut operation_failure = failure(
-            ConversationOperationFailureKind::OutcomeUnknown,
-            ConversationOperationFailureStage::Settlement,
-            ProviderOperationEffect::Applied,
-            "agent ended the turn with an unrecognized stop reason",
-            operation_id,
-            target,
-        );
-        if let Ok(message) = collaboration_protocol::NonEmptyText::try_from(format!(
-            "agent ended the turn with an unrecognized stop reason{suffix}"
-        )) {
-            operation_failure.message = message;
-        }
-        return operation_failure;
     }
     runtime_failure(operation_id, target, error)
 }
@@ -67,6 +87,14 @@ pub(super) fn runtime_failure(
             ConversationOperationFailureStage::Validation,
             ProviderOperationEffect::None,
             "provider conversation already has active work",
+            operation_id,
+            target,
+        ),
+        ExternalProviderRuntimeError::SettingsUnresolved => failure(
+            ConversationOperationFailureKind::SettingsUnresolved,
+            ConversationOperationFailureStage::Validation,
+            ProviderOperationEffect::None,
+            "provider Session settings are unresolved; set a value or accept current settings before work",
             operation_id,
             target,
         ),

@@ -66,6 +66,7 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -140,8 +141,8 @@ async fn idle_explicit_queue_is_accepted_and_drains_for_both_providers() {
                 requested_policy: ProviderRequestedPolicy {
                     access: RouterAccess::WriteRestricted,
                 },
-                created_by: target.clone(),
-                approver: target.clone(),
+                created_by: (target.clone()).into(),
+                approver: (target.clone()).into(),
                 updated_at_ms: 1,
             })
             .await

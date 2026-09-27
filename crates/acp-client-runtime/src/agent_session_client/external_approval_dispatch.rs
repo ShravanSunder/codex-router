@@ -4,13 +4,15 @@
 use super::ExternalProviderApprovalRefusalWarning;
 use super::{ActiveApprovalContext, ExternalProviderApprovalRefusalReason};
 use crate::{
-    ApprovalPortOutcome, InteractionPort, approval_presentation, map_external_permission_options,
+    ApprovalPortOutcome, InteractionPort, ProviderPersistenceTarget, RefusedApprovalOffer,
+    map_permission_options, reviewed_approval_fields,
 };
 use agent_client_protocol::schema::v1::{
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome,
 };
 use agent_client_protocol::{Agent, ConnectionTo, Error, Responder};
+use session_event_model::ApprovalRequest;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -23,6 +25,7 @@ pub(super) struct PermissionDispatchState<P: InteractionPort> {
     pub(super) refusal_reasons:
         Arc<Mutex<HashMap<P::OperationId, ExternalProviderApprovalRefusalReason>>>,
     pub(super) endpoint_id: Arc<RwLock<Option<String>>>,
+    pub(super) persistence_target: ProviderPersistenceTarget,
     #[cfg(any(test, feature = "test-observation"))]
     pub(super) refusal_warnings: Arc<Mutex<Vec<ExternalProviderApprovalRefusalWarning>>>,
     #[cfg(any(test, feature = "test-observation"))]
@@ -71,12 +74,21 @@ pub(super) fn spawn_external_approval_dispatch<P: InteractionPort>(
     context: Option<ActiveApprovalContext<P>>,
     state: PermissionDispatchState<P>,
 ) -> Result<(), Error> {
+    let request_id = serde_json::to_string(&(request.session_id.0.as_ref(), responder.id()))
+        .map_err(|_| Error::internal_error())?;
     let request_cancellation = responder.cancellation();
+    let response_guard = context.as_ref().map(|context| context.responses.track());
     connection.spawn(async move {
         let outcome = match context {
             Some(context) => {
-                handle_contextual_permission_request(context, request, request_cancellation, &state)
-                    .await
+                handle_contextual_permission_request(
+                    context,
+                    request,
+                    request_id,
+                    request_cancellation,
+                    &state,
+                )
+                .await
             }
             None => RequestPermissionOutcome::Cancelled,
         };
@@ -89,24 +101,53 @@ pub(super) fn spawn_external_approval_dispatch<P: InteractionPort>(
             },
             std::sync::atomic::Ordering::Relaxed,
         );
-        responder.respond(RequestPermissionResponse::new(outcome))
+        let response = responder.respond(RequestPermissionResponse::new(outcome));
+        drop(response_guard);
+        response
     })
 }
 
 async fn handle_contextual_permission_request<P: InteractionPort>(
     context: ActiveApprovalContext<P>,
     request: RequestPermissionRequest,
+    request_id: String,
     request_cancellation: agent_client_protocol::RequestCancellation,
     state: &PermissionDispatchState<P>,
 ) -> RequestPermissionOutcome {
     let provider_session_id = request.session_id.0.to_string();
-    let presentation = approval_presentation(&request.tool_call.fields);
-    let options = map_external_permission_options(request.options);
+    let reviewed = reviewed_approval_fields(&request.tool_call);
+    let options = match map_permission_options(request.options, state.persistence_target) {
+        Ok(options) => options,
+        Err(refused) => {
+            state
+                .interaction_port
+                .record_refusal(
+                    context.approval,
+                    RefusedApprovalOffer {
+                        request_id,
+                        reason: refused.reason,
+                        title: reviewed.title,
+                        description: reviewed.description,
+                        subject: reviewed.subject,
+                        options: refused.options,
+                    },
+                )
+                .await;
+            return RequestPermissionOutcome::Cancelled;
+        }
+    };
+    let canonical_request = ApprovalRequest {
+        request_id,
+        title: reviewed.title,
+        description: reviewed.description,
+        subject: reviewed.subject,
+        options_origin: session_event_model::OptionsOrigin::AgentOffered,
+        options,
+    };
     let agent_cancellation = CancellationToken::new();
     let approval = state.interaction_port.request_approval(
         context.approval.clone(),
-        presentation,
-        options,
+        canonical_request,
         context.cancelling,
         agent_cancellation.clone(),
     );
@@ -120,7 +161,7 @@ async fn handle_contextual_permission_request<P: InteractionPort>(
         outcome = &mut approval => outcome,
     };
     match outcome {
-        ApprovalPortOutcome::Selected { option_id } => {
+        ApprovalPortOutcome::Selected { option_id, .. } => {
             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id))
         }
         ApprovalPortOutcome::Cancelled => RequestPermissionOutcome::Cancelled,

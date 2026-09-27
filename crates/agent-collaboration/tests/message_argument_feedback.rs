@@ -13,6 +13,7 @@ fn session_ref() -> String {
 fn missing_from_is_machine_readable_when_json_is_requested() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_SESSION_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CURSOR_CONVERSATION_ID")
         .args([

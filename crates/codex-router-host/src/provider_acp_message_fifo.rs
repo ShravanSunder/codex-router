@@ -1,6 +1,7 @@
 //! Bounded, Host-lifetime FIFO for provider prompts accepted as queued.
 use crate::{
     ExternalProviderSupervisor, LiveSessionOwnershipCheck,
+    external_provider_supervisor::ProviderPromptContentsRequest,
     external_provider_supervisor::ProviderPromptDispatch,
     provider_acp_session_loading::{ProviderSessionLoadOutcome, ensure_provider_session_loaded},
 };
@@ -27,11 +28,26 @@ const MIN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50
 const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 const PROVIDER_RETIRED_REASON: &str = "providerRetired";
 
+#[derive(Clone)]
+pub(crate) enum ProviderQueuedPrompt {
+    Message(ConversationPromptRequest),
+    Contents(ProviderPromptContentsRequest),
+}
+
+impl ProviderQueuedPrompt {
+    fn operation_id(&self) -> &collaboration_protocol::OperationId {
+        match self {
+            Self::Message(request) => &request.operation_id,
+            Self::Contents(request) => &request.operation_id,
+        }
+    }
+}
+
 pub(crate) struct ProviderAcpMessageFifo {
     supervisor: Arc<ExternalProviderSupervisor>,
     store: Arc<Mutex<ProviderOperationStore>>,
     ownership: Arc<dyn LiveSessionOwnershipCheck>,
-    senders: StdMutex<HashMap<SessionRef, mpsc::Sender<ConversationPromptRequest>>>,
+    senders: StdMutex<HashMap<SessionRef, mpsc::Sender<ProviderQueuedPrompt>>>,
     workers: StdMutex<Vec<JoinHandle<()>>>,
     shutdown: CancellationToken,
 }
@@ -55,7 +71,7 @@ impl ProviderAcpMessageFifo {
     pub(crate) fn reserve(
         &self,
         target: &SessionRef,
-    ) -> Result<mpsc::OwnedPermit<ConversationPromptRequest>, &'static str> {
+    ) -> Result<mpsc::OwnedPermit<ProviderQueuedPrompt>, &'static str> {
         if self.shutdown.is_cancelled() {
             return Err("provider queue is shutting down");
         }
@@ -127,7 +143,7 @@ impl Drop for ProviderAcpMessageFifo {
 
 async fn run_provider_message_fifo(
     target: SessionRef,
-    mut receiver: mpsc::Receiver<ConversationPromptRequest>,
+    mut receiver: mpsc::Receiver<ProviderQueuedPrompt>,
     supervisor: Arc<ExternalProviderSupervisor>,
     store: Arc<Mutex<ProviderOperationStore>>,
     ownership: Arc<dyn LiveSessionOwnershipCheck>,
@@ -144,7 +160,7 @@ async fn run_provider_message_fifo(
                 None => return,
             },
         };
-        let operation_id = request.operation_id.clone();
+        let operation_id = request.operation_id().clone();
         let Some(runtime) = supervisor.runtime_for(&target.endpoint) else {
             drop_current_and_remaining(
                 &supervisor,
@@ -158,6 +174,7 @@ async fn run_provider_message_fifo(
         let mut retry_delay = MIN_RETRY_DELAY;
         let mut loaded = false;
         let mut operation_admitted = false;
+        let mut dispatch_started = false;
         loop {
             if shutdown.is_cancelled() {
                 drop_current_and_remaining(
@@ -248,6 +265,15 @@ async fn run_provider_message_fifo(
                 retry_delay = next_retry_delay(retry_delay);
                 continue;
             }
+            if !dispatch_started {
+                if !supervisor
+                    .queued_operation_registry()
+                    .try_start(&operation_id)
+                {
+                    break;
+                }
+                dispatch_started = true;
+            }
             let submitted = tokio::select! {
                 () = shutdown.cancelled() => {
                     drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, "Router shutdown before provider submission");
@@ -257,7 +283,14 @@ async fn run_provider_message_fifo(
                     drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, PROVIDER_RETIRED_REASON);
                     return;
                 },
-                submitted = supervisor.submit_delivery_prompt(request.clone()) => submitted,
+                submitted = async {
+                    match request.clone() {
+                        ProviderQueuedPrompt::Message(message) =>
+                            supervisor.submit_delivery_prompt(message).await,
+                        ProviderQueuedPrompt::Contents(contents) =>
+                            supervisor.submit_delivery_prompt_contents(contents).await,
+                    }
+                } => submitted,
             };
             match submitted {
                 Ok(
@@ -373,7 +406,7 @@ fn next_retry_delay(current: std::time::Duration) -> std::time::Duration {
 fn drop_current_and_remaining(
     supervisor: &ExternalProviderSupervisor,
     current: &collaboration_protocol::OperationId,
-    receiver: &mut mpsc::Receiver<ConversationPromptRequest>,
+    receiver: &mut mpsc::Receiver<ProviderQueuedPrompt>,
     reason: &str,
 ) {
     supervisor
@@ -384,12 +417,12 @@ fn drop_current_and_remaining(
 
 fn mark_remaining_not_submitted(
     supervisor: &ExternalProviderSupervisor,
-    receiver: &mut mpsc::Receiver<ConversationPromptRequest>,
+    receiver: &mut mpsc::Receiver<ProviderQueuedPrompt>,
     reason: &str,
 ) {
     while let Ok(request) = receiver.try_recv() {
         supervisor
             .queued_operation_registry()
-            .mark_not_submitted(&request.operation_id, reason);
+            .mark_not_submitted(request.operation_id(), reason);
     }
 }

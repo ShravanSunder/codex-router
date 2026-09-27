@@ -300,10 +300,8 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     model_value.handle_key(SessionsPickerKey::SearchChar(character));
                 }
                 KeyCode::Enter if modifiers.contains(KeyModifiers::ALT) => {
-                    if let Some(session_id) = model_value.focused_session_id() {
-                        selected_outcome.set(Some(SessionsPickerOutcome::ForkSession(
-                            session_id.to_owned(),
-                        )));
+                    if let Some(outcome) = model_value.fork_outcome_for_focus() {
+                        selected_outcome.set(Some(outcome));
                     }
                 }
                 KeyCode::Enter => selected_outcome.set(model_value.activation_outcome_for_focus()),

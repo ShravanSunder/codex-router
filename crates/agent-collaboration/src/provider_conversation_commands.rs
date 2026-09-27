@@ -57,11 +57,14 @@ pub(crate) fn report_client_failure(
 fn report_typed_failure(failure: &ConversationOperationFailure, json_output: bool) -> i32 {
     let exit = match failure.kind {
         ConversationOperationFailureKind::InvalidRequest
+        | ConversationOperationFailureKind::InvalidSetting
         | ConversationOperationFailureKind::UnsupportedCapability
         | ConversationOperationFailureKind::ProtocolViolation => 2,
-        ConversationOperationFailureKind::AuthenticationRequired
+        ConversationOperationFailureKind::Overloaded
+        | ConversationOperationFailureKind::AuthenticationRequired
         | ConversationOperationFailureKind::Unavailable => 3,
         ConversationOperationFailureKind::PermissionRejected
+        | ConversationOperationFailureKind::SettingsUnresolved
         | ConversationOperationFailureKind::Busy
         | ConversationOperationFailureKind::NotFound
         | ConversationOperationFailureKind::StaleGeneration

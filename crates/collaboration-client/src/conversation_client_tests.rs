@@ -205,7 +205,7 @@ fn conversation_transport_follows_advertised_channel() {
 #[tokio::test]
 async fn provider_create_rejects_codex_only_inputs_before_mutation() {
     use collaboration_service::{ServiceIdentity, serve_control_connection};
-    for field in ["model", "effort", "fork", "rootMessageId"] {
+    for field in ["fork", "rootMessageId"] {
         let (client, server) =
             tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("socket pair: {error}"));
         let identity = ServiceIdentity::new(
@@ -225,8 +225,6 @@ async fn provider_create_rejects_codex_only_inputs_before_mutation() {
             "createdBy":{"endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"codex-local"},"sessionId":"caller"}
         })).unwrap_or_else(|error| panic!("create input: {error}"));
         match field {
-            "model" => input.model = Some("gpt-6-sol".to_owned()),
-            "effort" => input.effort = Some("medium".to_owned()),
             "fork" => {
                 input.fork = Some(
                     "source-thread"
@@ -326,6 +324,30 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
                 })
             })
         }
+        fn resume(
+            &self,
+            _: collaboration_protocol::ConversationResumeRequest,
+        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+            let operation = self.admitted.clone();
+            Box::pin(async move {
+                Ok(ConversationOperationSubmission {
+                    admission: ConversationAdmissionState::Admitted,
+                    operation,
+                })
+            })
+        }
+        fn close(
+            &self,
+            _: collaboration_protocol::ConversationCloseRequest,
+        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+            let operation = self.admitted.clone();
+            Box::pin(async move {
+                Ok(ConversationOperationSubmission {
+                    admission: ConversationAdmissionState::Admitted,
+                    operation,
+                })
+            })
+        }
         fn prompt(
             &self,
             _: ConversationPromptRequest,
@@ -366,11 +388,16 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
             let wait_delay = self.wait_delay;
             Box::pin(async move {
                 tokio::time::sleep(wait_delay).await;
+                let target = operation.target.clone();
                 Ok(ConversationOperationWaitResult {
                     operation,
-                    output: ConversationOperationWaitOutput::OutputUnavailable {
-                        reason:
-                            collaboration_protocol::ConversationOutputUnavailableReason::NotRetained,
+                    output: ConversationOperationWaitOutput::Available {
+                        settlement: serde_json::from_value(json!({
+                            "kind":"created","target":target,
+                            "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},
+                                "mappingStatus":"verified","authentication":"authenticated"}
+                        }))
+                        .expect("created settlement"),
                     },
                 })
             })
@@ -436,6 +463,10 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
         != (ConversationCreateOutcome::Created {
             operation_id: operation_id.clone(),
             target: serde_json::from_value(target)?,
+            effective_settings: Some(serde_json::from_value(json!({
+                "requestedPolicy":{"access":"workspace-write"},
+                "mappingStatus":"verified","authentication":"authenticated"
+            }))?),
         })
         || create_calls.load(Ordering::SeqCst) != 1
         || wait_calls.load(Ordering::SeqCst) != 1

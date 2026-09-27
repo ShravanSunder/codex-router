@@ -9,8 +9,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-message-board = { path = "../message-board", version = "0.1.40" }
+message-board = { path = "../message-board", version = "0.1.39" }
+schemars.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+base64.workspace = true
+uuid.workspace = true

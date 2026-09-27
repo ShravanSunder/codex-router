@@ -63,6 +63,7 @@ impl ExternalProviderLaunchBinding {
             label: NonEmptyText::try_from(label.to_owned())?,
             provider,
             launch: crate::ExternalProviderLaunch {
+                persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
                 executable,
                 arguments,
                 environment: Vec::new(),
@@ -314,6 +315,7 @@ impl CollaborationRuntime {
         .await?;
         let provider_retirements = startup.retirements;
         let external_provider_supervisor = startup.supervisor;
+        let provider_session_hub = startup.hub;
         let provider_endpoints = startup
             .endpoints
             .iter()
@@ -329,6 +331,9 @@ impl CollaborationRuntime {
                 dyn collaboration_service::ProviderConversationBackend,
             > = supervisor.clone();
             identity = identity.with_provider_conversation_backend(provider_backend);
+        }
+        if let Some(hub) = provider_session_hub {
+            identity = identity.with_provider_session_hub(hub);
         }
         let endpoint = EndpointRef {
             service_id: service_id.clone(),
@@ -346,7 +351,7 @@ impl CollaborationRuntime {
             endpoint,
             gate: publication.admission_gate(),
         };
-        let approval_broker = collaboration_service::ServiceApprovalBroker::load(
+        let approval_broker = collaboration_service::ServiceInteractionBroker::load(
             service_id.clone(),
             native_backend.clone(),
             inputs.directory.join("approval-routes.json"),

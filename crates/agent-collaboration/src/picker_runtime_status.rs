@@ -1,4 +1,4 @@
-use collaboration_client::protocol::{NativeActiveFlag, NativeThreadStatus};
+use collaboration_client::protocol::{NativeActiveFlag, NativeThreadStatus, ProviderSessionState};
 
 /// Availability of the selected Host's observation, separate from any thread's state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -39,6 +39,17 @@ pub(crate) enum PickerRuntimeStatus {
 }
 
 impl PickerRuntimeStatus {
+    pub(crate) const fn from_provider(state: &ProviderSessionState) -> Self {
+        match state {
+            ProviderSessionState::Unloaded | ProviderSessionState::Closed => Self::NotLoaded,
+            ProviderSessionState::Idle => Self::Idle,
+            ProviderSessionState::Running => Self::Active,
+            ProviderSessionState::RequiresAction | ProviderSessionState::AuthenticationRequired => {
+                Self::Blocked
+            }
+        }
+    }
+
     pub(crate) fn from_native(status: &NativeThreadStatus) -> Self {
         match status {
             NativeThreadStatus::NotLoaded => Self::NotLoaded,

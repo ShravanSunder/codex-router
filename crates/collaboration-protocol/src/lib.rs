@@ -10,38 +10,73 @@ pub use operation_failure_contract::{
 };
 mod conversation_create_outcome;
 mod provider_conversation_contract;
+mod provider_identity;
+mod provider_settings_contract;
 pub use conversation_create_outcome::ConversationCreateOutcome;
 pub use provider_conversation_contract::{
-    ConversationAdmissionState, ConversationBindingIdentity, ConversationCancelRequest,
-    ConversationCreateRequest, ConversationLoadRequest, ConversationOperationFailure,
-    ConversationOperationFailureKind, ConversationOperationFailureStage,
-    ConversationOperationQueueState, ConversationOperationReconcileRequest,
-    ConversationOperationSettlement, ConversationOperationShowRequest,
-    ConversationOperationSnapshot, ConversationOperationSubmission,
-    ConversationOperationWaitOutput, ConversationOperationWaitRequest,
-    ConversationOperationWaitResult, ConversationOutputUnavailableReason,
-    ConversationPromptRequest, EffectiveProviderSettings, ProviderAuthenticationState,
+    AppliedProviderSetting, ConversationAdmissionState, ConversationBindingIdentity,
+    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
+    ConversationLoadRequest, ConversationOperationFailure, ConversationOperationFailureKind,
+    ConversationOperationFailureStage, ConversationOperationQueueState,
+    ConversationOperationReconcileRequest, ConversationOperationSettlement,
+    ConversationOperationShowRequest, ConversationOperationSnapshot,
+    ConversationOperationSubmission, ConversationOperationWaitOutput,
+    ConversationOperationWaitRequest, ConversationOperationWaitResult,
+    ConversationOutputUnavailableReason, ConversationPromptRequest, ConversationResumeRequest,
+    EffectiveProviderSettings, FailedProviderSetting, InvalidProviderSetting,
+    InvalidSettingSessionDisposition, NotAppliedProviderSetting, ProviderAuthenticationState,
     ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities, ProviderCapability,
     ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
     ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
     ProviderPermissionOutcome, ProviderPromptStopReason, ProviderReconciliationState,
-    ProviderRequestedPolicy, ProviderRuntimeIdentity, ProviderSettingsMappingStatus,
-    ProviderTransport, ProviderWorkingDirectory,
+    ProviderRequestedPolicy, ProviderRequestedSettings, ProviderRuntimeIdentity,
+    ProviderSettingName, ProviderSettingsMappingStatus, ProviderTransport,
+    ProviderWorkingDirectory,
+};
+pub use provider_identity::ProviderIdentity;
+pub use provider_settings_contract::{
+    ProviderSettingsAcceptRequest, ProviderSettingsFailure, ProviderSettingsFailureKind,
+    ProviderSettingsResult, ProviderSettingsSetRequest,
 };
 mod access_contract;
 mod approval_contract;
+mod interaction_actor;
 mod permission_diagnostic;
+mod provider_session_inspect;
+mod provider_session_list;
+mod session_observation_contract;
+pub use provider_session_inspect::{
+    ProviderConfigOptionView, ProviderConfigValueView, ProviderHistoryAvailability,
+    ProviderInspectFailure, ProviderInspectFailureKind, ProviderSessionInspectRequest,
+    ProviderSessionInspectResult, ProviderSettingChoiceView, ProviderSettingsCatalogView,
+};
+mod question_contract;
 pub use access_contract::{
     RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,
 };
 pub use approval_contract::{
     ApprovalArgument, ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision,
-    ApprovalListParams, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionScope,
-    ApprovalPresentation, ApprovalRequestRecord, ApprovalState,
+    ApprovalDetailedListResult, ApprovalDetailedRecord, ApprovalListParams, ApprovalListResponse,
+    ApprovalListResult, ApprovalOfferedOption, ApprovalOptionEffect, ApprovalOptionScope,
+    ApprovalOptionView, ApprovalOptionViewScope, ApprovalPresentation, ApprovalRequestRecord,
+    ApprovalState,
 };
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,
     PermissionDiagnosticStage,
+};
+pub use provider_session_list::{
+    ProviderSessionListParams, ProviderSessionListResult, ProviderSessionState,
+    ProviderSessionSummary,
+};
+pub use question_contract::{
+    QuestionAnswerParams, QuestionAnswerResult, QuestionAnswerValue, QuestionFieldView,
+    QuestionListParams, QuestionListResult, QuestionRecord, QuestionResponse, QuestionState,
+};
+pub use session_observation_contract::{
+    BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
+    ProviderObservationEventTooLarge, ProviderObservationEventTooLargeKind,
+    ProviderSessionListenReady, ProviderSessionListenRequest,
 };
 mod backend_generation;
 mod control_error_validation;

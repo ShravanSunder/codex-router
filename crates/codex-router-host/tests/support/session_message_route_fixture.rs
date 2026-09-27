@@ -1,13 +1,12 @@
 //! ACP, peer, wake, listen, and approval fixtures for Host composition proof.
 use collaboration_client::{ControlClient, MessageSendRequest, PublicMessageContent};
 use collaboration_protocol::{
-    ApprovalDecideParams, ApprovalDecision, ConversationCreateRequest,
-    ConversationOperationSettlement, ConversationOperationWaitOutput,
-    ConversationOperationWaitRequest, ConversationPromptRequest, DeliveryDisposition,
-    DeliveryEvidence, DeliveryOutcome, DeliveryShowRequest, EndpointRef, MessageContent,
-    MessageDelivery, MessageText, OperationId, PositiveSeconds, ProviderRequestedPolicy,
-    ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef, WakeSendRequest,
-    WakeShowRequest,
+    ApprovalDecideParams, ConversationCreateRequest, ConversationOperationSettlement,
+    ConversationOperationWaitOutput, ConversationOperationWaitRequest, ConversationPromptRequest,
+    DeliveryDisposition, DeliveryEvidence, DeliveryOutcome, DeliveryShowRequest, EndpointRef,
+    MessageContent, MessageDelivery, MessageText, OperationId, PositiveSeconds,
+    ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef,
+    WakeSendRequest, WakeShowRequest,
 };
 use message_board::{
     BoardCreateRequest, BoardId, Description, HumanId, Identity, MessageId, MessagePostRequest,
@@ -267,6 +266,7 @@ pub(super) async fn create_provider_target(
     let operation_id = OperationId::generate();
     client
         .create_provider_conversation(ConversationCreateRequest {
+            settings: None,
             operation_id: operation_id.clone(),
             endpoint,
             generation: Some(collaboration_protocol::CodexGeneration {
@@ -277,8 +277,8 @@ pub(super) async fn create_provider_target(
                 working_directory.display().to_string(),
             )
             .expect("working directory"),
-            created_by: actor.clone(),
-            approver: actor,
+            created_by: (actor.clone()).into(),
+            approver: (actor).into(),
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
@@ -377,14 +377,15 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
     let operation_id = OperationId::generate();
     client
         .prompt_provider_conversation(ConversationPromptRequest {
+            input_id: None,
             operation_id: operation_id.clone(),
             target: requester.clone(),
             generation: Some(collaboration_protocol::CodexGeneration {
                 service_epoch: inventory.service_epoch,
                 generation: generation_number,
             }),
-            requested_by: requester,
-            approver: approver.clone(),
+            requested_by: (requester).into(),
+            approver: (approver.clone()).into(),
             prompt: MessageContent::HumanUser {
                 text: MessageText::try_from("request permission".to_owned())
                     .expect("permission prompt"),
@@ -392,20 +393,33 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
         })
         .await
         .expect("permission prompt admitted");
-    wait_for_prompt_text(approver_prompt_log, "approval-").await;
+    wait_for_prompt_text(approver_prompt_log, "externalProviderPermission").await;
     let pending = client
-        .list_pending_approvals(true)
+        .list_approvals_with_options(true)
         .await
         .expect("pending approvals")
         .approvals
         .into_iter()
-        .find(|record| record.approver == approver)
+        .find(|record| {
+            serde_json::to_value(&record.approver).ok()
+                == Some(json!({"kind":"session","session":approver.clone()}))
+        })
         .expect("approval for other provider");
+    assert!(
+        pending
+            .options
+            .iter()
+            .any(|option| option.option_id == "allow-once")
+    );
     client
         .decide_approval(ApprovalDecideParams {
             request_id: pending.request_id,
-            decision: ApprovalDecision::Allow,
-            actor: approver,
+            decision: None,
+            option_id: Some("allow-once".to_owned()),
+            acknowledge_persistent: false,
+            note: None,
+            actor: serde_json::from_value(json!({"kind":"session","session":approver.clone()}))
+                .expect("approver identity"),
         })
         .await
         .expect("approval decision");
@@ -422,4 +436,45 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
             settlement: ConversationOperationSettlement::PromptCompleted { .. }
         }
     ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let log = std::fs::read_to_string(approver_prompt_log).unwrap_or_default();
+            let notice_id = log
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|entry| {
+                    entry["method"] == "session/prompt"
+                        && entry["params"]["prompt"][0]["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("externalProviderPermission"))
+                })
+                .and_then(|entry| entry["id"].as_str().map(str::to_owned));
+            if notice_id
+                .is_some_and(|id| log.contains(&format!("\"fixturePromptCompleted\": \"{id}\"")))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approver notice turn settled before later board activity");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if client
+                .inspect_provider_session(collaboration_protocol::ProviderSessionInspectRequest {
+                    target: approver.clone(),
+                })
+                .await
+                .is_ok_and(|session| {
+                    session.state == collaboration_protocol::ProviderSessionState::Idle
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approver Session idle before later board activity");
 }

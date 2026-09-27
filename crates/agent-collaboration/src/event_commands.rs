@@ -1,7 +1,7 @@
-//! Scoped native event output; attachment is explicit and cancellation only closes observation.
+//! Scoped Session event output; attachment is explicit and cancellation only closes observation.
 use clap::{Parser, Subcommand};
 use collaboration_client::protocol::{EndpointId, EndpointRef, SessionId, SessionRef};
-use collaboration_client::{BoundedObservationRequest, ControlClient, NativeObservation};
+use collaboration_client::{BoundedObservationRequest, ControlClient, SessionObservation};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -21,7 +21,7 @@ struct EventArguments {
 }
 #[derive(Subcommand)]
 enum EventCommand {
-    /// Attach/load a native thread and stream its events. Closing does not interrupt work.
+    /// Attach to a native or provider Session and stream its events.
     Listen {
         #[arg(long)]
         endpoint: String,
@@ -34,7 +34,7 @@ enum EventCommand {
         #[arg(long,default_value_t=60,value_parser=clap::value_parser!(u64).range(1..))]
         timeout_seconds: u64,
     },
-    /// Attach/load a native thread and return one bounded JSON observation result.
+    /// Attach to a native or provider Session and return one bounded observation.
     Observe {
         #[arg(long)]
         endpoint: String,
@@ -50,6 +50,10 @@ enum EventCommand {
         max_events: usize,
         #[arg(long, default_value_t = 262_144, value_parser = parse_max_bytes)]
         max_bytes: usize,
+        #[arg(long, requires = "epoch")]
+        after_sequence: Option<u64>,
+        #[arg(long)]
+        epoch: Option<u64>,
     },
 }
 
@@ -117,14 +121,20 @@ pub fn run_event_command(arguments: Vec<OsString>) -> i32 {
                 timeout_seconds,
                 max_events,
                 max_bytes,
+                after_sequence,
+                epoch,
             } => {
                 observe(
                     &directory,
-                    endpoint,
-                    session,
-                    timeout_seconds,
-                    max_events,
-                    max_bytes,
+                    ObserveInput {
+                        endpoint,
+                        session,
+                        timeout_seconds,
+                        max_events,
+                        max_bytes,
+                        after_sequence,
+                        epoch,
+                    },
                 )
                 .await
             }
@@ -153,7 +163,7 @@ async fn listen(
                 collaboration_client::ClientError::Protocol("invalid session"),
             )
         })?;
-        NativeObservation::attach_by_ids_with_context(directory, endpoint_id, session_id).await
+        SessionObservation::attach_by_ids_with_context(directory, endpoint_id, session_id).await
     }
     .await;
     let mut observation = match attached {
@@ -171,6 +181,7 @@ async fn listen(
     };
     let target = observation.target().clone();
     let generation = observation.generation().clone();
+    let provider = observation.is_provider();
     if writeln!(
         io::stdout(),
         "{}",
@@ -196,9 +207,28 @@ async fn listen(
             message=observation.next_message()=>message,
         };
         match message {
-                Ok(message)=>if writeln!(io::stdout(),"{}",json!({"kind":"nativeMessage","target":target,"generation":generation,"message":message})).is_err(){return 3;},
-                Err(_)=>{let _printed=writeln!(io::stdout(),"{}",json!({"kind":"connectionClosed","reason":"nativeConnectionLost"}));return 3;}
+            Ok(message) => {
+                let resync_required = provider
+                    && (message.get("kind").and_then(serde_json::Value::as_str)
+                        == Some("resyncRequired")
+                        || message
+                            .pointer("/event/kind")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("resyncRequired"));
+                if writeln!(io::stdout(),"{}",json!({"kind":if provider {"providerSessionEvent"} else {"nativeMessage"},"target":target,"generation":generation,"message":message})).is_err(){return 3;}
+                if resync_required {
+                    return 3;
+                }
             }
+            Err(_) => {
+                let _printed = writeln!(
+                    io::stdout(),
+                    "{}",
+                    json!({"kind":"connectionClosed","reason":if provider {"providerObservationLost"} else {"nativeConnectionLost"}})
+                );
+                return 3;
+            }
+        }
     }
 }
 
@@ -218,15 +248,18 @@ fn report_observation_error(error: collaboration_client::OperationError) -> i32 
     exit
 }
 
-async fn observe(
-    directory: &std::path::Path,
+struct ObserveInput {
     endpoint: String,
     session: String,
     timeout_seconds: u64,
     max_events: usize,
     max_bytes: usize,
-) -> i32 {
-    let endpoint_id = match EndpointId::try_from(endpoint) {
+    after_sequence: Option<u64>,
+    epoch: Option<u64>,
+}
+
+async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
+    let endpoint_id = match EndpointId::try_from(input.endpoint) {
         Ok(value) => value,
         Err(_) => {
             return crate::endpoint_commands::report_failure(
@@ -237,7 +270,7 @@ async fn observe(
             );
         }
     };
-    let session_id = match SessionId::try_from(session) {
+    let session_id = match SessionId::try_from(input.session) {
         Ok(value) => value,
         Err(_) => {
             return crate::endpoint_commands::report_failure(
@@ -278,13 +311,15 @@ async fn observe(
     };
     drop(control);
     let cancel = tokio_util::sync::CancellationToken::new();
-    let observation = NativeObservation::observe_bounded(
+    let observation = SessionObservation::observe_bounded(
         directory,
         BoundedObservationRequest {
             target,
-            timeout_seconds,
-            max_events,
-            max_bytes,
+            timeout_seconds: input.timeout_seconds,
+            max_events: input.max_events,
+            max_bytes: input.max_bytes,
+            after_sequence: input.after_sequence,
+            epoch: input.epoch,
         },
         cancel.clone(),
     );
@@ -318,5 +353,55 @@ async fn observe(
             let _printed = writeln!(io::stdout(), "{record}");
             exit
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{EventArguments, EventCommand};
+
+    #[test]
+    fn observe_accepts_paging_cursor_with_epoch() {
+        let arguments = EventArguments::try_parse_from([
+            "events",
+            "observe",
+            "--endpoint",
+            "claude-local",
+            "--session",
+            "session-one",
+            "--attach",
+            "--after-sequence",
+            "12",
+            "--epoch",
+            "3",
+        ])
+        .expect("paged observe args");
+        match arguments.command {
+            EventCommand::Observe {
+                after_sequence,
+                epoch,
+                ..
+            } => {
+                assert_eq!(after_sequence, Some(12));
+                assert_eq!(epoch, Some(3));
+            }
+            EventCommand::Listen { .. } => panic!("expected observe"),
+        }
+        assert!(
+            EventArguments::try_parse_from([
+                "events",
+                "observe",
+                "--endpoint",
+                "claude-local",
+                "--session",
+                "session-one",
+                "--attach",
+                "--after-sequence",
+                "12",
+            ])
+            .is_err()
+        );
     }
 }

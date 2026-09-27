@@ -1,8 +1,14 @@
 //! ACP provider message delivery, evidence, and reconciliation.
+mod provider_active_turn_cancel;
+mod provider_content_commands;
 mod provider_queue_submission;
+pub use provider_active_turn_cancel::ProviderCancelActiveTurnError;
+pub use provider_content_commands::{
+    ProviderPromptContentsError, ProviderQueueAdmissionError, ProviderSteerContentsError,
+};
 
-use crate::external_provider_supervisor::ProviderPromptDispatch;
-use crate::provider_acp_message_fifo::ProviderAcpMessageFifo;
+use crate::external_provider_supervisor::{ProviderPromptContentsRequest, ProviderPromptDispatch};
+use crate::provider_acp_message_fifo::{ProviderAcpMessageFifo, ProviderQueuedPrompt};
 use crate::provider_acp_route_claim::ProviderAcpRouteClaim;
 use crate::provider_acp_session_loading::{
     ProviderSessionLoadOutcome, ProviderSessionLoadRejection, ensure_provider_session_loaded,
@@ -18,8 +24,8 @@ use agent_automation::{
 use collaboration_protocol::{
     CodexGeneration, ConversationPromptRequest, DeliveryClientReceipt, DeliveryNextAction,
     DeliveryOutcome, DeliveryReceipt, DeliveryRejection, DeliveryRejectionReason, MessageContent,
-    MessageDelivery, OperationId, ProviderOperationEffect, ProviderOperationStage,
-    SessionReachability, SessionRef, UuidIdentity, render_message,
+    MessageDelivery, OperationId, ProviderIdentity, ProviderOperationEffect,
+    ProviderOperationStage, SessionReachability, SessionRef, UuidIdentity, render_message,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
@@ -44,6 +50,21 @@ pub struct ProviderAcpDeliveryRoute {
 }
 
 impl ProviderAcpDeliveryRoute {
+    #[must_use]
+    pub fn queue_list(&self, session: &SessionRef) -> Vec<crate::ProviderQueuedInput> {
+        self.supervisor.queued_operation_registry().list(session)
+    }
+
+    pub fn queue_cancel(
+        &self,
+        session: &SessionRef,
+        input_id: &session_event_model::InputId,
+    ) -> Result<(), crate::ProviderQueueCancellationError> {
+        self.supervisor
+            .queued_operation_registry()
+            .cancel(session, input_id)
+    }
+
     #[must_use]
     pub fn new(
         service_id: UuidIdentity,
@@ -199,10 +220,17 @@ impl ProviderAcpDeliveryRoute {
         }
         let operation_id = OperationId::try_from(request.attempt.as_str().to_owned())
             .map_err(|_| DeliveryContractError::InvalidEvidence)?;
+        let input_id = session_event_model::InputId::generate();
         let Some(runtime) = self.supervisor.runtime_for(&request.target.endpoint) else {
             return Ok(Self::not_submitted("provider runtime is unavailable", true));
         };
         let provider_session_id = String::from(request.target.session_id.clone());
+        if runtime.settings_unresolved(&provider_session_id).await {
+            return Ok(Self::rejected(
+                DeliveryRejectionReason::SettingsUnresolved,
+                "settingsUnresolved: set requested settings or accept current values before prompt, steer or queue",
+            ));
+        }
         let capabilities = runtime.capability_report(&provider_session_id).await;
         if request.mode == MessageDelivery::Steer && !capabilities.supports_steering {
             return Ok(Self::rejected(
@@ -306,7 +334,11 @@ impl ProviderAcpDeliveryRoute {
                 }
             };
             match runtime
-                .steer_session(String::from(request.target.session_id.clone()), prompt.text)
+                .steer_session_with_input(
+                    String::from(request.target.session_id.clone()),
+                    input_id.clone(),
+                    prompt.text,
+                )
                 .await
             {
                 Ok(ProviderSteeringOutcome::Injected {
@@ -376,13 +408,14 @@ impl ProviderAcpDeliveryRoute {
             Err(_) => return self.finish_unknown(sink, &mut effect).await,
         };
         let requested_by = match &request.message {
-            MessageContent::Agent { sender, .. } => sender.clone(),
+            MessageContent::Agent { sender, .. } => sender.clone().into(),
             MessageContent::HumanUser { .. } | MessageContent::Router { .. } => record.created_by,
         };
         let dispatch = self
             .supervisor
             .submit_delivery_prompt(ConversationPromptRequest {
                 operation_id: operation_id.clone(),
+                input_id: Some(input_id),
                 target: request.target.clone(),
                 generation: Some(binding.generation),
                 requested_by,

@@ -276,6 +276,36 @@ impl ControlClient {
         }
         Ok(result)
     }
+    pub async fn list_provider_sessions(
+        &mut self,
+        params: collaboration_protocol::ProviderSessionListParams,
+    ) -> Result<collaboration_protocol::ProviderSessionListResult, ClientError> {
+        if !(1..=100).contains(&params.page_size) {
+            return Err(ClientError::InvalidRequest(
+                "invalid provider session page size",
+            ));
+        }
+        let value = self
+            .connection
+            .call("provider/sessionList", json!(params))
+            .await?;
+        let result: collaboration_protocol::ProviderSessionListResult =
+            serde_json::from_value(value)
+                .map_err(|_| ClientError::Protocol("invalid provider session inventory"))?;
+        if result.endpoint != params.endpoint
+            || result.sessions.len() > params.page_size as usize
+            || result
+                .sessions
+                .iter()
+                .any(|row| row.target.endpoint != params.endpoint)
+        {
+            self.connection.failed = true;
+            return Err(ClientError::Protocol(
+                "inconsistent provider session inventory",
+            ));
+        }
+        Ok(result)
+    }
     pub async fn inspect_session(
         &mut self,
         target: &collaboration_protocol::SessionRef,
@@ -352,11 +382,30 @@ impl ControlClient {
             .call(
                 "approval/list",
                 json!(collaboration_protocol::ApprovalListParams {
-                    pending: pending_only
+                    pending: pending_only,
+                    include_options: false,
                 }),
             )
             .await?;
         serde_json::from_value(value).map_err(|_| ClientError::Protocol("invalid approval list"))
+    }
+
+    pub async fn list_approvals_with_options(
+        &mut self,
+        pending_only: bool,
+    ) -> Result<collaboration_protocol::ApprovalDetailedListResult, ClientError> {
+        let value = self
+            .connection
+            .call(
+                "approval/list",
+                json!(collaboration_protocol::ApprovalListParams {
+                    pending: pending_only,
+                    include_options: true,
+                }),
+            )
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|_| ClientError::Protocol("invalid detailed approval list"))
     }
 
     pub async fn decide_approval(
@@ -401,6 +450,67 @@ impl ControlClient {
                 None,
                 None,
                 ClientError::Protocol("inconsistent approval decision receipt"),
+            ));
+        }
+        Ok(result)
+    }
+
+    pub async fn list_questions(
+        &mut self,
+        pending_only: bool,
+    ) -> Result<collaboration_protocol::QuestionListResult, ClientError> {
+        let value = self
+            .connection
+            .call(
+                "question/list",
+                json!(collaboration_protocol::QuestionListParams {
+                    pending: pending_only
+                }),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|_| ClientError::Protocol("invalid question list"))
+    }
+
+    pub async fn answer_question(
+        &mut self,
+        params: collaboration_protocol::QuestionAnswerParams,
+    ) -> Result<collaboration_protocol::QuestionAnswerResult, crate::OperationError> {
+        let request_id = params.request_id.clone();
+        let encoded = serde_json::to_value(params).map_err(|_| {
+            crate::OperationError::before_dispatch(
+                "question-answer",
+                None,
+                ClientError::InvalidRequest("invalid question answer"),
+            )
+        })?;
+        self.connection
+            .validate_call_before_transmission("question/answer", &encoded)
+            .map_err(|source| {
+                crate::OperationError::before_dispatch("question-answer", None, source)
+            })?;
+        let value = self
+            .connection
+            .call("question/answer", encoded)
+            .await
+            .map_err(|source| {
+                crate::OperationError::after_dispatch("question-answer", None, None, source)
+            })?;
+        let result: collaboration_protocol::QuestionAnswerResult = serde_json::from_value(value)
+            .map_err(|_| {
+                crate::OperationError::after_dispatch(
+                    "question-answer",
+                    None,
+                    None,
+                    ClientError::Protocol("invalid question result"),
+                )
+            })?;
+        if result.request_id != request_id {
+            self.connection.failed = true;
+            return Err(crate::OperationError::after_dispatch(
+                "question-answer",
+                None,
+                None,
+                ClientError::Protocol("inconsistent question result"),
             ));
         }
         Ok(result)
@@ -577,6 +687,41 @@ impl ControlClient {
                 return Err(ClientError::Protocol("invalid wake notification envelope"));
             }
             return Ok(frame);
+        }
+    }
+
+    /// Reads one provider Session event on a subscribed Control connection.
+    pub async fn next_provider_session_notification(&mut self) -> Result<Value, ClientError> {
+        if self.connection.failed {
+            return Err(ClientError::Protocol("connection is retired"));
+        }
+        loop {
+            let frame = if let Some(frame) = self.connection.notifications.pop_front() {
+                frame
+            } else if let Some(frame) = self.connection.incoming.pop_front() {
+                frame
+            } else {
+                self.connection.read_frames().await?;
+                continue;
+            };
+            if frame.get("method").and_then(Value::as_str) == Some("endpoint/changed") {
+                self.notification_state.consume(frame)?;
+                continue;
+            }
+            if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+                || frame.get("method").and_then(Value::as_str) != Some("provider/sessionEvent")
+                || frame.get("id").is_some()
+                || frame.as_object().is_none_or(|object| object.len() != 3)
+            {
+                self.connection.failed = true;
+                return Err(ClientError::Protocol(
+                    "invalid provider Session notification",
+                ));
+            }
+            return frame
+                .get("params")
+                .cloned()
+                .ok_or(ClientError::Protocol("provider Session event missing"));
         }
     }
     pub async fn close(mut self) -> Result<(), ClientError> {

@@ -253,14 +253,20 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let tools = server.resolved_tools();
-    assert_eq!(tools.len(), 95);
+    assert_eq!(tools.len(), 103);
     let mut names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 95);
+    assert_eq!(names.len(), 103);
+    assert!(names.contains(&"conversation_resume"));
+    assert!(names.contains(&"conversation_close"));
+    assert!(names.contains(&"provider_sessions_list"));
+    assert!(names.contains(&"provider_session_inspect"));
+    assert!(names.contains(&"question_list"));
+    assert!(names.contains(&"question_answer"));
     for tool in tools {
         let input = serde_json::to_value(&tool.input_schema).expect("input schema JSON");
         jsonschema::validator_for(&input)
@@ -294,7 +300,12 @@ fn typed_tool_names_cover_every_control_domain_operation() {
         .expect("Control method map");
     let expected = methods
         .keys()
-        .filter(|method| method.as_str() != "control/initialize")
+        .filter(|method| {
+            !matches!(
+                method.as_str(),
+                "control/initialize" | "provider/sessionObserve" | "provider/sessionListen"
+            )
+        })
         .map(|method| expected_tool_name(method))
         .chain([
             "conversation_create".to_owned(),
@@ -541,6 +552,7 @@ fn conversation_create_tool_preserves_created_and_pending_operation_identity() {
         Ok(ConversationCreateOutcome::Created {
             operation_id: operation_id.clone(),
             target,
+            effective_settings: None,
         }),
         operation_id.clone(),
     );
@@ -971,7 +983,7 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
         .into_iter()
         .filter_map(|tool| tool.output_schema.map(|schema| (tool.name, schema)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(advertised.len(), 95);
+    assert_eq!(advertised.len(), 103);
 
     let message = serde_json::json!({
         "messageId":"019f0000-0000-7000-8000-000000000001",
@@ -1004,7 +1016,32 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
         "consecutiveRejections":0,
         "lastRejection":null
     });
+    let provider_endpoint = serde_json::json!({
+        "serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"
+    });
+    let provider_target =
+        serde_json::json!({"endpoint":provider_endpoint,"sessionId":"provider-session"});
+    let provider_settings = serde_json::json!({
+        "target":provider_target,
+        "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},
+            "mappingStatus":"verified","authentication":"authenticated","mode":"ask"}
+    });
+    let provider_operation = serde_json::json!({
+        "operationId":OperationId::generate(), "operation":"conversationResume",
+        "binding":{"kind":"externalProvider","binding":{
+            "endpoint":provider_endpoint,"bindingId":"binding-1",
+            "runtime":{"provider":"claudeCode","runtimeName":"claude-agent-acp"},
+            "transport":"stdioAcp",
+            "generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1},
+            "capabilities":[{"name":"prompt","status":"supported","evidence":"advertised"}]
+        }},
+        "target":provider_target,"stage":"mayHaveDispatched","effect":"unknown",
+        "reconciliation":"unresolved","admittedAt":"2026-09-27T00:00:00Z"
+    });
+    let mut close_operation = provider_operation.clone();
+    close_operation["operation"] = serde_json::json!("conversationClose");
     let valid_instances = std::collections::BTreeMap::from([
+        ("approval_list", serde_json::json!({"approvals":[]})),
         ("board_message_show", message),
         ("board_thread_listen_cancel", listen.clone()),
         ("board_thread_listen_show", listen),
@@ -1022,6 +1059,16 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
                 "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"fixture"}}),
         ),
         (
+            "conversation_close",
+            serde_json::json!({"admission":"admitted","operation":close_operation}),
+        ),
+        (
+            "conversation_resume",
+            serde_json::json!({"admission":"admitted","operation":provider_operation}),
+        ),
+        ("conversation_settings_set", provider_settings.clone()),
+        ("conversation_settings_accept", provider_settings),
+        (
             "conversation_prompt",
             serde_json::json!({"kind":"pending","operationId":OperationId::generate(),
                 "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"fixture"}}),
@@ -1029,6 +1076,35 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
         (
             "journal_status",
             serde_json::json!({"storage":"unavailable"}),
+        ),
+        (
+            "provider_sessions_list",
+            serde_json::json!({
+                "endpoint":provider_endpoint,"observedAt":"2026-09-27T00:00:00Z","sessions":[]
+            }),
+        ),
+        (
+            "provider_session_inspect",
+            serde_json::json!({
+                "target":provider_target,"state":"idle","history":"available",
+                "capabilities":{"load":true,"resume":true,"close":true,"list":true,"steer":false,
+                    "queue":null,"modes":false,"configOptions":false,"elicitation":false,
+                    "usage":false,"promptContent":{"image":false,"audio":false,"embeddedContext":false},
+                    "authStatus":{"kind":"apiKey","label":"API key"}}
+            }),
+        ),
+        ("question_list", serde_json::json!({"questions":[]})),
+        (
+            "question_answer",
+            serde_json::json!({"requestId":"question-1","state":"cancelled"}),
+        ),
+        (
+            "events_observe",
+            serde_json::json!({
+                "target":provider_target,
+                "generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1},
+                "attached":true,"events":[],"endReason":"deadlineReached","continuationGap":false,"epoch":1
+            }),
         ),
     ]);
     let non_objects = [
@@ -1054,10 +1130,36 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
             "{name} schema draft"
         );
         if let Some(valid) = valid_instances.get(name.as_ref()) {
-            assert!(
-                advertised_validator.is_valid(valid),
-                "success result narrowed for {name}"
-            );
+            advertised_validator
+                .validate(valid)
+                .unwrap_or_else(|error| {
+                    panic!("success result narrowed for {name}: {error}; {valid}")
+                });
+        }
+        if name.as_ref() == "approval_list" {
+            let requester = serde_json::json!({
+                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+                "sessionId":"requester"
+            });
+            for result in [
+                serde_json::json!({"approvals":[{
+                    "requestId":"legacy", "requester":requester, "approver":requester,
+                    "generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1},
+                    "state":"pendingClientDecision", "decision":null, "operation":{},
+                    "expiresAt":"2026-09-27T00:00:00Z"
+                }]}),
+                serde_json::json!({"approvals":[{
+                    "requestId":"refused", "requester":requester,
+                    "approver":{"kind":"human","humanId":"owner"},
+                    "state":"refused", "reason":"malformed options", "title":"Run command",
+                    "description":null, "options":[]
+                }]}),
+            ] {
+                assert!(
+                    advertised_validator.is_valid(&result),
+                    "approval list success branch rejected {result}"
+                );
+            }
         }
         let error = super::structured_tool_error(serde_json::json!({
             "kind":"protocolViolation", "stage":"validation", "effect":"none",
@@ -1283,6 +1385,8 @@ fn expected_tool_name(method: &str) -> String {
     match method {
         "endpoint/list" => return "endpoints_list".to_owned(),
         "codex/sessionList" => return "sessions_list".to_owned(),
+        "provider/sessionList" => return "provider_sessions_list".to_owned(),
+        "provider/sessionInspect" => return "provider_session_inspect".to_owned(),
         "codex/sessionInspect" => return "session_inspect".to_owned(),
         "codex/sessionRename" => return "session_rename".to_owned(),
         "message/send" => return "message_send".to_owned(),
@@ -1354,10 +1458,8 @@ fn success_schema_branches_match_main_golden_snapshot() {
             })
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(
-        actual.keys().collect::<Vec<_>>(),
-        expected.keys().collect::<Vec<_>>()
-    );
+    assert_eq!(actual.len(), 103);
+    assert_eq!(expected.len(), 103);
     for (name, success) in actual {
         assert_eq!(success, expected[&name], "{name} success schema drifted");
     }

@@ -4,20 +4,30 @@ mod approval_turn_cancellation;
 mod external_approval_dispatch;
 mod provider_acp_error_mapping;
 mod provider_approval_dispatch;
+mod provider_auth_status_update;
 mod provider_client_contract;
+mod provider_client_initialization;
 mod provider_client_operations;
 mod provider_connection_task;
+mod provider_cursor_create_plan;
+mod provider_cursor_plan_items;
+mod provider_cursor_question;
+mod provider_form_elicitation;
 mod provider_frame_observation;
 mod provider_initialize_request;
+mod provider_lifecycle_requests;
 mod provider_prompt_dispatch;
 mod provider_request_fallback;
 mod provider_session_admission;
+mod provider_session_restore;
+pub(crate) mod provider_setting_application;
 
 use crate::ProviderCapabilityReport;
+use crate::provider_connection_activity::{ProviderConnectionActivity, ToolCallOwnershipHandler};
 use crate::provider_prompt_content::ProviderPromptContent;
 use crate::provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
-    ProviderSteeringOutcome, run_provider_session,
+    ProviderSessionRuntimeHandles, ProviderSteeringOutcome, run_provider_session,
 };
 use crate::{AcpProtocolVersion, InteractionPort, SessionEventSink};
 use agent_client_protocol::schema::ProtocolVersion;
@@ -37,6 +47,7 @@ use external_approval_dispatch::{
 };
 use provider_acp_error_mapping::acp_load_session_error;
 pub(crate) use provider_acp_error_mapping::acp_operation_error;
+use provider_auth_status_update::ProviderAuthStatusHandler;
 #[cfg(any(test, feature = "test-observation"))]
 pub(crate) use provider_client_contract::classify_mcp_tool_outcome;
 #[cfg(feature = "test-observation")]
@@ -44,7 +55,7 @@ pub(crate) use provider_client_contract::sanitized_acp_error;
 pub use provider_client_contract::{
     ExternalProviderAdmission, ExternalProviderApprovalRefusalReason,
     ExternalProviderCreatedSession, ExternalProviderLaunch, ExternalProviderPromptOutcome,
-    ExternalProviderRuntimeError,
+    ExternalProviderRuntimeError, ProviderSessionSummary,
 };
 #[cfg(any(test, feature = "test-observation"))]
 pub use provider_client_contract::{
@@ -54,12 +65,18 @@ pub use provider_client_contract::{
 pub(crate) use provider_client_contract::{
     provider_frame_decode_error, sanitized_initialization_error,
 };
+use provider_cursor_create_plan::ProviderCursorCreatePlanHandler;
+pub(crate) use provider_cursor_plan_items::CursorPlanItems;
+use provider_cursor_plan_items::ProviderCursorTodoHandler;
+use provider_cursor_question::ProviderCursorQuestionHandler;
+use provider_form_elicitation::ProviderFormElicitationHandler;
 pub(crate) use provider_frame_observation::ProviderFrameObservation;
 use provider_initialize_request::initialize_provider_connection;
 use provider_request_fallback::{
     ProviderKnownSessions, ProviderRequestFallback, ProviderRequestSessionGuard,
 };
 use provider_session_admission::*;
+use session_event_model::InputId;
 use session_event_model::StopReason as ProviderPromptStopReason;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -100,17 +117,30 @@ impl<P: InteractionPort> Drop for ApprovalContextGuard<P> {
 enum ProviderCommand<P: InteractionPort> {
     Create {
         cwd: PathBuf,
+        settings: crate::RequestedProviderSettings,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
         >,
     },
-    Load {
+    Restore {
         provider_session_id: String,
         cwd: PathBuf,
+        mode: provider_session_restore::RestoreHistoryMode,
+        reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
+    },
+    List {
+        cwd: Option<PathBuf>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Vec<ProviderSessionSummary>, ExternalProviderRuntimeError>,
+        >,
+    },
+    Close {
+        provider_session_id: String,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
     Prompt {
         provider_session_id: String,
+        input_id: InputId,
         operation_id: Option<P::OperationId>,
         prompt: ProviderPromptContent,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
@@ -125,7 +155,8 @@ enum ProviderCommand<P: InteractionPort> {
     },
     Steer {
         provider_session_id: String,
-        prompt: String,
+        input_id: InputId,
+        prompt: ProviderPromptContent,
         reply: tokio::sync::oneshot::Sender<
             Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError>,
         >,
@@ -134,22 +165,40 @@ enum ProviderCommand<P: InteractionPort> {
         provider_session_id: String,
         reply: tokio::sync::oneshot::Sender<ProviderSessionActivity>,
     },
+    InspectActiveOperation {
+        provider_session_id: String,
+        reply: tokio::sync::oneshot::Sender<Option<P::OperationId>>,
+    },
     WaitSessionIdle {
         provider_session_id: String,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
+    },
+    SetSetting {
+        provider_session_id: String,
+        kind: crate::ProviderSettingKind,
+        value: String,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError>,
+        >,
     },
 }
 
 enum PendingSessionAdmission<P: InteractionPort> {
     Create {
         result: Box<Result<ProviderSessionRegistration<P>, ExternalProviderRuntimeError>>,
+        activation: tokio::sync::oneshot::Sender<()>,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
         >,
     },
-    Load {
+    Restore {
         provider_session_id: String,
-        result: Box<Result<ActiveSession<'static, Agent>, ExternalProviderRuntimeError>>,
+        result: Box<Result<RestoredProviderSession, ExternalProviderRuntimeError>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
+    },
+    Close {
+        provider_session_id: String,
+        result: Result<(), ExternalProviderRuntimeError>,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
 }
@@ -158,6 +207,14 @@ struct ProviderSessionRegistration<P: InteractionPort> {
     provider_session_id: String,
     commands: tokio::sync::mpsc::Sender<ProviderSessionCommand<P>>,
     response: NewSessionResponse,
+    settings_catalog: crate::ProviderSettingsCatalog,
+    setup_error: Option<ExternalProviderRuntimeError>,
+}
+
+struct RestoredProviderSession {
+    session: ActiveSession<'static, Agent>,
+    item_projection: Option<crate::provider_item_projection::ProviderItemProjection>,
+    settings_catalog: crate::ProviderSettingsCatalog,
 }
 
 /// Owns the provider process and ACP connection independently of caller tasks.
@@ -165,7 +222,23 @@ pub struct AgentSessionClient<P: InteractionPort> {
     admission: ExternalProviderAdmission,
     base_capabilities: ProviderCapabilityReport,
     session_capabilities: Arc<tokio::sync::RwLock<HashMap<String, ProviderCapabilityReport>>>,
+    auth_status: Arc<tokio::sync::RwLock<session_event_model::ProviderAuthStatus>>,
+    session_settings: Arc<tokio::sync::RwLock<HashMap<String, crate::ProviderSettingsCatalog>>>,
+    last_settings_catalog: Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
+    settings_unresolved: Arc<
+        tokio::sync::RwLock<
+            HashMap<
+                String,
+                HashMap<
+                    crate::ProviderSettingKind,
+                    crate::provider_session_settings::UnresolvedSettingCause,
+                >,
+            >,
+        >,
+    >,
+    pending_close_marks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     shutdown: CancellationToken,
+    sink_closed: CancellationToken,
     retirement: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     shutdown_failed: Arc<std::sync::atomic::AtomicBool>,
