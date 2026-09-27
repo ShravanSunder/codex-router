@@ -29,6 +29,7 @@ pub(super) async fn handle_app_server_thread_request(
     events: Arc<dyn SessionEventHub>,
     endpoint: SessionEndpointRef,
     actor: Identity,
+    catalog: &[ProviderModelEntry],
 ) -> Result<Value, ThreadMethodError> {
     match method {
         "thread/start" => {
@@ -47,14 +48,14 @@ pub(super) async fn handle_app_server_thread_request(
             if !working_directory.is_absolute() {
                 return Err(ThreadMethodError::InvalidParams);
             }
-            let requested_model = params.get("model").and_then(Value::as_str);
-            let model_override = requested_model.filter(|model| *model != "provider-default");
+            let model_override =
+                provider_model_override(params.get("model").and_then(Value::as_str), catalog);
             let session = commands
                 .create(CreateSessionCommand {
                     endpoint: endpoint.clone(),
                     working_directory,
                     settings: SessionSettingsCommand {
-                        model: model_override.map(str::to_owned),
+                        model: model_override,
                         ..SessionSettingsCommand::default()
                     },
                     actor,
@@ -229,6 +230,7 @@ pub(super) async fn handle_app_server_turn_request(
     events: Arc<dyn SessionEventHub>,
     endpoint: SessionEndpointRef,
     actor: Identity,
+    catalog: &[ProviderModelEntry],
 ) -> Result<Value, ThreadMethodError> {
     let thread_id = params
         .get("threadId")
@@ -245,6 +247,19 @@ pub(super) async fn handle_app_server_turn_request(
     match method {
         "turn/start" => {
             let content = parse_turn_input(&params).await?;
+            if let Some(model) =
+                provider_model_override(params.get("model").and_then(Value::as_str), catalog)
+            {
+                commands
+                    .set_setting(SetSessionSettingCommand {
+                        target: session.clone(),
+                        setting_id: "model".into(),
+                        value: model,
+                        actor: actor.clone(),
+                    })
+                    .await
+                    .map_err(|_| ThreadMethodError::Unavailable)?;
+            }
             let handle = commands
                 .prompt(PromptSessionCommand {
                     target: session,
@@ -311,6 +326,24 @@ pub(super) async fn handle_app_server_turn_request(
         }
         _ => Err(ThreadMethodError::InvalidParams),
     }
+}
+
+fn provider_model_override(
+    requested: Option<&str>,
+    catalog: &[ProviderModelEntry],
+) -> Option<String> {
+    let requested = requested?;
+    if requested == "provider-default" {
+        return None;
+    }
+    if catalog.iter().any(|model| model.id() == requested) {
+        return Some(requested.to_owned());
+    }
+    tracing::warn!(
+        model = requested,
+        "model outside provider catalog; using provider default"
+    );
+    None
 }
 
 const MAX_IMAGE_BYTES: usize = 768 * 1024;

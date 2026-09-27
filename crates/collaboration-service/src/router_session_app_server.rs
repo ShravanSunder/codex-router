@@ -2,7 +2,7 @@
 use crate::{
     CommandContent, CreateSessionCommand, HubEvent, HubSessionSummary, PromptSessionCommand,
     SessionCommandPort, SessionEventHub, SessionEventHubError, SessionSettingsCommand,
-    SessionSteerOutcome, SessionTargetCommand, SteerSessionCommand,
+    SessionSteerOutcome, SessionTargetCommand, SetSessionSettingCommand, SteerSessionCommand,
     app_server_event_forwarding::{AppServerEventForwarding, historical_turns},
     app_server_model_catalog::{ProviderModelEntry, render_model_list},
     private_socket_listener::PrivateSocketListener,
@@ -191,6 +191,7 @@ pub async fn serve_router_session_app_server_connection(
                 | "turn/interrupt"
         ) {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+            let catalog = context.model_catalog.borrow().clone();
             let result = if method.starts_with("thread/") {
                 handle_app_server_thread_request(
                     method,
@@ -199,6 +200,7 @@ pub async fn serve_router_session_app_server_connection(
                     Arc::clone(&context.events),
                     context.endpoint.clone(),
                     context.actor.clone(),
+                    &catalog,
                 )
                 .await
             } else {
@@ -209,6 +211,7 @@ pub async fn serve_router_session_app_server_connection(
                     Arc::clone(&context.events),
                     context.endpoint.clone(),
                     context.actor.clone(),
+                    &catalog,
                 )
                 .await
             };
@@ -294,6 +297,10 @@ use methods::{
     handle_app_server_request, handle_app_server_thread_request, handle_app_server_turn_request,
 };
 
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
+#[path = "router_session_app_server_model_tests.rs"]
+mod model_tests;
 #[cfg(test)]
 #[path = "router_session_app_server_test_support.rs"]
 mod test_support;

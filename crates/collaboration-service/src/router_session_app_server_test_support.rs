@@ -24,9 +24,11 @@ pub(super) struct ScriptedSessionBackend {
     pub(super) prompt_commands: Mutex<Vec<PromptSessionCommand>>,
     pub(super) steer_commands: Mutex<Vec<SteerSessionCommand>>,
     pub(super) cancel_commands: Mutex<Vec<SessionTargetCommand>>,
+    pub(super) setting_commands: Mutex<Vec<SetSessionSettingCommand>>,
     pub(super) created: Notify,
     pub(super) events: broadcast::Sender<crate::HubEvent>,
     pub(super) history: Mutex<Vec<crate::HubEvent>>,
+    pub(super) effective_model: Mutex<Option<String>>,
 }
 
 impl ScriptedSessionBackend {
@@ -52,9 +54,11 @@ impl ScriptedSessionBackend {
             prompt_commands: Mutex::new(Vec::new()),
             steer_commands: Mutex::new(Vec::new()),
             cancel_commands: Mutex::new(Vec::new()),
+            setting_commands: Mutex::new(Vec::new()),
             created: Notify::new(),
             events,
             history: Mutex::new(Vec::new()),
+            effective_model: Mutex::new(None),
         }))
     }
 
@@ -79,7 +83,8 @@ impl SessionCommandPort for ScriptedSessionBackend {
                 updated_at_seconds: 1_700_000_000,
                 preview: String::new(),
                 name: None,
-                model: None,
+                model: self.effective_model.lock().expect("test lock").clone(),
+                mode: None,
                 state: SessionState::Unloaded,
             });
         self.live_states
@@ -161,8 +166,12 @@ impl SessionCommandPort for ScriptedSessionBackend {
     fn close(&self, _: SessionTargetCommand) -> CommandFuture<'_, ()> {
         Box::pin(async { Err(CommandFailure::Unsupported) })
     }
-    fn set_setting(&self, _: SetSessionSettingCommand) -> CommandFuture<'_, ()> {
-        Box::pin(async { Err(CommandFailure::Unsupported) })
+    fn set_setting(&self, command: SetSessionSettingCommand) -> CommandFuture<'_, ()> {
+        self.setting_commands
+            .lock()
+            .expect("test lock")
+            .push(command);
+        Box::pin(async { Ok(()) })
     }
 }
 

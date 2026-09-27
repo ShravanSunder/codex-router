@@ -264,6 +264,7 @@ impl SessionEventHub for ScriptedProviderBackend {
                 preview: String::new(),
                 name: None,
                 model: None,
+                mode: None,
                 state,
             }]
         } else {

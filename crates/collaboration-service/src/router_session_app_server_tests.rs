@@ -138,6 +138,7 @@ async fn thread_start_list_read_resume_use_port_and_hub() -> Result<(), Box<dyn 
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         ScriptedSessionBackend::actor()?,
+        &[],
     )
     .await?;
     assert_eq!(started["thread"]["id"], backend.session.session_id.as_str());
@@ -160,6 +161,7 @@ async fn thread_start_list_read_resume_use_port_and_hub() -> Result<(), Box<dyn 
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         ScriptedSessionBackend::actor()?,
+        &[],
     )
     .await?;
     assert_eq!(listed["data"][0]["id"], backend.session.session_id.as_str());
@@ -172,6 +174,7 @@ async fn thread_start_list_read_resume_use_port_and_hub() -> Result<(), Box<dyn 
             Arc::clone(&backend) as Arc<dyn SessionEventHub>,
             backend.endpoint.clone(),
             ScriptedSessionBackend::actor()?,
+            &[],
         )
         .await?;
         assert_eq!(result["thread"]["id"], backend.session.session_id.as_str());
@@ -199,6 +202,7 @@ async fn durable_unloaded_session_has_a_stable_uuid_alias() -> Result<(), Box<dy
             preview: "saved input".into(),
             name: None,
             model: None,
+            mode: None,
             state: SessionState::Running,
         });
     let listed = handle_app_server_thread_request(
@@ -208,6 +212,7 @@ async fn durable_unloaded_session_has_a_stable_uuid_alias() -> Result<(), Box<dy
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         ScriptedSessionBackend::actor()?,
+        &[],
     )
     .await?;
     let alias = listed["data"][0]["id"].as_str().ok_or("missing alias")?;
@@ -221,6 +226,7 @@ async fn durable_unloaded_session_has_a_stable_uuid_alias() -> Result<(), Box<dy
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         ScriptedSessionBackend::actor()?,
+        &[],
     )
     .await?;
     assert_eq!(read["thread"]["id"], alias);
@@ -243,6 +249,7 @@ async fn thread_resume_loads_an_unloaded_provider_session() -> Result<(), Box<dy
             preview: String::new(),
             name: None,
             model: None,
+            mode: None,
             state: SessionState::Unloaded,
         });
     let actor = ScriptedSessionBackend::actor()?;
@@ -253,6 +260,7 @@ async fn thread_resume_loads_an_unloaded_provider_session() -> Result<(), Box<dy
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         actor.clone(),
+        &[],
     )
     .await?;
     assert_eq!(resumed["thread"]["status"]["type"], "idle");
@@ -282,6 +290,7 @@ async fn thread_resume_returns_replayed_items_grouped_into_historical_turns()
             preview: String::new(),
             name: None,
             model: None,
+            mode: None,
             state: SessionState::Unloaded,
         });
     *backend.history.lock().expect("test lock") = vec![
@@ -313,6 +322,7 @@ async fn thread_resume_returns_replayed_items_grouped_into_historical_turns()
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         ScriptedSessionBackend::actor()?,
+        &[],
     )
     .await?;
     assert_eq!(
@@ -330,6 +340,7 @@ async fn thread_resume_returns_replayed_items_grouped_into_historical_turns()
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         ScriptedSessionBackend::actor()?,
+        &[],
     )
     .await?;
     assert_eq!(read["thread"]["turns"], resumed["thread"]["turns"]);
@@ -346,6 +357,7 @@ async fn ephemeral_start_never_reaches_the_provider() -> Result<(), Box<dyn std:
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         ScriptedSessionBackend::actor()?,
+        &[],
     )
     .await;
     assert!(matches!(result, Err(ThreadMethodError::InvalidParams)));
@@ -371,6 +383,7 @@ async fn turn_methods_forward_input_and_actor_to_the_port() -> Result<(), Box<dy
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         actor.clone(),
+        &[],
     )
     .await?;
     let thread_id = started["thread"]["id"].as_str().ok_or("thread id")?;
@@ -381,6 +394,7 @@ async fn turn_methods_forward_input_and_actor_to_the_port() -> Result<(), Box<dy
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         actor.clone(),
+        &[],
     )
     .await?;
     assert_eq!(turn["turn"]["id"], "turn-1");
@@ -402,6 +416,7 @@ async fn turn_methods_forward_input_and_actor_to_the_port() -> Result<(), Box<dy
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         actor.clone(),
+        &[],
     )
     .await?;
     assert_eq!(steered, json!({"turnId":"turn-1"}));
@@ -417,6 +432,7 @@ async fn turn_methods_forward_input_and_actor_to_the_port() -> Result<(), Box<dy
         Arc::clone(&backend) as Arc<dyn SessionEventHub>,
         backend.endpoint.clone(),
         actor.clone(),
+        &[],
     )
     .await?;
     assert_eq!(interrupted, json!({}));
