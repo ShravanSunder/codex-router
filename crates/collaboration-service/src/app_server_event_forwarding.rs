@@ -117,23 +117,57 @@ impl AppServerEventForwarding {
                 render_turn_event(session, event).into_iter().collect()
             }
             SessionEvent::TurnEnded { .. } => {
+                self.turn_ids.remove(session);
+                self.items
+                    .retain(|(item_session, _), _| item_session != session);
                 render_turn_event(session, event).into_iter().collect()
             }
             SessionEvent::ItemStarted { item } | SessionEvent::ItemUpdated { item } => {
                 let turn_id = self.turn_ids.get(session).map(String::as_str).unwrap_or("");
                 let translated = translate_session_item(item, &thread_id, turn_id);
-                self.items.insert(
+                let previous = self.items.insert(
                     (session.clone(), item.item_id.clone()),
                     translated.thread_item.clone(),
                 );
-                let method = if matches!(event.event, SessionEvent::ItemStarted { .. }) {
-                    "item/started"
+                let mut frames = if matches!(event.event, SessionEvent::ItemStarted { .. }) {
+                    vec![json!({"method":"item/started","params":{
+                        "threadId":thread_id,"turnId":turn_id,"item":translated.thread_item,
+                        "startedAtMs":chrono::Utc::now().timestamp_millis()
+                    }})]
                 } else {
-                    "item/updated"
+                    match &item.kind {
+                        session_event_model::SessionItemKind::AgentMessage => {
+                            let old_text = previous
+                                .as_ref()
+                                .and_then(|value| value.get("text"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            let new_text = item.text.as_deref().unwrap_or("");
+                            new_text
+                                .strip_prefix(old_text)
+                                .filter(|delta| !delta.is_empty())
+                                .map(|delta| {
+                                    vec![json!({"method":"item/agentMessage/delta","params":{
+                                        "threadId":thread_id,"turnId":turn_id,"itemId":item.item_id,
+                                        "delta":delta
+                                    }})]
+                                })
+                                .unwrap_or_default()
+                        }
+                        session_event_model::SessionItemKind::ToolCall { .. } => item
+                            .text
+                            .as_deref()
+                            .filter(|message| !message.is_empty())
+                            .map(|message| {
+                                vec![json!({"method":"item/mcpToolCall/progress","params":{
+                                    "threadId":thread_id,"turnId":turn_id,"itemId":item.item_id,
+                                    "message":message
+                                }})]
+                            })
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    }
                 };
-                let mut frames = vec![json!({"method":method,"params":{
-                    "threadId":thread_id,"turnId":turn_id,"item":translated.thread_item
-                }})];
                 if let Some(notification) = translated.notification {
                     frames.push(notification);
                 }
@@ -144,7 +178,8 @@ impl AppServerEventForwarding {
                     return Vec::new();
                 };
                 vec![json!({"method":"item/completed","params":{
-                    "threadId":thread_id,"turnId":self.turn_ids.get(session),"item":item
+                    "threadId":thread_id,"turnId":self.turn_ids.get(session),"item":item,
+                    "completedAtMs":chrono::Utc::now().timestamp_millis()
                 }})]
             }
             SessionEvent::InteractionRequested { interaction } => {
@@ -306,5 +341,89 @@ impl AppServerEventForwarding {
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
+mod notification_wire_tests {
+    use super::*;
+    use session_event_model::SessionItemKind;
+
+    /// Oracle: Codex 0.157.1 app-server-protocol v2/item.rs:1327-1336,
+    /// 1405-1414,1427-1433 and protocol/common.rs:1936-1946.
+    #[test]
+    fn item_lifecycle_uses_typed_v2_notifications() -> Result<(), Box<dyn std::error::Error>> {
+        let session: SessionRef = serde_json::from_value(json!({
+            "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"claude-local"},
+            "sessionId":"provider-1"
+        }))?;
+        let actor: Identity = serde_json::from_value(json!({"kind":"human","humanId":"owner"}))?;
+        let mut projector = AppServerEventForwarding::new(actor, None);
+        let turn = projector.project(
+            &session,
+            &HubEvent {
+                sequence: 1,
+                event: SessionEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                    input_id: session_event_model::InputId::generate(),
+                },
+            },
+        );
+        assert_eq!(turn[0]["method"], "turn/started");
+        let item = |text: &str| SessionItem {
+            item_id: "reply-1".into(),
+            kind: SessionItemKind::AgentMessage,
+            text: Some(text.into()),
+        };
+        let started = projector.project(
+            &session,
+            &HubEvent {
+                sequence: 2,
+                event: SessionEvent::ItemStarted {
+                    item: item("First"),
+                },
+            },
+        );
+        assert_eq!(started[0]["method"], "item/started");
+        assert!(started[0]["params"]["startedAtMs"].is_i64());
+        let updated = projector.project(
+            &session,
+            &HubEvent {
+                sequence: 3,
+                event: SessionEvent::ItemUpdated {
+                    item: item("First streamed"),
+                },
+            },
+        );
+        assert_eq!(updated[0]["method"], "item/agentMessage/delta");
+        assert_eq!(updated[0]["params"]["delta"], " streamed");
+        let completed = projector.project(
+            &session,
+            &HubEvent {
+                sequence: 4,
+                event: SessionEvent::ItemCompleted {
+                    item_id: "reply-1".into(),
+                },
+            },
+        );
+        assert_eq!(completed[0]["method"], "item/completed");
+        assert_eq!(completed[0]["params"]["item"]["text"], "First streamed");
+        assert!(completed[0]["params"]["completedAtMs"].is_i64());
+        let ended = projector.project(
+            &session,
+            &HubEvent {
+                sequence: 5,
+                event: SessionEvent::TurnEnded {
+                    turn_id: "turn-1".into(),
+                    outcome: TurnOutcome::Ended {
+                        stop_reason: StopReason::EndTurn,
+                        local_cause: None,
+                    },
+                },
+            },
+        );
+        assert_eq!(ended[0]["method"], "turn/completed");
+        Ok(())
     }
 }
