@@ -364,6 +364,15 @@ impl CollaborationRuntime {
         .map_err(io::Error::other)?;
         let unmaterialized_threads =
             std::sync::Arc::new(collaboration_service::UnmaterializedThreadHolder::new());
+        let peer_registry_directory = inputs.peer_registry_directory.clone().map_or_else(
+            crate::session_message_route_composition::default_peer_registry_directory,
+            Ok,
+        )?;
+        let identity = identity.with_claude_code_sessions(std::sync::Arc::new(
+            claude_code_peer_messaging::ClaudeCodeSessionRegistry::new(
+                peer_registry_directory.clone(),
+            ),
+        ));
         let message_routes =
             crate::session_message_route_composition::compose_session_message_routes(
                 provider_endpoints,
@@ -372,10 +381,7 @@ impl CollaborationRuntime {
                 std::sync::Arc::clone(&unmaterialized_threads),
                 external_provider_supervisor.clone(),
                 provider_store.clone(),
-                inputs.peer_registry_directory.clone().map_or_else(
-                    crate::session_message_route_composition::default_peer_registry_directory,
-                    Ok,
-                )?,
+                peer_registry_directory,
             )?;
         let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
             message_routes.router.clone();

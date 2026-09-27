@@ -4,6 +4,7 @@ use super::*;
 async fn provider_selection_shows_read_only_details_without_a_codex_outcome() {
     let summary: collaboration_client::protocol::ProviderSessionSummary =
         serde_json::from_value(serde_json::json!({
+            "origin":"hostedProvider",
             "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},"sessionId":"provider-one"},
             "workingDirectory":"/repo/project-a","updatedAt":3,"state":"requiresAction",
             "approver":{"kind":"human","humanId":"owner"},

@@ -3,6 +3,23 @@ use collaboration_protocol::{ConversationCreateOutcome, DeliveryReceipt, Operati
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[tokio::test]
+async fn native_sessions_list_routes_claude_to_provider_tool_without_changing_schema() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let request: collaboration_protocol::NativeSessionListParams = serde_json::from_value(
+        serde_json::json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+            "view":"active","scope":{"kind":"any"},"source":"interactive",
+            "pageSize":10
+        }),
+    ).expect("Claude list request");
+    let result = server.sessions_list(super::Parameters(request)).await;
+    assert_eq!(result.is_error, Some(true));
+    let content = serde_json::to_string(&result.structured_content).expect("error content");
+    assert!(content.contains("provider_sessions_list"), "{content}");
+}
+
 #[test]
 fn message_send_route_receipts_match_advertised_output_schema() {
     let temporary = tempfile::tempdir().expect("temporary directory");
@@ -1080,7 +1097,22 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
         (
             "provider_sessions_list",
             serde_json::json!({
-                "endpoint":provider_endpoint,"observedAt":"2026-09-27T00:00:00Z","sessions":[]
+                "endpoint":provider_endpoint,"observedAt":"2026-09-27T00:00:00Z",
+                "sessions":[
+                    {
+                        "origin":"hostedProvider","target":provider_target,
+                        "workingDirectory":"/tmp/project","updatedAt":1790162500,
+                        "state":"idle","approver":{"kind":"human","humanId":"owner"},
+                        "createdBy":{"kind":"human","humanId":"owner"}
+                    },
+                    {
+                        "origin":"claudeCodeInteractive",
+                        "target":{"endpoint":provider_endpoint,"sessionId":"interactive-session"},
+                        "name":"Claude terminal","workingDirectory":"/tmp/project",
+                        "status":"busy","startedAt":1790162400,"updatedAt":1790162494,
+                        "statusUpdatedAt":1790162494,"kind":"claudeCode","entrypoint":"cli"
+                    }
+                ],"skippedRecords":0
             }),
         ),
         (

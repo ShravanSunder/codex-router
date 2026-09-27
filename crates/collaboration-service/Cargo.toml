@@ -23,6 +23,7 @@ getrandom = "0.3.4"
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14" }
+claude-code-peer-messaging = { path = "../claude-code-peer-messaging", version = "0.1.37" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

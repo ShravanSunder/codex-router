@@ -246,11 +246,24 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::None)
     }
 
-    #[tool(name = "sessions_list", description = "Lists stored, loaded, or active conversations using the selected endpoint and scope. Read-only and never resumes a conversation.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<NativeSessionListResult>>())]
+    #[tool(name = "sessions_list", description = "Lists stored, loaded, or active Codex conversations using the selected scope. Claude Code sessions use provider_sessions_list. Read-only and never resumes a conversation.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<NativeSessionListResult>>())]
     async fn sessions_list(
         &self,
         Parameters(request): Parameters<NativeSessionListParams>,
     ) -> CallToolResult {
+        if String::from(request.endpoint.endpoint_id.clone()) == "claude-local" {
+            return failure(
+                ClientError::Rejected {
+                    code: -32050,
+                    data: Some(serde_json::json!({
+                        "kind": "unsupportedCapability",
+                        "stage": "discovery",
+                        "message": "Use provider_sessions_list for Claude Code sessions"
+                    })),
+                },
+                OperationEffect::None,
+            );
+        }
         let mut client = match self.connect().await {
             Ok(value) => value,
             Err(error) => return failure(error, OperationEffect::None),
@@ -260,7 +273,7 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::None)
     }
 
-    #[tool(name = "provider_sessions_list", description = "Lists Router-owned provider Sessions from durable inventory with live state when available. Stored rows have no source or title; inspect a loaded Session for current model and mode.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ProviderSessionListResult>>())]
+    #[tool(name = "provider_sessions_list", description = "Lists Router-hosted provider Sessions and live Claude Code terminal sessions. Claude terminal discovery supports active or loaded views; stored applies only to hosted Sessions. Live pages are not snapshots, so sessions may move between pages.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ProviderSessionListResult>>())]
     async fn provider_sessions_list(
         &self,
         Parameters(request): Parameters<ProviderSessionListParams>,
