@@ -1,8 +1,9 @@
 use super::*;
+use serde_json::json;
 
 #[test]
 fn acp_prompt_keeps_text_and_resource_link_as_distinct_blocks() {
-    let parsed = content_blocks(&json!({"prompt":[
+    let parsed = parse_prompt_content(&json!({"prompt":[
         {"type":"text","text":"inspect this"},
         {"type":"resource_link","uri":"file:///tmp/report.txt","name":"report.txt","mimeType":"text/plain"}
     ]}));
@@ -20,18 +21,20 @@ fn acp_prompt_keeps_text_and_resource_link_as_distinct_blocks() {
 
 #[test]
 fn acp_prompt_validates_media_and_embedded_resource_shapes() {
-    let parsed = content_blocks(&json!({"prompt":[
+    let parsed = parse_prompt_content(&json!({"prompt":[
         {"type":"image","data":"AQID","mimeType":"image/png"},
         {"type":"audio","data":"AQID","mimeType":"audio/wav"},
         {"type":"resource","resource":{"uri":"file:///tmp/data","mimeType":"text/plain","text":"inside"}}
     ]}));
     assert!(matches!(parsed, Ok(ref blocks) if blocks.len() == 3));
     assert!(
-        content_blocks(&json!({"prompt":[{"type":"image","data":"bad!","mimeType":"image/png"}]}))
-            .is_err()
+        parse_prompt_content(
+            &json!({"prompt":[{"type":"image","data":"bad!","mimeType":"image/png"}]})
+        )
+        .is_err()
     );
     assert!(
-        content_blocks(
+        parse_prompt_content(
             &json!({"prompt":[{"type":"resource_link","uri":"file:///tmp/report","name":""}]})
         )
         .is_err()

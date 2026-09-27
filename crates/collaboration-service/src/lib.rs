@@ -56,6 +56,7 @@ mod app_server_interaction_translation_tests;
 #[cfg(test)]
 #[path = "app_server_item_translation_tests.rs"]
 mod app_server_item_translation_tests;
+mod provider_acp_content_translation;
 mod provider_acp_event_projection;
 mod provider_acp_interaction;
 mod provider_acp_session_route;

@@ -1,11 +1,12 @@
 //! ACP route for Router-owned provider Sessions on the shared connection shell.
 use crate::ServiceInteractionBroker;
+use crate::provider_acp_content_translation::parse_prompt_content;
 use crate::provider_acp_event_projection::{ProviderSessionObservers, stream_prompt};
 use crate::provider_acp_interaction::{
     OutboundInteraction, apply_interaction_reply, present_interaction,
 };
 use crate::{
-    CommandContent, CommandFailure, CreateSessionCommand, PromptSessionCommand, QueueInputCommand,
+    CommandFailure, CreateSessionCommand, PromptSessionCommand, QueueInputCommand,
     SessionCommandPort, SessionEventHub, SessionSettingsCommand, SessionSteerOutcome,
     SessionTargetCommand, SteerSessionCommand,
 };
@@ -17,9 +18,6 @@ use serde_json::{Value, json};
 use session_event_model::session_profile_codec::ProfileElement;
 use session_event_model::{CapabilityReport, SessionEvent, SessionState};
 
-#[cfg(test)]
-#[path = "provider_acp_session_route_content_tests.rs"]
-mod content_tests;
 use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 use tokio::{sync::mpsc, task::JoinSet};
 
@@ -102,91 +100,6 @@ fn named_session(params: &Value, endpoint: &SessionEndpointRef) -> Result<Sessio
     }
     let session_id = params.get("sessionId").and_then(Value::as_str).ok_or(())?;
     serde_json::from_value(json!({"endpoint":endpoint,"sessionId":session_id})).map_err(|_| ())
-}
-
-fn content_blocks(params: &Value) -> Result<Vec<CommandContent>, ()> {
-    let blocks = params.get("prompt").and_then(Value::as_array).ok_or(())?;
-    blocks
-        .iter()
-        .map(|block| match block.get("type").and_then(Value::as_str) {
-            Some("text") => block
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or(())
-                .and_then(|text| CommandContent::text(text.to_owned()).map_err(|_| ())),
-            Some("resource_link") => CommandContent::resource_link(
-                block
-                    .get("uri")
-                    .and_then(Value::as_str)
-                    .ok_or(())?
-                    .to_owned(),
-                block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or(())?
-                    .to_owned(),
-                block
-                    .get("mimeType")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            )
-            .map_err(|_| ()),
-            Some("image") => CommandContent::image(
-                block
-                    .get("mimeType")
-                    .and_then(Value::as_str)
-                    .ok_or(())?
-                    .to_owned(),
-                block
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .ok_or(())?
-                    .to_owned(),
-                block.get("uri").and_then(Value::as_str).map(str::to_owned),
-            )
-            .map_err(|_| ()),
-            Some("audio") => CommandContent::audio(
-                block
-                    .get("mimeType")
-                    .and_then(Value::as_str)
-                    .ok_or(())?
-                    .to_owned(),
-                block
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .ok_or(())?
-                    .to_owned(),
-            )
-            .map_err(|_| ()),
-            Some("resource") => {
-                let resource = block.get("resource").ok_or(())?;
-                let uri = resource
-                    .get("uri")
-                    .and_then(Value::as_str)
-                    .ok_or(())?
-                    .to_owned();
-                let mime_type = resource
-                    .get("mimeType")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                if let Some(text) = resource.get("text").and_then(Value::as_str) {
-                    CommandContent::embedded_text(uri, mime_type, text.to_owned()).map_err(|_| ())
-                } else {
-                    CommandContent::embedded_blob(
-                        uri,
-                        mime_type,
-                        resource
-                            .get("blob")
-                            .and_then(Value::as_str)
-                            .ok_or(())?
-                            .to_owned(),
-                    )
-                    .map_err(|_| ())
-                }
-            }
-            _ => Err(()),
-        })
-        .collect()
 }
 
 async fn session_result(
@@ -491,7 +404,7 @@ async fn serve_provider_sessions(
             "session/prompt" => {
                 match (
                     named_session(&params, &route.endpoint),
-                    content_blocks(&params),
+                    parse_prompt_content(&params),
                 ) {
                     (Ok(session), Ok(content)) => {
                         let attachment = route.events.attach(session.clone()).await;
@@ -543,7 +456,7 @@ async fn serve_provider_sessions(
             "_session/steering" => {
                 match (
                     named_session(&params, &route.endpoint),
-                    content_blocks(&params),
+                    parse_prompt_content(&params),
                 ) {
                     (Ok(session), Ok(content)) => {
                         match current_turn_id(route.events.as_ref(), session.clone()).await {
@@ -582,7 +495,7 @@ async fn serve_provider_sessions(
             "_session/queue/add" => {
                 match (
                     named_session(&params, &route.endpoint),
-                    content_blocks(&params),
+                    parse_prompt_content(&params),
                 ) {
                     (Ok(session), Ok(content)) => match route
                         .commands
