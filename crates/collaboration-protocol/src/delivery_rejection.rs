@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum DeliveryRejectionReason {
     ChildThread,
     Busy,
+    HeldByAnotherClient,
     SettingsUnresolved,
     NotResumable,
     PermissionDenied,
@@ -27,6 +28,7 @@ pub enum DeliveryRejectionReason {
 pub enum DeliveryNextAction {
     InspectTarget,
     UseDeliverySteer,
+    MessageFromHoldingCodexClient,
     RequestApproval,
     CorrectRequest,
     RetryLater,

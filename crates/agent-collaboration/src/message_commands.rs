@@ -96,21 +96,7 @@ fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i
     }
     let (record, code, write_failure_code) = match result {
         Ok(receipt) => {
-            let exit = match receipt.outcome {
-                DeliveryOutcome::NotSubmitted {
-                    retryable: true, ..
-                } => 3,
-                DeliveryOutcome::NotSubmitted {
-                    retryable: false, ..
-                }
-                | DeliveryOutcome::Rejected(_) => 4,
-                DeliveryOutcome::Unknown => 5,
-                DeliveryOutcome::Started
-                | DeliveryOutcome::Steered
-                | DeliveryOutcome::StartedOrSteered
-                | DeliveryOutcome::Queued
-                | DeliveryOutcome::PeerMessageWritten => 0,
-            };
+            let exit = receipt_exit_status(&receipt.outcome);
             (
                 crate::endpoint_commands::result_envelope(json!(receipt)),
                 exit,
@@ -149,6 +135,24 @@ fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i
     }
 }
 
+fn receipt_exit_status(outcome: &DeliveryOutcome) -> i32 {
+    match outcome {
+        DeliveryOutcome::NotSubmitted {
+            retryable: true, ..
+        } => 3,
+        DeliveryOutcome::NotSubmitted {
+            retryable: false, ..
+        }
+        | DeliveryOutcome::Rejected(_) => 4,
+        DeliveryOutcome::Unknown => 5,
+        DeliveryOutcome::Started
+        | DeliveryOutcome::Steered
+        | DeliveryOutcome::StartedOrSteered
+        | DeliveryOutcome::Queued
+        | DeliveryOutcome::PeerMessageWritten => 0,
+    }
+}
+
 fn operation_failure_exit(failure: &OperationFailure) -> i32 {
     match failure.kind {
         OperationFailureKind::Rejected
@@ -176,8 +180,32 @@ fn operation_failure_exit(failure: &OperationFailure) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::operation_failure_exit;
+    use super::{operation_failure_exit, receipt_exit_status};
     use collaboration_client::{ClientError, MessageSendError, OperationEffect};
+
+    #[test]
+    fn cli_receipt_keeps_foreign_writer_reason_action_and_rejected_exit() {
+        let receipt: collaboration_client::protocol::DeliveryReceipt =
+            serde_json::from_value(serde_json::json!({
+                "outcome":{
+                    "kind":"rejected","reason":"heldByAnotherClient",
+                    "nextAction":"messageFromHoldingCodexClient","clientCode":-32600,
+                    "detail":"Message it from the Codex client that holds it."
+                },
+                "reachability":"codexAppServer","client":null
+            }))
+            .expect("typed receipt");
+        assert_eq!(receipt_exit_status(&receipt.outcome), 4);
+        let output = crate::endpoint_commands::result_envelope(serde_json::json!(receipt));
+        assert_eq!(
+            output["result"]["record"]["outcome"]["reason"],
+            "heldByAnotherClient"
+        );
+        assert_eq!(
+            output["result"]["record"]["outcome"]["nextAction"],
+            "messageFromHoldingCodexClient"
+        );
+    }
 
     #[test]
     fn adapter_distinguishes_preparation_loss_from_post_dispatch_loss() {

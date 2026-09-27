@@ -379,7 +379,8 @@ fn interpret_native_response(
                         client_code: data
                             .and_then(|value| value.get("clientCode"))
                             .and_then(Value::as_i64),
-                        detail: None,
+                        detail: (reason == DeliveryRejectionReason::HeldByAnotherClient)
+                            .then(|| "Message it from the Codex client that holds it.".to_owned()),
                     }),
                     None,
                 )

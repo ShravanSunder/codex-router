@@ -595,8 +595,8 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
                 "kind":{"const":"nativeRejected"},
                 "stage":{"enum":if method == "codex/sessionInspect" { vec!["inspect"] } else { vec!["rename"] }},
                 "message":text,
-                "reason":{"enum":["childThread","busy","notResumable","permissionDenied","unsupportedCapability","unknown"]},
-                "nextAction":{"enum":["inspectTarget","useDeliverySteer","requestApproval","correctRequest","retryLater"]},
+                "reason":{"enum":["childThread","busy","heldByAnotherClient","notResumable","permissionDenied","unsupportedCapability","unknown"]},
+                "nextAction":{"enum":["inspectTarget","useDeliverySteer","messageFromHoldingCodexClient","requestApproval","correctRequest","retryLater"]},
                 "nativeCode":{"type":"integer"}
             }
         }));
