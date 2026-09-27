@@ -25,7 +25,10 @@ if line:
     if not os.path.exists(marker):
         with open(marker + '.early', 'w') as receipt:
             receipt.write('load preceded replay reset')
-    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}}), flush=True)
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{
+        'configOptions':[{'id':'model','name':'Model','type':'select',
+                          'currentValue':'model-a',
+                          'options':[{'value':'model-a','name':'Model A'}]}]}}), flush=True)
 sys.stdin.read()
 "#;
 
@@ -129,10 +132,20 @@ async fn history_replay_reset_precedes_session_load() {
     let result = client
         .load_session("fixture-session".to_owned(), root.path().to_path_buf())
         .await;
+    let catalog = client
+        .settings_catalog("fixture-session")
+        .await
+        .expect("loaded session catalog");
+    let last_catalog = client.last_settings_catalog().await.expect("last catalog");
     client.shutdown().await;
 
     assert!(result.is_ok(), "load result: {result:?}");
     assert!(marker.exists(), "reset completed");
+    assert_eq!(
+        catalog.effective_settings().model.as_deref(),
+        Some("model-a")
+    );
+    assert_eq!(last_catalog, catalog);
     assert!(
         !marker.with_extension("early").exists(),
         "load waited for reset"

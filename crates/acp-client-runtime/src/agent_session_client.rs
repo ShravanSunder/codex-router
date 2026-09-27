@@ -12,6 +12,7 @@ mod provider_initialize_request;
 mod provider_prompt_dispatch;
 mod provider_request_fallback;
 mod provider_session_admission;
+mod provider_setting_application;
 
 use crate::ProviderCapabilityReport;
 use crate::provider_prompt_content::ProviderPromptContent;
@@ -100,6 +101,7 @@ impl<P: InteractionPort> Drop for ApprovalContextGuard<P> {
 enum ProviderCommand<P: InteractionPort> {
     Create {
         cwd: PathBuf,
+        settings: crate::RequestedProviderSettings,
         reply: tokio::sync::oneshot::Sender<
             Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
         >,
@@ -158,6 +160,8 @@ struct ProviderSessionRegistration<P: InteractionPort> {
     provider_session_id: String,
     commands: tokio::sync::mpsc::Sender<ProviderSessionCommand<P>>,
     response: NewSessionResponse,
+    settings_catalog: crate::ProviderSettingsCatalog,
+    setup_error: Option<ExternalProviderRuntimeError>,
 }
 
 /// Owns the provider process and ACP connection independently of caller tasks.
@@ -165,6 +169,9 @@ pub struct AgentSessionClient<P: InteractionPort> {
     admission: ExternalProviderAdmission,
     base_capabilities: ProviderCapabilityReport,
     session_capabilities: Arc<tokio::sync::RwLock<HashMap<String, ProviderCapabilityReport>>>,
+    session_settings: Arc<tokio::sync::RwLock<HashMap<String, crate::ProviderSettingsCatalog>>>,
+    last_settings_catalog: Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
+    settings_unresolved: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     shutdown: CancellationToken,
     retirement: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,

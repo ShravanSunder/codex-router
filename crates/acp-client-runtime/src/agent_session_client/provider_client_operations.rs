@@ -17,6 +17,46 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             .unwrap_or_else(|| self.base_capabilities.clone())
     }
 
+    pub async fn settings_catalog(
+        &self,
+        provider_session_id: &str,
+    ) -> Option<crate::ProviderSettingsCatalog> {
+        self.session_settings
+            .read()
+            .await
+            .get(provider_session_id)
+            .cloned()
+    }
+
+    pub async fn last_settings_catalog(&self) -> Option<crate::ProviderSettingsCatalog> {
+        self.last_settings_catalog.read().await.clone()
+    }
+
+    pub async fn settings_unresolved(&self, provider_session_id: &str) -> bool {
+        self.settings_unresolved
+            .read()
+            .await
+            .contains(provider_session_id)
+    }
+
+    pub async fn accept_session_settings(
+        &self,
+        provider_session_id: String,
+    ) -> Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        let catalog = self
+            .session_settings
+            .read()
+            .await
+            .get(&provider_session_id)
+            .cloned()
+            .ok_or(ExternalProviderRuntimeError::LocalNotFound)?;
+        self.settings_unresolved
+            .write()
+            .await
+            .remove(&provider_session_id);
+        Ok(catalog.effective_settings())
+    }
+
     #[must_use]
     #[cfg(any(test, feature = "test-observation"))]
     pub fn permission_observation(&self) -> ExternalProviderPermissionObservation {
@@ -106,9 +146,22 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         &self,
         cwd: PathBuf,
     ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
+        self.create_session_with_settings(cwd, crate::RequestedProviderSettings::default())
+            .await
+    }
+
+    pub async fn create_session_with_settings(
+        &self,
+        cwd: PathBuf,
+        settings: crate::RequestedProviderSettings,
+    ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
-            .send(ProviderCommand::Create { cwd, reply })
+            .send(ProviderCommand::Create {
+                cwd,
+                settings,
+                reply,
+            })
             .await
             .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
         result
