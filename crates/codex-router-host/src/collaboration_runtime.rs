@@ -444,12 +444,11 @@ impl CollaborationRuntime {
         {
             acp = acp.with_interaction_broker(std::sync::Arc::clone(&approval_broker));
         }
-        if let (Some(supervisor), Some(delivery), Some(hub), Some(store), Some(owner_human_id)) = (
+        if let (Some(supervisor), Some(delivery), Some(hub), Some(store)) = (
             &external_provider_supervisor,
             &provider_delivery_route,
             &provider_session_hub,
             &provider_store,
-            owner_human_id.as_ref(),
         ) {
             let commands: std::sync::Arc<dyn collaboration_service::SessionCommandPort> =
                 std::sync::Arc::new(crate::HostSessionCommandPort::new(
@@ -461,7 +460,9 @@ impl CollaborationRuntime {
             let events: std::sync::Arc<dyn collaboration_service::SessionEventHub> =
                 std::sync::Arc::clone(hub) as _;
             let socket_directory = inputs.directory.join("router-sessions");
-            create_private_socket_directory(&socket_directory)?;
+            if owner_human_id.is_some() {
+                create_private_socket_directory(&socket_directory)?;
+            }
             for description in provider_face_endpoints {
                 let Some(catalog) = supervisor.provider_model_catalog(&description.endpoint) else {
                     continue;
@@ -481,6 +482,9 @@ impl CollaborationRuntime {
                     std::sync::Arc::clone(&commands),
                     std::sync::Arc::clone(&events),
                 );
+                let Some(owner_human_id) = owner_human_id.as_ref() else {
+                    continue;
+                };
                 let context = collaboration_service::RouterSessionAppServerContext::new(
                     endpoint,
                     message_board::Identity::Human {

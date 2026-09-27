@@ -174,7 +174,7 @@ async fn rejected_persistent_acp_choice_is_visible_and_retryable() -> TestResult
         sequence: 10,
         event: SessionEvent::InteractionRequested {
             interaction: PendingInteraction::Approval {
-                approver: owner,
+                approver: owner.clone(),
                 request: Box::new(request),
             },
         },
@@ -196,14 +196,51 @@ async fn rejected_persistent_acp_choice_is_visible_and_retryable() -> TestResult
     let retried = next_frame(&mut lines).await?;
     assert_eq!(retried["method"], "session/request_permission");
     assert_ne!(retried["id"], first["id"]);
+    assert!(
+        retried["params"]["toolCall"]["title"]
+            .as_str()
+            .is_some_and(|title| title.contains("persistentChoiceNotAcknowledged"))
+    );
     assert_eq!(retried["params"]["options"][0]["optionId"], "allow-always");
     send_frame(
         &mut writer,
         json!({"jsonrpc":"2.0","id":retried["id"],"result":{
-            "outcome":{"outcome":"selected","optionId":"reject-once"}
+            "outcome":{"outcome":"selected","optionId":"allow-always"}
         }}),
     )
     .await?;
+    let last = next_frame(&mut lines).await?;
+    assert_eq!(last["method"], "session/request_permission");
+    send_frame(
+        &mut writer,
+        json!({"jsonrpc":"2.0","id":last["id"],"result":{
+            "outcome":{"outcome":"selected","optionId":"allow-always"}
+        }}),
+    )
+    .await?;
+    send_frame(
+        &mut writer,
+        json!({"jsonrpc":"2.0","id":3,
+        "method":"session/list","params":{}}),
+    )
+    .await?;
+    let after_limit = next_frame(&mut lines).await?;
+    assert_eq!(
+        after_limit["id"], 3,
+        "interaction was presented more than three times"
+    );
+    assert_eq!(broker.list_typed_approvals(true).await.len(), 1);
+    broker
+        .decide_typed_interaction(
+            "persistent-retry",
+            &owner,
+            collaboration_service::TypedInteractionDecision::SelectApproval {
+                option_id: "reject-once".into(),
+                acknowledge_persistent: false,
+                note: None,
+            },
+        )
+        .await?;
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(2), agent_reply).await??,
         TypedApprovalResolution::Selected(selection) if selection.option_id.as_str() == "reject-once"

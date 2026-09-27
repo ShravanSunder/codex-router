@@ -26,6 +26,9 @@ pub(super) struct ScriptedSessionBackend {
     pub(super) load_commands: Mutex<Vec<SessionTargetCommand>>,
     pub(super) prompt_commands: Mutex<Vec<PromptSessionCommand>>,
     pub(super) steer_commands: Mutex<Vec<SteerSessionCommand>>,
+    pub(super) steer_gate: Mutex<Option<Arc<Notify>>>,
+    pub(super) steer_started: Notify,
+    pub(super) turn_command_order: Mutex<Vec<&'static str>>,
     pub(super) cancel_commands: Mutex<Vec<SessionTargetCommand>>,
     pub(super) setting_commands: Mutex<Vec<SetSessionSettingCommand>>,
     pub(super) created: Notify,
@@ -60,6 +63,9 @@ impl ScriptedSessionBackend {
             load_commands: Mutex::new(Vec::new()),
             prompt_commands: Mutex::new(Vec::new()),
             steer_commands: Mutex::new(Vec::new()),
+            steer_gate: Mutex::new(None),
+            steer_started: Notify::new(),
+            turn_command_order: Mutex::new(Vec::new()),
             cancel_commands: Mutex::new(Vec::new()),
             setting_commands: Mutex::new(Vec::new()),
             created: Notify::new(),
@@ -146,8 +152,17 @@ impl SessionCommandPort for ScriptedSessionBackend {
         })
     }
     fn steer(&self, command: SteerSessionCommand) -> CommandFuture<'_, SessionSteerOutcome> {
-        self.steer_commands.lock().expect("test lock").push(command);
-        Box::pin(async {
+        let gate = self.steer_gate.lock().expect("test lock").take();
+        self.steer_started.notify_one();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            self.steer_commands.lock().expect("test lock").push(command);
+            self.turn_command_order
+                .lock()
+                .expect("test lock")
+                .push("steer");
             Ok(SessionSteerOutcome::Injected {
                 turn_id: "turn-1".into(),
             })
@@ -163,6 +178,10 @@ impl SessionCommandPort for ScriptedSessionBackend {
         Box::pin(async { Err(CommandFailure::Unsupported) })
     }
     fn cancel(&self, command: SessionTargetCommand) -> CommandFuture<'_, ()> {
+        self.turn_command_order
+            .lock()
+            .expect("test lock")
+            .push("interrupt");
         self.cancel_commands
             .lock()
             .expect("test lock")

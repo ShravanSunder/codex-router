@@ -5,6 +5,118 @@ use std::{os::unix::fs::PermissionsExt, sync::Arc};
 use tokio::net::UnixListener;
 use tokio_tungstenite::client_async;
 
+/// A missed terminal event must settle the TUI after a same-epoch resync.
+#[tokio::test]
+async fn resync_replays_missed_item_and_turn_completion() -> Result<(), Box<dyn std::error::Error>>
+{
+    use session_event_model::{InputId, SessionItem, SessionItemKind, StopReason, TurnOutcome};
+    use tokio::time::{Duration, timeout};
+
+    let directory = tempfile::tempdir()?;
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+    let listener = UnixListener::bind(directory.path().join("claude.sock"))?;
+    let backend = ScriptedSessionBackend::new()?;
+    handle_app_server_thread_request(
+        "thread/start",
+        json!({"cwd":directory.path()}),
+        Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
+        Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        backend.endpoint.clone(),
+        ScriptedSessionBackend::actor()?,
+        &[],
+    )
+    .await?;
+    let item = SessionItem {
+        item_id: "answer".into(),
+        kind: SessionItemKind::AgentMessage,
+        text: Some("done".into()),
+    };
+    *backend.history.lock().expect("test lock") = vec![
+        HubEvent {
+            sequence: 1,
+            event: SessionEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+                input_id: InputId::generate(),
+            },
+        },
+        HubEvent {
+            sequence: 2,
+            event: SessionEvent::ItemStarted { item: item.clone() },
+        },
+    ];
+    let context = Arc::new(RouterSessionAppServerContext::new(
+        backend.endpoint.clone(),
+        ScriptedSessionBackend::actor()?,
+        Arc::clone(&backend) as Arc<dyn SessionCommandPort>,
+        Arc::clone(&backend) as Arc<dyn SessionEventHub>,
+        tokio::sync::watch::channel(Vec::new()).1,
+    ));
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept client");
+        serve_router_session_app_server_connection(stream, context)
+            .await
+            .expect("serve client");
+    });
+    let stream = UnixStream::connect(directory.path().join("claude.sock")).await?;
+    let (mut client, _) = client_async("ws://localhost/rpc", stream).await?;
+    client
+        .send(Message::Text(
+            json!({"id":1,"method":"thread/resume","params":{
+                "threadId":backend.session.session_id.as_str()
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let reply: Value = serde_json::from_str(
+        timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("resume reply")??
+            .to_text()?,
+    )?;
+    assert_eq!(reply["id"], 1);
+    backend.history.lock().expect("test lock").extend([
+        HubEvent {
+            sequence: 3,
+            event: SessionEvent::ItemCompleted {
+                item_id: "answer".into(),
+            },
+        },
+        HubEvent {
+            sequence: 4,
+            event: SessionEvent::TurnEnded {
+                turn_id: "turn-1".into(),
+                outcome: TurnOutcome::Ended {
+                    stop_reason: StopReason::EndTurn,
+                    local_cause: None,
+                },
+            },
+        },
+    ]);
+    backend.events.send(HubEvent {
+        sequence: 5,
+        event: SessionEvent::ResyncRequired { replay_epoch: 0 },
+    })?;
+    let completed_item: Value = serde_json::from_str(
+        timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("item completion")??
+            .to_text()?,
+    )?;
+    let completed_turn: Value = serde_json::from_str(
+        timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("turn completion")??
+            .to_text()?,
+    )?;
+    assert_eq!(completed_item["method"], "item/completed");
+    assert_eq!(completed_turn["method"], "turn/completed");
+    assert_eq!(completed_turn["params"]["turn"]["status"], "completed");
+    client.close(None).await?;
+    server.await?;
+    Ok(())
+}
+
 struct ObservedConcreteHub {
     inner: Arc<crate::ProviderSessionEventHub>,
     attachment_count: std::sync::atomic::AtomicUsize,

@@ -170,10 +170,22 @@ pub async fn serve_router_session_app_server_connection(
         mpsc::channel::<(SessionRef, Result<HubEvent, ()>)>(64);
     let (response_sender, mut response_receiver) =
         mpsc::channel::<Result<HandledAppServerRequest, AppServerConnectionError>>(32);
+    let (turn_sender, mut turn_receiver) = mpsc::channel::<Value>(64);
     let mut event_tasks = JoinSet::new();
     let mut request_tasks = JoinSet::new();
+    let turn_context = Arc::clone(&context);
+    let turn_response_sender = response_sender.clone();
+    request_tasks.spawn(async move {
+        while let Some(request) = turn_receiver.recv().await {
+            let result = handle_app_server_rpc(Arc::clone(&turn_context), request).await;
+            if turn_response_sender.send(result).await.is_err() {
+                break;
+            }
+        }
+    });
     let mut attached_sessions = HashSet::new();
     let mut subscriptions = HashMap::<SessionRef, AbortHandle>::new();
+    let mut delivered_sequences = HashMap::<SessionRef, (u64, u64)>::new();
     let mut forwarding =
         AppServerEventForwarding::new(context.actor.clone(), context.interaction_broker.clone());
     loop {
@@ -213,10 +225,11 @@ pub async fn serve_router_session_app_server_connection(
                             context.events.attach(session.clone()).await
                                 .map_err(|_| AppServerConnectionError::HubUnavailable)?
                         };
-                        let subscription = attach_session_events(
+                        let (subscription, epoch, sequence) = attach_session_events(
                             session.clone(), attachment, &mut forwarding, &mut websocket,
-                            &event_sender, &mut event_tasks,
+                            &event_sender, &mut event_tasks, None,
                         ).await?;
+                        delivered_sequences.insert(session.clone(), (epoch, sequence));
                         subscriptions.insert(session, subscription);
                     }
                 }
@@ -234,10 +247,12 @@ pub async fn serve_router_session_app_server_connection(
                     }
                     match context.events.attach(session.clone()).await {
                         Ok(attachment) => {
-                            let subscription = attach_session_events(
+                            let (subscription, epoch, sequence) = attach_session_events(
                                 session.clone(), attachment, &mut forwarding, &mut websocket,
                                 &event_sender, &mut event_tasks,
+                                delivered_sequences.get(&session).copied(),
                             ).await?;
+                            delivered_sequences.insert(session.clone(), (epoch, sequence));
                             attached_sessions.insert(session.clone());
                             subscriptions.insert(session, subscription);
                         }
@@ -247,6 +262,9 @@ pub async fn serve_router_session_app_server_connection(
                         }
                     }
                 } else if let Ok(event) = event {
+                    if let Some((_, sequence)) = delivered_sequences.get_mut(&session) {
+                        *sequence = (*sequence).max(event.sequence);
+                    }
                     for notification in forwarding.project(&session, &event) {
                         websocket.send(Message::Text(notification.to_string().into())).await?;
                     }
@@ -274,6 +292,30 @@ pub async fn serve_router_session_app_server_connection(
             continue;
         }
         if request.get("id").is_none() {
+            continue;
+        }
+        if matches!(
+            request.get("method").and_then(Value::as_str),
+            Some("turn/start" | "turn/steer" | "turn/interrupt")
+        ) {
+            match turn_sender.try_send(request) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(request)) => {
+                    websocket
+                        .send(Message::Text(
+                            json!({
+                                "id": request.get("id").cloned().unwrap_or(Value::Null),
+                                "error": {"code": -32000, "message": "Turn command queue is full"}
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await?;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(AppServerConnectionError::RequestWorkerUnavailable);
+                }
+            }
             continue;
         }
         let request_context = Arc::clone(&context);
@@ -430,16 +472,25 @@ async fn attach_session_events(
     websocket: &mut tokio_tungstenite::WebSocketStream<UnixStream>,
     event_sender: &mpsc::Sender<(SessionRef, Result<HubEvent, ()>)>,
     event_tasks: &mut JoinSet<()>,
-) -> Result<AbortHandle, AppServerConnectionError> {
+    replay_after: Option<(u64, u64)>,
+) -> Result<(AbortHandle, u64, u64), AppServerConnectionError> {
     let pending_requests = pending_snapshot_requests(&attachment.snapshot);
+    let epoch = attachment.epoch;
+    let mut latest_sequence = 0;
     for event in attachment.snapshot {
+        latest_sequence = latest_sequence.max(event.sequence);
         let request_still_pending = matches!(
             &event.event,
             SessionEvent::InteractionRequested { interaction }
                 if pending_requests.contains(interaction.request_id())
         );
         for notification in forwarding.project(&session, &event) {
-            if request_still_pending {
+            let missed_event = replay_after.is_some_and(|(previous_epoch, sequence)| {
+                previous_epoch != epoch || event.sequence > sequence
+            });
+            let historical_interaction =
+                matches!(event.event, SessionEvent::InteractionRequested { .. });
+            if request_still_pending || (missed_event && !historical_interaction) {
                 websocket
                     .send(Message::Text(notification.to_string().into()))
                     .await?;
@@ -448,17 +499,21 @@ async fn attach_session_events(
     }
     let mut receiver = attachment.receiver;
     let sender = event_sender.clone();
-    Ok(event_tasks.spawn(async move {
-        loop {
-            let event = receiver.recv().await.map_err(|_| ());
-            let needs_reattach = event.as_ref().map_or(true, |event| {
-                matches!(&event.event, SessionEvent::ResyncRequired { .. })
-            });
-            if sender.send((session.clone(), event)).await.is_err() || needs_reattach {
-                break;
+    Ok((
+        event_tasks.spawn(async move {
+            loop {
+                let event = receiver.recv().await.map_err(|_| ());
+                let needs_reattach = event.as_ref().map_or(true, |event| {
+                    matches!(&event.event, SessionEvent::ResyncRequired { .. })
+                });
+                if sender.send((session.clone(), event)).await.is_err() || needs_reattach {
+                    break;
+                }
             }
-        }
-    }))
+        }),
+        epoch,
+        latest_sequence,
+    ))
 }
 
 #[path = "router_session_app_server_methods.rs"]
@@ -484,6 +539,10 @@ mod model_tests;
 #[allow(clippy::panic_in_result_fn)]
 #[path = "router_session_app_server_multichoice_tui_tests.rs"]
 mod multichoice_tui_tests;
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
+#[path = "router_session_app_server_order_tests.rs"]
+mod order_tests;
 #[cfg(test)]
 #[allow(clippy::panic_in_result_fn)]
 #[path = "router_session_app_server_reattach_tests.rs"]

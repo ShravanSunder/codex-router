@@ -31,6 +31,21 @@ pub struct ProviderAcpSessionRoute {
 struct PendingAcpInteraction {
     session: SessionRef,
     interaction: PendingInteraction,
+    presentations: u8,
+}
+
+const MAX_INTERACTION_PRESENTATIONS: u8 = 3;
+
+fn add_interaction_rejection_reason(frame: &mut Value, reason: &str) {
+    if let Some(title) = frame.pointer_mut("/params/toolCall/title") {
+        if let Some(original) = title.as_str() {
+            *title = json!(format!("{original} (previous answer rejected: {reason})"));
+        }
+    } else if let Some(message) = frame.pointer_mut("/params/message")
+        && let Some(original) = message.as_str()
+    {
+        *message = json!(format!("{original} (previous answer rejected: {reason})"));
+    }
 }
 
 fn interaction_error_kind(error: &crate::InteractionHistoryError) -> &'static str {
@@ -256,6 +271,7 @@ async fn serve_provider_sessions(
                     pending_interactions.insert(request_id, PendingAcpInteraction {
                         session,
                         interaction: pending,
+                        presentations: 1,
                     });
                     router.output.send(frame).await?;
                 }
@@ -275,7 +291,7 @@ async fn serve_provider_sessions(
                 .as_str()
                 .and_then(|request_id| pending_interactions.remove(request_id))
             {
-                let request_id = pending.interaction.request_id();
+                let request_id = pending.interaction.request_id().to_owned();
                 if frame.get("error").is_some_and(|error| !error.is_null()) {
                     tracing::warn!(
                         request_id,
@@ -305,6 +321,7 @@ async fn serve_provider_sessions(
                             .any(|record| record.request_id() == request_id),
                     };
                     if still_pending
+                        && pending.presentations < MAX_INTERACTION_PRESENTATIONS
                         && let Some(mut outbound) = present_interaction(
                             &pending.session,
                             pending.interaction,
@@ -312,6 +329,10 @@ async fn serve_provider_sessions(
                             supports_question_form,
                         )
                     {
+                        add_interaction_rejection_reason(
+                            &mut outbound.frame,
+                            interaction_error_kind(&error),
+                        );
                         let fresh_id =
                             format!("{}:retry:{}", outbound.request_id, uuid::Uuid::now_v7());
                         if let Some(object) = outbound.frame.as_object_mut() {
@@ -322,9 +343,16 @@ async fn serve_provider_sessions(
                             PendingAcpInteraction {
                                 session: pending.session,
                                 interaction: outbound.pending,
+                                presentations: pending.presentations + 1,
                             },
                         );
                         router.output.send(outbound.frame).await?;
+                    } else if still_pending {
+                        tracing::warn!(
+                            request_id,
+                            presentations = pending.presentations,
+                            "provider ACP interaction presentation limit reached; broker request remains pending"
+                        );
                     }
                 }
             }
@@ -497,6 +525,15 @@ async fn serve_provider_sessions(
                         match attachment {
                             Err(_) => failure(id, -32002, "Session not found"),
                             Ok(attachment) => {
+                                let Some(observed_turn) =
+                                    observers.observed_turns.get(&session).cloned()
+                                else {
+                                    router
+                                        .output
+                                        .send(failure(id, -32000, "Session observer unavailable"))
+                                        .await?;
+                                    continue;
+                                };
                                 let command = PromptSessionCommand {
                                     target: session.clone(),
                                     input_id: session_event_model::InputId::generate(),
@@ -507,19 +544,6 @@ async fn serve_provider_sessions(
                                     Err(error) => command_failure(id, error),
                                     Ok(turn) => {
                                         let output = router.output.clone();
-                                        let Some(observed_turn) =
-                                            observers.observed_turns.get(&session).cloned()
-                                        else {
-                                            router
-                                                .output
-                                                .send(failure(
-                                                    id,
-                                                    -32000,
-                                                    "Session observer unavailable",
-                                                ))
-                                                .await?;
-                                            continue;
-                                        };
                                         prompts.spawn(async move {
                                             stream_prompt(
                                                 output,
