@@ -5,6 +5,7 @@ use rustix::{io::Errno, process::Pid};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -240,6 +241,19 @@ impl ClaudeCodeSessionRegistry {
             }
             candidates.push(PeerSessionCandidate { session_id, lookup });
         }
+        let mut claims_by_session = HashMap::<SessionId, usize>::new();
+        for candidate in &candidates {
+            *claims_by_session
+                .entry(candidate.session_id.clone())
+                .or_default() += 1;
+        }
+        sessions.retain(|summary| {
+            let is_unambiguous = claims_by_session.get(&summary.session_id) == Some(&1);
+            if !is_unambiguous {
+                skipped_records = skipped_records.saturating_add(1);
+            }
+            is_unambiguous
+        });
         Ok(PeerSessionInventory {
             sessions,
             skipped_records,

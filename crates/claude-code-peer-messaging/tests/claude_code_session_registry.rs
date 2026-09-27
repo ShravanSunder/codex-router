@@ -79,6 +79,28 @@ fn live_sessions_counts_oversize_or_unreadable_live_records_without_failing_page
 }
 
 #[test]
+fn duplicate_live_session_identity_is_not_listed_as_a_usable_target() {
+    let root = tempfile::tempdir().expect("registry directory");
+    let mut second_process = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("second live process");
+    for process_id in [std::process::id(), second_process.id()] {
+        std::fs::write(
+            root.path().join(format!("{process_id}.json")),
+            live_record_fixture(process_id, "duplicate-session").to_string(),
+        )
+        .expect("duplicate registry record");
+    }
+    let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+    let inventory = registry.live_sessions().expect("duplicate inventory");
+    second_process.kill().expect("stop second process");
+    second_process.wait().expect("reap second process");
+    assert!(inventory.sessions.is_empty());
+    assert_eq!(inventory.skipped_records, 2);
+}
+
+#[test]
 fn live_registry_entry_is_writable_only_for_supported_protocol() {
     let root = tempfile::tempdir().expect("registry directory");
     let pid = std::process::id();
