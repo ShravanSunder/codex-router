@@ -147,15 +147,6 @@ jobs:
       # the built artifacts so they don't contend for cargo's build lock.
       - name: Build test binaries
         run: cargo nextest run --profile ci --workspace --no-run
-      - name: Prove quota PTY cancellation serially (temporary)
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 30); do
-            cargo nextest run --profile ci --retries 0 --no-tests fail \
-              -p codex-router-quota-reset-test-harness --test quota_reset_pty_test \
-              -E 'test(=quota_reset_pty_test::compiled_quota_tui_inspects_loopback_and_cancels_with_zero_posts)'
-            echo "quota PTY cancellation: ${attempt}/30 passed"
-          done
       - name: Test quota-reset terminal integration
         id: quota_reset_terminal_integration
         background: true
