@@ -1,7 +1,7 @@
 //! Host lifecycle publication is ordered with replay and visible on return.
 
 use crate::{ExternalProviderLaunch, ExternalProviderRuntime};
-use acp_client_runtime::ProviderPersistenceTarget;
+use acp_client_runtime::{ProviderPersistenceTarget, ProviderSettingKind};
 use collaboration_protocol::{ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess};
 use collaboration_service::{
     ProviderOperationStore, ProviderSessionEventHub, ProviderSessionRecord, SessionEventHub,
@@ -38,6 +38,32 @@ else: raise AssertionError(mode)
 sys.stdin.read()
 "#;
 
+const SETTINGS_UPDATES_FIXTURE: &str = r#"
+import json,sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+current={'mode':'default','model':'a'}
+def option(id,values):
+ return {'id':id,'name':id,'category':id,'type':'select','currentValue':current[id],
+  'options':[{'value':value,'name':value} for value in values]}
+def options(): return [option('mode',['default','ask']),option('model',['a','b','c'])]
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'hub-settings-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session','configOptions':options()}})
+for config_id,value in [('model','b'),('mode','ask')]:
+ request=read()
+ assert request['method']=='session/set_config_option' and request['params']['configId']==config_id,request
+ current[config_id]=value
+ send({'jsonrpc':'2.0','id':request['id'],'result':{'configOptions':options()}})
+current['model']='c'
+send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session',
+ 'update':{'sessionUpdate':'config_option_update','configOptions':options()}}})
+sys.stdin.read()
+"#;
+
 type Fixture = (
     tempfile::TempDir,
     Arc<Mutex<ProviderOperationStore>>,
@@ -47,6 +73,10 @@ type Fixture = (
 );
 
 async fn fixture(mode: &str) -> Fixture {
+    fixture_with_script(LIFECYCLE_FIXTURE, &[mode]).await
+}
+
+async fn fixture_with_script(script: &str, arguments: &[&str]) -> Fixture {
     let root = tempfile::tempdir().expect("fixture root");
     let store = Arc::new(Mutex::new(
         ProviderOperationStore::open(&root.path().join("operations.sqlite"))
@@ -67,12 +97,10 @@ async fn fixture(mode: &str) -> Fixture {
         ExternalProviderLaunch {
             persistence_target: ProviderPersistenceTarget::Unspecified,
             executable: PathBuf::from("/usr/bin/python3"),
-            arguments: vec![
-                "-u".into(),
-                "-c".into(),
-                LIFECYCLE_FIXTURE.into(),
-                mode.into(),
-            ],
+            arguments: ["-u".to_owned(), "-c".to_owned(), script.to_owned()]
+                .into_iter()
+                .chain(arguments.iter().map(|argument| (*argument).to_owned()))
+                .collect(),
             environment: Vec::new(),
         },
         "fixture",
@@ -124,6 +152,13 @@ async fn assert_listed_idle(hub: &ProviderSessionEventHub, session: &SessionRef)
                 && matches!(capabilities.auth_status, session_event_model::ProviderAuthStatus::NotReported)
     ));
     assert!(matches!(
+        attached
+            .snapshot
+            .get(attached.snapshot.len().saturating_sub(3))
+            .map(|event| &event.event),
+        Some(SessionEvent::SettingsChanged { .. })
+    ));
+    assert!(matches!(
         attached.snapshot.last().map(|event| &event.event),
         Some(SessionEvent::StateChanged {
             state: SessionState::Idle
@@ -165,7 +200,7 @@ async fn load_replays_historical_items_before_publishing_idle() {
             .any(|event| matches!(event.event, SessionEvent::ItemStarted { .. }))
     );
     assert!(matches!(
-        attached.snapshot[attached.snapshot.len() - 3].event,
+        attached.snapshot[attached.snapshot.len() - 4].event,
         SessionEvent::TurnEnded { .. }
     ));
     runtime.shutdown().await;
@@ -181,6 +216,77 @@ async fn resume_invalidates_history_before_publishing_idle() {
         .expect("session/resume");
     assert_listed_idle(&hub, &session).await;
     let attached = hub.attach(session).await.expect("resumed attach");
-    assert_eq!(attached.snapshot.len(), 2);
+    assert_eq!(attached.snapshot.len(), 3);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn create_setting_change_and_idle_update_refresh_hub_model() {
+    let (root, store, hub, runtime, session) =
+        fixture_with_script(SETTINGS_UPDATES_FIXTURE, &[]).await;
+    runtime
+        .create_session(root.path().to_path_buf())
+        .await
+        .expect("session/new");
+    record_session(&store, &session).await;
+    let created = hub
+        .sessions(session.endpoint.clone())
+        .await
+        .expect("created inventory");
+    assert_eq!(created[0].model.as_deref(), Some("a"));
+    assert_eq!(created[0].mode.as_deref(), Some("default"));
+
+    runtime
+        .set_setting(
+            "fixture-session".into(),
+            ProviderSettingKind::Model,
+            "b".into(),
+        )
+        .await
+        .expect("set model");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let rows = hub
+                .sessions(session.endpoint.clone())
+                .await
+                .expect("model inventory");
+            if rows[0].model.as_deref() == Some("b") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("model setting event");
+    runtime
+        .set_setting(
+            "fixture-session".into(),
+            ProviderSettingKind::Mode,
+            "ask".into(),
+        )
+        .await
+        .expect("set mode");
+    let idle_update = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let rows = hub
+                .sessions(session.endpoint.clone())
+                .await
+                .expect("idle inventory");
+            if rows[0].model.as_deref() == Some("c") && rows[0].mode.as_deref() == Some("ask") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if idle_update.is_err() {
+        panic!(
+            "idle config update missing; snapshot: {:?}",
+            hub.attach(session.clone())
+                .await
+                .expect("diagnostic attach")
+                .snapshot
+        );
+    }
     runtime.shutdown().await;
 }
