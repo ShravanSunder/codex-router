@@ -4,7 +4,10 @@ use super::*;
 fn live_quota_command_rejects_api_key_auth_without_printing_key() {
     let test_root = TestRoot::new("live-quota-api-key");
     must_ok(fs::create_dir(test_root.path()));
-    let auth_json = test_root.path().join("auth.json");
+    let profiles_root = test_root.path().join("profiles");
+    let profile_root = profiles_root.join("api-key-profile");
+    must_ok(fs::create_dir_all(&profile_root));
+    let auth_json = profile_root.join("auth.json");
     must_ok(fs::write(
         &auth_json,
         r#"{"auth_mode":"api-key","OPENAI_API_KEY":"sk-local-secret-canary"}"#,
@@ -15,10 +18,8 @@ fn live_quota_command_rejects_api_key_auth_without_printing_key() {
             "codex-router",
             "live",
             "quota",
-            "--auth-json",
-            path_to_str(&auth_json),
-            "--profile-label",
-            "api-key-profile",
+            "--profiles-root",
+            path_to_str(&profiles_root),
             "--approve-network-account-use",
         ],
         CliContext::new(Vec::new()),
@@ -39,7 +40,9 @@ fn live_quota_command_rejects_api_key_auth_without_printing_key() {
 fn live_quota_refuses_network_account_use_without_explicit_approval() {
     let test_root = TestRoot::new("live-quota-approval-required");
     must_ok(fs::create_dir(test_root.path()));
-    let auth_json = test_root.path().join("auth.json");
+    let profiles_root = test_root.path().join("profiles");
+    must_ok(fs::create_dir_all(profiles_root.join("main")));
+    let auth_json = profiles_root.join("main/auth.json");
     must_ok(fs::write(
         &auth_json,
         r#"{"auth_mode":"chatgpt","tokens":{"access_token":"oauth-secret-canary"}}"#,
@@ -52,10 +55,8 @@ fn live_quota_refuses_network_account_use_without_explicit_approval() {
             "codex-router".into(),
             "live".into(),
             "quota".into(),
-            "--auth-json".into(),
-            auth_json.as_os_str().to_owned(),
-            "--profile-label".into(),
-            "main".into(),
+            "--profiles-root".into(),
+            profiles_root.as_os_str().to_owned(),
         ],
         &CliContext::new(Vec::new()),
         &mut stdout,
@@ -77,7 +78,9 @@ fn live_quota_refuses_network_account_use_without_explicit_approval() {
 fn live_quota_rejects_non_provider_base_url_before_token_egress() {
     let test_root = TestRoot::new("live-quota-disallowed-base-url");
     must_ok(fs::create_dir(test_root.path()));
-    let auth_json = test_root.path().join("auth.json");
+    let profiles_root = test_root.path().join("profiles");
+    must_ok(fs::create_dir_all(profiles_root.join("main")));
+    let auth_json = profiles_root.join("main/auth.json");
     must_ok(fs::write(
         &auth_json,
         r#"{"auth_mode":"chatgpt","tokens":{"access_token":"oauth-egress-canary"}}"#,
@@ -90,10 +93,8 @@ fn live_quota_rejects_non_provider_base_url_before_token_egress() {
             "codex-router".into(),
             "live".into(),
             "quota".into(),
-            "--auth-json".into(),
-            auth_json.as_os_str().to_owned(),
-            "--profile-label".into(),
-            "main".into(),
+            "--profiles-root".into(),
+            profiles_root.as_os_str().to_owned(),
             "--base-url".into(),
             "http://attacker.example".into(),
             "--approve-network-account-use".into(),

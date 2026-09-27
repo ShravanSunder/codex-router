@@ -112,6 +112,7 @@ pub(super) async fn run(
             _ = tokio::time::sleep_until(next_mark) => {
                 if mark == mark_total {
                     wait.abort();
+                    let _ = (&mut wait).await;
                     state.cancellation.cancel();
                     let reason = match state.mode {
                         ThreadListenMode::Once { .. } => ThreadListenEndReason::Timeout,
@@ -138,11 +139,15 @@ pub(super) async fn run(
                             let terminal = record_rejection(&mut consecutive_rejections, &mut last_rejection, evidence);
                             publish_rejection_state(&state, consecutive_rejections, &last_rejection);
                             if terminal {
+                                wait.abort();
+                                let _ = (&mut wait).await;
                                 finish_session_delivery(&registry, &listen_id, &state, &sink, ThreadListenEndReason::Error, last_rejection).await;
                                 return;
                             }
                         }
                         Err(BatchSinkFailure::Unavailable) => {
+                            wait.abort();
+                            let _ = (&mut wait).await;
                             finish_session_delivery(&registry, &listen_id, &state, &sink, ThreadListenEndReason::Error, json!({"kind":"unavailable"})).await;
                             return;
                         }

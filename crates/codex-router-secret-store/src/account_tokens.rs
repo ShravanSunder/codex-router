@@ -9,6 +9,7 @@ use codex_router_core::redaction::SecretString;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::backend::SecretStore;
 use crate::model::SecretKey;
 use crate::model::SecretStoreError;
 
@@ -92,6 +93,11 @@ impl AccountCredentialBundle {
 
     /// Serializes the bundle into one secret-store payload.
     pub fn to_secret_string(&self) -> Result<SecretString, SecretStoreError> {
+        if self.access_token.expose_secret().trim().is_empty() {
+            return Err(SecretStoreError::InvalidSecretPayload {
+                message: "account credential bundle missing access token".to_owned(),
+            });
+        }
         let payload = AccountCredentialBundlePayload {
             version: ACCOUNT_CREDENTIAL_BUNDLE_VERSION,
             access_token: self.access_token.expose_secret(),
@@ -197,6 +203,38 @@ pub fn account_credential_bundle_key(
         account_id.as_str(),
         generation
     ))
+}
+
+/// Finds a successor slot proven unused, skipping orphaned bundles.
+pub fn first_unused_account_credential_generation(
+    store: &impl SecretStore,
+    account_id: &AccountId,
+    active_generation: u64,
+) -> Result<u64, SecretStoreError> {
+    let mut candidate =
+        active_generation
+            .checked_add(1)
+            .ok_or_else(|| SecretStoreError::InvalidSecretPayload {
+                message: "credential generation overflow".to_owned(),
+            })?;
+    loop {
+        let key = account_credential_bundle_key(account_id, candidate)?;
+        match store.read_secret(&key) {
+            Ok(_) => {
+                candidate = candidate.checked_add(1).ok_or_else(|| {
+                    SecretStoreError::InvalidSecretPayload {
+                        message: "credential generation overflow".to_owned(),
+                    }
+                })?;
+            }
+            Err(SecretStoreError::Filesystem { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(candidate);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn secret_payload_error(error: impl std::fmt::Display) -> SecretStoreError {

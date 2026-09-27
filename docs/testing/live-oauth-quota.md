@@ -11,7 +11,7 @@ execution.
 
 Live proof covers only:
 
-- real OAuth login or account credential import
+- real OAuth device login
 - real quota fetch
 - real account rotation
 - real quota pooling across multiple accounts
@@ -29,7 +29,6 @@ Router-owned account setup:
 
 ```shell
 cargo run -p codex-router-cli -- account login --label <label> --device-auth --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account login --label <label> --auth-json <path> --allow-plaintext-file-secrets
 cargo run -p codex-router-cli -- account list
 cargo run -p codex-router-cli -- quota refresh
 cargo run -p codex-router-cli -- quota status --all-limits
@@ -43,10 +42,6 @@ to the installed `codex` binary in a temporary owner-only `CODEX_HOME`, then
 imports the resulting OAuth `auth.json` into router-owned account state. Use
 `--codex-bin <path>` when the test must pin a specific Codex binary.
 
-`account login --auth-json` imports an existing Codex/Prodex-style OAuth
-`auth.json` into router-owned account state. It is an explicit migration,
-recovery, and test setup path, not implicit steady-state shared auth.
-
 `quota refresh` uses the router-owned credential resolver and persists provider
 quota windows to SQLite. `quota status` reads SQLite only and performs no
 provider I/O.
@@ -54,14 +49,12 @@ provider I/O.
 Read-only diagnostic live quota:
 
 ```shell
-cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> --dry-run
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --dry-run
-cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> --approve-network-account-use
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --approve-network-account-use
 ```
 
-The diagnostic command reads Codex/Prodex-style OAuth `auth.json` as a
-compatibility input, calls the ChatGPT usage endpoint, and prints only redacted
+The diagnostic command reads OAuth `auth.json` inside each discovered profile
+directory, calls the ChatGPT usage endpoint, and prints only redacted
 quota window summaries. It does not copy the file into router state, does not
 make `auth.json` the router runtime source of truth, and rejects API-key auth
 for quota because the ChatGPT quota endpoint requires Codex OAuth access tokens.
@@ -73,7 +66,6 @@ The implemented CLI surface for local router proof is:
 
 ```shell
 cargo run -p codex-router-cli -- account login [--router-root <path>] --label <label> --device-auth --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account login [--router-root <path>] --label <label> --auth-json <path> --allow-plaintext-file-secrets
 cargo run -p codex-router-cli -- account list [--router-root <path>]
 cargo run -p codex-router-cli -- quota refresh [--router-root <path>]
 cargo run -p codex-router-cli -- quota status [--router-root <path>] --all-limits
@@ -81,9 +73,7 @@ cargo run -p codex-router-cli -- profile print --port 8787
 cargo run -p codex-router-cli -- profile doctor
 cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --port 8787 --dry-run
 cargo run -p codex-router-cli -- serve [--state-db <state.sqlite>] [--secret-root <secret-root>] [--upstream-base-url <url>]
-cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> --dry-run
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --dry-run
-cargo run -p codex-router-cli -- live quota --auth-json <path> --profile-label <label> --approve-network-account-use
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --approve-network-account-use
 ```
 
@@ -115,7 +105,6 @@ Approved live quota proof commands for this revision:
 
 ```shell
 cargo run -p codex-router-cli -- account login --label <label> --device-auth --allow-plaintext-file-secrets
-cargo run -p codex-router-cli -- account login --label <label> --auth-json <path> --allow-plaintext-file-secrets
 cargo run -p codex-router-cli -- quota refresh
 cargo run -p codex-router-cli -- quota status --all-limits
 cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root> --dry-run
@@ -188,5 +177,5 @@ redaction: no tokens, auth headers, emails, or raw response bodies printed
 
 ```text
 live_oauth_quota_gate: not-run
-reason: approval required for router-owned device-auth/import plus real quota refresh and cycling proof
+reason: approval required for router-owned device auth plus real quota refresh and cycling proof
 ```

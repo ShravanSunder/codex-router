@@ -123,7 +123,7 @@ fn quota_status_snapshot_rows_show_unknown_pace_until_window_metadata_exists() {
     );
     assert_eq!(
         lines[1],
-        "account\tstatus\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
+        "account\tstatus\tOAuth\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
     );
     assert!(lines[2].contains("burn unavailable"), "{}", lines[2]);
     assert!(lines[2].contains("sample fresh 1m 40s"), "{}", lines[2]);
@@ -221,7 +221,7 @@ fn quota_status_shows_two_user_quota_windows_per_account() {
     );
     assert_eq!(
         lines[1],
-        "account\tstatus\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
+        "account\tstatus\tOAuth\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
     );
     assert!(lines[2].contains("###------- 25% left resets in 2h 30m"));
     assert!(lines[2].contains("########-- 80% left resets in 6d 23h"));
@@ -235,7 +235,7 @@ fn quota_status_shows_two_user_quota_windows_per_account() {
     assert!(!lines[2].contains("quota guard"));
     assert_eq!(
         lines[3],
-        "responses route\tnext: primary\twhy: preferred by quota: safest quota limiting window: 5h 25% left"
+        "responses route\tnext: primary\twhy: preferred by quota: idle far-reset allowance limiting window: 5h 25% left"
     );
     assert_eq!(lines.len(), 4);
     assert!(!output.stdout.contains("acct_primary"));
@@ -332,7 +332,7 @@ fn quota_status_table_format_renders_account_rows_without_legacy_tables() {
     assert!(visible_stdout.contains("─"));
     assert!(visible_stdout.contains("╰"));
     assert!(visible_stdout.contains("responses -> primary"));
-    assert!(visible_stdout.contains("safest quota"));
+    assert!(visible_stdout.contains("idle far-reset allowance"));
     assert!(visible_stdout.contains("burn "));
     assert!(!visible_stdout.contains("why: preferred by quota"));
     assert!(!visible_stdout.contains("  Account"));
@@ -346,7 +346,6 @@ fn quota_status_table_format_renders_account_rows_without_legacy_tables() {
     assert!(visible_stdout.contains("rate"));
     assert!(visible_stdout.contains("guards"));
     assert!(!visible_stdout.contains("│ Clients"));
-    assert!(visible_stdout.contains("safest quota"));
     assert!(!visible_stdout.contains("account ┆ status"));
     assert!(!visible_stdout.contains("route     ┆ next"));
     assert!(!visible_stdout.contains("acct_primary"));

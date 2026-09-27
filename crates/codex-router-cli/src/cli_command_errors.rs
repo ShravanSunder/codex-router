@@ -1,4 +1,5 @@
 //! Public CLI error vocabulary; formatting is independent of dispatch.
+use crate::credential_upkeep_worker::CredentialUpkeepStartError;
 use crate::{
     account::AccountCommandError, host_command::HostCommandError, profile::ProfileWriteError,
     quota::QuotaCommandError, token::TokenCommandError,
@@ -13,6 +14,9 @@ use thiserror::Error;
 /// CLI execution failure.
 #[derive(Debug, Error)]
 pub enum CliError {
+    /// Background OAuth upkeep could not start.
+    #[error(transparent)]
+    CredentialUpkeep(#[from] CredentialUpkeepStartError),
     /// Command name is unknown.
     #[error("unknown command: {command}")]
     UnknownCommand {
@@ -96,7 +100,7 @@ pub enum CliError {
     #[error(transparent)]
     Quota(#[from] QuotaCommandError),
     /// Live quota command needs exactly one source.
-    #[error("live quota requires exactly one of --auth-json or --profiles-root")]
+    #[error("live quota requires --profiles-root")]
     LiveQuotaSourceRequired,
     /// Live quota profile discovery failed.
     #[error("failed to read live quota profiles: {message}")]

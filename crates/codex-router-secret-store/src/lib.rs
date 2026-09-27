@@ -260,6 +260,20 @@ mod tests {
     }
 
     #[test]
+    fn empty_access_token_cannot_be_serialized_as_an_active_bundle() {
+        let bundle = AccountCredentialBundle::imported_codex_auth(
+            "   ",
+            Some("refresh-token-canary".to_owned()),
+        );
+        let error = must_err(bundle.to_secret_string());
+        assert!(matches!(
+            error,
+            crate::model::SecretStoreError::InvalidSecretPayload { .. }
+        ));
+        assert!(!error.to_string().contains("refresh-token-canary"));
+    }
+
+    #[test]
     fn refresh_lease_has_owner_follower_and_stale_recovery() {
         let clock = ManualClock::new(100);
         let manager = RefreshLeaseManager::new(clock.clone());
@@ -346,3 +360,4 @@ mod tests {
         }
     }
 }
+pub mod account_credential_lock;

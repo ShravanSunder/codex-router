@@ -54,44 +54,6 @@ impl Drop for TestRoot {
     }
 }
 
-pub(super) struct FailingSecretStore {
-    pub(super) write_attempts: AtomicUsize,
-}
-
-impl FailingSecretStore {
-    pub(super) fn new() -> Self {
-        Self {
-            write_attempts: AtomicUsize::new(0),
-        }
-    }
-
-    pub(super) fn write_attempts(&self) -> usize {
-        self.write_attempts.load(Ordering::SeqCst)
-    }
-}
-
-impl SecretStore for FailingSecretStore {
-    fn write_secret(
-        &self,
-        _key: &SecretKey,
-        _secret: &SecretString,
-    ) -> Result<(), SecretStoreError> {
-        self.write_attempts.fetch_add(1, Ordering::SeqCst);
-
-        Err(SecretStoreError::Filesystem {
-            path: PathBuf::from("injected-secret-store-failure"),
-            source: std::io::Error::other("injected secret-store failure"),
-        })
-    }
-
-    fn read_secret(&self, _key: &SecretKey) -> Result<SecretString, SecretStoreError> {
-        Err(SecretStoreError::Filesystem {
-            path: PathBuf::from("injected-secret-store-failure"),
-            source: std::io::Error::other("injected secret-store failure"),
-        })
-    }
-}
-
 pub(super) fn assert_router_profile_contract(output: &str, port: u16) {
     assert!(!output.contains("[profiles.codex-router]\n"));
     assert!(output.contains("model_provider = \"codex-router\"\n"));
@@ -156,21 +118,6 @@ pub(super) fn must_err<T, E: std::fmt::Display>(result: Result<T, E>) -> E {
         Ok(_) => panic!("expected error, got Ok"),
         Err(error) => error,
     }
-}
-
-pub(super) fn fake_id_token_with_chatgpt_account_id(account_id: &str) -> String {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    let payload = serde_json::json!({
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": account_id
-        }
-    });
-    format!(
-        "header.{}.signature",
-        URL_SAFE_NO_PAD.encode(payload.to_string())
-    )
 }
 
 pub(super) fn remove_dir_all(path: &Path) {

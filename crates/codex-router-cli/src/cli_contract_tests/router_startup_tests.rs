@@ -126,6 +126,7 @@ fn serve_command_defaults_to_live_runtime_clock_with_quota_freshness_margin() {
     };
 
     assert_eq!(command.now_unix_seconds, None);
+    assert_eq!(command.quota_refresh_interval_seconds, 180);
     assert!(
         command.quota_refresh_interval_seconds < command.max_snapshot_age_seconds,
         "background refresh must run before live selector evidence expires"
@@ -307,4 +308,231 @@ fn serve_command_dispatches_websocket_upgrade_through_runtime() {
         Ok(()) => {}
         Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
     }
+}
+
+#[derive(Clone)]
+struct LoopbackUpkeepOAuthClient {
+    token_endpoint: String,
+}
+
+impl CredentialRefreshClient for LoopbackUpkeepOAuthClient {
+    fn refresh_credentials(
+        &self,
+        _account_id: &AccountId,
+        refresh_token: &SecretString,
+    ) -> Result<AccountCredentialBundle, codex_router_auth::resolver::CredentialRefreshFailure>
+    {
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("fixture OAuth client")
+            .post(&self.token_endpoint)
+            .header("content-type", "application/json")
+            .body(
+                serde_json::to_string(&serde_json::json!({
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token.expose_secret(),
+                }))
+                .expect("fixture OAuth request"),
+            )
+            .send()
+            .expect("fixture OAuth response");
+        assert!(response.status().is_success());
+        let payload: serde_json::Value =
+            serde_json::from_str(&response.text().expect("fixture OAuth body"))
+                .expect("fixture OAuth payload");
+        Ok(AccountCredentialBundle::imported_codex_auth(
+            payload["access_token"]
+                .as_str()
+                .expect("access token")
+                .to_owned(),
+            Some(
+                payload["refresh_token"]
+                    .as_str()
+                    .expect("refresh token")
+                    .to_owned(),
+            ),
+        )
+        .with_expires_unix_seconds(10_000_000))
+    }
+}
+
+#[test]
+fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
+    use super::credential_upkeep_tests::wait_for_upkeep_generation;
+    use crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock;
+
+    let test_root = TestRoot::new("serve-idle-oauth-upkeep");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let enabled_id = account_id("serve-upkeep-enabled");
+    let disabled_id = account_id("serve-upkeep-disabled");
+    for (account_id, status, refresh_token) in [
+        (
+            &enabled_id,
+            AccountStatus::Enabled,
+            "initial-refresh-canary",
+        ),
+        (
+            &disabled_id,
+            AccountStatus::Disabled,
+            "disabled-refresh-canary",
+        ),
+    ] {
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(account_id.clone(), "upkeep", status)
+                .with_active_credential_generation(1),
+        ));
+        let key = must_ok(account_credential_bundle_key(account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "initial-access-canary",
+                        Some(refresh_token.to_owned()),
+                    )
+                    .with_expires_unix_seconds(10_000_000)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+    }
+    must_ok(QuotaSnapshotRepository::upsert_snapshot(
+        &state,
+        &PersistedQuotaSnapshot::new(enabled_id.clone(), QuotaSnapshotSource::MockEndpoint)
+            .with_observed_unix_seconds(1_000)
+            .with_route_band("responses", 0),
+    ));
+    drop(state);
+
+    let oauth_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
+    must_ok(oauth_listener.set_nonblocking(true));
+    let oauth_address = must_ok(oauth_listener.local_addr());
+    let (oauth_call_sender, oauth_call_receiver) = mpsc::channel();
+    let oauth_thread = thread::spawn(move || {
+        for (call, expected_refresh) in
+            [(1, "initial-refresh-canary"), (2, "rotated-refresh-canary")]
+        {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let (mut stream, _) = loop {
+                match oauth_listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::yield_now()
+                    }
+                    Err(error) => panic!("fixture OAuth accept failed: {error}"),
+                }
+            };
+            must_ok(stream.set_nonblocking(false));
+            must_ok(stream.set_read_timeout(Some(Duration::from_secs(2))));
+            let mut request = Vec::new();
+            let expected_fragment = format!("\"refresh_token\":\"{expected_refresh}\"");
+            loop {
+                let mut buffer = [0_u8; 2048];
+                let bytes_read = must_ok(stream.read(&mut buffer));
+                assert!(bytes_read > 0, "fixture OAuth request ended early");
+                request.extend_from_slice(&buffer[..bytes_read]);
+                if String::from_utf8_lossy(&request).contains(&expected_fragment) {
+                    break;
+                }
+            }
+            assert!(String::from_utf8_lossy(&request).starts_with("POST /oauth/token HTTP/1.1"));
+            let response_body = format!(
+                r#"{{"access_token":"upkeep-access-{call}","refresh_token":"rotated-refresh-canary"}}"#,
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len(),
+            );
+            must_ok(stream.write_all(response.as_bytes()));
+            must_ok(oauth_call_sender.send(call));
+        }
+    });
+
+    let router_port = reserve_loopback_port();
+    let command = must_ok(CliCommand::parse([
+        OsString::from("serve"),
+        OsString::from("--listen-host"),
+        OsString::from("127.0.0.1"),
+        OsString::from("--port"),
+        OsString::from(router_port.to_string()),
+        OsString::from("--state-db"),
+        state_path.as_os_str().to_os_string(),
+        OsString::from("--secret-root"),
+        secret_root.as_os_str().to_os_string(),
+        OsString::from("--upstream-base-url"),
+        OsString::from("http://127.0.0.1:1/v1"),
+        OsString::from("--now-unix-seconds"),
+        OsString::from("1000"),
+        OsString::from("--disable-background-quota-refresh"),
+        OsString::from("--max-connections"),
+        OsString::from("1"),
+    ]));
+    let CliCommand::Serve(command) = command else {
+        panic!("fixture serve command should parse");
+    };
+    let clock = Arc::new(AtomicU64::new(1_000));
+    let worker_clock = Arc::clone(&clock);
+    let (wake_sender, wake_receiver) = mpsc::channel();
+    let oauth_client = LoopbackUpkeepOAuthClient {
+        token_endpoint: format!("http://{oauth_address}/oauth/token"),
+    };
+    let serve_thread = thread::spawn(move || {
+        let mut stdout = Vec::new();
+        let result = run_serve_command_with_upkeep_start(
+            &mut stdout,
+            command,
+            move |state_path, secret_root| {
+                let clock = Arc::clone(&worker_clock);
+                let worker = start_background_credential_upkeep_worker_with_client_and_clock(
+                    state_path,
+                    secret_root,
+                    oauth_client,
+                    move || clock.load(Ordering::SeqCst),
+                )?;
+                must_ok(wake_sender.send(worker.wake_handle_for_test()));
+                Ok(worker)
+            },
+        );
+        (result, stdout)
+    });
+    let wake_handle = must_ok(wake_receiver.recv_timeout(Duration::from_secs(2)));
+    assert_eq!(
+        must_ok(oauth_call_receiver.recv_timeout(Duration::from_secs(2))),
+        1
+    );
+    wait_for_upkeep_generation(&state_path, &enabled_id, 2);
+    clock.store(1_000 + 2 * 86_400, Ordering::SeqCst);
+    wake_handle.wake();
+    assert_eq!(
+        must_ok(oauth_call_receiver.recv_timeout(Duration::from_secs(2))),
+        2
+    );
+    wait_for_upkeep_generation(&state_path, &enabled_id, 3);
+
+    let mut health_client = must_ok(TcpStream::connect(("127.0.0.1", router_port)));
+    must_ok(
+        health_client
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    );
+    let mut health_response = String::new();
+    must_ok(health_client.read_to_string(&mut health_response));
+    assert!(health_response.starts_with("HTTP/1.1 200 OK"));
+    let (serve_result, stdout) = must_ok(serve_thread.join().map_err(|_| "serve thread failed"));
+    must_ok(serve_result);
+    assert!(String::from_utf8_lossy(&stdout).contains("listening: 127.0.0.1:"));
+    must_ok(oauth_thread.join().map_err(|_| "OAuth thread failed"));
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let disabled = must_ok(AccountStateRepository::load_account(&state, &disabled_id))
+        .expect("disabled account should remain");
+    assert_eq!(disabled.active_credential_generation(), Some(1));
+    assert_eq!(disabled.status(), AccountStatus::Disabled);
 }

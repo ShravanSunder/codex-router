@@ -31,6 +31,10 @@ struct ThreadListenState {
     consecutive_rejections: AtomicU8,
     /// Never held across an await: set and read in one statement.
     last_rejection: std::sync::Mutex<Value>,
+    #[cfg(test)]
+    debounce_armed: tokio::sync::Notify,
+    #[cfg(test)]
+    batch_progress_recorded: tokio::sync::Notify,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -154,6 +158,10 @@ impl ThreadListenRegistry {
             acknowledged: AtomicBool::new(false),
             consecutive_rejections: AtomicU8::new(0),
             last_rejection: std::sync::Mutex::new(Value::Null),
+            #[cfg(test)]
+            debounce_armed: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            batch_progress_recorded: tokio::sync::Notify::new(),
             _permit: permit,
         });
         let snapshot = state.snapshot(listen_id.clone());
@@ -256,6 +264,8 @@ impl ThreadListenRegistry {
             if let Some(mut observed_activity) = latest {
                 let cap_deadline = Instant::now() + THREAD_LISTEN_DEBOUNCE_CAP;
                 let mut quiet_deadline = Instant::now() + THREAD_LISTEN_DEBOUNCE;
+                #[cfg(test)]
+                state.debounce_armed.notify_one();
                 loop {
                     tokio::select! {
                         _ = state.cancellation.cancelled() => {
@@ -448,6 +458,8 @@ fn record_batch_progress(state: &ThreadListenState, batch_set: &ThreadListenBatc
         state.last_sequence.store(last, Ordering::Relaxed);
     }
     state.batches_delivered.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    state.batch_progress_recorded.notify_one();
 }
 
 fn record_rejection(
