@@ -6,7 +6,7 @@ use crate::agent_session_client::ExternalProviderRuntimeError;
 use crate::agent_session_client::provider_setting_application::{
     SettingSetupFailure, apply_initial_settings,
 };
-use crate::provider_session_actor::ProviderSessionSettingsHandles;
+use crate::provider_session_actor::ProviderSessionRuntimeHandles;
 use crate::{
     EffectiveProviderSettings, InvalidSettingSessionDisposition, ProviderSettingKind,
     RequestedProviderSettings,
@@ -16,7 +16,7 @@ pub(crate) async fn apply_loaded_setting(
     session: &ActiveSession<'_, Agent>,
     kind: ProviderSettingKind,
     value: String,
-    handles: &ProviderSessionSettingsHandles,
+    handles: &ProviderSessionRuntimeHandles,
 ) -> Result<EffectiveProviderSettings, ExternalProviderRuntimeError> {
     let provider_session_id = session.session_id().to_string();
     let mut catalog = handles

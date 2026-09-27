@@ -149,16 +149,19 @@ async fn later_auth_change_publishes_capabilities_and_logged_out_status() {
         .create_session(root.path().to_path_buf())
         .await
         .expect("session opens");
-    let (prompt_result, event) = tokio::join!(
-        client.prompt(session_id.clone(), "Proceed".to_owned()),
-        tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()),
-    );
-    let event = event
-        .expect("auth notification was handled")
-        .expect("capability event");
-    let SessionEvent::CapabilitiesChanged { capabilities } = event else {
-        panic!("unexpected event: {event:?}")
+    let receive_auth_change = async {
+        loop {
+            let event = events.recv().await.expect("event sink remains open");
+            if let SessionEvent::CapabilitiesChanged { capabilities } = event {
+                break capabilities;
+            }
+        }
     };
+    let (prompt_result, capabilities) = tokio::join!(
+        client.prompt(session_id.clone(), "Proceed".to_owned()),
+        tokio::time::timeout(std::time::Duration::from_secs(2), receive_auth_change),
+    );
+    let capabilities = capabilities.expect("auth notification was handled");
     assert_eq!(capabilities.auth_status, ProviderAuthStatus::LoggedOut);
     prompt_result.expect("prompt ends");
     let report = client.capability_report(&session_id).await;

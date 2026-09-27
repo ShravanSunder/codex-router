@@ -22,7 +22,7 @@ use crate::ProviderCapabilityReport;
 use crate::provider_prompt_content::ProviderPromptContent;
 use crate::provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
-    ProviderSessionSettingsHandles, ProviderSteeringOutcome, run_provider_session,
+    ProviderSessionRuntimeHandles, ProviderSteeringOutcome, run_provider_session,
 };
 use crate::{AcpProtocolVersion, InteractionPort, SessionEventSink};
 use agent_client_protocol::schema::ProtocolVersion;
@@ -66,6 +66,7 @@ use provider_request_fallback::{
     ProviderKnownSessions, ProviderRequestFallback, ProviderRequestSessionGuard,
 };
 use provider_session_admission::*;
+use session_event_model::InputId;
 use session_event_model::StopReason as ProviderPromptStopReason;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -129,6 +130,7 @@ enum ProviderCommand<P: InteractionPort> {
     },
     Prompt {
         provider_session_id: String,
+        input_id: InputId,
         operation_id: Option<P::OperationId>,
         prompt: ProviderPromptContent,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
@@ -143,6 +145,7 @@ enum ProviderCommand<P: InteractionPort> {
     },
     Steer {
         provider_session_id: String,
+        input_id: InputId,
         prompt: String,
         reply: tokio::sync::oneshot::Sender<
             Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError>,

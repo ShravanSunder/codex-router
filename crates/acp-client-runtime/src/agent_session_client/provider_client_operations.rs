@@ -152,8 +152,30 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         prompt: String,
         context: P::Context,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_with_approval_dispatch(provider_session_id, prompt, context, None)
-            .await
+        self.prompt_with_approval_context_for_input(
+            provider_session_id,
+            InputId::generate(),
+            prompt,
+            context,
+        )
+        .await
+    }
+
+    pub async fn prompt_with_approval_context_for_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        prompt: String,
+        context: P::Context,
+    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
+        self.prompt_with_approval_dispatch_for_input(
+            provider_session_id,
+            input_id,
+            prompt,
+            context,
+            None,
+        )
+        .await
     }
 
     pub async fn create_session(
@@ -304,6 +326,16 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         provider_session_id: String,
         prompt: String,
     ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
+        self.steer_with_input(provider_session_id, InputId::generate(), prompt)
+            .await
+    }
+
+    pub async fn steer_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        prompt: String,
+    ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
         if !self.admission.supports_steering {
             return Err(ExternalProviderRuntimeError::UnsupportedSteering);
         }
@@ -311,6 +343,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         self.commands
             .send(ProviderCommand::Steer {
                 provider_session_id,
+                input_id,
                 prompt,
                 reply,
             })

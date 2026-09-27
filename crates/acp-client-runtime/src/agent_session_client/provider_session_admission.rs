@@ -29,7 +29,7 @@ pub(super) fn register_static_provider_session<P: InteractionPort>(
     session_tasks: &mut tokio::task::JoinSet<()>,
     shutdown: CancellationToken,
     frame_observation: Arc<ProviderFrameObservation>,
-    settings_handles: ProviderSessionSettingsHandles,
+    runtime_handles: ProviderSessionRuntimeHandles,
     #[cfg(any(test, feature = "test-observation"))] test_tool_calls: Arc<
         std::sync::Mutex<Vec<ExternalProviderToolCall>>,
     >,
@@ -47,7 +47,7 @@ pub(super) fn register_static_provider_session<P: InteractionPort>(
         command_rx,
         shutdown,
         frame_observation,
-        settings_handles,
+        runtime_handles,
         #[cfg(any(test, feature = "test-observation"))]
         test_tool_calls,
     ));
@@ -68,7 +68,7 @@ pub(super) struct CreateAdmissionInputs<P: InteractionPort> {
         Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError>,
     >,
     pub(super) frame_observation: Arc<ProviderFrameObservation>,
-    pub(super) settings_handles: ProviderSessionSettingsHandles,
+    pub(super) runtime_handles: ProviderSessionRuntimeHandles,
     #[cfg(any(test, feature = "test-observation"))]
     pub(super) test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
 }
@@ -83,7 +83,7 @@ pub(super) async fn run_create_admission<P: InteractionPort>(inputs: CreateAdmis
         admission_tx,
         reply,
         frame_observation,
-        settings_handles,
+        runtime_handles,
         #[cfg(any(test, feature = "test-observation"))]
         test_tool_calls,
     } = inputs;
@@ -182,7 +182,7 @@ pub(super) async fn run_create_admission<P: InteractionPort>(inputs: CreateAdmis
                 command_rx,
                 session_shutdown,
                 session_frame_observation,
-                settings_handles,
+                runtime_handles,
                 #[cfg(any(test, feature = "test-observation"))]
                 test_tool_calls,
             )

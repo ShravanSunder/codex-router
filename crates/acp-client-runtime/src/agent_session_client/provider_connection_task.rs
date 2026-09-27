@@ -49,7 +49,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             crate::ProviderSettingKind,
         >::new()));
         let task_settings_unresolved = Arc::clone(&settings_unresolved);
-        let task_settings_handles = ProviderSessionSettingsHandles {
+        let task_runtime_handles = ProviderSessionRuntimeHandles {
+            event_sink: Arc::clone(&event_sink),
             session_settings: Arc::clone(&task_session_settings),
             last_settings_catalog: Arc::clone(&task_last_settings_catalog),
             settings_unresolved: Arc::clone(&task_settings_unresolved),
@@ -295,7 +296,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     &mut session_tasks,
                                                     task_shutdown.clone(),
                                                     Arc::clone(&task_frame_observation),
-                                                    task_settings_handles.clone(),
+                                                    task_runtime_handles.clone(),
                                                     #[cfg(any(test, feature = "test-observation"))] Arc::clone(&session_test_tool_calls),
                                                 )
                                             }).map(|_| ());
@@ -341,7 +342,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             let pending_admission_tx = admission_tx.clone();
                                             let supports_close = base_capabilities.supports_close;
                                             let pending_frame_observation = Arc::clone(&task_frame_observation);
-                                            let pending_settings_handles = task_settings_handles.clone();
+                                            let pending_runtime_handles = task_runtime_handles.clone();
                                             #[cfg(any(test, feature = "test-observation"))]
                                             let pending_test_tool_calls = Arc::clone(&session_test_tool_calls);
                                             admission_tasks.spawn(async move {
@@ -354,7 +355,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     admission_tx: pending_admission_tx,
                                                     reply,
                                                     frame_observation: pending_frame_observation,
-                                                    settings_handles: pending_settings_handles,
+                                                    runtime_handles: pending_runtime_handles,
                                                     #[cfg(any(test, feature = "test-observation"))]
                                                     test_tool_calls: pending_test_tool_calls,
                                                 })
@@ -413,7 +414,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 ).await;
                                             });
                                         }
-                                        ProviderCommand::Prompt { provider_session_id, operation_id, prompt, dispatch, reply } => {
+                                        ProviderCommand::Prompt { provider_session_id, input_id, operation_id, prompt, dispatch, reply } => {
                                             if pending_closes.contains(&provider_session_id) {
                                                 if let Some(dispatch) = dispatch {
                                                     let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
@@ -436,7 +437,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 continue;
                                             };
                                             let turn_cancellation = operation_id.as_ref().and_then(|operation_id| active_turn_cancellation(&task_approval_contexts, &task_interaction_port, &provider_session_id, Some(operation_id)));
-                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { operation_id, prompt, turn_cancellation, dispatch, reply }).await
+                                            if let Err(error) = session.send(ProviderSessionCommand::Prompt { input_id, operation_id, prompt, turn_cancellation, dispatch, reply }).await
                                                 && let ProviderSessionCommand::Prompt { dispatch: Some(dispatch), .. } = error.0
                                             {
                                                 let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
@@ -449,7 +450,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             };
                                             let _result = session.send(ProviderSessionCommand::Cancel { expected_operation_id, reply }).await;
                                         }
-                                        ProviderCommand::Steer { provider_session_id, prompt, reply } => {
+                                        ProviderCommand::Steer { provider_session_id, input_id, prompt, reply } => {
                                             if pending_closes.contains(&provider_session_id) {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
                                                 continue;
@@ -462,7 +463,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalNotFound));
                                                 continue;
                                             };
-                                            let _result = session.send(ProviderSessionCommand::Steer { prompt, reply }).await;
+                                            let _result = session.send(ProviderSessionCommand::Steer { input_id, prompt, reply }).await;
                                         }
                                         ProviderCommand::InspectSession { provider_session_id, reply } => {
                                             let Some(session) = sessions.get(&provider_session_id) else {
