@@ -1,5 +1,5 @@
 use super::{CollaborationMcpServer, conversation_create_tool_result};
-use collaboration_protocol::{ConversationCreateOutcome, OperationId};
+use collaboration_protocol::{ConversationCreateOutcome, DeliveryReceipt, OperationId};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -18,6 +18,149 @@ async fn native_sessions_list_routes_claude_to_provider_tool_without_changing_sc
     assert_eq!(result.is_error, Some(true));
     let content = serde_json::to_string(&result.structured_content).expect("error content");
     assert!(content.contains("provider_sessions_list"), "{content}");
+}
+
+#[test]
+fn message_send_route_receipts_match_advertised_output_schema() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let schema = server
+        .resolved_tools()
+        .into_iter()
+        .find(|tool| tool.name == "message_send")
+        .and_then(|tool| tool.output_schema)
+        .expect("advertised message_send output schema");
+    let schema = Value::Object((*schema).clone());
+    assert!(schema["anyOf"].is_array(), "tool output must use anyOf");
+    assert_eq!(
+        schema.pointer("/$defs/McpToolError/oneOf/0/properties/mcpResult/const"),
+        Some(&serde_json::json!("error")),
+        "error branch must have an exclusive discriminator"
+    );
+    let validator = jsonschema::validator_for(&schema).expect("message_send JSON Schema");
+    let target = serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"thread-a"
+    });
+    let generation = serde_json::json!({
+        "serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":1
+    });
+    let native = |acceptance: Value| {
+        serde_json::json!({
+            "outcome":{"kind":"startedOrSteered"},
+            "reachability":"codexAppServer",
+            "client":{
+                "kind":"codexAppServer",
+                "target":target,
+                "generation":generation,
+                "inputKind":"agent",
+                "representation":"declaredAgentText",
+                "clientUserMessageId":"message-a",
+                "resumeEffect":"notRequested",
+                "acceptance":acceptance
+            }
+        })
+    };
+    let cases = [
+        (
+            "codex-start",
+            native(serde_json::json!({
+                "kind":"nativeInputAccepted","operation":"turnStart",
+                "disposition":"startedOrSteered","turnId":"turn-a"
+            })),
+        ),
+        (
+            "codex-steer",
+            native(serde_json::json!({
+                "kind":"steerAccepted","turnId":"turn-a"
+            })),
+        ),
+        (
+            "claude-peer",
+            serde_json::json!({
+                "outcome":{"kind":"peerMessageWritten"},"reachability":"claudeCodePeer",
+                "client":{"kind":"claudeCodePeer"}
+            }),
+        ),
+        (
+            "provider-acp",
+            serde_json::json!({
+                "outcome":{"kind":"started"},"reachability":"providerAcp",
+                "client":{"kind":"providerAcp","operationId":OperationId::generate()}
+            }),
+        ),
+    ];
+    for (route, value) in cases {
+        let receipt: DeliveryReceipt = serde_json::from_value(value.clone())
+            .unwrap_or_else(|error| panic!("{route} receipt fixture: {error}"));
+        let result = super::message_tool_result(Ok(receipt));
+        assert_ne!(result.is_error, Some(true), "{route} tool result");
+        let structured = result.structured_content.expect("structured receipt");
+        assert_eq!(structured, value, "{route} success wire shape changed");
+        validator.validate(&structured).unwrap_or_else(|error| {
+            panic!("{route} structuredContent violates advertised schema: {error}; {structured}")
+        });
+    }
+}
+
+#[test]
+fn message_send_post_submission_failure_matches_advertised_output_schema() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let schema = server
+        .resolved_tools()
+        .into_iter()
+        .find(|tool| tool.name == "message_send")
+        .and_then(|tool| tool.output_schema)
+        .expect("advertised message_send output schema");
+    let validator = jsonschema::validator_for(&Value::Object((*schema).clone()))
+        .expect("message_send JSON Schema");
+    let target = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"thread-a"
+    }))
+    .expect("target");
+    let result =
+        super::message_tool_result(Err(collaboration_client::MessageSendError::Submission {
+            target,
+            source: Box::new(collaboration_client::ClientError::Protocol(
+                "invalid message receipt; acceptance unknown",
+            )),
+        }));
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured error receipt");
+    validator.validate(&structured).unwrap_or_else(|error| {
+        panic!(
+            "post-submission structuredContent violates advertised schema: {error}; {structured}"
+        )
+    });
+}
+
+#[test]
+fn message_send_unknown_delivery_retains_outcome_in_typed_error() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let schema = server
+        .resolved_tools()
+        .into_iter()
+        .find(|tool| tool.name == "message_send")
+        .and_then(|tool| tool.output_schema)
+        .expect("advertised message_send output schema");
+    let schema = Value::Object((*schema).clone());
+    let validator = jsonschema::validator_for(&schema).expect("message_send JSON Schema");
+    let receipt = DeliveryReceipt {
+        outcome: collaboration_protocol::DeliveryOutcome::Unknown,
+        reachability: None,
+        client: None,
+    };
+    let result = super::message_tool_result(Ok(receipt));
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured error receipt");
+    assert_eq!(structured["mcpResult"], "error");
+    assert_eq!(structured["kind"], "outcomeUnknown");
+    assert_eq!(structured["effect"], "unknown");
+    assert_eq!(structured["outcome"]["kind"], "unknown");
+    validator.validate(&structured).expect("typed error schema");
 }
 
 #[test]
@@ -708,6 +851,37 @@ fn advertised_tool_output_schemas_have_object_roots() {
     );
 }
 
+#[test]
+fn described_success_types_keep_their_output_root_description() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    for name in [
+        "board_message_show",
+        "board_thread_show",
+        "board_thread_listen_show",
+        "board_thread_listen_cancel",
+    ] {
+        let schema = server
+            .resolved_tools()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .and_then(|tool| tool.output_schema)
+            .expect("described output schema");
+        let schema = Value::Object((*schema).clone());
+        let success_ref = schema["anyOf"][0]["$ref"]
+            .as_str()
+            .expect("success branch reference");
+        let definition = schema
+            .pointer(success_ref.trim_start_matches('#'))
+            .expect("success definition");
+        assert_eq!(
+            schema.get("description"),
+            definition.get("description"),
+            "{name} root description moved into $defs"
+        );
+    }
+}
+
 fn schema_contains_boolean_subschema(schema: &serde_json::Value) -> bool {
     match schema {
         serde_json::Value::Bool(_) => true,
@@ -818,40 +992,15 @@ fn boolean_schema_normalization_preserves_instance_and_annotation_booleans() {
 }
 
 #[test]
-fn advertised_object_roots_preserve_original_catalog_semantics() {
+fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
-    let original = server
-        .tool_router
-        .list_all()
-        .into_iter()
-        .filter_map(|tool| {
-            let schema = tool.output_schema?;
-            (schema.get("type").is_none()).then_some((tool.name, schema))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
     let advertised = server
         .resolved_tools()
         .into_iter()
         .filter_map(|tool| tool.output_schema.map(|schema| (tool.name, schema)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(
-        original
-            .keys()
-            .map(AsRef::<str>::as_ref)
-            .collect::<Vec<_>>(),
-        vec![
-            "approval_list",
-            "board_message_show",
-            "board_thread_listen_cancel",
-            "board_thread_listen_show",
-            "conversation_create",
-            "conversation_create_and_prompt",
-            "conversation_load",
-            "conversation_prompt",
-            "journal_status"
-        ]
-    );
+    assert_eq!(advertised.len(), 103);
 
     let message = serde_json::json!({
         "messageId":"019f0000-0000-7000-8000-000000000001",
@@ -884,6 +1033,30 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
         "consecutiveRejections":0,
         "lastRejection":null
     });
+    let provider_endpoint = serde_json::json!({
+        "serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"
+    });
+    let provider_target =
+        serde_json::json!({"endpoint":provider_endpoint,"sessionId":"provider-session"});
+    let provider_settings = serde_json::json!({
+        "target":provider_target,
+        "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},
+            "mappingStatus":"verified","authentication":"authenticated","mode":"ask"}
+    });
+    let provider_operation = serde_json::json!({
+        "operationId":OperationId::generate(), "operation":"conversationResume",
+        "binding":{"kind":"externalProvider","binding":{
+            "endpoint":provider_endpoint,"bindingId":"binding-1",
+            "runtime":{"provider":"claudeCode","runtimeName":"claude-agent-acp"},
+            "transport":"stdioAcp",
+            "generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1},
+            "capabilities":[{"name":"prompt","status":"supported","evidence":"advertised"}]
+        }},
+        "target":provider_target,"stage":"mayHaveDispatched","effect":"unknown",
+        "reconciliation":"unresolved","admittedAt":"2026-09-27T00:00:00Z"
+    });
+    let mut close_operation = provider_operation.clone();
+    close_operation["operation"] = serde_json::json!("conversationClose");
     let valid_instances = std::collections::BTreeMap::from([
         ("approval_list", serde_json::json!({"approvals":[]})),
         ("board_message_show", message),
@@ -903,6 +1076,16 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
                 "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"fixture"}}),
         ),
         (
+            "conversation_close",
+            serde_json::json!({"admission":"admitted","operation":close_operation}),
+        ),
+        (
+            "conversation_resume",
+            serde_json::json!({"admission":"admitted","operation":provider_operation}),
+        ),
+        ("conversation_settings_set", provider_settings.clone()),
+        ("conversation_settings_accept", provider_settings),
+        (
             "conversation_prompt",
             serde_json::json!({"kind":"pending","operationId":OperationId::generate(),
                 "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"fixture"}}),
@@ -910,6 +1093,50 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
         (
             "journal_status",
             serde_json::json!({"storage":"unavailable"}),
+        ),
+        (
+            "provider_sessions_list",
+            serde_json::json!({
+                "endpoint":provider_endpoint,"observedAt":"2026-09-27T00:00:00Z",
+                "sessions":[
+                    {
+                        "origin":"hostedProvider","target":provider_target,
+                        "workingDirectory":"/tmp/project","updatedAt":1790162500,
+                        "state":"idle","approver":{"kind":"human","humanId":"owner"},
+                        "createdBy":{"kind":"human","humanId":"owner"}
+                    },
+                    {
+                        "origin":"claudeCodeInteractive",
+                        "target":{"endpoint":provider_endpoint,"sessionId":"interactive-session"},
+                        "name":"Claude terminal","workingDirectory":"/tmp/project",
+                        "status":"busy","startedAt":1790162400,"updatedAt":1790162494,
+                        "statusUpdatedAt":1790162494,"kind":"claudeCode","entrypoint":"cli"
+                    }
+                ],"skippedRecords":0
+            }),
+        ),
+        (
+            "provider_session_inspect",
+            serde_json::json!({
+                "target":provider_target,"state":"idle","history":"available",
+                "capabilities":{"load":true,"resume":true,"close":true,"list":true,"steer":false,
+                    "queue":null,"modes":false,"configOptions":false,"elicitation":false,
+                    "usage":false,"promptContent":{"image":false,"audio":false,"embeddedContext":false},
+                    "authStatus":{"kind":"apiKey","label":"API key"}}
+            }),
+        ),
+        ("question_list", serde_json::json!({"questions":[]})),
+        (
+            "question_answer",
+            serde_json::json!({"requestId":"question-1","state":"cancelled"}),
+        ),
+        (
+            "events_observe",
+            serde_json::json!({
+                "target":provider_target,
+                "generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1},
+                "attached":true,"events":[],"endReason":"deadlineReached","continuationGap":false,"epoch":1
+            }),
         ),
     ]);
     let non_objects = [
@@ -919,29 +1146,28 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
         serde_json::json!("value"),
         serde_json::json!([]),
     ];
-    for (name, original_schema) in original {
-        let advertised_schema = advertised.get(&name).expect("advertised schema");
+    for (name, advertised_schema) in advertised {
         assert_eq!(
             advertised_schema.get("type"),
             Some(&serde_json::json!("object"))
         );
-        let original_value = serde_json::Value::Object((*original_schema).clone());
-        let advertised_value = serde_json::Value::Object((**advertised_schema).clone());
-        let original_validator =
-            jsonschema::validator_for(&original_value).expect("original catalog validator");
+        let advertised_value = serde_json::Value::Object((*advertised_schema).clone());
         let advertised_validator =
             jsonschema::validator_for(&advertised_value).expect("advertised catalog validator");
-        let valid = valid_instances
-            .get(name.as_ref())
-            .expect("valid tool result");
-        assert!(
-            original_validator.is_valid(valid),
-            "invalid original fixture for {name}"
+        assert_eq!(
+            advertised_value.get("$schema"),
+            Some(&serde_json::json!(
+                "https://json-schema.org/draft/2020-12/schema"
+            )),
+            "{name} schema draft"
         );
-        assert!(
-            advertised_validator.is_valid(valid),
-            "valid result narrowed for {name}"
-        );
+        if let Some(valid) = valid_instances.get(name.as_ref()) {
+            advertised_validator
+                .validate(valid)
+                .unwrap_or_else(|error| {
+                    panic!("success result narrowed for {name}: {error}; {valid}")
+                });
+        }
         if name.as_ref() == "approval_list" {
             let requester = serde_json::json!({
                 "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
@@ -962,24 +1188,25 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
                 }]}),
             ] {
                 assert!(
-                    original_validator.is_valid(&result),
-                    "original list rejected {result}"
-                );
-                assert!(
                     advertised_validator.is_valid(&result),
-                    "advertised list rejected {result}"
+                    "approval list success branch rejected {result}"
                 );
             }
         }
+        let error = super::structured_tool_error(serde_json::json!({
+            "kind":"protocolViolation", "stage":"validation", "effect":"none",
+            "message":"fixture validation failure", "code":null, "data":null
+        }));
+        let structured = error.structured_content.expect("structured error sample");
+        advertised_validator
+            .validate(&structured)
+            .unwrap_or_else(|failure| {
+                panic!("{name} error result violates advertised schema: {failure}; {structured}")
+            });
         for instance in &non_objects {
-            assert_eq!(
-                original_validator.is_valid(instance),
-                advertised_validator.is_valid(instance),
-                "root meaning changed for {name} and {instance}"
-            );
             assert!(
-                !original_validator.is_valid(instance),
-                "{name} unexpectedly admitted non-object {instance} before normalization"
+                !advertised_validator.is_valid(instance),
+                "{name} unexpectedly admits non-object {instance}"
             );
         }
     }
@@ -1214,4 +1441,58 @@ fn expected_tool_name(method: &str) -> String {
         }
     }
     output
+}
+#[test]
+fn success_schema_branches_match_main_golden_snapshot() {
+    // Generated by resolved_tools() at origin/main d8db284c, before the union cutover.
+    let expected: std::collections::BTreeMap<String, Value> =
+        serde_json::from_str(include_str!("snapshots/main_success_schemas.json"))
+            .expect("main success schema snapshot");
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let actual = server
+        .resolved_tools()
+        .into_iter()
+        .filter_map(|tool| {
+            tool.output_schema.map(|schema| {
+                let union = Value::Object((*schema).clone());
+                let reference = union["anyOf"][0]["$ref"]
+                    .as_str()
+                    .expect("success branch reference");
+                let definition_name = reference
+                    .strip_prefix("#/$defs/")
+                    .expect("local success definition");
+                let mut success = union["$defs"][definition_name]
+                    .as_object()
+                    .expect("success definition object")
+                    .clone();
+                success.insert("$schema".to_owned(), union["$schema"].clone());
+                success.insert(
+                    "title".to_owned(),
+                    Value::String(definition_name.to_owned()),
+                );
+                success
+                    .entry("type".to_owned())
+                    .or_insert_with(|| Value::String("object".to_owned()));
+                let definitions = union["$defs"]
+                    .as_object()
+                    .expect("union definitions")
+                    .iter()
+                    .filter(|(name, _)| {
+                        name.as_str() != definition_name && name.as_str() != "McpToolError"
+                    })
+                    .map(|(name, definition)| (name.clone(), definition.clone()))
+                    .collect::<serde_json::Map<_, _>>();
+                if !definitions.is_empty() {
+                    success.insert("$defs".to_owned(), Value::Object(definitions));
+                }
+                (tool.name.to_string(), Value::Object(success))
+            })
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(actual.len(), 103);
+    assert_eq!(expected.len(), 103);
+    for (name, success) in actual {
+        assert_eq!(success, expected[&name], "{name} success schema drifted");
+    }
 }

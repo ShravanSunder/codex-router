@@ -8,6 +8,10 @@ Expected inputs: the caller-authorized collaboration operation, selected agent-r
 
 Return: the resolved service and exact target, observed result and effect, retained correlation or operation identities, and any capability, access, or uncertainty gap.
 
+## Owner refresh after a Host upgrade
+
+If a valid result fails schema validation after a Router Host upgrade, the owner reconnects the MCP server (e.g. Claude Code `/mcp`) to refresh cached tool schemas.
+
 ## Use the advertised contract
 
 1. Verify that the selected MCP connection is the intended agent-router service. Use the running server's advertised discovery schema, compare its returned service identity with the caller-selected service and any supplied target, and verify endpoint identity when the requested operation is endpoint-scoped. Stop and report a mismatch before mutation. Do not require an endpoint for a service-scoped board operation. Receiving content from agent-router or seeing a familiar name is not service or sender authentication.
