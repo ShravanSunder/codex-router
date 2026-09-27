@@ -155,15 +155,6 @@ jobs:
         id: workspace_tests
         background: true
         run: cargo nextest run --profile ci --workspace --exclude codex-router-quota-reset-test-harness
-      - name: Prove quota PTY cancellation during workspace tests (temporary)
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 20); do
-            cargo nextest run --profile ci --retries 0 --no-tests fail \
-              -p codex-router-quota-reset-test-harness --test quota_reset_pty_test \
-              -E 'test(=quota_reset_pty_test::compiled_quota_tui_inspects_loopback_and_cancels_with_zero_posts)'
-            echo "quota PTY under-load: ${attempt}/20 passed"
-          done
       - name: Wait for tests
         wait-all:
 
