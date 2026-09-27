@@ -27,14 +27,23 @@ fn sessions_list_table_renders_human_title_and_metadata() {
         .with_name(EXPLICIT_NAME)],
     );
 
+    let context = CliContext::new(vec![
+        ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+        ("HOME".to_owned(), test_root.path().display().to_string()),
+    ])
+    .with_current_dir(project);
     let output = run_cli(
         ["--any", "--source", "all", "--list", "--format", "table"],
-        CliContext::new(vec![
-            ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
-            ("HOME".to_owned(), test_root.path().display().to_string()),
-        ])
-        .with_current_dir(project),
+        context.clone(),
     );
+    let local_output = run_cli(
+        [
+            "--any", "--source", "all", "--list", "--format", "table", "--local",
+        ],
+        context,
+    );
+    assert_eq!(local_output.stdout.as_bytes(), output.stdout.as_bytes());
+    assert_eq!(local_output.stderr.as_bytes(), output.stderr.as_bytes());
 
     assert!(
         output

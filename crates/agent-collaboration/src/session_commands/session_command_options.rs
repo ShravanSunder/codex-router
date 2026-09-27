@@ -99,7 +99,7 @@ pub struct SessionsCommand {
     pub id: Option<String>,
     /// Launch a new Codex session instead of resuming one.
     pub new: bool,
-    /// Launch Codex locally instead of attaching to the hosted app-server.
+    /// Use the Codex-only local picker (no provider Sessions), then launch Codex locally.
     pub local: bool,
     /// Maximum matching sessions to load.
     pub limit: usize,

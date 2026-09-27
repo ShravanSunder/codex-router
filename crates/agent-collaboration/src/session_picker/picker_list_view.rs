@@ -75,7 +75,7 @@ pub(super) fn render_session_list(
                 .into_any(),
             );
         } else if let Some(record) = model.visible_choice_record_at(visible_index) {
-            let session_id = record.session_id.clone();
+            let identity = record.identity.clone();
             let row = render_record_row(record, visible_index == focused_index, row_width);
             rows.push(
                 element! {
@@ -83,12 +83,12 @@ pub(super) fn render_session_list(
                         focus_handler: move |_| {
                             let should_update_focus = {
                                 let model_value = model_state.read();
-                                model_value.focused_session_id() != Some(session_id.as_str())
+                                model_value.focused_identity() != Some(&identity)
                                     || model_value.focused_window_start(visible_rows) != window_start
                             };
                             if should_update_focus {
-                                let _ = model_state.write().focus_visible_session_in_window(
-                                    &session_id,
+                                let _ = model_state.write().focus_visible_identity_in_window(
+                                    &identity,
                                     Some(window_start),
                                 );
                             }

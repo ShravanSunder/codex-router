@@ -44,6 +44,9 @@ pub(super) fn provider_matches(
 }
 
 pub(super) fn source_matches(source: SessionsSource, record: &SessionPickerRecord) -> bool {
+    if record.identity.is_provider() {
+        return true;
+    }
     match source {
         SessionsSource::All => true,
         SessionsSource::Interactive => {
