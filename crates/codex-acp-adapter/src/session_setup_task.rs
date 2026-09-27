@@ -39,6 +39,7 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
         if inputs.adopt_unmaterialized {
             let outcome = session
                 .adopt_unmaterialized(&mut catalog, &inputs.generation, &inputs.params)
+                .await
                 .map(|()| (Vec::new(), json!({})));
             return SetupTaskOutput {
                 binding: Some(session),
