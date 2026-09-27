@@ -151,6 +151,22 @@ pub enum AppServerConnectionError {
     HubUnavailable,
 }
 
+fn pending_snapshot_requests(snapshot: &[HubEvent]) -> HashSet<String> {
+    let mut pending = HashSet::new();
+    for event in snapshot {
+        match &event.event {
+            SessionEvent::InteractionRequested { interaction } => {
+                pending.insert(interaction.request_id().to_owned());
+            }
+            SessionEvent::InteractionResolved { request_id } => {
+                pending.remove(request_id);
+            }
+            _ => {}
+        }
+    }
+    pending
+}
+
 pub async fn serve_router_session_app_server_connection(
     stream: UnixStream,
     context: Arc<RouterSessionAppServerContext>,
@@ -282,9 +298,15 @@ pub async fn serve_router_session_app_server_connection(
                     .attach(session.clone())
                     .await
                     .map_err(|_| AppServerConnectionError::HubUnavailable)?;
+                let pending_requests = pending_snapshot_requests(&attachment.snapshot);
                 for event in attachment.snapshot {
+                    let request_still_pending = matches!(
+                        &event.event,
+                        SessionEvent::InteractionRequested { interaction }
+                            if pending_requests.contains(interaction.request_id())
+                    );
                     for notification in forwarding.project(&session, &event) {
-                        if matches!(&event.event, SessionEvent::InteractionRequested { .. }) {
+                        if request_still_pending {
                             websocket
                                 .send(Message::Text(notification.to_string().into()))
                                 .await?;
@@ -329,6 +351,10 @@ mod cwd_tests;
 #[allow(clippy::panic_in_result_fn)]
 #[path = "router_session_app_server_model_tests.rs"]
 mod model_tests;
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
+#[path = "router_session_app_server_reattach_tests.rs"]
+mod reattach_tests;
 #[cfg(test)]
 #[path = "router_session_app_server_test_support.rs"]
 mod test_support;
