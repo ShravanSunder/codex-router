@@ -4,6 +4,7 @@ mod approval_turn_cancellation;
 mod external_approval_dispatch;
 mod provider_acp_error_mapping;
 mod provider_approval_dispatch;
+mod provider_auth_status_update;
 mod provider_client_contract;
 mod provider_client_initialization;
 mod provider_client_operations;
@@ -41,6 +42,7 @@ use external_approval_dispatch::{
 };
 use provider_acp_error_mapping::acp_load_session_error;
 pub(crate) use provider_acp_error_mapping::acp_operation_error;
+use provider_auth_status_update::ProviderAuthStatusHandler;
 #[cfg(any(test, feature = "test-observation"))]
 pub(crate) use provider_client_contract::classify_mcp_tool_outcome;
 #[cfg(feature = "test-observation")]
@@ -196,6 +198,7 @@ pub struct AgentSessionClient<P: InteractionPort> {
     admission: ExternalProviderAdmission,
     base_capabilities: ProviderCapabilityReport,
     session_capabilities: Arc<tokio::sync::RwLock<HashMap<String, ProviderCapabilityReport>>>,
+    auth_status: Arc<tokio::sync::RwLock<session_event_model::ProviderAuthStatus>>,
     session_settings: Arc<tokio::sync::RwLock<HashMap<String, crate::ProviderSettingsCatalog>>>,
     last_settings_catalog: Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
     settings_unresolved: Arc<tokio::sync::RwLock<HashMap<String, crate::ProviderSettingKind>>>,

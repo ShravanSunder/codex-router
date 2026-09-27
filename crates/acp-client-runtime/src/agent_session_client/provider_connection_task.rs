@@ -30,6 +30,13 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             ProviderCapabilityReport,
         >::new()));
         let task_session_capabilities = Arc::clone(&session_capabilities);
+        let auth_status = Arc::new(tokio::sync::RwLock::new(
+            session_event_model::ProviderAuthStatus::NotReported,
+        ));
+        let task_auth_status = Arc::clone(&auth_status);
+        let callback_auth_status = Arc::clone(&auth_status);
+        let callback_session_capabilities = Arc::clone(&session_capabilities);
+        let callback_event_sink = Arc::clone(&event_sink);
         let session_settings = Arc::new(tokio::sync::RwLock::new(HashMap::<
             String,
             crate::ProviderSettingsCatalog,
@@ -157,6 +164,11 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
+                .with_handler(ProviderAuthStatusHandler::new(
+                    callback_auth_status,
+                    callback_session_capabilities,
+                    callback_event_sink,
+                ))
                 .with_handler(ProviderRequestFallback)
                 .connect_with(
                 Lines::new(outgoing, incoming),
@@ -244,6 +256,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             if let Ok(created) = &mut result {
                                                 known_sessions.track(created.provider_session_id.clone()).await;
                                                 if let Some(report) = report {
+                                                    let report = report.with_auth_status(task_auth_status.read().await.clone());
                                                     task_session_capabilities.write().await.insert(created.provider_session_id.clone(), report);
                                                 }
                                                 if let Some(catalog) = catalog {
@@ -289,6 +302,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             if result.is_err() {
                                                 known_sessions.forget(&provider_session_id).await;
                                             } else if let Some(report) = report {
+                                                let report = report.with_auth_status(task_auth_status.read().await.clone());
                                                 task_session_capabilities.write().await.insert(provider_session_id.clone(), report);
                                                 if let Some(catalog) = catalog {
                                                     task_session_settings.write().await.insert(provider_session_id.clone(), catalog.clone());
@@ -543,6 +557,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             admission,
             base_capabilities,
             session_capabilities,
+            auth_status,
             session_settings,
             last_settings_catalog,
             settings_unresolved,

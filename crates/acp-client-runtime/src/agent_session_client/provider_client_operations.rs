@@ -9,12 +9,14 @@ impl<P: InteractionPort> AgentSessionClient<P> {
     }
 
     pub async fn capability_report(&self, provider_session_id: &str) -> ProviderCapabilityReport {
-        self.session_capabilities
+        let report = self
+            .session_capabilities
             .read()
             .await
             .get(provider_session_id)
             .cloned()
-            .unwrap_or_else(|| self.base_capabilities.clone())
+            .unwrap_or_else(|| self.base_capabilities.clone());
+        report.with_auth_status(self.auth_status.read().await.clone())
     }
 
     pub async fn settings_catalog(
