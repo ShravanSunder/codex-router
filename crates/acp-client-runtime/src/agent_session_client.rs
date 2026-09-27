@@ -30,7 +30,9 @@ use agent_client_protocol::{
 };
 pub(crate) use approval_turn_cancellation::ProviderTurnCancellation;
 use approval_turn_cancellation::{ActiveApprovalContext, active_turn_cancellation};
-use external_approval_dispatch::{PermissionDispatchState, spawn_external_approval_dispatch};
+use external_approval_dispatch::{
+    PermissionDispatchState, record_permission_refusal, spawn_external_approval_dispatch,
+};
 use provider_acp_error_mapping::acp_load_session_error;
 pub(crate) use provider_acp_error_mapping::acp_operation_error;
 pub(crate) use provider_frame_observation::ProviderFrameObservation;
@@ -539,51 +541,30 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                         let context = callback_approval_contexts.lock().ok().and_then(|contexts| {
                             contexts.get(request.session_id.0.as_ref()).cloned()
                         });
-                        if context.is_none() {
-                            let reason = ExternalProviderApprovalRefusalReason::MissingPromptContext;
-                            let endpoint = callback_endpoint_id
-                                .read()
-                                .await
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_owned());
-                            let provider_session_id = request.session_id.0.to_string();
-                            tracing::warn!(
-                                endpoint = %endpoint,
-                                provider_session_id = %provider_session_id,
-                                method = "session/request_permission",
-                                reason_code = reason.code(),
-                                "provider permission request refused before approval broker",
-                            );
+                        let dispatch_state = PermissionDispatchState {
+                            interaction_port: Arc::clone(&callback_interaction_port),
+                            refusal_reasons: Arc::clone(&callback_permission_refusal_reasons),
+                            endpoint_id: Arc::clone(&callback_endpoint_id),
                             #[cfg(any(test, feature = "test-observation"))]
-                            if let Ok(mut warnings) = callback_approval_refusal_warnings.lock() {
-                                warnings.push(ExternalProviderApprovalRefusalWarning {
-                                    endpoint,
-                                    provider_session_id,
-                                    method: "session/request_permission",
-                                    reason_code: reason,
-                                });
-                            }
-                            if let Some(context) = &context
-                                && let Ok(mut refusals) =
-                                    callback_permission_refusal_reasons.lock()
-                            {
-                                refusals.insert(P::operation_id(&context.approval), reason);
-                            }
+                            refusal_warnings: Arc::clone(&callback_approval_refusal_warnings),
+                            #[cfg(any(test, feature = "test-observation"))]
+                            permission_outcome: Arc::clone(&callback_permission_outcome),
+                        };
+                        if context.is_none() {
+                            record_permission_refusal(
+                                &dispatch_state,
+                                request.session_id.0.as_ref(),
+                                None,
+                                ExternalProviderApprovalRefusalReason::MissingPromptContext,
+                            )
+                            .await;
                         }
                         spawn_external_approval_dispatch(
                             request,
                             responder,
                             connection,
                             context,
-                            PermissionDispatchState {
-                                interaction_port: Arc::clone(&callback_interaction_port),
-                                refusal_reasons: Arc::clone(&callback_permission_refusal_reasons),
-                                endpoint_id: Arc::clone(&callback_endpoint_id),
-                                #[cfg(any(test, feature = "test-observation"))]
-                                refusal_warnings: Arc::clone(&callback_approval_refusal_warnings),
-                                #[cfg(any(test, feature = "test-observation"))]
-                                permission_outcome: Arc::clone(&callback_permission_outcome),
-                            },
+                            dispatch_state,
                         )
                     },
                     agent_client_protocol::on_receive_request!(),

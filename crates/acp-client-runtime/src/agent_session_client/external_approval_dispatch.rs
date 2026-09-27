@@ -29,6 +29,41 @@ pub(super) struct PermissionDispatchState<P: InteractionPort> {
     pub(super) permission_outcome: Arc<std::sync::atomic::AtomicU8>,
 }
 
+pub(super) async fn record_permission_refusal<P: InteractionPort>(
+    state: &PermissionDispatchState<P>,
+    provider_session_id: &str,
+    operation_id: Option<P::OperationId>,
+    reason: ExternalProviderApprovalRefusalReason,
+) {
+    let endpoint = state
+        .endpoint_id
+        .read()
+        .await
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    tracing::warn!(
+        endpoint = %endpoint,
+        provider_session_id,
+        method = "session/request_permission",
+        reason_code = reason.code(),
+        "provider permission request refused before approval broker",
+    );
+    #[cfg(any(test, feature = "test-observation"))]
+    if let Ok(mut warnings) = state.refusal_warnings.lock() {
+        warnings.push(ExternalProviderApprovalRefusalWarning {
+            endpoint,
+            provider_session_id: provider_session_id.to_owned(),
+            method: "session/request_permission",
+            reason_code: reason,
+        });
+    }
+    if let Some(operation_id) = operation_id
+        && let Ok(mut reasons) = state.refusal_reasons.lock()
+    {
+        reasons.insert(operation_id, reason);
+    }
+}
+
 pub(super) fn spawn_external_approval_dispatch<P: InteractionPort>(
     request: RequestPermissionRequest,
     responder: Responder<RequestPermissionResponse>,
@@ -90,34 +125,13 @@ async fn handle_contextual_permission_request<P: InteractionPort>(
         }
         ApprovalPortOutcome::Cancelled => RequestPermissionOutcome::Cancelled,
         ApprovalPortOutcome::Unavailable => {
-            let endpoint = state
-                .endpoint_id
-                .read()
-                .await
-                .clone()
-                .unwrap_or_else(|| "unknown".to_owned());
-            tracing::warn!(
-                endpoint = %endpoint,
-                provider_session_id = %provider_session_id,
-                method = "session/request_permission",
-                reason_code = ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable.code(),
-                "provider permission request refused before approval broker",
-            );
-            #[cfg(any(test, feature = "test-observation"))]
-            if let Ok(mut warnings) = state.refusal_warnings.lock() {
-                warnings.push(ExternalProviderApprovalRefusalWarning {
-                    endpoint,
-                    provider_session_id,
-                    method: "session/request_permission",
-                    reason_code: ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable,
-                });
-            }
-            if let Ok(mut reasons) = state.refusal_reasons.lock() {
-                reasons.insert(
-                    P::operation_id(&context.approval),
-                    ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable,
-                );
-            }
+            record_permission_refusal(
+                state,
+                &provider_session_id,
+                Some(P::operation_id(&context.approval)),
+                ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable,
+            )
+            .await;
             RequestPermissionOutcome::Cancelled
         }
     }
