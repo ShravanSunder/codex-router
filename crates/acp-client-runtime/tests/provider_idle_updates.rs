@@ -159,6 +159,24 @@ async fn idle_mode_config_unknown_and_late_tool_updates_are_projected() {
         2,
         "mode and config updates each publish current capabilities"
     );
+    let settings = initial_events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::SettingsChanged { settings } => Some(settings),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(settings.len(), 3, "create, idle mode, idle config");
+    assert_eq!(settings[0].mode.as_deref(), Some("auto"));
+    assert_eq!(settings[1].mode.as_deref(), Some("ask"));
+    assert_eq!(settings[2].model.as_deref(), Some("b"));
+    assert!(
+        initial_events.iter().position(|event| matches!(event,
+        SessionEvent::SettingsChanged { settings } if settings.model.as_deref() == Some("b")))
+            < initial_events
+                .iter()
+                .rposition(|event| matches!(event, SessionEvent::CapabilitiesChanged { .. }))
+    );
     let catalog = client
         .settings_catalog(&session_id)
         .await

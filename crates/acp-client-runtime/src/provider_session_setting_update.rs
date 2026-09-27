@@ -66,6 +66,15 @@ pub(crate) async fn apply_loaded_setting(
         None => {
             let effective = catalog.effective_settings();
             handles
+                .event_sink
+                .publish(
+                    &provider_session_id,
+                    SessionEvent::SettingsChanged {
+                        settings: catalog.to_session_settings(),
+                    },
+                )
+                .map_err(|_| ExternalProviderRuntimeError::SinkClosed)?;
+            handles
                 .session_settings
                 .write()
                 .await

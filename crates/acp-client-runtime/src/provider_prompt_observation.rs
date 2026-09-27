@@ -191,6 +191,12 @@ async fn update_live_settings(
         None
     };
     if let Some(catalog) = catalog {
+        handles.event_sink.publish(
+            session_id,
+            SessionEvent::SettingsChanged {
+                settings: catalog.to_session_settings(),
+            },
+        )?;
         *handles.last_settings_catalog.write().await = Some(catalog);
     }
     if let Some(modes_update) = capability_change {

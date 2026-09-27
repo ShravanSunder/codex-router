@@ -5,7 +5,7 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -116,13 +116,15 @@ impl InteractionPort for NoopInteractionPort {
     }
 }
 
-struct CountingEventSink(AtomicUsize);
+#[derive(Default)]
+struct CountingEventSink(AtomicUsize, Mutex<Vec<SessionEvent>>);
 impl SessionEventSink for CountingEventSink {
     fn begin_history_replay(&self, _session_id: &str) -> HistoryReplayFuture<'_> {
         self.0.fetch_add(1, Ordering::Relaxed);
         Box::pin(async { Ok(()) })
     }
-    fn publish(&self, _session_id: &str, _event: SessionEvent) -> Result<(), EventSinkClosed> {
+    fn publish(&self, _session_id: &str, event: SessionEvent) -> Result<(), EventSinkClosed> {
+        self.1.lock().expect("session events").push(event);
         Ok(())
     }
 }
@@ -153,7 +155,7 @@ fn fixture_launch(
 async fn advertised_list_resume_and_idle_close_keep_wire_order() {
     let root = tempfile::tempdir().expect("fixture root");
     let receipt = root.path().join("exchange.json");
-    let sink = Arc::new(CountingEventSink(AtomicUsize::new(0)));
+    let sink = Arc::new(CountingEventSink::default());
     let client = AgentSessionClient::initialize(
         fixture_launch("idle-close", root.path(), &receipt),
         Arc::new(NoopInteractionPort),
@@ -173,6 +175,9 @@ async fn advertised_list_resume_and_idle_close_keep_wire_order() {
         .await
         .expect("resume");
     assert_eq!(sink.0.load(Ordering::Relaxed), 0, "resume does not replay");
+    assert!(matches!(sink.1.lock().expect("session events").as_slice(),
+        [SessionEvent::SettingsChanged { settings }]
+            if settings.mode.is_none() && settings.model.is_none()));
     client
         .prompt_contents_with_approval_dispatch_for_input(
             "fixture-session".to_owned(),
@@ -204,7 +209,7 @@ async fn close_cancels_running_turn_before_session_close() {
     let client = AgentSessionClient::initialize(
         fixture_launch("running-close", root.path(), &receipt),
         Arc::new(NoopInteractionPort),
-        Arc::new(CountingEventSink(AtomicUsize::new(0))),
+        Arc::new(CountingEventSink::default()),
     )
     .await
     .expect("fixture initializes");
@@ -261,7 +266,7 @@ async fn unadvertised_lifecycle_methods_send_no_acp_request() {
             persistence_target: ProviderPersistenceTarget::Unspecified,
         },
         Arc::new(NoopInteractionPort),
-        Arc::new(CountingEventSink(AtomicUsize::new(0))),
+        Arc::new(CountingEventSink::default()),
     )
     .await
     .expect("fixture initializes");
