@@ -5,9 +5,9 @@ use super::{
     ProviderCommand, ProviderPromptDispatchObservation,
 };
 use crate::InteractionPort;
-use crate::provider_prompt_content::ProviderPromptContent;
+use crate::provider_prompt_content::{ProviderPromptContent, acp_blocks_from_prompt_content};
 use agent_client_protocol::schema::v1::ContentBlock;
-use session_event_model::InputId;
+use session_event_model::{InputId, PromptContent};
 
 impl<P: InteractionPort> AgentSessionClient<P> {
     pub async fn prompt(
@@ -61,6 +61,26 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             vec![ContentBlock::Text(
                 agent_client_protocol::schema::v1::TextContent::new(prompt),
             )],
+            dispatch,
+        )
+        .await
+    }
+
+    /// Submit ordered, validated Session content without exposing ACP SDK
+    /// blocks to the Host. Unsupported optional types fail before dispatch.
+    pub async fn prompt_contents_for_operation_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        operation_id: Option<P::OperationId>,
+        contents: Vec<PromptContent>,
+        dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
+    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
+        self.prompt_content(
+            provider_session_id,
+            input_id,
+            operation_id,
+            acp_blocks_from_prompt_content(contents),
             dispatch,
         )
         .await
