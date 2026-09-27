@@ -1,4 +1,4 @@
-"""Ordered stdio JSON-RPC fixture agent, launched only by Rust tests."""
+"""Scripted stdio JSON-RPC fixture agent, launched only by Rust tests."""
 
 import json
 import os
@@ -76,6 +76,17 @@ for step_number, step in enumerate(steps, start=1):
         actual = read_message(step_number)
         if not contains_expected(actual, step["message"]):
             fail(step_number, step["message"], actual)
+    elif action == "expect_messages_unordered":
+        pending = list(step["messages"])
+        while pending:
+            actual = read_message(step_number)
+            matched = next(
+                (index for index, expected in enumerate(pending) if contains_expected(actual, expected)),
+                None,
+            )
+            if matched is None:
+                fail(step_number, pending, actual)
+            pending.pop(matched)
     elif action == "respond":
         request_name = step["requestName"]
         if request_name not in request_ids:

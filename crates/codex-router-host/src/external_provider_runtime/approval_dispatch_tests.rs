@@ -159,8 +159,10 @@ fn permission_during_cancel_fixture() -> ExternalProviderLaunch {
             "params": {"sessionId": "session-a", "toolCall": {"toolCallId": "permission-a", "title": "Run an approved command", "kind": "execute"},
                 "options": [{"optionId": "allow-a", "name": "Allow once", "kind": "allow_once"}]}
         }))
-        .expect_message(serde_json::json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "session-a"}}))
-        .expect_message(serde_json::json!({"jsonrpc": "2.0", "id": 91, "result": {"outcome": {"outcome": "cancelled"}}}))
+        .expect_messages_unordered(vec![
+            serde_json::json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "session-a"}}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 91, "result": {"outcome": {"outcome": "cancelled"}}}),
+        ])
         .send(serde_json::json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-a", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "session-a-cancelled"}}}}))
         .respond("prompt", serde_json::json!({"stopReason": "cancelled"}))
         .launch()
