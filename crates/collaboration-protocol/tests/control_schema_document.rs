@@ -156,6 +156,17 @@ fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
         }));
         assert!(validator.is_valid(&unknown), "{method} unknown native code");
 
+        let held_by_another_client = service_error(json!({
+            "kind":"nativeRejected","stage":stage,
+            "message":"Message it from the Codex client that holds it.",
+            "reason":"heldByAnotherClient",
+            "nextAction":"messageFromHoldingCodexClient"
+        }));
+        assert!(
+            validator.is_valid(&held_by_another_client),
+            "{method} active-writer rejection"
+        );
+
         let mut missing_action = rejection.clone();
         missing_action["error"]["data"]
             .as_object_mut()
