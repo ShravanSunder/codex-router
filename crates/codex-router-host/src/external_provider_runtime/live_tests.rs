@@ -365,8 +365,8 @@ async fn fixture_acp_permission_notice_reaches_approver_and_allow_executes_comma
             format!("Run `echo {endpoint_id}-ok` and report its output."),
             ExternalProviderApprovalContext {
                 // The creator is also the prompt sender and default approver.
-                requester: approver.clone(),
-                approver: approver.clone(),
+                requester: (approver.clone()).into(),
+                approver: (approver.clone()).into(),
                 target,
                 operation_id: OperationId::generate(),
                 binding_generation: generation.clone(),
@@ -447,8 +447,8 @@ async fn fixture_acp_permission_without_allow_records_visible_refusal_reason() -
             provider_session_id,
             "Run a command requiring permission.".to_owned(),
             ExternalProviderApprovalContext {
-                requester: approver.clone(),
-                approver,
+                requester: (approver.clone()).into(),
+                approver: approver.into(),
                 target,
                 operation_id: OperationId::generate(),
                 binding_generation: generation,
@@ -589,8 +589,8 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             "Call router-collaboration-endpoints_list once. In its JSON result, select the endpoints item whose endpoint.endpointId is claude-local, then return only endpoint.serviceId, without backticks or explanation. Do not use serviceEpoch."
                 .to_owned(),
             ExternalProviderApprovalContext {
-                requester,
-                approver: approver.clone(),
+                requester: requester.into(),
+                approver: (approver.clone()).into(),
                 target,
                 operation_id,
                 binding_generation: generation,
@@ -635,7 +635,7 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             .as_ref()
             .ok()
             .and_then(|result| result.as_ref().ok())
-            .map(|outcome| outcome.stop_reason);
+            .map(|outcome| outcome.stop_reason.clone());
         let identity_corroborated = prompt_result
             .as_ref()
             .ok()

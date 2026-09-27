@@ -5,7 +5,7 @@ use crate::{
 };
 use message_board::SessionRef;
 use serde_json::{Value, json};
-use session_event_model::session_profile_codec::{ProfileState, StateNotification};
+use session_event_model::session_profile_codec::{ProfileState, ProfileTurn, StateNotification};
 use session_event_model::{
     CapabilityReport, PendingInteraction, SessionEvent, SessionItemKind, SessionState, StopReason,
     ToolCallStatus, TurnOutcome,
@@ -35,22 +35,73 @@ fn event_notification(
     session: &SessionRef,
     supports_state: bool,
     item_text: &mut HashMap<String, String>,
+    active_turn: &mut Option<String>,
 ) -> Option<Value> {
     match event {
+        SessionEvent::TurnStarted { turn_id, .. } => {
+            *active_turn = Some(turn_id.clone());
+            supports_state.then(|| {
+                state_frame(
+                    session,
+                    ProfileState::Running,
+                    Some(ProfileTurn::Running {
+                        turn_id: turn_id.clone(),
+                    }),
+                )
+            })
+        }
+        SessionEvent::TurnEnded { turn_id, outcome } => {
+            if active_turn.as_deref() == Some(turn_id) {
+                *active_turn = None;
+            }
+            let (state, turn) = match outcome {
+                TurnOutcome::Ended { stop_reason, .. } => {
+                    let stop_reason = Some(stop_reason_label(stop_reason));
+                    let turn = if matches!(stop_reason.as_deref(), Some("cancelled")) {
+                        ProfileTurn::Interrupted {
+                            turn_id: turn_id.clone(),
+                            stop_reason,
+                        }
+                    } else {
+                        ProfileTurn::Completed {
+                            turn_id: turn_id.clone(),
+                            stop_reason,
+                        }
+                    };
+                    (ProfileState::Idle, turn)
+                }
+                TurnOutcome::Lost { reason } if reason == "endNotObservable" => (
+                    ProfileState::Idle,
+                    ProfileTurn::Failed {
+                        turn_id: turn_id.clone(),
+                        reason: reason.clone(),
+                    },
+                ),
+                TurnOutcome::Lost { reason } => (
+                    ProfileState::Unloaded,
+                    ProfileTurn::Lost {
+                        turn_id: turn_id.clone(),
+                        reason: reason.clone(),
+                    },
+                ),
+            };
+            supports_state.then(|| state_frame(session, state, Some(turn)))
+        }
         SessionEvent::StateChanged { state } if supports_state => {
             let state = match state {
+                SessionState::Unloaded => Some(ProfileState::Unloaded),
                 SessionState::Running => Some(ProfileState::Running),
                 SessionState::Idle => Some(ProfileState::Idle),
                 SessionState::RequiresAction { pending } => Some(ProfileState::RequiresAction {
                     kind: pending.first().kind(),
                 }),
-                _ => None,
+                SessionState::AuthenticationRequired => Some(ProfileState::AuthenticationRequired),
+                SessionState::Closed => Some(ProfileState::Closed),
             }?;
-            let notification = StateNotification {
-                session_id: session.session_id.as_str().to_owned(),
-                state,
-            };
-            Some(json!({"jsonrpc":"2.0","method":notification.method(),"params":notification}))
+            let turn = active_turn.as_ref().map(|turn_id| ProfileTurn::Running {
+                turn_id: turn_id.clone(),
+            });
+            Some(state_frame(session, state, turn))
         }
         SessionEvent::ItemStarted { item } | SessionEvent::ItemUpdated { item }
             if matches!(item.kind, SessionItemKind::ToolCall { .. }) =>
@@ -102,20 +153,27 @@ fn event_notification(
                 "update":{"sessionUpdate":update_kind,"content":{"type":"text","text":delta}}
             }}))
         }
-        SessionEvent::TurnEnded {
-            outcome: TurnOutcome::Lost { reason },
-            ..
-        } if supports_state => {
-            let notification = StateNotification {
-                session_id: session.session_id.as_str().to_owned(),
-                state: ProfileState::Lost {
-                    reason: reason.clone(),
-                    stop_reason: None,
-                },
-            };
-            Some(json!({"jsonrpc":"2.0","method":notification.method(),"params":notification}))
-        }
         _ => None,
+    }
+}
+
+fn state_frame(session: &SessionRef, state: ProfileState, turn: Option<ProfileTurn>) -> Value {
+    let notification = StateNotification {
+        session_id: session.session_id.as_str().to_owned(),
+        state,
+        turn,
+    };
+    json!({"jsonrpc":"2.0","method":notification.method(),"params":notification})
+}
+
+fn stop_reason_label(reason: &StopReason) -> String {
+    match reason {
+        StopReason::EndTurn => "end_turn".into(),
+        StopReason::MaxTokens => "max_tokens".into(),
+        StopReason::MaxTurnRequests => "max_turn_requests".into(),
+        StopReason::Refusal => "refusal".into(),
+        StopReason::Cancelled => "cancelled".into(),
+        StopReason::Unknown(value) => value.clone(),
     }
 }
 
@@ -171,6 +229,7 @@ impl ProviderSessionObservers {
             self.cancellations
                 .insert(session.clone(), cancellation.clone());
             let mut item_text = HashMap::new();
+            let mut active_turn = None;
             for event in &attachment.snapshot {
                 if let SessionEvent::InteractionRequested { interaction } = &event.event {
                     self.interaction_sender
@@ -186,6 +245,7 @@ impl ProviderSessionObservers {
                         &session,
                         self.supports_state,
                         &mut item_text,
+                        &mut active_turn,
                     ) {
                         self.output.send(notification).await.map_err(|_| ())?;
                     }
@@ -197,48 +257,77 @@ impl ProviderSessionObservers {
             let supports_state = self.supports_state;
             let interaction_sender = self.interaction_sender.clone();
             self.tasks.spawn(async move {
-            loop {
-                let received = tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => break,
-                    received = receiver.recv() => received,
-                };
-                let event = match received {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if supports_state {
-                            let notification = StateNotification {
-                                session_id: session.session_id.as_str().to_owned(),
-                                state: ProfileState::Lost { reason: "event stream lagged; reattach required".into(), stop_reason: None },
-                            };
-                            let _sent = output.send(json!({"jsonrpc":"2.0","method":notification.method(),"params":notification})).await;
+                loop {
+                    let received = tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => break,
+                        received = receiver.recv() => received,
+                    };
+                    let event = match received {
+                        Ok(event)
+                            if !matches!(event.event, SessionEvent::ResyncRequired { .. }) =>
+                        {
+                            Some(event)
                         }
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    };
+                    if cancellation.is_cancelled() {
                         break;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                };
-                if cancellation.is_cancelled() { break; }
-                if matches!(event.event, SessionEvent::ResyncRequired { .. }) {
-                    let Ok(replacement) = events.attach(session.clone()).await else { break; };
-                    item_text.clear();
-                    for historical in &replacement.snapshot {
-                        if let SessionEvent::InteractionRequested { interaction } = &historical.event
-                            && interaction_sender.send((session.clone(), interaction.clone())).await.is_err() { return; }
-                        if let Some(notification) = event_notification(&historical.event, &session, supports_state, &mut item_text)
-                            && output.send(notification).await.is_err() { return; }
+                    let Some(event) = event else {
+                        let Ok(replacement) = events.attach(session.clone()).await else {
+                            break;
+                        };
+                        item_text.clear();
+                        active_turn = None;
+                        for historical in &replacement.snapshot {
+                            if let SessionEvent::InteractionRequested { interaction } =
+                                &historical.event
+                                && interaction_sender
+                                    .send((session.clone(), interaction.clone()))
+                                    .await
+                                    .is_err()
+                            {
+                                return;
+                            }
+                            if let Some(notification) = event_notification(
+                                &historical.event,
+                                &session,
+                                supports_state,
+                                &mut item_text,
+                                &mut active_turn,
+                            ) && output.send(notification).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                        receiver = replacement.receiver;
+                        continue;
+                    };
+                    if let SessionEvent::InteractionRequested { interaction } = &event.event
+                        && interaction_sender
+                            .send((session.clone(), interaction.clone()))
+                            .await
+                            .is_err()
+                    {
+                        break;
                     }
-                    receiver = replacement.receiver;
-                    continue;
+                    if let Some(notification) = event_notification(
+                        &event.event,
+                        &session,
+                        supports_state,
+                        &mut item_text,
+                        &mut active_turn,
+                    ) && output.send(notification).await.is_err()
+                    {
+                        break;
+                    }
+                    if let SessionEvent::TurnEnded { turn_id, .. } = event.event {
+                        let _sent = turn_sender.send(Some(turn_id));
+                    }
                 }
-                if let SessionEvent::InteractionRequested { interaction } = &event.event
-                    && interaction_sender.send((session.clone(), interaction.clone())).await.is_err() { break; }
-                if let Some(notification) = event_notification(&event.event, &session, supports_state, &mut item_text)
-                    && output.send(notification).await.is_err() { break; }
-                if let SessionEvent::TurnEnded { turn_id, .. } = event.event {
-                    let _sent = turn_sender.send(Some(turn_id));
-                }
-            }
-        });
+            });
         }
         Ok(report)
     }
@@ -299,5 +388,57 @@ pub(crate) async fn stream_prompt(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    fn session() -> SessionRef {
+        serde_json::from_value(json!({
+            "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"claude-local"},
+            "sessionId":"provider-session"
+        }))
+        .expect("session")
+    }
+
+    #[test]
+    fn turn_state_is_sent_only_to_clients_that_advertised_state() {
+        let session = session();
+        let mut item_text = HashMap::new();
+        let mut active_turn = None;
+        let started = SessionEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+            input_id: session_event_model::InputId::generate(),
+        };
+        assert!(
+            event_notification(&started, &session, false, &mut item_text, &mut active_turn)
+                .is_none()
+        );
+        assert_eq!(active_turn.as_deref(), Some("turn-1"));
+        let started_frame =
+            event_notification(&started, &session, true, &mut item_text, &mut active_turn)
+                .expect("state notification");
+        assert_eq!(
+            started_frame["params"]["turn"],
+            json!({"status":"running","turnId":"turn-1"})
+        );
+        let ended = SessionEvent::TurnEnded {
+            turn_id: "turn-1".into(),
+            outcome: TurnOutcome::Ended {
+                stop_reason: StopReason::Cancelled,
+                local_cause: None,
+            },
+        };
+        let ended_frame =
+            event_notification(&ended, &session, true, &mut item_text, &mut active_turn)
+                .expect("state notification");
+        assert_eq!(ended_frame["params"]["state"], "idle");
+        assert_eq!(
+            ended_frame["params"]["turn"],
+            json!({"status":"interrupted","turnId":"turn-1","stopReason":"cancelled"})
+        );
+        assert!(active_turn.is_none());
     }
 }

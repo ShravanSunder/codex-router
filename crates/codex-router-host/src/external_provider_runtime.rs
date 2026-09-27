@@ -6,7 +6,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use acp_client_runtime::AgentSessionClient;
 pub(crate) use acp_client_runtime::ProviderPromptDispatchObservation;
-use collaboration_protocol::{CodexGeneration, OperationId, ProviderPromptStopReason, SessionRef};
+use collaboration_protocol::{
+    CodexGeneration, OperationId, ProviderIdentity, ProviderPromptStopReason, SessionRef,
+};
 use collaboration_service::ProviderSessionEventHub;
 use collaboration_service::ServiceInteractionBroker;
 use message_board::SessionEndpointRef;
@@ -34,8 +36,8 @@ pub use acp_client_runtime::{
 
 #[derive(Clone, Debug)]
 pub struct ExternalProviderApprovalContext {
-    pub requester: SessionRef,
-    pub approver: SessionRef,
+    pub requester: ProviderIdentity,
+    pub approver: ProviderIdentity,
     pub target: SessionRef,
     pub operation_id: OperationId,
     pub binding_generation: CodexGeneration,
@@ -61,7 +63,17 @@ fn host_prompt_outcome(
         session_event_model::StopReason::Refusal => ProviderPromptStopReason::Refusal,
         session_event_model::StopReason::Cancelled => ProviderPromptStopReason::Cancelled,
         session_event_model::StopReason::Unknown(value) => {
-            return Err(ExternalProviderRuntimeError::unknown_stop_reason(&value));
+            let safe_value = if !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            {
+                value
+            } else {
+                "unrecognized".to_owned()
+            };
+            ProviderPromptStopReason::Unknown(safe_value)
         }
     };
     Ok(ExternalProviderPromptOutcome {
@@ -76,18 +88,18 @@ mod prompt_projection_tests {
     use super::*;
 
     #[test]
-    fn unknown_stop_reason_keeps_only_its_safe_suffix() {
+    fn unknown_stop_reason_keeps_output_and_safe_value() {
         let outcome = acp_client_runtime::ExternalProviderPromptOutcome {
             output: "known output".to_owned(),
             stop_reason: session_event_model::StopReason::Unknown("future_stop".to_owned()),
             permission_refusal_reason: None,
         };
-        let error = host_prompt_outcome(outcome).expect_err("unknown stop reason");
-        assert!(matches!(
-            error,
-            ExternalProviderRuntimeError::UnknownStopReason { suffix }
-                if suffix == " (future_stop)"
-        ));
+        let projected = host_prompt_outcome(outcome).expect("unknown reason is a terminal outcome");
+        assert_eq!(projected.output, "known output");
+        assert_eq!(
+            projected.stop_reason,
+            ProviderPromptStopReason::Unknown("future_stop".into())
+        );
 
         let untrusted = acp_client_runtime::ExternalProviderPromptOutcome {
             output: String::new(),
@@ -96,9 +108,9 @@ mod prompt_projection_tests {
         };
         assert_eq!(
             host_prompt_outcome(untrusted)
-                .expect_err("unknown stop reason")
-                .to_string(),
-            "agent ended the turn with an unrecognized stop reason"
+                .expect("terminal outcome")
+                .stop_reason,
+            ProviderPromptStopReason::Unknown("unrecognized".into())
         );
     }
 }
@@ -225,6 +237,15 @@ impl ExternalProviderRuntime {
         provider_session_id: &str,
     ) -> acp_client_runtime::ProviderCapabilityReport {
         self.client.capability_report(provider_session_id).await
+    }
+
+    pub(crate) fn install_catalog_refresh(
+        &self,
+        sender: tokio::sync::mpsc::UnboundedSender<String>,
+    ) {
+        if let Some(event_sink) = &self.event_sink {
+            event_sink.install_catalog_refresh(sender);
+        }
     }
 
     pub fn retirement(&self) -> CancellationToken {

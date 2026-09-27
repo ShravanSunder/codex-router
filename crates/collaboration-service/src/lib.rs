@@ -66,7 +66,9 @@ mod scheduled_run_contract;
 mod scheduled_run_evidence_sink;
 mod scheduled_run_router;
 mod session_command_port;
-pub use app_server_model_catalog::{InvalidProviderModelEntry, ProviderModelEntry};
+pub use app_server_model_catalog::{
+    InvalidProviderModelEntry, ProviderModelEntry, render_model_list,
+};
 pub use router_session_app_server::{
     AppServerConnectionError, RouterSessionAppServerContext, RouterSessionAppServerListener,
     serve_router_session_app_server_connection,

@@ -6,7 +6,7 @@ use agent_client_protocol::{Dispatch, SessionMessage};
 use futures_util::FutureExt as _;
 use session_event_model::{InputId, SessionEvent, StopReason, TurnOutcome};
 
-use crate::provider_item_projection::ProviderItemProjection;
+use crate::provider_item_projection::{ItemProjectionError, ProviderItemProjection};
 use crate::provider_settings_catalog_codec::{
     apply_settings_update, catalog_from_session_response,
 };
@@ -136,7 +136,7 @@ fn replay_queued_session_updates(
                 .and_then(serde_json::Value::as_str);
             projection
                 .observe_unknown(source_kind, content)
-                .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+                .map_err(replay_projection_error)?;
             continue;
         }
         let Ok(notification) = serde_json::from_value::<SessionNotification>(params.clone()) else {
@@ -161,7 +161,7 @@ fn replay_queued_session_updates(
                         input_id: InputId::generate(),
                     },
                 )
-                .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+                .map_err(|_| ExternalProviderRuntimeError::SinkClosed)?;
             historical_turn = Some(turn_id);
             saw_agent_output = false;
         } else if !user_message {
@@ -169,7 +169,7 @@ fn replay_queued_session_updates(
         }
         projection
             .observe(&notification.update)
-            .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+            .map_err(replay_projection_error)?;
     }
     end_historical_turn(
         &mut historical_turn,
@@ -186,9 +186,7 @@ fn end_historical_turn(
     event_sink: &Arc<dyn SessionEventSink>,
     session_id: &str,
 ) -> Result<(), ExternalProviderRuntimeError> {
-    projection
-        .finish()
-        .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+    projection.finish().map_err(replay_projection_error)?;
     if let Some(turn_id) = turn_id.take() {
         event_sink
             .publish(
@@ -201,7 +199,14 @@ fn end_historical_turn(
                     },
                 },
             )
-            .map_err(|_| ExternalProviderRuntimeError::HistoryReplayUnavailable)?;
+            .map_err(|_| ExternalProviderRuntimeError::SinkClosed)?;
     }
     Ok(())
+}
+
+fn replay_projection_error(error: ItemProjectionError) -> ExternalProviderRuntimeError {
+    match error {
+        ItemProjectionError::OutputLimit => ExternalProviderRuntimeError::HistoryReplayUnavailable,
+        ItemProjectionError::SinkClosed => ExternalProviderRuntimeError::SinkClosed,
+    }
 }

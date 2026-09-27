@@ -223,13 +223,7 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
             }
             break;
         }
-        let approver = match serde_json::to_value(&record.approver)
-            .ok()
-            .and_then(|value| serde_json::from_value(value).ok())
-        {
-            Some(session) => message_board::Identity::Session { session },
-            None => return failure(id, "unavailable"),
-        };
+        let approver = record.approver;
         rows.push((
             record.updated_at_ms,
             session_id,

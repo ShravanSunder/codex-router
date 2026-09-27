@@ -317,8 +317,8 @@ fn typed_participants(
     context: &ExternalProviderApprovalContext,
 ) -> Option<(BoardSessionRef, Identity)> {
     let requester = board_session_ref(&context.target)?;
-    let approver = board_session_ref(&context.approver)?;
-    Some((requester, Identity::Session { session: approver }))
+    let approver = context.approver.to_board_identity().ok()?;
+    Some((requester, approver))
 }
 
 fn board_session_ref(value: &collaboration_protocol::SessionRef) -> Option<BoardSessionRef> {
@@ -357,7 +357,34 @@ impl SessionEventSink for NoopSessionEventSink {
         &self,
         _session_id: &str,
         _event: session_event_model::SessionEvent,
-    ) -> Result<(), acp_client_runtime::EventSinkOverflow> {
+    ) -> Result<(), acp_client_runtime::EventSinkClosed> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod provider_actor_tests {
+    use super::*;
+
+    #[test]
+    fn human_approver_reaches_typed_broker_without_a_synthetic_session() {
+        let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"cursor-local"},
+            "sessionId":"provider-session"
+        })).expect("target");
+        let context = ExternalProviderApprovalContext {
+            requester: target.clone().into(),
+            approver: serde_json::from_value(serde_json::json!({"humanId":"owner"}))
+                .expect("human"),
+            target,
+            operation_id: collaboration_protocol::OperationId::generate(),
+            binding_generation: serde_json::from_value(serde_json::json!({
+                "serviceEpoch":"1ff962c5-7fa3-4c18-a5ca-1bbe8db09e80","generation":1
+            }))
+            .expect("generation"),
+            binding_retirement: CancellationToken::new(),
+        };
+        let (_, approver) = typed_participants(&context).expect("broker participants");
+        assert!(matches!(approver, Identity::Human { human_id } if human_id.as_str() == "owner"));
     }
 }

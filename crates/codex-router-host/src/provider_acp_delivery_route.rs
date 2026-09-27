@@ -402,7 +402,7 @@ impl ProviderAcpDeliveryRoute {
             Err(_) => return self.finish_unknown(sink, &mut effect).await,
         };
         let requested_by = match &request.message {
-            MessageContent::Agent { sender, .. } => sender.clone(),
+            MessageContent::Agent { sender, .. } => sender.clone().into(),
             MessageContent::HumanUser { .. } | MessageContent::Router { .. } => record.created_by,
         };
         let dispatch = self

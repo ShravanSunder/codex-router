@@ -297,9 +297,10 @@ impl SessionEventHub for ProviderSessionEventHub {
                         .map_or(SessionState::Unloaded, |history| history.state.clone());
                     Ok(HubSessionSummary {
                         session,
-                        approver: message_board::Identity::Session {
-                            session: from_stored_session(&entry.approver)?,
-                        },
+                        approver: entry
+                            .approver
+                            .to_board_identity()
+                            .map_err(|_| SessionEventHubError::Unavailable)?,
                         working_directory: std::path::PathBuf::from(String::from(
                             entry.working_directory,
                         )),

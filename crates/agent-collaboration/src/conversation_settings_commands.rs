@@ -3,7 +3,7 @@
 use clap::{Args, Subcommand};
 use collaboration_client::ControlClient;
 use collaboration_client::protocol::{
-    ProviderSettingName, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
+    ProviderIdentity, ProviderSettingName, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
     ProviderSettingsFailureKind, ProviderSettingsSetRequest, SessionRef,
 };
 use std::{
@@ -96,12 +96,12 @@ pub(crate) fn run(arguments: SettingsArguments) -> i32 {
             );
         }
     };
-    let actor: SessionRef = match serde_json::from_str(&actor) {
+    let actor: ProviderIdentity = match serde_json::from_str(&actor) {
         Ok(value) => value,
         Err(_) => {
             return crate::endpoint_commands::report_failure(
                 "invalidField",
-                "--actor must be a SessionRef JSON",
+                "--actor must be a SessionRef or Human identity JSON",
                 2,
                 json_output,
             );

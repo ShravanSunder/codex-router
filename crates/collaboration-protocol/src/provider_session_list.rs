@@ -2,9 +2,8 @@
 
 use crate::{
     EndpointRef, NativeSessionScope, NativeSessionSource, NativeSessionView, ObservationTimestamp,
-    ProviderWorkingDirectory, SessionRef,
+    ProviderIdentity, ProviderWorkingDirectory, SessionRef,
 };
-use message_board::Identity;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -48,8 +47,8 @@ pub struct ProviderSessionSummary {
     /// Unix seconds; Router has no durable creation timestamp for these rows.
     pub updated_at: i64,
     pub state: ProviderSessionState,
-    pub approver: Identity,
-    pub created_by: SessionRef,
+    pub approver: ProviderIdentity,
+    pub created_by: ProviderIdentity,
 }
 
 #[derive(JsonSchema, Clone, Debug, Serialize, Deserialize)]

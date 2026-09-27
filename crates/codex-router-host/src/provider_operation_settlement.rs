@@ -2,9 +2,9 @@
 use collaboration_protocol::{
     AppliedProviderSetting, ConversationOperationFailure, ConversationOperationSettlement,
     EffectiveProviderSettings, FailedProviderSetting, MessageText, OperationId,
-    ProviderAuthenticationState, ProviderOperationEffect, ProviderPromptStopReason,
-    ProviderReconciliationState, ProviderRequestedPolicy, ProviderSettingName,
-    ProviderSettingsMappingStatus, ProviderWorkingDirectory, SessionRef,
+    ProviderAuthenticationState, ProviderIdentity, ProviderOperationEffect,
+    ProviderPromptStopReason, ProviderReconciliationState, ProviderRequestedPolicy,
+    ProviderSettingName, ProviderSettingsMappingStatus, ProviderWorkingDirectory, SessionRef,
 };
 use collaboration_service::{
     ProviderOperationStore, ProviderOperationStoreError, ProviderSessionRecord,
@@ -108,8 +108,8 @@ pub(crate) fn provider_session_record(
     target: SessionRef,
     working_directory: ProviderWorkingDirectory,
     requested_policy: ProviderRequestedPolicy,
-    created_by: SessionRef,
-    approver: SessionRef,
+    created_by: ProviderIdentity,
+    approver: ProviderIdentity,
 ) -> ProviderSessionRecord {
     ProviderSessionRecord {
         target,

@@ -109,7 +109,9 @@ impl<P: InteractionPort> AgentSessionClient<P> {
     }
 
     fn prompt_transport_failure(&self) -> ExternalProviderRuntimeError {
-        if self.frame_observation.limit_was_exceeded() {
+        if self.sink_closed.is_cancelled() {
+            ExternalProviderRuntimeError::SinkClosed
+        } else if self.frame_observation.limit_was_exceeded() {
             ExternalProviderRuntimeError::FrameLimitExceeded
         } else {
             ExternalProviderRuntimeError::TransportFailure

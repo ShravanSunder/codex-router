@@ -1,6 +1,6 @@
 //! Immediate, actor-bound provider Session setting changes.
 
-use crate::{EffectiveProviderSettings, ProviderSettingName, SessionRef};
+use crate::{EffectiveProviderSettings, ProviderIdentity, ProviderSettingName, SessionRef};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderSettingsSetRequest {
     pub target: SessionRef,
-    pub actor: SessionRef,
+    pub actor: ProviderIdentity,
     pub setting: ProviderSettingName,
     pub value: String,
 }
@@ -17,7 +17,7 @@ pub struct ProviderSettingsSetRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderSettingsAcceptRequest {
     pub target: SessionRef,
-    pub actor: SessionRef,
+    pub actor: ProviderIdentity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]

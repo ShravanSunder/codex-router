@@ -10,6 +10,7 @@ pub use operation_failure_contract::{
 };
 mod conversation_create_outcome;
 mod provider_conversation_contract;
+mod provider_identity;
 mod provider_settings_contract;
 pub use conversation_create_outcome::ConversationCreateOutcome;
 pub use provider_conversation_contract::{
@@ -31,6 +32,7 @@ pub use provider_conversation_contract::{
     ProviderRequestedSettings, ProviderRuntimeIdentity, ProviderSettingName,
     ProviderSettingsMappingStatus, ProviderTransport, ProviderWorkingDirectory,
 };
+pub use provider_identity::ProviderIdentity;
 pub use provider_settings_contract::{
     ProviderSettingsAcceptRequest, ProviderSettingsFailure, ProviderSettingsFailureKind,
     ProviderSettingsResult, ProviderSettingsSetRequest,

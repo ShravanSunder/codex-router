@@ -271,6 +271,59 @@ async fn resume_and_close_dispatch_as_inspectable_provider_operations() -> TestR
     Ok(())
 }
 
+#[tokio::test]
+async fn human_creator_and_approver_survive_create_and_load_control_dispatch() -> TestResult {
+    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let human = json!({"humanId":"owner"});
+    let create = json!({
+        "operationId":operation_id(),
+        "endpoint":endpoint(),
+        "generation":generation(),
+        "workingDirectory":"/tmp/provider-work",
+        "createdBy":human,
+        "approver":human,
+        "requestedPolicy":{"access":"workspace-write"}
+    });
+    let created = call(
+        &mut writer,
+        &mut reader,
+        "create-human",
+        "conversation/create",
+        create.clone(),
+    )
+    .await?;
+    ensure(
+        created["result"]["admission"] == "admitted",
+        format!("create: {created}"),
+    )?;
+    let load = json!({
+        "operationId":operation_id(),
+        "target":session("provider-conversation"),
+        "generation":generation(),
+        "workingDirectory":"/tmp/provider-work",
+        "requestedBy":human,
+        "approver":human,
+        "requestedPolicy":{"access":"workspace-write"}
+    });
+    let loaded = call(
+        &mut writer,
+        &mut reader,
+        "load-human",
+        "conversation/load",
+        load.clone(),
+    )
+    .await?;
+    ensure(
+        loaded["result"]["admission"] == "admitted",
+        format!("load: {loaded}"),
+    )?;
+    ensure(
+        *backend.calls.lock().await == vec![("create", create), ("load", load)],
+        "human actor JSON changed at Control dispatch".into(),
+    )?;
+    Ok(())
+}
+
 impl RecordingBackend {
     fn record<Request: Serialize + Send + 'static, T: Send + 'static>(
         &self,

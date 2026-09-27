@@ -1,8 +1,8 @@
 use collaboration_protocol::{
     CodexGeneration, EndpointId, EndpointRef, GenerationNumber, NonEmptyText, OperationId,
     ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities, ProviderCapability,
-    ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
-    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
+    ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderIdentity,
+    ProviderKind, ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
     ProviderRequestedPolicy, ProviderRuntimeIdentity, ProviderTransport, ProviderWorkingDirectory,
     RouterAccess, SessionId, SessionRef, UuidIdentity,
 };
@@ -10,6 +10,7 @@ use collaboration_service::{
     ProviderOperationAdmission, ProviderOperationStore, ProviderOperationStoreError,
     ProviderSessionRecord,
 };
+use message_board::HumanId;
 use sqlx::{Connection, SqliteConnection};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -83,8 +84,8 @@ async fn provider_session_metadata_round_trips_and_rejects_invalid_stored_rows()
         requested_policy: ProviderRequestedPolicy {
             access: RouterAccess::WriteRestricted,
         },
-        created_by: session_ref("codex-local", "creator-1")?,
-        approver: session_ref("codex-local", "approver-1")?,
+        created_by: session_ref("codex-local", "creator-1")?.into(),
+        approver: session_ref("codex-local", "approver-1")?.into(),
         updated_at_ms: 10,
     };
 
@@ -96,6 +97,17 @@ async fn provider_session_metadata_round_trips_and_rejects_invalid_stored_rows()
     ensure_eq!(restored, record);
 
     let mut raw = SqliteConnection::connect(&format!("sqlite:{}", path.display())).await?;
+    let stored_creator: String = sqlx::query_scalar(
+        "SELECT created_by_json FROM provider_session_records WHERE target_session_id = 'provider-session-1'",
+    )
+    .fetch_one(&mut raw)
+    .await?;
+    ensure_eq!(stored_creator, serde_json::to_string(&record.created_by)?);
+    ensure_eq!(
+        stored_creator,
+        serde_json::to_string(&session_ref("codex-local", "creator-1")?)?
+    );
+
     sqlx::query("UPDATE provider_session_records SET working_directory = 'relative' WHERE target_session_id = 'provider-session-1'")
         .execute(&mut raw)
         .await?;
@@ -105,6 +117,47 @@ async fn provider_session_metadata_round_trips_and_rejects_invalid_stored_rows()
         Err(ProviderOperationStoreError::InvalidRecord)
     ));
     store.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn human_creator_and_approver_survive_store_reopen_and_old_reader_fails_closed() -> TestResult
+{
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("provider-operations.sqlite");
+    let target = session_ref("claude-local", "human-owned-session")?;
+    let human = ProviderIdentity::Human {
+        human_id: HumanId::try_from("owner".to_owned())?,
+    };
+    let record = ProviderSessionRecord {
+        target: target.clone(),
+        working_directory: ProviderWorkingDirectory::try_from(root.path().display().to_string())?,
+        requested_policy: ProviderRequestedPolicy {
+            access: RouterAccess::WriteRestricted,
+        },
+        created_by: human.clone(),
+        approver: human.clone(),
+        updated_at_ms: 10,
+    };
+    let mut store = ProviderOperationStore::open(&path).await?;
+    store.record_session(&record).await?;
+    store.close().await?;
+
+    let mut reopened = ProviderOperationStore::open(&path).await?;
+    ensure_eq!(reopened.session_record(&target).await?, Some(record));
+    reopened.close().await?;
+
+    let mut raw = SqliteConnection::connect(&format!("sqlite:{}", path.display())).await?;
+    let stored_creator: String = sqlx::query_scalar(
+        "SELECT created_by_json FROM provider_session_records WHERE target_session_id = 'human-owned-session'",
+    )
+    .fetch_one(&mut raw)
+    .await?;
+    ensure_eq!(stored_creator, r#"{"humanId":"owner"}"#);
+    let old_reader = serde_json::from_str::<SessionRef>(&stored_creator)
+        .expect_err("old SessionRef-only reader must reject a human creator");
+    ensure!(old_reader.to_string().contains("humanId"));
+    raw.close().await?;
     Ok(())
 }
 
@@ -132,8 +185,8 @@ async fn create_settlement_and_session_record_commit_together() -> TestResult {
         requested_policy: ProviderRequestedPolicy {
             access: RouterAccess::WriteRestricted,
         },
-        created_by: session_ref("codex-local", "creator-2")?,
-        approver: session_ref("codex-local", "approver-2")?,
+        created_by: session_ref("codex-local", "creator-2")?.into(),
+        approver: session_ref("codex-local", "approver-2")?.into(),
         updated_at_ms: 12,
     };
 
@@ -185,8 +238,8 @@ async fn provider_session_inventory_lists_only_the_requested_endpoint() -> TestR
                 requested_policy: ProviderRequestedPolicy {
                     access: RouterAccess::WriteRestricted,
                 },
-                created_by: session_ref("codex-local", "creator")?,
-                approver: session_ref("codex-local", "approver")?,
+                created_by: session_ref("codex-local", "creator")?.into(),
+                approver: session_ref("codex-local", "approver")?.into(),
                 updated_at_ms,
             })
             .await?;

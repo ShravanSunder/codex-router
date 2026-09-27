@@ -49,6 +49,7 @@ pub enum ProviderSessionActivity {
 #[derive(Clone)]
 pub(crate) struct ProviderSessionRuntimeHandles {
     pub(crate) event_sink: Arc<dyn SessionEventSink>,
+    pub(crate) sink_closed: CancellationToken,
     pub(crate) tool_registry: Arc<ProviderConnectionActivity>,
     pub(crate) todo_state: Arc<CursorPlanItems>,
     pub(crate) session_settings:
@@ -121,12 +122,19 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
             () = shutdown.cancelled() => break,
             update = session.read_update() => {
                 let Ok(update) = update else { break; };
-                if observe_idle_session_update(
+                let observation = observe_idle_session_update(
                     update,
                     &mut item_projection,
                     &runtime_handles,
                     session.session_id().0.as_ref(),
-                ).await.is_err() {
+                ).await;
+                if matches!(observation, Err(ExternalProviderRuntimeError::SinkClosed)) {
+                    runtime_handles.sink_closed.cancel();
+                    shutdown.cancel();
+                    break;
+                }
+                if observation.is_err() {
+                    shutdown.cancel();
                     break;
                 }
             }
@@ -169,10 +177,9 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             session.session_id().0.as_ref(),
                             SessionEvent::TurnStarted { turn_id: turn_id.clone(), input_id },
                         ).is_err() {
-                            let _result = session.connection().send_notification(
-                                CancelNotification::new(session.session_id().clone()),
-                            );
-                            let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
+                            runtime_handles.sink_closed.cancel();
+                            shutdown.cancel();
+                            let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
                             runtime_handles.tool_registry.turn_ended(session.session_id().0.as_ref());
                             runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());
                             return;
@@ -210,9 +217,14 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                         );
                                     }
                                     runtime_handles.todo_state.forget_session(provider_session_id.0.as_ref());
-                                    let _result = reply.send(Err(ExternalProviderRuntimeError::Operation(
-                                        "provider runtime shut down while prompt was active".to_owned(),
-                                    )));
+                                    let error = if runtime_handles.sink_closed.is_cancelled() {
+                                        ExternalProviderRuntimeError::SinkClosed
+                                    } else {
+                                        ExternalProviderRuntimeError::Operation(
+                                            "provider runtime shut down while prompt was active".to_owned(),
+                                        )
+                                    };
+                                    let _result = reply.send(Err(error));
                                     return;
                                 }
                                 limit_notice = output_limit_rx.recv(), if !output_limit_cancelled => {
@@ -229,9 +241,12 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                     }
                                 }
                                 result = &mut prompt_result => {
-                                    output_limit_cancelled |= runtime_handles
-                                        .tool_registry
-                                        .output_overflowed(provider_session_id.0.as_ref());
+                                    if matches!(&result, Err(ExternalProviderRuntimeError::SinkClosed)) {
+                                        runtime_handles.sink_closed.cancel();
+                                        shutdown.cancel();
+                                        let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
+                                        return;
+                                    }
                                     let outcome = match &result {
                                         Ok(prompt) => TurnOutcome::Ended {
                                             stop_reason: prompt.stop_reason.clone(),
@@ -246,8 +261,10 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                             SessionEvent::TurnEnded { turn_id: turn_id.clone(), outcome },
                                         ).is_err()
                                     {
+                                        runtime_handles.sink_closed.cancel();
+                                        shutdown.cancel();
                                         runtime_handles.todo_state.forget_session(provider_session_id.0.as_ref());
-                                        let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
+                                        let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
                                         return;
                                     }
                                     runtime_handles.todo_state.forget_session(provider_session_id.0.as_ref());
@@ -285,7 +302,9 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                                     SessionEvent::InputAccepted { input_id, turn_id: turn_id.clone() },
                                                 ).is_err()
                                             {
-                                                let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
+                                                runtime_handles.sink_closed.cancel();
+                                                shutdown.cancel();
+                                                let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
                                                 return;
                                             }
                                             let _result = reply.send(result);
@@ -315,9 +334,11 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                 session.session_id().0.as_ref(),
                                 SessionEvent::TurnStarted { turn_id: turn_id.clone(), input_id },
                             ).is_err() {
+                                runtime_handles.sink_closed.cancel();
+                                shutdown.cancel();
                                 runtime_handles.tool_registry.turn_ended(session.session_id().0.as_ref());
                                 runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());
-                                let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
+                                let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
                                 return;
                             }
                             if runtime_handles.tool_registry.claim_turn_end(session.session_id().0.as_ref(), &turn_id)
@@ -328,7 +349,9 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                     outcome: TurnOutcome::Lost { reason: "endNotObservable".to_owned() },
                                 },
                             ).is_err() {
-                                let _result = reply.send(Err(ExternalProviderRuntimeError::TransportFailure));
+                                runtime_handles.sink_closed.cancel();
+                                shutdown.cancel();
+                                let _result = reply.send(Err(ExternalProviderRuntimeError::SinkClosed));
                                 return;
                             }
                             runtime_handles.todo_state.forget_session(session.session_id().0.as_ref());

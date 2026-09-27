@@ -3,6 +3,14 @@
 use super::*;
 
 impl<P: InteractionPort> AgentSessionClient<P> {
+    fn retired_operation_error(&self) -> ExternalProviderRuntimeError {
+        if self.sink_closed.is_cancelled() {
+            ExternalProviderRuntimeError::SinkClosed
+        } else {
+            ExternalProviderRuntimeError::TransportFailure
+        }
+    }
+
     #[must_use]
     pub fn admission(&self) -> &ExternalProviderAdmission {
         &self.admission
@@ -76,7 +84,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+            .map_err(|_| self.retired_operation_error())?;
         match result.await {
             Ok(result) => result,
             Err(_) => {
@@ -221,10 +229,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
     pub async fn load_session(
@@ -278,10 +284,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
     pub async fn list_sessions(
@@ -297,10 +301,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         self.commands
             .send(ProviderCommand::List { cwd, reply })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
     pub async fn close_session(
@@ -328,10 +330,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
     pub async fn steer_session(
@@ -361,10 +361,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
     pub async fn session_activity(
@@ -378,10 +376,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())
     }
 
     pub async fn wait_session_idle(
@@ -395,10 +391,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
     pub async fn shutdown(&self) {

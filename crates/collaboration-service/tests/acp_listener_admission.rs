@@ -291,6 +291,15 @@ async fn acp_listener_reports_unavailable_codex_without_closing_the_connection()
     let idle: serde_json::Value = serde_json::from_str(&idle).unwrap();
     assert_eq!(idle["method"], "_session/state");
     assert_eq!(idle["params"]["state"], "idle");
+    let completed = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let completed: serde_json::Value = serde_json::from_str(&completed).unwrap();
+    assert_eq!(completed["method"], "_session/state");
+    assert_eq!(completed["params"]["turn"]["status"], "completed");
+    assert_eq!(completed["params"]["turn"]["turnId"], "turn-1");
     let prompted = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
         .await
         .unwrap()

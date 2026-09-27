@@ -135,7 +135,7 @@ fn question_choice_ids_are_unique_while_labels_may_repeat() {
     let field = json!({"kind":"multiChoice", "fieldId":"selection", "label":"Select", "description":null,
         "required":true, "options":[{"optionId":"a","label":"Same"},{"optionId":"b","label":"Same"}],
         "min":1,"max":2});
-    assert!(serde_json::from_value::<QuestionFields>(json!([field.clone()])).is_ok());
+    assert!(serde_json::from_value::<QuestionFields>(json!([field])).is_ok());
     let mut duplicate = field;
     duplicate["options"][1]["optionId"] = json!("a");
     assert!(serde_json::from_value::<QuestionFields>(json!([duplicate])).is_err());

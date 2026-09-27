@@ -321,8 +321,8 @@ async fn hosted_refresh_keeps_equal_provider_and_codex_ids_as_two_rows() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: creator.clone(),
-            approver: creator,
+            created_by: creator.clone().into(),
+            approver: creator.into(),
             updated_at_ms: 3_000,
         })
         .await

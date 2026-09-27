@@ -106,8 +106,8 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: actor.clone(),
-            approver: actor.clone(),
+            created_by: (actor.clone()).into(),
+            approver: (actor.clone()).into(),
             updated_at_ms: 1,
         })
         .await

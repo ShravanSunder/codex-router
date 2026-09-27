@@ -24,7 +24,7 @@ impl ProviderAcpDeliveryRoute {
             ));
         };
         let requested_by = match &request.message {
-            MessageContent::Agent { sender, .. } => sender.clone(),
+            MessageContent::Agent { sender, .. } => sender.clone().into(),
             MessageContent::HumanUser { .. } | MessageContent::Router { .. } => record.created_by,
         };
         let permit = match self.queue.reserve(&request.target) {

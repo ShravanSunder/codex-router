@@ -52,7 +52,7 @@ impl ProviderModelEntry {
     }
 }
 
-pub(crate) fn render_model_list(catalog: &[ProviderModelEntry]) -> Value {
+pub fn render_model_list(catalog: &[ProviderModelEntry]) -> Value {
     let models = if catalog.is_empty() {
         vec![ProviderModelEntry::provider_default()]
     } else {

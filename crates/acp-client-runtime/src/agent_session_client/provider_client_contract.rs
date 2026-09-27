@@ -178,6 +178,8 @@ pub enum ExternalProviderRuntimeError {
     ProviderRejected { code: i64 },
     #[error("provider operation response was unavailable")]
     TransportFailure,
+    #[error("session event consumer closed")]
+    SinkClosed,
     #[error("invalidSetting: provider setting was not advertised")]
     InvalidSetting {
         setting: crate::ProviderSettingKind,
@@ -204,26 +206,8 @@ pub enum ExternalProviderRuntimeError {
     FrameDecodeFailure,
     #[error("unsupportedContent{{{content_type}}}")]
     UnsupportedContent { content_type: &'static str },
-    #[error("agent ended the turn with an unrecognized stop reason{suffix}")]
-    UnknownStopReason { suffix: String },
     #[error("provider ACP operation failed: {0}")]
     Operation(String),
-}
-
-impl ExternalProviderRuntimeError {
-    pub fn unknown_stop_reason(value: &str) -> Self {
-        let suffix = if !value.is_empty()
-            && value.len() <= 32
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        {
-            format!(" ({value})")
-        } else {
-            String::new()
-        };
-        Self::UnknownStopReason { suffix }
-    }
 }
 
 pub(crate) fn sanitized_initialization_error(error: &agent_client_protocol::Error) -> String {
