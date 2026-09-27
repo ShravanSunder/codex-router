@@ -126,6 +126,12 @@ async fn live_contender_never_unlinks_and_next_owner_replaces_stale_socket()
     held_lock.try_lock()?;
     let stale_listener = std::os::unix::net::UnixListener::bind(paths.operator_socket())?;
     drop(stale_listener);
+    // Pin the stale inode so the filesystem cannot recycle its number for the
+    // rebound socket (ext4 reuses freed inodes immediately; APFS does not).
+    std::fs::hard_link(
+        paths.operator_socket(),
+        directory.path().join("stale-operator.sock.pin"),
+    )?;
     let stale_inode = std::fs::metadata(paths.operator_socket())?.ino();
 
     let contender = HostInstance::acquire(paths.clone());

@@ -807,8 +807,10 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
     let decision = broker
         .decide(ApprovalDecideParams {
             request_id: pending.request_id,
-            decision: ApprovalDecision::Allow,
-            actor: approver,
+            decision: Some(ApprovalDecision::Allow),
+            option_id: None,
+            acknowledge_persistent: false,
+            actor: serde_json::from_value(json!({"kind":"session","session":approver.clone()}))?,
         })
         .await
         .map_err(|error| format!("approval decision failed: {error}"))?;
@@ -916,11 +918,13 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
         broker
             .decide(ApprovalDecideParams {
                 request_id: pending.request_id,
-                decision: ApprovalDecision::Allow,
-                actor: approver,
+                decision: Some(ApprovalDecision::Allow),
+                option_id: None,
+                acknowledge_persistent: false,
+                actor: serde_json::from_value(json!({"kind":"session","session":approver}))?,
             })
             .await,
-        Err("approvalNotPending")
+        Err(error) if error.code() == "approvalNotPending"
     ));
     let history = broker.list(false).await.approvals;
     ensure_eq!(

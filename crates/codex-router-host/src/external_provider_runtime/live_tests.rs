@@ -14,6 +14,13 @@ use tokio_tungstenite::tungstenite::Message;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+fn approval_actor(session: &collaboration_protocol::SessionRef) -> message_board::Identity {
+    message_board::Identity::Session {
+        session: serde_json::from_value(serde_json::to_value(session).expect("session JSON"))
+            .expect("board session"),
+    }
+}
+
 #[test]
 fn provider_output_classifier_reports_only_bounded_uuid_metadata() {
     let expected = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())
@@ -382,8 +389,10 @@ async fn fixture_acp_permission_notice_reaches_approver_and_allow_executes_comma
         broker
             .decide(ApprovalDecideParams {
                 request_id: pending.request_id.clone(),
-                decision: ApprovalDecision::Allow,
-                actor: approver.clone(),
+                decision: Some(ApprovalDecision::Allow),
+                option_id: None,
+                acknowledge_persistent: false,
+                actor: approval_actor(&approver),
             })
             .await
             .map_err(|error| format!("approval decide: {error}"))?;
@@ -591,10 +600,12 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
                         if let Some(pending) = broker.list(true).await.approvals.into_iter().next() {
                             broker.decide(ApprovalDecideParams {
                                 request_id: pending.request_id,
-                                decision: ApprovalDecision::Allow,
-                                actor: approver.clone(),
+                                decision: Some(ApprovalDecision::Allow),
+                                option_id: None,
+                                acknowledge_persistent: false,
+                                actor: approval_actor(&approver),
                             }).await.map_err(|error| {
-                                ExternalProviderRuntimeError::Operation(error.to_owned())
+                                ExternalProviderRuntimeError::Operation(error.to_string())
                             })?;
                         }
                     }

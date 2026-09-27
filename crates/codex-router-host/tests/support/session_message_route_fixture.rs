@@ -404,8 +404,11 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
     client
         .decide_approval(ApprovalDecideParams {
             request_id: pending.request_id,
-            decision: ApprovalDecision::Allow,
-            actor: approver,
+            decision: Some(ApprovalDecision::Allow),
+            option_id: None,
+            acknowledge_persistent: false,
+            actor: serde_json::from_value(json!({"kind":"session","session":approver}))
+                .expect("approver identity"),
         })
         .await
         .expect("approval decision");
