@@ -19,6 +19,7 @@ async fn host_persists_configured_budgets_and_loads_them_on_restart()
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: None,
+            owner_human_id: None,
         })
         .await?;
         let mut client = ControlClient::connect(&root, "configuration-rpc-test", "1").await?;

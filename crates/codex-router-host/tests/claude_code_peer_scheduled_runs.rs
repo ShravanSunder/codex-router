@@ -252,6 +252,7 @@ async fn host_worker_finalizes_peer_run_as_written() {
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: Some(registry),
+        owner_human_id: None,
     })
     .await
     .expect("Host runtime");

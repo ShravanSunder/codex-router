@@ -17,6 +17,7 @@ async fn cli_configures_and_inspects_future_attempt_budgets()
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        owner_human_id: None,
     })
     .await?;
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))

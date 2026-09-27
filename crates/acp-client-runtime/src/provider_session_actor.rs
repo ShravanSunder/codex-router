@@ -131,6 +131,9 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
     });
     loop {
         tokio::select! {
+            // Drain updates already received for the previous Turn before admitting
+            // another prompt on this Session's ordered connection.
+            biased;
             () = shutdown.cancelled() => break,
             update = session.read_update() => {
                 let Ok(update) = update else { break; };
