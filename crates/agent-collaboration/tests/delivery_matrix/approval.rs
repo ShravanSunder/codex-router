@@ -7,9 +7,9 @@ use super::{
 use collaboration_client::{
     ConversationClient, ConversationClientError, ConversationCreateInput,
     ConversationOperationResult, ConversationPromptInput, PublicPromptContent,
+    board::Identity,
     protocol::{
-        ApprovalDecideParams, ApprovalDecision, ConversationCreateOutcome, OperationId,
-        RouterAccess, SessionRef,
+        ApprovalDecideParams, ConversationCreateOutcome, OperationId, RouterAccess, SessionRef,
     },
 };
 use serde_json::json;
@@ -44,6 +44,7 @@ pub(super) async fn deliver_approval_notice(
                 approver: Some(approver.clone()),
                 generation: None,
                 model: None,
+                mode: None,
                 effort: None,
                 fork: None,
                 root_message_id: None,
@@ -52,7 +53,8 @@ pub(super) async fn deliver_approval_notice(
         )
         .await?;
     let requester = match created {
-        ConversationCreateOutcome::Created { target, .. } => target,
+        ConversationCreateOutcome::Created { target, .. }
+        | ConversationCreateOutcome::CreatedWithoutSettings { target, .. } => target,
         ConversationCreateOutcome::Pending { .. } => {
             return Err("Scripted provider create stayed pending".into());
         }
@@ -102,8 +104,13 @@ pub(super) async fn deliver_approval_notice(
         .client
         .decide_approval(ApprovalDecideParams {
             request_id: request_id.clone(),
-            decision: ApprovalDecision::Deny,
-            actor: approver.clone(),
+            decision: None,
+            option_id: Some("deny-once".to_owned()),
+            note: None,
+            acknowledge_persistent: false,
+            actor: Identity::Session {
+                session: serde_json::from_value(serde_json::to_value(approver)?)?,
+            },
         })
         .await?;
     match tokio::time::timeout(Duration::from_secs(90), prompt_task).await {

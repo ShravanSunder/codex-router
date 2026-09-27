@@ -215,10 +215,30 @@ fn turns_contain_input(turns: &[Value], marker: &str) -> bool {
             .is_some_and(|items| {
                 items.iter().any(|item| {
                     item.get("type").and_then(Value::as_str) == Some("userMessage")
-                        && item.to_string().contains(marker)
+                        && item
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .is_some_and(|content| {
+                                content.iter().any(|part| {
+                                    part.get("type").and_then(Value::as_str) == Some("text")
+                                        && part
+                                            .get("text")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|text| text.contains(marker))
+                                })
+                            })
                 })
             })
     })
+}
+
+#[test]
+fn recipient_observer_finds_composite_approval_request_id_in_user_text() {
+    let request_id = "[\"matrix-provider-codex\",91]";
+    let turns = vec![json!({"items":[{"type":"userMessage","content":[
+        {"type":"text","text":format!("Approval request {request_id}")}
+    ]}]})];
+    assert!(turns_contain_input(&turns, request_id));
 }
 
 async fn create_empty_conversation(
@@ -238,6 +258,7 @@ async fn create_empty_conversation(
                 approver: Some(creator.clone()),
                 generation: None,
                 model: Some("gpt-5.6-luna".to_owned()),
+                mode: None,
                 effort: Some("low".to_owned()),
                 fork: None,
                 root_message_id: None,
@@ -246,7 +267,8 @@ async fn create_empty_conversation(
         )
         .await?;
     match created {
-        ConversationCreateOutcome::Created { target, .. } => Ok(target),
+        ConversationCreateOutcome::Created { target, .. }
+        | ConversationCreateOutcome::CreatedWithoutSettings { target, .. } => Ok(target),
         ConversationCreateOutcome::Pending { .. } => {
             Err("Empty conversation creation stayed pending".into())
         }

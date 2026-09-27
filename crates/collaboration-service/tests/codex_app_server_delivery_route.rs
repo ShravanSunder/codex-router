@@ -656,6 +656,17 @@ async fn exercise_held_empty_thread(
                 return Err("stale generation omitted NotDispatched evidence".into());
             }
         }
+        if matches!(
+            scenario,
+            ScheduledScenario::AdmissionRefused | ScheduledScenario::Rejected
+        ) {
+            use codex_acp_adapter::UnmaterializedBindingStore;
+            let restored = match holder.checkout("empty-thread") {
+                codex_acp_adapter::HeldBindingCheckout::Ready(binding) => binding,
+                _ => return Err("scheduled refusal left the binding busy or missing".into()),
+            };
+            holder.restore(*restored);
+        }
         if let Some(binding) = busy_binding {
             use codex_acp_adapter::UnmaterializedBindingStore;
             holder.restore(*binding);
