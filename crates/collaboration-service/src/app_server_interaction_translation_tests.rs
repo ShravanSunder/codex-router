@@ -325,16 +325,41 @@ fn question_form_keeps_typed_fields_and_distinct_outcomes() {
     assert_eq!(schema["properties"]["mode"]["oneOf"][1]["const"], "fast");
     assert_eq!(schema["required"], json!(["name", "count", "mode"]));
     assert_eq!(
-        map_question_form_reply(&json!({"action":"accept","content":{"count":2}})),
+        map_question_form_reply(&request, &json!({"action":"accept","content":{"count":2}})),
         Ok(QuestionReply::Answered(json!({"count":2})))
     );
     assert_eq!(
-        map_question_form_reply(&json!({"action":"decline"})),
+        map_question_form_reply(&request, &json!({"action":"decline"})),
         Ok(QuestionReply::Declined)
     );
     assert_eq!(
-        map_question_form_reply(&json!({"action":"cancel"})),
+        map_question_form_reply(&request, &json!({"action":"cancel"})),
         Ok(QuestionReply::Cancelled)
+    );
+    assert_eq!(
+        map_question_form_reply(
+            &request,
+            &json!({"action":"accept","content":{"mode":"safe"}})
+        ),
+        Ok(QuestionReply::Answered(
+            json!({"mode":{"selectedOptionIds":["safe"]}})
+        ))
+    );
+    assert_eq!(
+        map_question_form_reply(
+            &request,
+            &json!({"action":"accept","content":{"mode":{"selectedOptionIds":["fast"]}}})
+        ),
+        Ok(QuestionReply::Answered(
+            json!({"mode":{"selectedOptionIds":["fast"]}})
+        ))
+    );
+    assert_eq!(
+        map_question_form_reply(
+            &request,
+            &json!({"action":"accept","content":{"mode":["safe"]}})
+        ),
+        Err(InteractionReplyError::InvalidReply)
     );
 }
 

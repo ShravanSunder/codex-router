@@ -186,7 +186,11 @@ pub async fn serve_router_session_app_server_connection(
         };
         let request: Value = serde_json::from_str(&text)?;
         if request.get("method").is_none() {
-            forwarding.resolve_reply(&request).await;
+            for notification in forwarding.resolve_reply(&request).await {
+                websocket
+                    .send(Message::Text(notification.to_string().into()))
+                    .await?;
+            }
             continue;
         }
         let Some(id) = request.get("id").cloned() else {

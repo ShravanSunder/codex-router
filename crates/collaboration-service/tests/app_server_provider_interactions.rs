@@ -176,6 +176,173 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
             content: serde_json::from_value(json!({"count":3}))?
         }
     );
+    let choice: QuestionRequest = serde_json::from_value(json!({
+        "requestId":"question-choice","prompt":"Choose a mode","fields":[
+            {"kind":"singleChoice","fieldId":"mode","label":"Mode",
+                "description":null,"required":true,"options":[
+                    {"optionId":"safe","label":"Safe"},
+                    {"optionId":"fast","label":"Fast"}
+                ]}
+        ]
+    }))?;
+    let choice_answer = broker
+        .request_question(backend.session.clone(), actor.clone(), choice.clone())
+        .await?;
+    let _sent = backend.events.send(HubEvent {
+        sequence: 93,
+        event: SessionEvent::InteractionRequested {
+            interaction: PendingInteraction::Question {
+                approver: actor.clone(),
+                request: Box::new(choice),
+            },
+        },
+    });
+    let choice_form: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("choice form")??
+            .to_text()?,
+    )?;
+    assert_eq!(choice_form["method"], "mcpServer/elicitation/request");
+    assert_eq!(
+        choice_form["params"]["requestedSchema"]["properties"]["mode"]["oneOf"][0]["const"],
+        "safe"
+    );
+    client
+        .send(Message::Text(
+            json!({"id":choice_form["id"],
+        "result":{"action":"accept","content":{}}})
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let rejected: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("rejection notification")??
+            .to_text()?,
+    )?;
+    assert_eq!(rejected["method"], "error");
+    assert_eq!(rejected["params"]["willRetry"], true);
+    assert!(
+        rejected["params"]["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("question-choice"))
+    );
+    let retried: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("retried choice form")??
+            .to_text()?,
+    )?;
+    assert_eq!(retried["method"], "mcpServer/elicitation/request");
+    assert_ne!(retried["id"], choice_form["id"]);
+    client
+        .send(Message::Text(
+            json!({"id":retried["id"],
+        "result":{"action":"accept","content":{"mode":[]}}})
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let malformed: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("malformed notification")??
+            .to_text()?,
+    )?;
+    assert_eq!(malformed["method"], "error");
+    let retried_again: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("second retried form")??
+            .to_text()?,
+    )?;
+    assert_ne!(retried_again["id"], retried["id"]);
+    client
+        .send(Message::Text(
+            json!({"id":retried_again["id"],
+        "result":{"action":"accept","content":{"mode":"safe"}}})
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let selected_choice = tokio::time::timeout(Duration::from_secs(2), choice_answer).await??;
+    assert_eq!(
+        selected_choice,
+        QuestionResponse::Answered {
+            content: serde_json::from_value(json!({"mode":{"selectedOptionIds":["safe"]}}))?
+        }
+    );
+    let withdrawn: QuestionRequest = serde_json::from_value(json!({
+        "requestId":"question-withdraw","prompt":"Choose once","fields":[
+            {"kind":"singleChoice","fieldId":"mode","label":"Mode","description":null,
+                "required":true,"options":[{"optionId":"safe","label":"Safe"}]}
+        ]
+    }))?;
+    let withdrawn_answer = broker
+        .request_question(backend.session.clone(), actor.clone(), withdrawn.clone())
+        .await?;
+    let _sent = backend.events.send(HubEvent {
+        sequence: 94,
+        event: SessionEvent::InteractionRequested {
+            interaction: PendingInteraction::Question {
+                approver: actor.clone(),
+                request: Box::new(withdrawn),
+            },
+        },
+    });
+    let initial_withdraw_form: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("withdraw form")??
+            .to_text()?,
+    )?;
+    client
+        .send(Message::Text(
+            json!({"id":initial_withdraw_form["id"],
+        "result":{"action":"accept","content":{}}})
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let _: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("withdraw error")??
+            .to_text()?,
+    )?;
+    let pending_retry: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("withdraw retry")??
+            .to_text()?,
+    )?;
+    broker
+        .respond_question(
+            "question-withdraw",
+            &actor,
+            QuestionResponse::Answered {
+                content: serde_json::from_value(json!({"mode":{"selectedOptionIds":["safe"]}}))?,
+            },
+        )
+        .await?;
+    let _settled_elsewhere =
+        tokio::time::timeout(Duration::from_secs(2), withdrawn_answer).await??;
+    let _sent = backend.events.send(HubEvent {
+        sequence: 95,
+        event: SessionEvent::InteractionResolved {
+            request_id: "question-withdraw".into(),
+        },
+    });
+    let withdrawn_notice: Value = serde_json::from_str(
+        tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("withdraw notice")??
+            .to_text()?,
+    )?;
+    assert_eq!(withdrawn_notice["method"], "serverRequest/resolved");
+    assert_eq!(withdrawn_notice["params"]["requestId"], pending_retry["id"]);
     let other: Identity = serde_json::from_value(json!({"kind":"human","humanId":"other"}))?;
     let other_socket = directory.path().join("other.sock");
     let other_listener = tokio::net::UnixListener::bind(&other_socket)?;

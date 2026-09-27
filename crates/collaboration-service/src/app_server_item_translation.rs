@@ -507,14 +507,67 @@ pub fn translate_question_request(
     }
 }
 
-pub fn map_question_form_reply(reply: &Value) -> Result<QuestionReply, InteractionReplyError> {
+pub fn map_question_form_reply(
+    request: &QuestionRequest,
+    reply: &Value,
+) -> Result<QuestionReply, InteractionReplyError> {
     match reply.get("action").and_then(Value::as_str) {
-        Some("accept") => reply
-            .get("content")
-            .filter(|content| content.is_object())
-            .cloned()
-            .map(QuestionReply::Answered)
-            .ok_or(InteractionReplyError::InvalidReply),
+        Some("accept") => {
+            let content = reply
+                .get("content")
+                .and_then(Value::as_object)
+                .ok_or(InteractionReplyError::InvalidReply)?;
+            let mut mapped = serde_json::Map::new();
+            for (field_id, value) in content {
+                let field = request
+                    .fields
+                    .iter()
+                    .find(|field| match field {
+                        QuestionField::Text { field_id: id, .. }
+                        | QuestionField::Number { field_id: id, .. }
+                        | QuestionField::Boolean { field_id: id, .. }
+                        | QuestionField::SingleChoice { field_id: id, .. }
+                        | QuestionField::MultiChoice { field_id: id, .. } => id == field_id,
+                    })
+                    .ok_or(InteractionReplyError::InvalidReply)?;
+                let answer = match field {
+                    QuestionField::Text { .. } if value.is_string() => value.clone(),
+                    QuestionField::Number { .. } if value.is_number() => value.clone(),
+                    QuestionField::Boolean { .. } if value.is_boolean() => value.clone(),
+                    QuestionField::SingleChoice { .. } => {
+                        let selected = if let Some(selected) = value.as_str() {
+                            vec![selected.to_owned()]
+                        } else {
+                            value
+                                .get("selectedOptionIds")
+                                .and_then(Value::as_array)
+                                .filter(|choices| choices.len() == 1)
+                                .and_then(|choices| {
+                                    choices
+                                        .iter()
+                                        .map(|choice| choice.as_str().map(str::to_owned))
+                                        .collect::<Option<Vec<_>>>()
+                                })
+                                .ok_or(InteractionReplyError::InvalidReply)?
+                        };
+                        json!({"selectedOptionIds":selected})
+                    }
+                    QuestionField::MultiChoice { .. } => {
+                        let selected = value
+                            .as_array()
+                            .or_else(|| value.get("selectedOptionIds").and_then(Value::as_array))
+                            .ok_or(InteractionReplyError::InvalidReply)?;
+                        if !selected.iter().all(Value::is_string) {
+                            return Err(InteractionReplyError::InvalidReply);
+                        }
+                        json!({"selectedOptionIds":selected})
+                    }
+                    _ => return Err(InteractionReplyError::InvalidReply),
+                };
+                mapped.insert(field_id.clone(), answer);
+            }
+            Ok(QuestionReply::Answered(Value::Object(mapped)))
+        }
         Some("decline") => Ok(QuestionReply::Declined),
         Some("cancel") => Ok(QuestionReply::Cancelled),
         _ => Err(InteractionReplyError::InvalidReply),

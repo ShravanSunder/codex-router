@@ -10,7 +10,8 @@ use collaboration_protocol::QuestionResponse;
 use message_board::{Identity, SessionRef};
 use serde_json::{Value, json};
 use session_event_model::{
-    ApprovalRequest, PendingInteraction, SessionEvent, SessionItem, StopReason, TurnOutcome,
+    ApprovalRequest, PendingInteraction, QuestionRequest, SessionEvent, SessionItem, StopReason,
+    TurnOutcome,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -85,7 +86,8 @@ enum PendingAppServerInteraction {
         presentation: ApprovalPresentation,
     },
     Question {
-        request_id: String,
+        session: SessionRef,
+        request: Box<QuestionRequest>,
         presentation: QuestionPresentation,
     },
 }
@@ -185,6 +187,26 @@ impl AppServerEventForwarding {
             SessionEvent::InteractionRequested { interaction } => {
                 self.present_interaction(session, interaction, &thread_id)
             }
+            SessionEvent::InteractionResolved { request_id } => {
+                let mut resolved = Vec::new();
+                self.pending.retain(|id, interaction| {
+                    let matches_request = match interaction {
+                        PendingAppServerInteraction::Approval { request, .. } => {
+                            &request.request_id == request_id
+                        }
+                        PendingAppServerInteraction::Question { request, .. } => {
+                            &request.request_id == request_id
+                        }
+                    };
+                    if matches_request {
+                        resolved.push(json!({"method":"serverRequest/resolved","params":{
+                            "threadId":thread_id,"requestId":id
+                        }}));
+                    }
+                    !matches_request
+                });
+                resolved
+            }
             _ => Vec::new(),
         }
     }
@@ -215,7 +237,8 @@ impl AppServerEventForwarding {
             };
             return vec![json!({"method":"item/started","params":{
                 "threadId":thread_id,"turnId":turn_id,
-                "item":{"type":"agentMessage","id":item_id,"text":text}
+                "item":{"type":"agentMessage","id":item_id,"text":text},
+                "startedAtMs":chrono::Utc::now().timestamp_millis()
             }})];
         }
         let actor = &self.actor;
@@ -245,7 +268,8 @@ impl AppServerEventForwarding {
                     }
                     ApprovalPresentation::ReadOnly { summary } => {
                         vec![json!({"method":"item/started","params":{
-                            "threadId":thread_id,"turnId":turn_id,"item":summary
+                            "threadId":thread_id,"turnId":turn_id,"item":summary,
+                            "startedAtMs":chrono::Utc::now().timestamp_millis()
                         }})]
                     }
                 }
@@ -263,7 +287,8 @@ impl AppServerEventForwarding {
                         self.pending.insert(
                             id,
                             PendingAppServerInteraction::Question {
-                                request_id: request.request_id.clone(),
+                                session: session.clone(),
+                                request: request.clone(),
                                 presentation,
                             },
                         );
@@ -271,7 +296,8 @@ impl AppServerEventForwarding {
                     }
                     QuestionPresentation::ReadOnly { summary } => {
                         vec![json!({"method":"item/started","params":{
-                            "threadId":thread_id,"turnId":turn_id,"item":summary
+                            "threadId":thread_id,"turnId":turn_id,"item":summary,
+                            "startedAtMs":chrono::Utc::now().timestamp_millis()
                         }})]
                     }
                 }
@@ -279,15 +305,15 @@ impl AppServerEventForwarding {
         }
     }
 
-    pub(crate) async fn resolve_reply(&mut self, reply: &Value) {
+    pub(crate) async fn resolve_reply(&mut self, reply: &Value) -> Vec<Value> {
         let Some(id) = reply.get("id").and_then(Value::as_str) else {
-            return;
+            return Vec::new();
         };
         let Some(pending) = self.pending.remove(id) else {
-            return;
+            return Vec::new();
         };
-        let Some(broker) = &self.broker else {
-            return;
+        let Some(broker) = self.broker.clone() else {
+            return Vec::new();
         };
         match pending {
             PendingAppServerInteraction::Approval {
@@ -297,7 +323,7 @@ impl AppServerEventForwarding {
                 let Ok(ApprovalReply::Selected(option_id)) =
                     map_approval_reply(&presentation, reply.get("result").unwrap_or(&Value::Null))
                 else {
-                    return;
+                    return Vec::new();
                 };
                 let acknowledge_persistent = request.options.iter().any(|option| {
                     option.option_id == option_id
@@ -315,32 +341,128 @@ impl AppServerEventForwarding {
                         None,
                     )
                     .await;
+                Vec::new()
             }
             PendingAppServerInteraction::Question {
-                request_id,
+                session,
+                request,
                 presentation,
             } => {
                 if !matches!(presentation, QuestionPresentation::InteractiveForm { .. }) {
-                    return;
+                    return Vec::new();
                 }
-                let Ok(mapped) =
-                    map_question_form_reply(reply.get("result").unwrap_or(&Value::Null))
-                else {
-                    return;
+                let mapped = match map_question_form_reply(
+                    &request,
+                    reply.get("result").unwrap_or(&Value::Null),
+                ) {
+                    Ok(mapped) => mapped,
+                    Err(_) => {
+                        return self
+                            .retry_question_submission(
+                                broker.as_ref(),
+                                session,
+                                request,
+                                presentation,
+                                "malformedAnswer",
+                            )
+                            .await;
+                    }
                 };
                 let response = match mapped {
                     QuestionReply::Answered(content) => match serde_json::from_value(content) {
                         Ok(content) => QuestionResponse::Answered { content },
-                        Err(_) => return,
+                        Err(_) => {
+                            return self
+                                .retry_question_submission(
+                                    broker.as_ref(),
+                                    session,
+                                    request,
+                                    presentation,
+                                    "invalidAnswerShape",
+                                )
+                                .await;
+                        }
                     },
                     QuestionReply::Declined => QuestionResponse::Declined,
                     QuestionReply::Cancelled => QuestionResponse::Cancelled,
                 };
-                let _decision = broker
-                    .respond_question(&request_id, &self.actor, response)
+                let decision = broker
+                    .respond_question(&request.request_id, &self.actor, response)
                     .await;
+                match decision {
+                    Ok(()) => Vec::new(),
+                    Err(error) => {
+                        let error_kind = match error {
+                            crate::InteractionHistoryError::InvalidAnswer { .. } => "invalidAnswer",
+                            crate::InteractionHistoryError::WrongActor => "wrongActor",
+                            crate::InteractionHistoryError::AlreadySettled
+                            | crate::InteractionHistoryError::NotPending => "notPending",
+                            crate::InteractionHistoryError::Unavailable => "unavailable",
+                            _ => "rejected",
+                        };
+                        self.retry_question_submission(
+                            broker.as_ref(),
+                            session,
+                            request,
+                            presentation,
+                            error_kind,
+                        )
+                        .await
+                    }
+                }
             }
         }
+    }
+
+    async fn retry_question_submission(
+        &mut self,
+        broker: &ServiceInteractionBroker,
+        session: SessionRef,
+        request: Box<QuestionRequest>,
+        presentation: QuestionPresentation,
+        error_kind: &'static str,
+    ) -> Vec<Value> {
+        tracing::warn!(
+            request_id = %request.request_id,
+            error_kind,
+            "provider TUI question answer rejected"
+        );
+        let QuestionPresentation::InteractiveForm { ref params } = presentation else {
+            return Vec::new();
+        };
+        let thread_id = thread_alias(&session);
+        let turn_id = params.get("turnId").and_then(Value::as_str).unwrap_or("");
+        let still_pending = broker
+            .list_questions(true)
+            .await
+            .iter()
+            .any(|record| record.request_id() == request.request_id);
+        let error = json!({"method":"error","params":{
+            "threadId":thread_id,"turnId":turn_id,
+            "willRetry":still_pending,
+            "error":{"message":format!("Answer to question {} was rejected; choose again", request.request_id),
+                "codexErrorInfo":null}
+        }});
+        if !still_pending {
+            return vec![error];
+        }
+        let new_id = format!(
+            "router:question:{}:{}:retry:{}",
+            session.session_id.as_str(),
+            request.request_id,
+            uuid::Uuid::now_v7()
+        );
+        let request_frame =
+            json!({"id":new_id,"method":"mcpServer/elicitation/request","params":params});
+        self.pending.insert(
+            new_id,
+            PendingAppServerInteraction::Question {
+                session,
+                request,
+                presentation,
+            },
+        );
+        vec![error, request_frame]
     }
 }
 
