@@ -38,6 +38,7 @@ mod approval_presentation;
 mod external_permission_options;
 mod interaction_port;
 mod provider_capability_report;
+mod provider_item_projection;
 mod provider_persistence_target;
 mod provider_prompt_content;
 mod provider_prompt_observation;

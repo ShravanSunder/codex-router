@@ -1,4 +1,5 @@
 //! Bounded ACP prompt output and settlement observation.
+use crate::SessionEventSink;
 use crate::agent_session_client::{
     ExternalProviderPromptOutcome, ExternalProviderRuntimeError, MAX_PROMPT_OUTPUT_BYTES,
     ProviderFrameObservation, acp_operation_error, provider_frame_decode_error,
@@ -7,6 +8,7 @@ use crate::agent_session_client::{
 use crate::agent_session_client::{
     ExternalProviderToolCall, ExternalProviderToolOutcome, classify_mcp_tool_outcome,
 };
+use crate::provider_item_projection::ProviderItemProjection;
 use crate::provider_prompt_result_codec::{decode_prompt_result, decode_typed_stop_reason};
 use crate::provider_update_kind::{
     has_unknown_informational_value, is_known_update_kind, is_session_update_notification,
@@ -28,6 +30,7 @@ pub(crate) async fn read_bounded_prompt(
     >,
     output_limit_tx: tokio::sync::mpsc::UnboundedSender<()>,
     frame_observation: std::sync::Arc<ProviderFrameObservation>,
+    event_sink: std::sync::Arc<dyn SessionEventSink>,
     #[cfg(any(test, feature = "test-observation"))] test_tool_calls: Arc<
         std::sync::Mutex<Vec<ExternalProviderToolCall>>,
     >,
@@ -35,6 +38,8 @@ pub(crate) async fn read_bounded_prompt(
     use futures_util::FutureExt as _;
 
     let mut output = String::new();
+    let mut item_projection =
+        ProviderItemProjection::new(session.session_id().to_string(), event_sink);
     let mut unknown_update_kinds = HashSet::<String>::new();
     #[cfg(any(test, feature = "test-observation"))]
     let mut tool_calls = HashMap::<String, ExternalProviderToolCall>::new();
@@ -49,6 +54,7 @@ pub(crate) async fn read_bounded_prompt(
                     &mut output,
                     &mut output_limit_tx,
                     &mut unknown_update_kinds,
+                    &mut item_projection,
                     #[cfg(any(test, feature = "test-observation"))] &mut tool_calls,
                     #[cfg(any(test, feature = "test-observation"))] &test_tool_calls,
                 ).await? {
@@ -77,6 +83,7 @@ pub(crate) async fn read_bounded_prompt(
                         &mut output,
                         &mut output_limit_tx,
                         &mut unknown_update_kinds,
+                        &mut item_projection,
                         #[cfg(any(test, feature = "test-observation"))] &mut tool_calls,
                         #[cfg(any(test, feature = "test-observation"))] &test_tool_calls,
                     ).await?;
@@ -85,6 +92,9 @@ pub(crate) async fn read_bounded_prompt(
             }
         }
     };
+    item_projection
+        .finish()
+        .map_err(|_| ExternalProviderRuntimeError::PromptOutputLimitExceeded)?;
     #[cfg(any(test, feature = "test-observation"))]
     {
         *test_tool_calls
@@ -104,6 +114,7 @@ async fn record_prompt_update(
     output: &mut String,
     output_limit_tx: &mut Option<tokio::sync::mpsc::UnboundedSender<()>>,
     unknown_update_kinds: &mut HashSet<String>,
+    item_projection: &mut ProviderItemProjection,
     #[cfg(any(test, feature = "test-observation"))] tool_calls: &mut HashMap<
         String,
         ExternalProviderToolCall,
@@ -126,10 +137,31 @@ async fn record_prompt_update(
                         "unknown ACP session update kind"
                     );
                 }
+                let content = match &dispatch {
+                    agent_client_protocol::Dispatch::Notification(notification) => notification
+                        .params()
+                        .get("update")
+                        .and_then(|update| update.get("content"))
+                        .and_then(|content| content.get("text"))
+                        .and_then(serde_json::Value::as_str),
+                    _ => None,
+                };
+                if item_projection
+                    .observe_unknown(diagnostic_kind, content)
+                    .is_err()
+                    && let Some(limit_tx) = output_limit_tx.take()
+                {
+                    let _result = limit_tx.send(());
+                }
                 return Ok(None);
             }
             let handled = MatchDispatch::new(dispatch)
                 .if_notification(async |notification: SessionNotification| {
+                    if item_projection.observe(&notification.update).is_err()
+                        && let Some(limit_tx) = output_limit_tx.take()
+                    {
+                        let _result = limit_tx.send(());
+                    }
                     match notification.update {
                         SessionUpdate::AgentMessageChunk(ContentChunk {
                             content: ContentBlock::Text(text),
