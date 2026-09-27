@@ -523,7 +523,7 @@ async fn question_after_turn_cancel_is_recorded_as_cancelled() -> TestResult {
     assert!(matches!(row,
         collaboration_service::InteractionHistoryRecord::Question {
             state: collaboration_service::QuestionHistoryState::Cancelled { reason }, ..
-        } if reason == "turnCancelled"));
+        } if reason.as_str() == "turnCancelled"));
     Ok(())
 }
 

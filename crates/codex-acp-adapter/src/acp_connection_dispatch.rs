@@ -150,6 +150,7 @@ pub(crate) async fn route_codex_sessions(
                     let mut known_session=if let Some(session_id)=requested_session.as_ref() {
                         match sessions.reserve_load(session_id,setup_requests.len()) {
                             Ok(binding)=>binding,
+                            Err(crate::SessionRegistryError::Busy)=>{router.output.send(busy_error(id,"Session busy or capacity unavailable")).await?;continue;},
                             Err(_)=>{router.output.send(error(id,-32600,"Session busy or capacity unavailable")).await?;continue;},
                         }
                     } else {None};
@@ -162,7 +163,7 @@ pub(crate) async fn route_codex_sessions(
                             }
                             HeldBindingCheckout::Busy => {
                                 sessions.finish_failed_load(session_id);
-                                router.output.send(error(id,-32600,"Held session is busy")).await?;
+                                router.output.send(busy_error(id,"Held session is busy")).await?;
                                 continue;
                             }
                             HeldBindingCheckout::Missing => {}
@@ -173,7 +174,7 @@ pub(crate) async fn route_codex_sessions(
                     let holder=Arc::clone(&inputs.holder);
                     if create_new {
                         let (result_sender,result_receiver)=tokio::sync::oneshot::channel();
-                        holder.create_tasks().spawn(async move {
+                        holder.host_tasks().spawn(async move {
                             let mut outcome=run_session_setup(setup).await;
                             if let Some(binding)=outcome.binding.take() {
                                 holder.hold(binding);
@@ -208,7 +209,11 @@ pub(crate) async fn route_codex_sessions(
                     }
                 },
                 "session/prompt"=>{
-                    if sessions.begin_prompt(&mut schema,id.clone(),params).is_err() {router.output.send(error(id,-32600,"Session prompt unavailable or already pending")).await?;}
+                    match sessions.begin_prompt(&mut schema,id.clone(),params) {
+                        Ok(())=>{},
+                        Err(crate::SessionRegistryError::Busy)=>router.output.send(busy_error(id,"Session prompt unavailable or already pending")).await?,
+                        Err(_)=>router.output.send(error(id,-32600,"Session prompt unavailable or already pending")).await?,
+                    }
                 },
                 "session/list"=>{
                     if !schema.validate("ListSessionsRequest",&params).unwrap_or(false) {router.output.send(error(id,-32602,"Invalid session list parameters")).await?;continue;}
@@ -264,7 +269,19 @@ impl Drop for CheckedOutBinding {
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
+fn busy_error(id: Value, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":message,"data":{"kind":"busy"}}})
+}
 fn setup_error(id: Value, failure: &crate::SessionSetupError) -> Value {
+    if matches!(failure, crate::SessionSetupError::Busy) {
+        return busy_error(id, "Native session has an active turn");
+    }
+    if matches!(
+        failure,
+        crate::SessionSetupError::NativeThreadStatusUnavailable
+    ) {
+        return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"Native session status unavailable","data":{"kind":"invalidThreadStatus"}}});
+    }
     let code = if matches!(
         failure,
         crate::SessionSetupError::InvalidParameters

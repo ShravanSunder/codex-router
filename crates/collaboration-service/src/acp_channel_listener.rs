@@ -105,7 +105,7 @@ impl AcpChannelListener {
         };
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
-        self.holder.drain_create_tasks().await;
+        self.holder.drain_host_tasks().await;
         result
     }
 }

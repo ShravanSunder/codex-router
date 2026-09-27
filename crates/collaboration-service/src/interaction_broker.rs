@@ -171,7 +171,7 @@ pub struct ServiceInteractionBroker {
 }
 
 struct TypedPendingApproval {
-    completion: oneshot::Sender<TypedApprovalSelection>,
+    completion: oneshot::Sender<TypedApprovalResolution>,
     turn_cancellation: tokio_util::sync::CancellationToken,
     retirement: tokio_util::sync::CancellationToken,
     requester: message_board::SessionRef,
@@ -187,6 +187,31 @@ struct PendingQuestion {
 pub struct TypedApprovalSelection {
     pub option_id: session_event_model::OfferedOptionId,
     pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypedApprovalResolution {
+    Selected(TypedApprovalSelection),
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypedInteractionDecision {
+    SelectApproval {
+        option_id: String,
+        acknowledge_persistent: bool,
+        note: Option<String>,
+    },
+    Cancel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypedInteractionDecisionOutcome {
+    ApprovalSelected {
+        option_id: session_event_model::OfferedOptionId,
+    },
+    ApprovalCancelled,
+    QuestionCancelled,
 }
 
 impl ServiceInteractionBroker {
@@ -696,12 +721,20 @@ impl ServiceInteractionBroker {
                 .decide_typed_interaction(
                     &params.request_id,
                     &params.actor,
-                    &option_id,
-                    params.acknowledge_persistent,
-                    params.note.clone(),
+                    TypedInteractionDecision::SelectApproval {
+                        option_id,
+                        acknowledge_persistent: params.acknowledge_persistent,
+                        note: params.note.clone(),
+                    },
                 )
                 .await
                 .map_err(ApprovalDecisionError::from)?;
+            let TypedInteractionDecisionOutcome::ApprovalSelected {
+                option_id: selected,
+            } = selected
+            else {
+                return Err(ApprovalDecisionError::Code("approvalNotPending"));
+            };
             return Ok(ApprovalDecideResult {
                 request_id: params.request_id,
                 state: ApprovalState::Decided,

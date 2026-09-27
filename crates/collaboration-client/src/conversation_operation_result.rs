@@ -28,6 +28,28 @@ pub enum ConversationOperationResult {
         operation_id: OperationId,
         target: SessionRef,
     },
+    /// The caller detached from a Codex turn that remains active.
+    Running {
+        target: SessionRef,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        follow_up: String,
+    },
+}
+
+impl ConversationOperationResult {
+    #[must_use]
+    pub fn running_codex_turn(target: SessionRef) -> Self {
+        let endpoint = String::from(target.endpoint.endpoint_id.clone());
+        let session = String::from(target.session_id.clone());
+        Self::Running {
+            target,
+            turn_id: None,
+            follow_up: format!(
+                "Turn continues. Follow with: agent-collaboration events listen --endpoint {endpoint} --session {session} --attach; or agent-collaboration session inspect --endpoint {endpoint} --session {session} --json"
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

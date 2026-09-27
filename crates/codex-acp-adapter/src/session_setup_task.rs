@@ -50,6 +50,18 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
             .await
         {
             Ok(response)
+                if crate::session_creation::native_thread_activity(&response)
+                    == crate::session_creation::NativeThreadActivity::Active =>
+            {
+                Err(SessionSetupError::Busy)
+            }
+            Ok(response)
+                if crate::session_creation::native_thread_activity(&response)
+                    == crate::session_creation::NativeThreadActivity::Invalid =>
+            {
+                Err(SessionSetupError::NativeThreadStatusUnavailable)
+            }
+            Ok(response)
                 if inputs
                     .cancellation_barrier
                     .as_ref()
@@ -64,7 +76,10 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
         };
         let detached = matches!(
             &outcome,
-            Err(SessionSetupError::OutcomeUnknown | SessionSetupError::Unavailable)
+            Err(SessionSetupError::Busy
+                | SessionSetupError::NativeThreadStatusUnavailable
+                | SessionSetupError::OutcomeUnknown
+                | SessionSetupError::Unavailable)
         );
         return SetupTaskOutput {
             binding: if detached { None } else { Some(session) },

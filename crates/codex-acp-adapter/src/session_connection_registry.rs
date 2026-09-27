@@ -26,8 +26,8 @@ pub trait UnmaterializedBindingStore: Send + Sync {
     fn checkout(&self, session_id: &str) -> HeldBindingCheckout;
     fn restore(&self, binding: AcpSessionBinding);
     fn finish(&self, session_id: &str);
-    /// Host-lifetime tasks for creates that must outlive their ACP frontend.
-    fn create_tasks(&self) -> tokio_util::task::TaskTracker;
+    /// Host-lifetime work that must outlive its ACP frontend connection.
+    fn host_tasks(&self) -> tokio_util::task::TaskTracker;
 }
 #[derive(Debug, thiserror::Error)]
 pub enum SessionRegistryError {
@@ -205,27 +205,27 @@ impl AcpSessionRegistry {
     }
     /// Closes only this connection's prompt actors; the Host/backend lifecycle remains separate.
     pub async fn shutdown(mut self) {
-        for slot in self.sessions.values() {
-            if let SessionSlot::Busy(sender) = slot {
-                let _sent = sender.try_send(PromptCommand::Cancel);
+        // Closing the ACP frontend detaches its prompt actors. Dropping their
+        // command senders lets them observe EOF and keep draining native turns.
+        for slot in self.sessions.values_mut() {
+            if matches!(slot, SessionSlot::Busy(_)) {
+                *slot = SessionSlot::Detached;
             }
         }
-        let drained = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            while let Some(completed) = self.prompts.join_next().await {
+        let mut prompts = self.prompts;
+        let holder = Arc::clone(&self.holder);
+        let retired = self.retired;
+        self.holder.host_tasks().spawn(async move {
+            while let Some(completed) = prompts.join_next().await {
                 if let Ok(completed) = completed
                     && let Some(binding) = completed.1.binding
                     && binding.is_unmaterialized()
                 {
-                    self.holder.hold(binding);
+                    holder.hold(binding);
                 }
             }
-        })
-        .await;
-        self.retired.cancel();
-        if drained.is_err() {
-            self.prompts.abort_all();
-            while self.prompts.join_next().await.is_some() {}
-        }
+            retired.cancel();
+        });
         for (_, slot) in self.sessions {
             if let SessionSlot::Ready(binding) = slot
                 && binding.is_unmaterialized()

@@ -37,6 +37,7 @@ pub enum InteractionCancelReason {
     HostRestarted,
     EventPublicationFailed,
     AgentCancelled,
+    ApproverCancelled,
     TimedOut,
     Other(String),
 }
@@ -50,6 +51,7 @@ impl InteractionCancelReason {
             Self::HostRestarted => "hostRestarted",
             Self::EventPublicationFailed => "eventPublicationFailed",
             Self::AgentCancelled => "agentCancelled",
+            Self::ApproverCancelled => "approverCancelled",
             Self::TimedOut => "timedOut",
             Self::Other(reason) => reason,
         }
@@ -65,6 +67,7 @@ impl From<String> for InteractionCancelReason {
             "hostRestarted" => Self::HostRestarted,
             "eventPublicationFailed" => Self::EventPublicationFailed,
             "agentCancelled" => Self::AgentCancelled,
+            "approverCancelled" => Self::ApproverCancelled,
             "timedOut" => Self::TimedOut,
             _ => Self::Other(reason),
         }
@@ -248,6 +251,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&InteractionCancelReason::TimedOut).unwrap(),
             "\"timedOut\""
+        );
+        assert_eq!(
+            serde_json::to_string(&InteractionCancelReason::ApproverCancelled).unwrap(),
+            "\"approverCancelled\""
         );
         assert_eq!(
             serde_json::to_string(&ProviderSettingFailureReason::OutcomeUnknown).unwrap(),

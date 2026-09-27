@@ -26,7 +26,7 @@ impl UnmaterializedBindingStore for TestBindingHolder {
     }
     fn restore(&self, _binding: AcpSessionBinding) {}
     fn finish(&self, _session_id: &str) {}
-    fn create_tasks(&self) -> tokio_util::task::TaskTracker {
+    fn host_tasks(&self) -> tokio_util::task::TaskTracker {
         tokio_util::task::TaskTracker::new()
     }
 }
@@ -41,6 +41,183 @@ fn ensure_test_scratch() {
     use std::os::unix::fs::PermissionsExt;
     assert!(std::fs::create_dir_all(TEST_SCRATCH).is_ok());
     assert!(std::fs::set_permissions(TEST_SCRATCH, std::fs::Permissions::from_mode(0o700)).is_ok());
+}
+
+#[tokio::test]
+async fn prompt_rechecks_native_activity_before_starting_a_turn() {
+    let mut catalog = AcpSchemaCatalog::load().unwrap();
+    let definitions: serde_json::Map<String, Value> = [
+        "ThreadRead",
+        "ThreadResume",
+        "ThreadStart",
+        "ThreadLoadedList",
+        "TurnStart",
+        "TurnSteer",
+        "TurnInterrupt",
+    ]
+    .into_iter()
+    .flat_map(|name| {
+        [
+            (format!("{name}Params"), json!({"type":"object"})),
+            (format!("{name}Response"), json!({"type":"object"})),
+        ]
+    })
+    .collect();
+    let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
+        "codex_app_server_protocol.schemas.json".to_owned(),
+        serde_json::to_vec(&json!({"definitions":{"v2":definitions,"ServerRequest":{"type":"object"},"ServerNotification":{"type":"object"}}})).unwrap(),
+    )]))
+    .unwrap();
+    let schemas = Arc::new(NativePayloadSchemas::from_bundle(&bundle).unwrap());
+    let generation = serde_json::from_value(
+        json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
+    )
+    .unwrap();
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let connection = NativeProtocolConnection::from_websocket(
+        WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+    );
+    let backend = tokio::spawn(async move {
+        let mut socket = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        for (method, status) in [("thread/resume", "idle"), ("thread/read", "active")] {
+            let frame = socket.next().await.unwrap().unwrap();
+            let request: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(request["method"], method);
+            socket.send(Message::Text(json!({"id":request["id"],"result":{"cwd":"/work","thread":{"id":"thread-a","cwd":"/work","status":{"type":status},"turns":[]}}}).to_string().into())).await.unwrap();
+        }
+        if let Some(Ok(frame)) = socket.next().await {
+            assert!(
+                frame.is_close(),
+                "busy prompt sent another native request: {frame}"
+            );
+        }
+    });
+    let (session, _) = AcpSessionBinding::load_existing(
+        &mut catalog,
+        SessionSetupInputs {
+            operation_id: None,
+            recorder: Arc::new(AcceptingConversationRecorder),
+            connection,
+            schemas,
+            generation,
+            params: json!({"sessionId":"thread-a","cwd":"/work","mcpServers":[]}),
+            approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+        },
+    )
+    .await
+    .unwrap();
+    let error = PendingAcpPrompt::start(
+        session,
+        &mut catalog,
+        json!("prompt"),
+        &json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"work"}]}),
+    )
+    .await
+    .err()
+    .expect("active native thread must reject prompt");
+    assert_eq!(error.to_string(), "native session has an active turn");
+    backend.await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_native_turn_keeps_its_error_instead_of_projecting_a_result() {
+    let mut catalog = AcpSchemaCatalog::load().unwrap();
+    let definitions: serde_json::Map<String, Value> = [
+        "ThreadRead",
+        "ThreadResume",
+        "ThreadStart",
+        "ThreadLoadedList",
+        "TurnStart",
+        "TurnSteer",
+        "TurnInterrupt",
+    ]
+    .into_iter()
+    .flat_map(|name| {
+        [
+            (format!("{name}Params"), json!({"type":"object"})),
+            (format!("{name}Response"), json!({"type":"object"})),
+        ]
+    })
+    .collect();
+    let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
+        "codex_app_server_protocol.schemas.json".to_owned(),
+        serde_json::to_vec(&json!({"definitions":{"v2":definitions,"ServerRequest":{"type":"object"},"ServerNotification":{"type":"object"}}})).unwrap(),
+    )])).unwrap();
+    let schemas = Arc::new(NativePayloadSchemas::from_bundle(&bundle).unwrap());
+    let generation = serde_json::from_value(
+        json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
+    )
+    .unwrap();
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let connection = NativeProtocolConnection::from_websocket(
+        WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+    );
+    let backend = tokio::spawn(async move {
+        let mut socket = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        for (method, result) in [
+            (
+                "thread/resume",
+                json!({"cwd":"/work","thread":{"id":"thread-a","cwd":"/work","status":{"type":"idle"},"turns":[]}}),
+            ),
+            (
+                "thread/read",
+                json!({"thread":{"id":"thread-a","status":{"type":"idle"},"turns":[]}}),
+            ),
+            ("turn/start", json!({"turn":{"id":"turn-a"}})),
+        ] {
+            let frame = socket.next().await.unwrap().unwrap();
+            let request: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(request["method"], method);
+            socket
+                .send(Message::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        }
+        socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"failed"}}}).to_string().into())).await.unwrap();
+        if let Some(Ok(frame)) = socket.next().await {
+            assert!(
+                frame.is_close(),
+                "failed terminal caused another native request: {frame}"
+            );
+        }
+    });
+    let (session, _) = AcpSessionBinding::load_existing(
+        &mut catalog,
+        SessionSetupInputs {
+            operation_id: None,
+            recorder: Arc::new(AcceptingConversationRecorder),
+            connection,
+            schemas,
+            generation,
+            params: json!({"sessionId":"thread-a","cwd":"/work","mcpServers":[]}),
+            approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+        },
+    )
+    .await
+    .unwrap();
+    let mut prompt = PendingAcpPrompt::start(
+        session,
+        &mut catalog,
+        json!("prompt"),
+        &json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"work"}]}),
+    )
+    .await
+    .unwrap();
+    let Some(PromptEvent::Terminal(terminal)) = prompt.next_event(&mut catalog).await.unwrap()
+    else {
+        panic!("failed terminal was not delivered");
+    };
+    assert_eq!(
+        terminal["error"]["message"],
+        "Native prompt did not complete successfully"
+    );
+    assert!(terminal.get("result").is_none());
+    drop(prompt);
+    backend.await.unwrap();
 }
 
 #[tokio::test]
@@ -114,7 +291,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             } else {
                 "thread/start"
             };
-            for method in [setup_method, "turn/start"] {
+            for method in [setup_method, "thread/read", "turn/start"] {
                 let frame = socket
                     .next()
                     .await
@@ -127,13 +304,15 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 )
                 .unwrap_or_else(|error| panic!("JSON: {error}"));
                 assert_eq!(request["method"], method);
-                let result = if method == setup_method {
+                let result = if method == "thread/read" {
+                    json!({"thread":{"id":"thread-a","status":{"type":"idle"},"turns":[]}})
+                } else if method == setup_method {
                     if resumed {
                         // A thread created before routes were recorded: the native
                         // resume reports no settings and the broker holds no route.
-                        json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-a","cwd":"/work","reasoningEffort":persisted_effort,"turns":[]}})
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","thread":{"id":"thread-a","cwd":"/work","status":{"type":"idle"},"reasoningEffort":persisted_effort,"turns":[]}})
                     } else {
-                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","reasoningEffort":persisted_effort,"turns":[]}})
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","status":{"type":"idle"},"reasoningEffort":persisted_effort,"turns":[]}})
                     }
                 } else {
                     assert_eq!(request["params"]["input"][0]["text"], "hello");

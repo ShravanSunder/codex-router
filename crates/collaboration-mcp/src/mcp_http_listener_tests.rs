@@ -437,26 +437,14 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
                         .expect("active prompt signal")
                         .send(())
                         .expect("signal active prompt");
-                    let cancel: Value = serde_json::from_str(
-                        &lines
-                            .next_line()
+                    assert!(
+                        tokio::time::timeout(std::time::Duration::from_secs(12), lines.next_line())
                             .await
-                            .expect("ACP cancel read")
-                            .expect("ACP cancel frame"),
-                    )
-                    .expect("ACP cancel JSON");
-                    assert_eq!(cancel["method"], "session/cancel");
-                    writer
-                        .write_all(
-                            format!(
-                                "{}\n",
-                                json!({"jsonrpc":"2.0","id":cancel["id"],"result":{}})
-                            )
-                            .as_bytes(),
-                        )
-                        .await
-                        .expect("ACP cancel response");
-                    writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"cancelled","_meta":{"codex-router/nativeInterruption":{"state":"confirmed"}}}})).as_bytes()).await.expect("ACP cancelled prompt response");
+                            .expect("listener shutdown detaches caller")
+                            .expect("ACP read")
+                            .is_none(),
+                        "MCP transport shutdown must not send session/cancel"
+                    );
                 }
             }
         }
