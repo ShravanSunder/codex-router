@@ -1,5 +1,7 @@
 //! Validated, provider-neutral content blocks for provider prompts and steers.
 
+use base64::Engine as _;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidPromptContent {
     field: &'static str,
@@ -44,7 +46,36 @@ prompt_string!(PromptText, "text");
 prompt_string!(PromptUri, "uri");
 prompt_string!(PromptName, "name");
 prompt_string!(PromptMimeType, "mime type");
-prompt_string!(PromptData, "data");
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromptData(String);
+
+impl PromptData {
+    pub fn try_new(value: String) -> Result<Self, InvalidPromptContent> {
+        if value.is_empty()
+            || value.contains('\0')
+            || base64::engine::general_purpose::STANDARD
+                .decode(value.as_bytes())
+                .is_err()
+        {
+            Err(InvalidPromptContent {
+                field: "base64 data",
+            })
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PromptEmbeddedSource {

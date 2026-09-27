@@ -54,6 +54,7 @@ fn constructors_reject_empty_required_values_and_uri_only_images() {
         .is_err()
     );
     assert!(PromptContent::audio("audio/wav".into(), String::new()).is_err());
+    assert!(PromptContent::audio("audio/wav".into(), "not-base64!".into()).is_err());
     assert!(
         PromptContent::embedded_text("resource://fixture".into(), None, String::new()).is_err()
     );
