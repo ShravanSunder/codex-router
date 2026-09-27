@@ -1,14 +1,14 @@
 //! ACP connection routing over bounded carriers and one shared native backend.
 use crate::session_setup_task::{SetupTaskInputs, SetupTaskOutput, run_session_setup};
 use crate::{
-    AcpNegotiation, AcpRouterChannels, AcpSchemaCatalog, AcpSessionRegistry,
-    ConversationOperationRecorder, HeldBindingCheckout, UnmaterializedBindingStore,
-    acp_connection_channels, run_acp_transport,
+    AcpConnectionContext, AcpRouteFuture, AcpRouterChannels, AcpSchemaCatalog, AcpSessionRegistry,
+    AcpSessionRoute, ConversationOperationRecorder, HeldBindingCheckout,
+    UnmaterializedBindingStore, serve_acp_router_connection,
 };
 use codex_native_integration::NativePayloadSchemas;
 use collaboration_protocol::{CodexGeneration, OperationId};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, future::Future, io, path::PathBuf, pin::Pin, sync::Arc};
+use std::{future::Future, io, path::PathBuf, pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
@@ -30,29 +30,38 @@ pub async fn serve_acp_connection<TStream: AsyncRead + AsyncWrite + Unpin + Send
     stream: TStream,
     inputs: AcpConnectionInputs,
 ) -> io::Result<()> {
-    let (wire, router) = acp_connection_channels();
-    let closed = router.closed.clone();
-    let transport = tokio::spawn(run_acp_transport(stream, wire));
-    let result = route_connection(router, inputs).await;
-    closed.cancel();
-    let transport_result = transport
-        .await
-        .map_err(|_| io::Error::other("ACP transport task failed"))?;
-    result.and(transport_result)
+    serve_acp_router_connection(stream, vec![Box::new(CodexAcpSessionRoute { inputs })]).await
 }
-async fn route_connection(
+
+struct CodexAcpSessionRoute {
+    inputs: AcpConnectionInputs,
+}
+
+impl AcpSessionRoute for CodexAcpSessionRoute {
+    fn endpoint_id(&self) -> &str {
+        "codex-local"
+    }
+
+    fn run(
+        self: Box<Self>,
+        router: AcpRouterChannels,
+        _context: AcpConnectionContext,
+    ) -> AcpRouteFuture {
+        Box::pin(route_codex_sessions(router, self.inputs))
+    }
+}
+
+pub(crate) async fn route_codex_sessions(
     mut router: AcpRouterChannels,
     inputs: AcpConnectionInputs,
 ) -> io::Result<()> {
     let mut schema = AcpSchemaCatalog::load().map_err(io::Error::other)?;
-    let mut negotiation = AcpNegotiation::default();
     let actor_retirement = inputs.retired.child_token();
     let mut sessions = AcpSessionRegistry::new(
         router.output.clone(),
         actor_retirement,
         Arc::clone(&inputs.holder),
     );
-    let mut used_ids = BTreeSet::new();
     let mut catalog_requests: tokio::task::JoinSet<(Value, io::Result<Value>)> =
         tokio::task::JoinSet::new();
     let mut setup_requests: tokio::task::JoinSet<(Value, Option<String>, SetupTaskOutput)> =
@@ -115,27 +124,13 @@ async fn route_connection(
                 result=sessions.complete_next(),if sessions.has_pending()=>{result.map_err(io::Error::other)?;continue;},
                 frame=router.input.recv()=>match frame {Some(frame)=>frame,None=>break Ok(())},
             };
-            if frame.get("jsonrpc")!=Some(&json!("2.0")) {router.output.send(error(Value::Null,-32600,"Invalid ACP envelope")).await?;continue;}
-            // Router sends the client no requests, so a response frame is
-            // unsolicited; JSON-RPC forbids answering it. A client-sent
-            // session/request_permission carries a method and falls through to
-            // the unsupported-method reply below.
-            if frame.get("method").is_none() {continue;}
             let method=frame.get("method").and_then(Value::as_str).unwrap_or("");
             let params=frame.get("params").cloned().unwrap_or_else(||json!({}));
             let Some(id)=frame.get("id").cloned() else {
-                if negotiation.is_initialized()&&method=="session/cancel"&&schema.validate("CancelNotification",&params).unwrap_or(false)
+                if method=="session/cancel"&&schema.validate("CancelNotification",&params).unwrap_or(false)
                     && let Some(session)=params.get("sessionId").and_then(Value::as_str) {let _cancel=sessions.cancel(session);}
                 continue;
             };
-            if !(id.is_null()||id.is_string()||id.as_i64().is_some()) {router.output.send(error(Value::Null,-32600,"Invalid ACP request ID")).await?;continue;}
-            if used_ids.len()>=65536 {break Err(io::Error::other("ACP request lifetime limit"));}
-            if !used_ids.insert(id.to_string()) {router.output.send(error(id,-32600,"ACP request ID reused")).await?;continue;}
-            if method=="initialize" {
-                let response=negotiation.initialize(&mut schema,&frame).unwrap_or_else(|_|error(id,-32602,"ACP initialization rejected"));
-                router.output.send(response).await?;continue;
-            }
-            if !negotiation.is_initialized() {router.output.send(error(id,-32600,"ACP initialization required")).await?;continue;}
             match method {
                 "session/new"|"session/load"=>{
                     let create_new=method=="session/new";

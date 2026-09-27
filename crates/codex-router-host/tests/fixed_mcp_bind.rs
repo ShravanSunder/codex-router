@@ -23,6 +23,7 @@ async fn collaboration_runtime_binds_a_fixed_mcp_port_once() {
         mcp_bind,
         native_schema: None,
         peer_registry_directory: None,
+        owner_human_id: None,
     })
     .await
     .unwrap_or_else(|error| panic!("communication startup: {error}"));

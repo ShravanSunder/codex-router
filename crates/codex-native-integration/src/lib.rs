@@ -1,6 +1,10 @@
 //! Version-bounded integration with the managed upstream Codex executable.
 
 mod app_server_launch;
+mod codex_project_trust;
+pub use codex_project_trust::{
+    CodexHomeProjectTrust, CodexProjectTrustLookup, ProjectTrustAnswer, ProjectTrustMatchKind,
+};
 mod stored_thread_catalog;
 mod stored_thread_query;
 pub use stored_thread_catalog::StoredThreadCatalog;

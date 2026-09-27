@@ -19,6 +19,7 @@ pub use native_channel_relay::{
 mod native_generation_gate;
 pub use native_generation_gate::{NativeAdmission, NativeGenerationGate};
 mod native_relay_listener;
+mod pending_snapshot_interactions;
 mod private_socket_listener;
 pub use native_relay_listener::NativeRelayListener;
 mod conversation_operation_projection;
@@ -41,24 +42,46 @@ mod delivery_acceptance_effect;
 mod delivery_route_projection;
 pub use provider_session_event_hub::{HubReceiveError, ProviderSessionEventHub, receive_hub_event};
 pub use provider_session_record::ProviderSessionRecord;
-pub use session_event_hub::{
-    HubEvent, HubFuture, HubSessionSummary, SessionEventAttachment, SessionEventHub,
-    SessionEventHubError,
-};
+mod app_server_event_forwarding;
+mod app_server_item_translation;
 mod app_server_model_catalog;
-mod provider_conversation_backend;
-pub use app_server_model_catalog::{
-    InvalidProviderModelEntry, ProviderModelEntry, render_model_list,
+pub use app_server_item_translation::{
+    ApprovalPresentation, ApprovalReply, HistoricalTurn, InteractionDisplayContext,
+    InteractionReplyError, QuestionPresentation, QuestionReply, TranslatedSessionItem,
+    group_historical_turns, map_approval_reply, map_question_form_reply,
+    map_request_user_input_reply, render_historical_turn, translate_approval_request,
+    translate_question_request, translate_session_item,
 };
+#[cfg(test)]
+#[path = "app_server_interaction_translation_tests.rs"]
+mod app_server_interaction_translation_tests;
+#[cfg(test)]
+#[path = "app_server_item_translation_tests.rs"]
+mod app_server_item_translation_tests;
+mod provider_acp_content_translation;
+mod provider_acp_event_projection;
+mod provider_acp_interaction;
+mod provider_acp_session_route;
+mod provider_conversation_backend;
+mod router_session_app_server;
 mod schedule_preparation_evidence_sink;
 mod scheduled_run_contract;
 mod scheduled_run_evidence_sink;
 mod scheduled_run_router;
+mod session_command_port;
+pub use app_server_model_catalog::{
+    InvalidProviderModelEntry, ProviderModelEntry, render_model_list,
+};
+pub use router_session_app_server::{
+    AppServerConnectionError, RouterSessionAppServerContext, RouterSessionAppServerListener,
+    serve_router_session_app_server_connection,
+};
 mod session_delivery_contract;
 mod session_delivery_router;
 mod stored_delivery_receipt;
 mod stored_run_receipt;
 pub use collaboration_protocol::{DeliveryClientReceipt, DeliveryReceipt};
+pub use provider_acp_session_route::ProviderAcpSessionRoute;
 pub use provider_conversation_backend::{
     ProviderConversationBackend, ProviderConversationFuture, ProviderSessionInspectFuture,
     ProviderSettingsFuture,
@@ -71,12 +94,22 @@ pub use scheduled_run_contract::{
     ScheduleSupport, ScheduledRunExecution, ScheduledRunRoute, ScheduledRunSubmission,
     SettlementEvidence, StopRequestOutcome,
 };
+pub use session_command_port::{
+    CommandContent, CommandFailure, CommandFuture, CreateSessionCommand, PromptSessionCommand,
+    QueueInputCommand, QueuedSessionInput, SessionCommandPort, SessionSettingsCommand,
+    SessionSteerOutcome, SessionTargetCommand, SessionTurnHandle, SetSessionSettingCommand,
+    SteerSessionCommand,
+};
 pub use session_delivery_contract::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, RouteClaim,
     RouteUnavailableReason, SessionDeliveryRoute, SessionMessageDelivery,
 };
 pub use session_delivery_router::SessionDeliveryRouter;
+pub use session_event_hub::{
+    HubEvent, HubFuture, HubSessionSummary, SessionEventAttachment, SessionEventHub,
+    SessionEventHubError,
+};
 mod provider_conversation_dispatch;
 mod service_identity_storage;
 pub use service_identity_storage::{load_service_identity, new_service_uuid};

@@ -47,6 +47,7 @@ async fn live_current_source_catalog_is_accepted_by_cursor_and_claude() {
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        owner_human_id: None,
     })
     .await
     .expect("current-source collaboration Host");
@@ -183,6 +184,7 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: None,
+            owner_human_id: None,
         },
         vec![codex_router_host::ExternalProviderStartup::Launch(binding)],
     )

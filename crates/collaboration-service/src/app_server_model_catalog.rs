@@ -13,6 +13,11 @@ pub struct ProviderModelEntry {
 pub struct InvalidProviderModelEntry;
 
 impl ProviderModelEntry {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     pub fn try_new(
         id: String,
         display_name: String,

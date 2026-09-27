@@ -13,6 +13,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 pub struct CollaborationRuntimeInputs {
+    pub owner_human_id: Option<message_board::HumanId>,
     pub directory: PathBuf,
     pub codex_home: PathBuf,
     pub backend_socket: PathBuf,
@@ -89,6 +90,7 @@ pub struct BackendSchemaEvidence<'a> {
     pub export: &'a codex_native_integration::NativeSchemaExport,
 }
 pub struct CollaborationRuntime {
+    owner_human_id: Option<message_board::HumanId>,
     board_store: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
     provider_store:
         Option<std::sync::Arc<tokio::sync::Mutex<collaboration_service::ProviderOperationStore>>>,
@@ -183,6 +185,7 @@ impl CollaborationRuntime {
         provider_launches: Vec<crate::ExternalProviderStartup>,
         relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
     ) -> io::Result<Self> {
+        let mut owner_human_id = inputs.owner_human_id.clone();
         let service_id = load_service_identity(&inputs.directory)?;
         let service_epoch = new_service_uuid()?;
         let native_digest = if let Some(export) = &inputs.native_schema {
@@ -313,6 +316,7 @@ impl CollaborationRuntime {
             &mcp_url,
         )
         .await?;
+        let provider_face_endpoints = startup.endpoints.clone();
         let provider_retirements = startup.retirements;
         let external_provider_supervisor = startup.supervisor;
         let provider_session_hub = startup.hub;
@@ -332,7 +336,7 @@ impl CollaborationRuntime {
             > = supervisor.clone();
             identity = identity.with_provider_conversation_backend(provider_backend);
         }
-        if let Some(hub) = provider_session_hub {
+        if let Some(hub) = provider_session_hub.clone() {
             identity = identity.with_provider_session_hub(hub);
         }
         let endpoint = EndpointRef {
@@ -422,18 +426,96 @@ impl CollaborationRuntime {
         )?
         .with_connection_budget(std::sync::Arc::clone(&permits));
         let stored = std::sync::Arc::new(collaboration_service::NativeStoredSessions::new(
-            inputs.codex_home,
+            inputs.codex_home.clone(),
             String::from(service_id.clone()),
         ));
-        let acp = collaboration_service::AcpChannelListener::bind(
+        let mut acp = collaboration_service::AcpChannelListener::bind(
             &inputs.directory.join("codex-acp.sock"),
             publication.admission_gate(),
             stored,
-            approval_broker,
+            approval_broker.clone(),
             unmaterialized_threads,
             crate::codex_conversation_recording_composition::adapter_recorder(codex_recorder),
         )?
         .with_connection_budget(permits);
+        let mut provider_app_servers = Vec::new();
+        if !provider_face_endpoints.is_empty() && external_provider_supervisor.is_some() {
+            owner_human_id =
+                crate::owner_identity_resolution::resolve_face_owner_human_id(owner_human_id).await;
+        }
+        if external_provider_supervisor.is_some()
+            && provider_delivery_route.is_some()
+            && provider_session_hub.is_some()
+            && provider_store.is_some()
+        {
+            acp = acp.with_interaction_broker(std::sync::Arc::clone(&approval_broker));
+        }
+        if let (Some(supervisor), Some(delivery), Some(hub), Some(store)) = (
+            &external_provider_supervisor,
+            &provider_delivery_route,
+            &provider_session_hub,
+            &provider_store,
+        ) {
+            let commands: std::sync::Arc<dyn collaboration_service::SessionCommandPort> =
+                std::sync::Arc::new(crate::HostSessionCommandPort::new(
+                    std::sync::Arc::clone(supervisor),
+                    std::sync::Arc::clone(delivery),
+                    std::sync::Arc::clone(hub),
+                    std::sync::Arc::clone(store),
+                ));
+            let events: std::sync::Arc<dyn collaboration_service::SessionEventHub> =
+                std::sync::Arc::clone(hub) as _;
+            let socket_directory = inputs.directory.join("router-sessions");
+            if owner_human_id.is_some() {
+                create_private_socket_directory(&socket_directory)?;
+            }
+            for description in provider_face_endpoints {
+                let Some(catalog) = supervisor.provider_model_catalog(&description.endpoint) else {
+                    continue;
+                };
+                let endpoint = message_board::SessionEndpointRef {
+                    service_id: message_board::ServiceId::try_from(String::from(
+                        description.endpoint.service_id.clone(),
+                    ))
+                    .map_err(io::Error::other)?,
+                    endpoint_id: message_board::EndpointId::try_from(String::from(
+                        description.endpoint.endpoint_id.clone(),
+                    ))
+                    .map_err(io::Error::other)?,
+                };
+                acp = acp.with_provider_session_backend(
+                    endpoint.clone(),
+                    std::sync::Arc::clone(&commands),
+                    std::sync::Arc::clone(&events),
+                );
+                let Some(owner_human_id) = owner_human_id.as_ref() else {
+                    continue;
+                };
+                let context = collaboration_service::RouterSessionAppServerContext::new(
+                    endpoint,
+                    message_board::Identity::Human {
+                        human_id: owner_human_id.clone(),
+                    },
+                    std::sync::Arc::clone(&commands),
+                    std::sync::Arc::clone(&events),
+                    catalog,
+                )
+                .with_interaction_broker(std::sync::Arc::clone(&approval_broker))
+                .with_project_trust(std::sync::Arc::new(
+                    codex_native_integration::CodexHomeProjectTrust::new(inputs.codex_home.clone()),
+                ));
+                let socket_path = socket_directory.join(format!(
+                    "{}.sock",
+                    String::from(description.endpoint.endpoint_id.clone())
+                ));
+                provider_app_servers.push(
+                    collaboration_service::RouterSessionAppServerListener::bind(
+                        &socket_path,
+                        std::sync::Arc::new(context),
+                    )?,
+                );
+            }
+        }
         let publication = publication.with_acp_listener()?;
         if let Some(settings) = settings_backend
             && settings.recover().await.is_err()
@@ -471,6 +553,9 @@ impl CollaborationRuntime {
         tasks.spawn(control.run(shutdown.clone()));
         tasks.spawn(native.run(shutdown.clone()));
         tasks.spawn(acp.run(shutdown.clone()));
+        for app_server in provider_app_servers {
+            tasks.spawn(app_server.run(shutdown.clone()));
+        }
         for (retirement, mut description) in provider_retirements {
             let directory = endpoint_directory.clone();
             provider_retirement_tasks.spawn(async move {
@@ -495,6 +580,7 @@ impl CollaborationRuntime {
             tokio::spawn(async move { maintenance_store.run_maintenance(maintenance_stop).await })
         });
         Ok(Self {
+            owner_human_id,
             board_store,
             provider_store,
             external_provider_supervisor,
@@ -519,6 +605,11 @@ impl CollaborationRuntime {
             observer_task: None,
             mcp: Some(mcp),
         })
+    }
+
+    #[must_use]
+    pub fn owner_human_id(&self) -> Option<&message_board::HumanId> {
+        self.owner_human_id.as_ref()
     }
 
     #[must_use]
@@ -876,6 +967,24 @@ fn unix_seconds() -> io::Result<i64> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(io::Error::other)?;
     i64::try_from(elapsed.as_secs()).map_err(io::Error::other)
+}
+
+fn create_private_socket_directory(path: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.is_dir() && metadata.permissions().mode() & 0o077 == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    "provider socket directory must be private",
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn current_observation_timestamp() -> io::Result<ObservationTimestamp> {
