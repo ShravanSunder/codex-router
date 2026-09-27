@@ -43,11 +43,22 @@ for session_id,tool_id,content in (('first','tool-first','First task'),('second'
     response=read()
     assert response['id']=='todo-'+session_id,response
     assert response.get('result')=={},response
+    send({'jsonrpc':'2.0','id':'plan-'+session_id,'method':'cursor/create_plan',
+        'params':{'toolCallId':tool_id,'name':'Plan for '+session_id,
+                  'overview':'Scoped plan','plan':'# Steps',
+                  'todos':[{'id':'one','content':content,'status':'completed'}]}})
+    response=read()
+    assert response['id']=='plan-'+session_id and response.get('result')=={'outcome':'cancelled'},response
 send({'jsonrpc':'2.0','id':'todo-unknown','method':'cursor/update_todos',
     'params':{'toolCallId':'unknown','todos':[{'id':'x','content':'Must not appear','status':'pending'}],
               'merge':False}})
 response=read()
 assert response['id']=='todo-unknown' and response.get('result')=={},response
+send({'jsonrpc':'2.0','id':'question-unknown','method':'cursor/ask_question',
+    'params':{'toolCallId':'unknown','questions':[{'id':'q','prompt':'Which?',
+        'options':[{'id':'a','label':'A'}]}]}})
+response=read()
+assert response['id']=='question-unknown' and response.get('result')=={'outcome':{'outcome':'cancelled'}},response
 for session_id,prompt_id in prompts.items():
     send({'jsonrpc':'2.0','id':prompt_id,'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
@@ -93,6 +104,15 @@ impl InteractionPort for NoopInteractionPort {
         _agent_cancellation: CancellationToken,
     ) -> InteractionFuture<'_, ApprovalPortOutcome> {
         Box::pin(async { ApprovalPortOutcome::Cancelled })
+    }
+    fn request_question(
+        &self,
+        _context: Self::Context,
+        _request: session_event_model::QuestionRequest,
+        _turn_cancellation: CancellationToken,
+        _agent_cancellation: CancellationToken,
+    ) -> InteractionFuture<'_, session_event_model::QuestionResponse> {
+        Box::pin(async { session_event_model::QuestionResponse::Cancelled })
     }
     fn record_refusal(
         &self,
@@ -161,8 +181,8 @@ async fn concurrent_cursor_todos_publish_to_their_observed_sessions() {
     let (first_result, second_result) =
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             tokio::join!(
-                client.prompt(first.clone(), "One".to_owned()),
-                client.prompt(second.clone(), "Two".to_owned())
+                client.prompt_with_approval_context(first.clone(), "One".to_owned(), ()),
+                client.prompt_with_approval_context(second.clone(), "Two".to_owned(), ())
             )
         })
         .await
@@ -181,6 +201,13 @@ async fn concurrent_cursor_todos_publish_to_their_observed_sessions() {
                 if item.kind == SessionItemKind::Plan
                     && item.text.as_deref().is_some_and(|text| text.contains(expected_text)))),
             "plan Item for {session_id}: {events:?}"
+        );
+        assert!(
+            events.iter().any(|(owner, event)| owner == session_id
+                && matches!(event, SessionEvent::ItemUpdated { item }
+                    if item.kind == SessionItemKind::Plan
+                        && item.text.as_deref().is_some_and(|text| text.contains(&format!("Plan for {session_id}"))))),
+            "updated plan for {session_id}: {events:?}"
         );
     }
     assert_eq!(events.iter().filter(|(_, event)| matches!(event, SessionEvent::ItemStarted { item } if item.kind == SessionItemKind::Plan)).count(), 2);

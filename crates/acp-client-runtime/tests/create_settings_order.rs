@@ -122,6 +122,55 @@ send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
 "#;
 
+const SETTING_RESPONSE_FIXTURE: &str = r#"
+import json,sys,os
+mode=sys.argv[1]
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+def option(current): return {'id':'mode','name':'Mode','category':'mode','type':'select',
+    'currentValue':current,'options':[{'value':'auto','name':'Auto'},{'value':'ask','name':'Ask'}]}
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},
+    'agentInfo':{'name':'setting-response-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+send({'jsonrpc':'2.0','id':request['id'],'result':{
+    'sessionId':'fixture-session','configOptions':[option('auto')]}})
+request=read()
+assert request['method']=='session/set_config_option'
+assert request['params']['configId']=='mode' and request['params']['value']=='ask'
+if mode=='malformed':
+    send({'jsonrpc':'2.0','id':request['id'],'result':{'configOptions':'bad-shape'}})
+elif mode=='disconnect':
+    os.close(1)
+elif mode=='rejected':
+    send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32602,'message':'private detail'}})
+    prompt=read()
+    assert prompt['method']=='session/prompt'
+    send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+
+const LEGACY_SETTING_RESPONSE_FIXTURE: &str = r#"
+import json,sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},
+    'agentInfo':{'name':'legacy-response-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session',
+    'modes':{'currentModeId':'auto','availableModes':[
+        {'id':'auto','name':'Auto'},{'id':'ask','name':'Ask'}]}}})
+request=read()
+assert request['method']=='session/set_mode'
+send({'jsonrpc':'2.0','id':request['id'],'result':'bad-shape'})
+sys.stdin.read()
+"#;
+
 struct NoopInteractionPort;
 impl InteractionPort for NoopInteractionPort {
     type Context = ();
@@ -140,6 +189,15 @@ impl InteractionPort for NoopInteractionPort {
         _agent_cancellation: CancellationToken,
     ) -> InteractionFuture<'_, ApprovalPortOutcome> {
         Box::pin(async { ApprovalPortOutcome::Cancelled })
+    }
+    fn request_question(
+        &self,
+        _context: Self::Context,
+        _request: session_event_model::QuestionRequest,
+        _turn_cancellation: CancellationToken,
+        _agent_cancellation: CancellationToken,
+    ) -> InteractionFuture<'_, session_event_model::QuestionResponse> {
+        Box::pin(async { session_event_model::QuestionResponse::Cancelled })
     }
     fn record_refusal(
         &self,
@@ -440,4 +498,170 @@ async fn legacy_mode_is_selected_before_prompt_when_no_mode_config_exists() {
         std::fs::read_to_string(receipt).expect("receipt"),
         "mode-before-prompt"
     );
+}
+
+fn setting_response_launch(mode: &str) -> ExternalProviderLaunch {
+    ExternalProviderLaunch {
+        executable: PathBuf::from("python3"),
+        arguments: vec![
+            "-u".to_owned(),
+            "-c".to_owned(),
+            SETTING_RESPONSE_FIXTURE.to_owned(),
+            mode.to_owned(),
+        ],
+        environment: Vec::new(),
+        persistence_target: ProviderPersistenceTarget::Unspecified,
+    }
+}
+
+/// Oracle: once a setting request was sent, an unusable success response
+/// leaves the effect unknown. Work stays gated until the caller resolves it.
+#[tokio::test]
+async fn malformed_post_send_setting_response_gates_existing_session() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let client = AgentSessionClient::initialize(
+        setting_response_launch("malformed"),
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let session_id = client
+        .create_session(root.path().to_path_buf())
+        .await
+        .expect("session opens");
+    let result = client
+        .set_setting(
+            session_id.clone(),
+            acp_client_runtime::ProviderSettingKind::Mode,
+            "ask".to_owned(),
+        )
+        .await;
+    assert!(
+        matches!(&result, Err(acp_client_runtime::ExternalProviderRuntimeError::SettingOutcomeUnknown {
+        provider_session_id, setting: acp_client_runtime::ProviderSettingKind::Mode, value,
+    }) if provider_session_id == &session_id && value == "ask"),
+        "setting result: {result:?}"
+    );
+    assert!(client.settings_unresolved(&session_id).await);
+    let blocked = client.prompt(session_id, "Must not run".to_owned()).await;
+    assert!(matches!(
+        blocked,
+        Err(acp_client_runtime::ExternalProviderRuntimeError::SettingsUnresolved)
+    ));
+    client.shutdown().await;
+}
+
+/// An explicit JSON-RPC rejection is definite: the old setting remains
+/// effective and a later prompt may proceed.
+#[tokio::test]
+async fn explicit_setting_rejection_does_not_gate_session() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let client = AgentSessionClient::initialize(
+        setting_response_launch("rejected"),
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let session_id = client
+        .create_session(root.path().to_path_buf())
+        .await
+        .expect("session opens");
+    let result = client
+        .set_setting(
+            session_id.clone(),
+            acp_client_runtime::ProviderSettingKind::Mode,
+            "ask".to_owned(),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(acp_client_runtime::ExternalProviderRuntimeError::SettingFailed { .. })
+        ),
+        "setting result: {result:?}"
+    );
+    assert!(!client.settings_unresolved(&session_id).await);
+    client
+        .prompt(session_id, "Proceed".to_owned())
+        .await
+        .expect("prompt after rejection");
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_legacy_set_mode_response_is_outcome_unknown() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let client = AgentSessionClient::initialize(
+        ExternalProviderLaunch {
+            executable: PathBuf::from("python3"),
+            arguments: vec![
+                "-u".to_owned(),
+                "-c".to_owned(),
+                LEGACY_SETTING_RESPONSE_FIXTURE.to_owned(),
+            ],
+            environment: Vec::new(),
+            persistence_target: ProviderPersistenceTarget::Unspecified,
+        },
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let session_id = client
+        .create_session(root.path().to_path_buf())
+        .await
+        .expect("session opens");
+    let result = client
+        .set_setting(
+            session_id.clone(),
+            acp_client_runtime::ProviderSettingKind::Mode,
+            "ask".to_owned(),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(acp_client_runtime::ExternalProviderRuntimeError::SettingOutcomeUnknown { .. })
+        ),
+        "legacy setting result: {result:?}"
+    );
+    assert!(client.settings_unresolved(&session_id).await);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn disconnected_after_setting_submission_is_outcome_unknown() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let client = AgentSessionClient::initialize(
+        setting_response_launch("disconnect"),
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let session_id = client
+        .create_session(root.path().to_path_buf())
+        .await
+        .expect("session opens");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.set_setting(
+            session_id.clone(),
+            acp_client_runtime::ProviderSettingKind::Mode,
+            "ask".to_owned(),
+        ),
+    )
+    .await
+    .expect("setting result bounded");
+    assert!(
+        matches!(
+            result,
+            Err(acp_client_runtime::ExternalProviderRuntimeError::SettingOutcomeUnknown { .. })
+        ),
+        "disconnected setting result: {result:?}"
+    );
+    assert!(client.settings_unresolved(&session_id).await);
+    client.shutdown().await;
 }

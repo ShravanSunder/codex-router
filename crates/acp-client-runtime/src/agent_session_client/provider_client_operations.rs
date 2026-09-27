@@ -65,6 +65,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         kind: crate::ProviderSettingKind,
         value: String,
     ) -> Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        let uncertain_session_id = provider_session_id.clone();
+        let uncertain_value = value.clone();
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
             .send(ProviderCommand::SetSetting {
@@ -75,9 +77,20 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             })
             .await
             .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+        match result.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.settings_unresolved
+                    .write()
+                    .await
+                    .insert(uncertain_session_id.clone(), kind);
+                Err(ExternalProviderRuntimeError::SettingOutcomeUnknown {
+                    provider_session_id: uncertain_session_id,
+                    setting: kind,
+                    value: uncertain_value,
+                })
+            }
+        }
     }
 
     #[must_use]

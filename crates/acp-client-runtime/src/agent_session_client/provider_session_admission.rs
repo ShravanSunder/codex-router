@@ -166,6 +166,17 @@ pub(super) async fn run_create_admission<P: InteractionPort>(inputs: CreateAdmis
                         reason,
                     },
                 }),
+                Some(SettingSetupFailure::Uncertain { kind, value }) => {
+                    Some(ExternalProviderRuntimeError::CreatedWithoutSettings {
+                        provider_session_id: provider_session_id.clone(),
+                        applied,
+                        failed: crate::FailedProviderSetting {
+                            kind,
+                            value,
+                            reason: "outcomeUnknown".to_owned(),
+                        },
+                    })
+                }
             };
             let (commands, command_rx) = tokio::sync::mpsc::channel(16);
             registration_tx

@@ -1,7 +1,7 @@
 //! One provider session's prompt, cancellation, and steering actor.
 use crate::InteractionPort;
 use crate::SessionEventSink;
-use crate::agent_session_client::CursorTodoState;
+use crate::agent_session_client::CursorPlanItems;
 #[cfg(any(test, feature = "test-observation"))]
 use crate::agent_session_client::ExternalProviderToolCall;
 use crate::agent_session_client::ProviderTurnCancellation;
@@ -49,7 +49,7 @@ pub enum ProviderSessionActivity {
 pub(crate) struct ProviderSessionRuntimeHandles {
     pub(crate) event_sink: Arc<dyn SessionEventSink>,
     pub(crate) tool_registry: Arc<ProviderToolCallRegistry>,
-    pub(crate) todo_state: Arc<CursorTodoState>,
+    pub(crate) todo_state: Arc<CursorPlanItems>,
     pub(crate) session_settings:
         Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::ProviderSettingsCatalog>>>,
     pub(crate) last_settings_catalog:

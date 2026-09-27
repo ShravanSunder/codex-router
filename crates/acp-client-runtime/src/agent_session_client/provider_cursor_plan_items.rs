@@ -1,4 +1,4 @@
-//! Translate Cursor's tool-scoped todo updates into Session plan Items.
+//! Keep Cursor plan and todo updates on one stable Session Item.
 
 use std::{
     collections::HashMap,
@@ -12,14 +12,49 @@ use session_event_model::{SessionEvent, SessionItem, SessionItemKind};
 use crate::{SessionEventSink, provider_tool_call_registry::ProviderToolCallRegistry};
 
 #[derive(Default)]
-pub(crate) struct CursorTodoState(Mutex<HashMap<(String, String), Vec<CursorTodo>>>);
+pub(crate) struct CursorPlanItems(Mutex<HashMap<(String, String), CursorPlanRecord>>);
 
-impl CursorTodoState {
+#[derive(Default)]
+struct CursorPlanRecord {
+    name: Option<String>,
+    overview: Option<String>,
+    markdown: Option<String>,
+    todos: Vec<CursorTodo>,
+}
+
+pub(super) struct CursorPlanDefinition {
+    pub(super) tool_call_id: String,
+    pub(super) name: Option<String>,
+    pub(super) overview: Option<String>,
+    pub(super) markdown: String,
+    pub(super) todos: Vec<CursorTodo>,
+}
+
+impl CursorPlanItems {
     pub(crate) fn forget_session(&self, session_id: &str) {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|(owner, _), _| owner != session_id);
+    }
+
+    pub(super) fn set_plan(
+        &self,
+        session_id: &str,
+        plan: CursorPlanDefinition,
+    ) -> (bool, SessionItem) {
+        let mut plans = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (session_id.to_owned(), plan.tool_call_id);
+        let existed = plans.contains_key(&key);
+        let record = plans.entry(key.clone()).or_default();
+        record.name = plan.name;
+        record.overview = plan.overview;
+        record.markdown = Some(plan.markdown);
+        record.todos = plan.todos;
+        (existed, record.item(&key.1))
     }
 
     fn update(&self, session_id: &str, request: CursorTodoUpdate) -> (bool, SessionItem) {
@@ -29,30 +64,47 @@ impl CursorTodoState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = (session_id.to_owned(), request.tool_call_id);
         let existed = plans.contains_key(&key);
-        let todos = plans.entry(key.clone()).or_default();
+        let record = plans.entry(key.clone()).or_default();
         if !request.merge {
-            todos.clear();
+            record.todos.clear();
         }
         for update in request.todos {
-            if let Some(existing) = todos.iter_mut().find(|todo| todo.id == update.id) {
+            if let Some(existing) = record.todos.iter_mut().find(|todo| todo.id == update.id) {
                 *existing = update;
             } else {
-                todos.push(update);
+                record.todos.push(update);
             }
         }
-        let text = todos
-            .iter()
-            .map(|todo| format!("- {}: {}", todo.status.label(), todo.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        (
-            existed,
-            SessionItem {
-                item_id: format!("plan:{}", key.1),
-                kind: SessionItemKind::Plan,
-                text: Some(text),
-            },
-        )
+        (existed, record.item(&key.1))
+    }
+}
+
+impl CursorPlanRecord {
+    fn item(&self, tool_call_id: &str) -> SessionItem {
+        let mut sections = Vec::new();
+        if let Some(name) = &self.name {
+            sections.push(format!("# {name}"));
+        }
+        if let Some(overview) = &self.overview {
+            sections.push(overview.clone());
+        }
+        if let Some(markdown) = &self.markdown {
+            sections.push(markdown.clone());
+        }
+        if !self.todos.is_empty() {
+            sections.push(
+                self.todos
+                    .iter()
+                    .map(|todo| format!("- {}: {}", todo.status.label(), todo.content))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        SessionItem {
+            item_id: format!("plan:{tool_call_id}"),
+            kind: SessionItemKind::Plan,
+            text: Some(sections.join("\n\n")),
+        }
     }
 }
 
@@ -65,16 +117,16 @@ struct CursorTodoUpdate {
     merge: bool,
 }
 
-#[derive(Deserialize)]
-struct CursorTodo {
-    id: String,
-    content: String,
-    status: CursorTodoStatus,
+#[derive(Clone, Deserialize)]
+pub(super) struct CursorTodo {
+    pub(super) id: String,
+    pub(super) content: String,
+    pub(super) status: CursorTodoStatus,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum CursorTodoStatus {
+pub(super) enum CursorTodoStatus {
     Pending,
     InProgress,
     Completed,
@@ -94,14 +146,14 @@ impl CursorTodoStatus {
 
 pub(super) struct ProviderCursorTodoHandler {
     tool_registry: Arc<ProviderToolCallRegistry>,
-    todo_state: Arc<CursorTodoState>,
+    todo_state: Arc<CursorPlanItems>,
     event_sink: Arc<dyn SessionEventSink>,
 }
 
 impl ProviderCursorTodoHandler {
     pub(super) fn new(
         tool_registry: Arc<ProviderToolCallRegistry>,
-        todo_state: Arc<CursorTodoState>,
+        todo_state: Arc<CursorPlanItems>,
         event_sink: Arc<dyn SessionEventSink>,
     ) -> Self {
         Self {
@@ -164,11 +216,11 @@ impl HandleDispatchFrom<Agent> for ProviderCursorTodoHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{CursorTodo, CursorTodoState, CursorTodoStatus, CursorTodoUpdate};
+    use super::{CursorPlanItems, CursorTodo, CursorTodoStatus, CursorTodoUpdate};
 
     #[test]
     fn merge_updates_existing_todos_and_preserves_the_plan_item_id() {
-        let state = CursorTodoState::default();
+        let state = CursorPlanItems::default();
         let first = state.update(
             "session",
             CursorTodoUpdate {
