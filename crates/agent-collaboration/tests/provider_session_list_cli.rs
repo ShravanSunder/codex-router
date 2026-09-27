@@ -62,9 +62,17 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
             "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]}]
     }))
     .expect("endpoint");
+    let native_endpoint: EndpointDescription = serde_json::from_value(json!({
+        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
+        "label":"Codex fixture",
+        "availability":{"state":"available","observedAt":"2026-09-26T00:00:00Z"},
+        "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock",
+            "schemaDigest":null,"generation":null}]
+    }))
+    .expect("native endpoint");
     let identity = ServiceIdentity::new(service_id, epoch, &digest)
         .expect("identity")
-        .with_endpoints(vec![endpoint])
+        .with_endpoints(vec![endpoint, native_endpoint])
         .expect("endpoint inventory")
         .with_provider_operation_store(store);
     let control = LocalControlService::bind(&root.path().join("control.sock"), identity)
@@ -79,14 +87,14 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
     let _publication = ManifestPublication::publish(root.path(), &manifest).expect("publish");
     let stop = CancellationToken::new();
     let server = tokio::spawn(control.run(stop.clone()));
-    let run = |source: Option<&str>| {
+    let run = |endpoint_id: &str, source: Option<&str>| {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
         command
             .args([
                 "sessions",
                 "list",
                 "--endpoint",
-                "claude-local",
+                endpoint_id,
                 "--view",
                 "stored",
                 "--any",
@@ -99,7 +107,10 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
         }
         command
     };
-    let output = run(None).output().await.expect("provider CLI");
+    let output = run("claude-local", None)
+        .output()
+        .await
+        .expect("provider CLI");
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -112,13 +123,25 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
         json!(target)
     );
     assert_eq!(result["result"]["page"]["records"][0]["state"], "unloaded");
-    let rejected = run(Some("interactive"))
+    let rejected = run("claude-local", Some("interactive"))
         .output()
         .await
         .expect("source rejection");
     assert_eq!(rejected.status.code(), Some(2));
     let error: Value = serde_json::from_slice(&rejected.stdout).expect("error JSON");
     assert_eq!(error["error"]["code"], -32602);
+    let missing_native_source = run("codex-local", None)
+        .output()
+        .await
+        .expect("native source validation");
+    assert_eq!(missing_native_source.status.code(), Some(2));
+    let error: Value =
+        serde_json::from_slice(&missing_native_source.stdout).expect("native error JSON");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--source is required for Codex sessions"))
+    );
     stop.cancel();
     server.await.expect("server task").expect("server");
 }

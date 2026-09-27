@@ -1133,6 +1133,7 @@ fn expected_tool_name(method: &str) -> String {
     match method {
         "endpoint/list" => return "endpoints_list".to_owned(),
         "codex/sessionList" => return "sessions_list".to_owned(),
+        "provider/sessionList" => return "provider_sessions_list".to_owned(),
         "codex/sessionInspect" => return "session_inspect".to_owned(),
         "codex/sessionRename" => return "session_rename".to_owned(),
         "message/send" => return "message_send".to_owned(),

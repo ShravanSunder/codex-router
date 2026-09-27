@@ -7,7 +7,7 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 94);
+    assert_eq!(methods.len(), 97);
     for method in [
         "conversation/create",
         "conversation/load",
@@ -63,12 +63,15 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
         "control/initialize",
         "endpoint/list",
         "codex/sessionList",
+        "provider/sessionList",
         "codex/sessionInspect",
         "codex/sessionRename",
         "message/send",
         "codex/turnInterrupt",
         "approval/list",
         "approval/decide",
+        "question/list",
+        "question/answer",
         "addressBook/list",
         "lifecycleJournal/read",
         "lifecycleJournal/status",
