@@ -7,6 +7,7 @@ pub struct ExternalProviderLaunch {
     pub executable: PathBuf,
     pub arguments: Vec<String>,
     pub environment: Vec<(String, String)>,
+    pub persistence_target: crate::ProviderPersistenceTarget,
 }
 
 impl ExternalProviderLaunch {

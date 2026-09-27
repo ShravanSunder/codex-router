@@ -1,14 +1,15 @@
 //! A subprocess checks the ACP wire order around history replay admission.
 
+#![allow(clippy::expect_used)]
+
 use std::{path::PathBuf, sync::Arc};
 
 use acp_client_runtime::{
-    AgentSessionClient, ApprovalPortOutcome, ApprovalPresentation, EventSinkOverflow,
-    ExternalPermissionOptionMapping, ExternalProviderLaunch, ExternalProviderRuntimeError,
-    HistoryReplayFuture, HistoryReplayUnavailable, InteractionFuture, InteractionPort,
-    SessionEventSink,
+    AgentSessionClient, ApprovalPortOutcome, EventSinkOverflow, ExternalProviderLaunch,
+    ExternalProviderRuntimeError, HistoryReplayFuture, HistoryReplayUnavailable, InteractionFuture,
+    InteractionPort, RefusedApprovalOffer, SessionEventSink,
 };
-use session_event_model::SessionEvent;
+use session_event_model::{ApprovalRequest, SessionEvent};
 use tokio_util::sync::CancellationToken;
 
 const REPLAY_FIXTURE: &str = r#"
@@ -45,12 +46,19 @@ impl InteractionPort for TestInteractionPort {
     fn request_approval(
         &self,
         _context: Self::Context,
-        _presentation: ApprovalPresentation,
-        _options: ExternalPermissionOptionMapping,
+        _request: ApprovalRequest,
         _turn_cancellation: CancellationToken,
         _agent_cancellation: CancellationToken,
     ) -> InteractionFuture<'_, ApprovalPortOutcome> {
         Box::pin(async { ApprovalPortOutcome::Cancelled })
+    }
+
+    fn record_refusal(
+        &self,
+        _context: Self::Context,
+        _refusal: RefusedApprovalOffer,
+    ) -> InteractionFuture<'_, ()> {
+        Box::pin(async {})
     }
 
     fn cancel_all(
@@ -96,6 +104,7 @@ fn fixture_launch(marker: &std::path::Path) -> ExternalProviderLaunch {
             marker.to_string_lossy().into_owned(),
         ],
         environment: Vec::new(),
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
     }
 }
 
