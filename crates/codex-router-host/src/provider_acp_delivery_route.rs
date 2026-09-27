@@ -45,6 +45,21 @@ pub struct ProviderAcpDeliveryRoute {
 
 impl ProviderAcpDeliveryRoute {
     #[must_use]
+    pub fn queue_list(&self, session: &SessionRef) -> Vec<crate::ProviderQueuedInput> {
+        self.supervisor.queued_operation_registry().list(session)
+    }
+
+    pub fn queue_cancel(
+        &self,
+        session: &SessionRef,
+        input_id: &session_event_model::InputId,
+    ) -> Result<(), crate::ProviderQueueCancellationError> {
+        self.supervisor
+            .queued_operation_registry()
+            .cancel(session, input_id)
+    }
+
+    #[must_use]
     pub fn new(
         service_id: UuidIdentity,
         provider_endpoints: HashSet<collaboration_protocol::EndpointRef>,
@@ -199,6 +214,7 @@ impl ProviderAcpDeliveryRoute {
         }
         let operation_id = OperationId::try_from(request.attempt.as_str().to_owned())
             .map_err(|_| DeliveryContractError::InvalidEvidence)?;
+        let input_id = session_event_model::InputId::generate();
         let Some(runtime) = self.supervisor.runtime_for(&request.target.endpoint) else {
             return Ok(Self::not_submitted("provider runtime is unavailable", true));
         };
@@ -312,7 +328,11 @@ impl ProviderAcpDeliveryRoute {
                 }
             };
             match runtime
-                .steer_session(String::from(request.target.session_id.clone()), prompt.text)
+                .steer_session_with_input(
+                    String::from(request.target.session_id.clone()),
+                    input_id.clone(),
+                    prompt.text,
+                )
                 .await
             {
                 Ok(ProviderSteeringOutcome::Injected {
@@ -389,6 +409,7 @@ impl ProviderAcpDeliveryRoute {
             .supervisor
             .submit_delivery_prompt(ConversationPromptRequest {
                 operation_id: operation_id.clone(),
+                input_id: Some(input_id),
                 target: request.target.clone(),
                 generation: Some(binding.generation),
                 requested_by,

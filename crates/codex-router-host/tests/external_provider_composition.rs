@@ -125,6 +125,7 @@ sys.stdin.read()
     let prompt_operation = OperationId::generate();
     client
         .prompt_provider_conversation(ConversationPromptRequest {
+            input_id: None,
             operation_id: prompt_operation.clone(),
             target: target.clone(),
             generation: Some(generation),

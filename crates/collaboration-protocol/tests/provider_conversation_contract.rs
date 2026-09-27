@@ -1,7 +1,7 @@
 use collaboration_protocol::{
     ConversationBindingIdentity, ConversationCreateOutcome, ConversationCreateRequest,
-    ConversationOperationFailure, ConversationOperationSettlement, control_error_is_valid,
-    control_schema_document,
+    ConversationOperationFailure, ConversationOperationSettlement, ConversationPromptRequest,
+    control_error_is_valid, control_schema_document,
 };
 use serde_json::{Value, json};
 
@@ -228,6 +228,31 @@ fn invalid_setting_failure_names_advertised_values_and_session_disposition() {
     let decoded: ConversationOperationFailure =
         serde_json::from_value(failure.clone()).expect("typed invalid setting");
     assert_eq!(serde_json::to_value(decoded).expect("round trip"), failure);
+}
+
+#[test]
+fn provider_prompt_input_id_is_additive_and_kept_verbatim() {
+    let base = json!({
+        "operationId":"019f0000-0000-7000-8000-000000000011",
+        "target":session("provider-session"),
+        "requestedBy":session("creator"),
+        "approver":session("approver"),
+        "prompt":{"kind":"router","text":"hello"}
+    });
+    let old: ConversationPromptRequest = serde_json::from_value(base.clone()).expect("old prompt");
+    assert_eq!(serde_json::to_value(old).expect("old round trip"), base);
+    let mut with_id = base;
+    with_id["inputId"] = json!("input-from-front-door");
+    let prompt: ConversationPromptRequest =
+        serde_json::from_value(with_id.clone()).expect("typed Input ID");
+    assert_eq!(
+        prompt
+            .input_id
+            .as_ref()
+            .map(session_event_model::InputId::as_str),
+        Some("input-from-front-door")
+    );
+    assert_eq!(serde_json::to_value(prompt).expect("round trip"), with_id);
 }
 
 #[test]

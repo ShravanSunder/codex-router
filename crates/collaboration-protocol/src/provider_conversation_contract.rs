@@ -405,6 +405,8 @@ pub struct ConversationOperationSnapshot {
     pub terminal_stop_reason: Option<ProviderPromptStopReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_state: Option<ConversationOperationQueueState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<session_event_model::InputId>,
     pub admitted_at: ObservationTimestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_at: Option<ObservationTimestamp>,
@@ -456,6 +458,8 @@ pub struct ConversationLoadRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationPromptRequest {
     pub operation_id: OperationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<session_event_model::InputId>,
     pub target: SessionRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,

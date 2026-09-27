@@ -378,6 +378,7 @@ pub(super) async fn prompt_and_approve_from_peer_provider(
     let operation_id = OperationId::generate();
     client
         .prompt_provider_conversation(ConversationPromptRequest {
+            input_id: None,
             operation_id: operation_id.clone(),
             target: requester.clone(),
             generation: Some(collaboration_protocol::CodexGeneration {

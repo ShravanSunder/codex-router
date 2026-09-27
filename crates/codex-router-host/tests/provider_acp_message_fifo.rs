@@ -77,6 +77,7 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
     let first = collaboration_service::ProviderConversationBackend::prompt(
         supervisor.as_ref(),
         collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: first_operation_id,
             target: target.clone(),
             generation: Some(binding.generation.clone()),
@@ -125,6 +126,11 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
         queued_snapshot.queue_state,
         Some(collaboration_protocol::ConversationOperationQueueState::RouterQueued)
     );
+    let queued_input_id = queued_snapshot.input_id.clone().expect("queued InputId");
+    let listed = route.queue_list(&target);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].input_id, queued_input_id);
+    assert_eq!(listed[0].preview, "second");
 
     let blocker_id = collaboration_protocol::OperationId::generate();
     {
@@ -197,6 +203,10 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
     .await
     .expect("submitted operation uses provider operation record");
     assert_eq!(submitted_snapshot.queue_state, None);
+    assert_eq!(
+        route.queue_cancel(&target, &queued_input_id),
+        Err(codex_router_host::ProviderQueueCancellationError::NotQueued)
+    );
     assert_eq!(
         submitted_snapshot.stage,
         collaboration_protocol::ProviderOperationStage::MayHaveDispatched
@@ -407,6 +417,7 @@ async fn failed_queued_prompt_advances_to_the_next_accepted_item() {
     let active_prompt = collaboration_service::ProviderConversationBackend::prompt(
         supervisor.as_ref(),
         collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: collaboration_protocol::OperationId::generate(),
             target: target.clone(),
             generation: Some(binding.generation.clone()),
@@ -610,6 +621,7 @@ async fn provider_retirement_marks_queued_items_not_submitted() {
     let first = collaboration_service::ProviderConversationBackend::prompt(
         supervisor.as_ref(),
         collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: collaboration_protocol::OperationId::generate(),
             target: target.clone(),
             generation: Some(binding.generation.clone()),

@@ -372,6 +372,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     let active_id = OperationId::generate();
     supervisor
         .prompt(ConversationPromptRequest {
+            input_id: None,
             operation_id: active_id.clone(),
             target: target.clone(),
             generation: Some(generation.clone()),
@@ -602,6 +603,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     for _ in 0..256 {
         let operation_id = OperationId::generate();
         let prompt = collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: operation_id.clone(),
             target: target.clone(),
             generation: Some(generation.clone()),

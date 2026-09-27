@@ -822,11 +822,15 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
                 PreparedOperation::Admitted { snapshot, live } => {
                     let operation_id = request.operation_id.clone();
                     let provider_session_id = String::from(target.session_id.clone());
+                    let input_id = request
+                        .input_id
+                        .unwrap_or_else(session_event_model::InputId::generate);
                     let completion_target = target.clone();
                     backend.spawn_operation(operation_id.clone(), live, async move {
                         match runtime
-                            .prompt_with_approval_context(
+                            .prompt_with_approval_context_for_input(
                                 provider_session_id,
+                                input_id,
                                 rendered_prompt.text,
                                 approval_context,
                             )

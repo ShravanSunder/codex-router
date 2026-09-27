@@ -204,6 +204,7 @@ impl ConversationClient {
                 }
                 let request = ProviderPromptRequest {
                     operation_id: operation_id.clone(),
+                    input_id: None,
                     target: target.clone(),
                     generation: input.generation,
                     requested_by: input.requested_by.clone(),

@@ -54,13 +54,17 @@ impl ExternalProviderSupervisor {
             return Ok(ProviderPromptDispatch::Existing);
         };
         let (dispatched, dispatch_observation) = tokio::sync::oneshot::channel();
+        let input_id = request
+            .input_id
+            .unwrap_or_else(session_event_model::InputId::generate);
         let provider_session_id = String::from(target.session_id.clone());
         let completion_target = target.clone();
         let completion_operation_id = operation_id.clone();
         self.spawn_operation(operation_id, live, async move {
             match runtime
-                .prompt_with_approval_dispatch(
+                .prompt_with_approval_dispatch_for_input(
                     provider_session_id,
+                    input_id,
                     rendered.text,
                     approval_context,
                     Some(dispatched),

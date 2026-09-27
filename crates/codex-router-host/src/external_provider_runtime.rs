@@ -306,6 +306,17 @@ impl ExternalProviderRuntime {
         self.client.steer_session(provider_session_id, prompt).await
     }
 
+    pub async fn steer_session_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: session_event_model::InputId,
+        prompt: String,
+    ) -> Result<crate::ProviderSteeringOutcome, ExternalProviderRuntimeError> {
+        self.client
+            .steer_with_input(provider_session_id, input_id, prompt)
+            .await
+    }
+
     pub async fn session_activity(
         &self,
         provider_session_id: String,
@@ -402,16 +413,42 @@ impl ExternalProviderRuntime {
         )
     }
 
-    pub(crate) async fn prompt_with_approval_dispatch(
+    pub async fn prompt_with_approval_context_for_input(
         &self,
         provider_session_id: String,
+        input_id: session_event_model::InputId,
+        prompt: String,
+        context: ExternalProviderApprovalContext,
+    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
+        host_prompt_outcome(
+            self.client
+                .prompt_with_approval_context_for_input(
+                    provider_session_id,
+                    input_id,
+                    prompt,
+                    context,
+                )
+                .await?,
+        )
+    }
+
+    pub(crate) async fn prompt_with_approval_dispatch_for_input(
+        &self,
+        provider_session_id: String,
+        input_id: session_event_model::InputId,
         prompt: String,
         context: ExternalProviderApprovalContext,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
         host_prompt_outcome(
             self.client
-                .prompt_with_approval_dispatch(provider_session_id, prompt, context, dispatch)
+                .prompt_with_approval_dispatch_for_input(
+                    provider_session_id,
+                    input_id,
+                    prompt,
+                    context,
+                    dispatch,
+                )
                 .await?,
         )
     }
