@@ -189,6 +189,13 @@ fn broker_options(
 pub(crate) struct NoopSessionEventSink;
 
 impl SessionEventSink for NoopSessionEventSink {
+    fn begin_history_replay(
+        &self,
+        _session_id: &str,
+    ) -> acp_client_runtime::HistoryReplayFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn publish(
         &self,
         _session_id: &str,

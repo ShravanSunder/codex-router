@@ -10,7 +10,7 @@ use collaboration_protocol::{
     ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind, ProviderRuntimeIdentity,
     ProviderTransport, UuidIdentity,
 };
-use collaboration_service::{ProviderOperationStore, new_service_uuid};
+use collaboration_service::{ProviderOperationStore, ProviderSessionEventHub, new_service_uuid};
 use std::{io, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -41,6 +41,7 @@ impl ExternalProviderStartup {
 
 pub(crate) struct ProviderStartupComposition {
     pub supervisor: Option<Arc<ExternalProviderSupervisor>>,
+    pub hub: Option<Arc<ProviderSessionEventHub>>,
     pub endpoints: Vec<EndpointDescription>,
     pub retirements: Vec<(CancellationToken, EndpointDescription)>,
 }
@@ -52,6 +53,9 @@ pub(crate) async fn compose_provider_startup(
     service_epoch: &UuidIdentity,
     mcp_url: &str,
 ) -> io::Result<ProviderStartupComposition> {
+    let hub = store
+        .as_ref()
+        .map(|store| Arc::new(ProviderSessionEventHub::new(Arc::clone(store))));
     let mut bindings = Vec::new();
     let mut endpoints = Vec::with_capacity(configured.len());
     let mut retirements = Vec::new();
@@ -74,10 +78,28 @@ pub(crate) async fn compose_provider_startup(
             }
             ExternalProviderStartup::Launch(binding) => {
                 let executable = binding.launch.executable.display().to_string();
-                let runtime = ExternalProviderRuntime::initialize_with_mcp_http(
+                let endpoint = EndpointRef {
+                    service_id: service_id.clone(),
+                    endpoint_id: binding.endpoint_id.clone(),
+                };
+                let hub_endpoint = message_board::SessionEndpointRef {
+                    service_id: message_board::ServiceId::try_from(String::from(
+                        service_id.clone(),
+                    ))
+                    .map_err(io::Error::other)?,
+                    endpoint_id: message_board::EndpointId::try_from(String::from(
+                        binding.endpoint_id.clone(),
+                    ))
+                    .map_err(io::Error::other)?,
+                };
+                let runtime = ExternalProviderRuntime::initialize_with_mcp_http_and_hub(
                     binding.launch,
                     "router-collaboration",
                     mcp_url.to_owned(),
+                    Arc::clone(hub.as_ref().ok_or_else(|| {
+                        io::Error::other("provider Session hub unavailable for configured launch")
+                    })?),
+                    hub_endpoint,
                 )
                 .await;
                 match runtime {
@@ -85,10 +107,6 @@ pub(crate) async fn compose_provider_startup(
                         runtime
                             .set_endpoint_id(String::from(binding.endpoint_id.clone()))
                             .await;
-                        let endpoint = EndpointRef {
-                            service_id: service_id.clone(),
-                            endpoint_id: binding.endpoint_id,
-                        };
                         let generation_number = generation_number(binding.provider)?;
                         let runtime_name =
                             runtime.admission().runtime_name.clone().unwrap_or_else(|| {
@@ -174,6 +192,7 @@ pub(crate) async fn compose_provider_startup(
     };
     Ok(ProviderStartupComposition {
         supervisor,
+        hub,
         endpoints,
         retirements,
     })

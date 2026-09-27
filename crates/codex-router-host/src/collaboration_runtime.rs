@@ -314,6 +314,7 @@ impl CollaborationRuntime {
         .await?;
         let provider_retirements = startup.retirements;
         let external_provider_supervisor = startup.supervisor;
+        let provider_session_hub = startup.hub;
         let provider_endpoints = startup
             .endpoints
             .iter()
@@ -329,6 +330,9 @@ impl CollaborationRuntime {
                 dyn collaboration_service::ProviderConversationBackend,
             > = supervisor.clone();
             identity = identity.with_provider_conversation_backend(provider_backend);
+        }
+        if let Some(hub) = provider_session_hub {
+            identity = identity.with_provider_session_hub(hub);
         }
         let endpoint = EndpointRef {
             service_id: service_id.clone(),
