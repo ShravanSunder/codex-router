@@ -1,10 +1,11 @@
 //! Keep supported ACP permission choices usable when a provider adds an unknown choice.
 
+use crate::{ExternalApprovalOption, ExternalApprovalOptionScope};
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};
-use collaboration_service::{ExternalApprovalOption, ExternalApprovalOptionScope};
 use std::collections::BTreeSet;
 
-pub(super) enum ExternalPermissionOptionMapping {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExternalPermissionOptionMapping {
     Mapped(Vec<ExternalApprovalOption>),
     Refused {
         reason: &'static str,
@@ -21,7 +22,7 @@ enum ExternalPermissionKind {
     Unsupported { provider_kind: String },
 }
 
-pub(super) fn map_external_permission_options(
+pub fn map_external_permission_options(
     options: Vec<PermissionOption>,
 ) -> ExternalPermissionOptionMapping {
     map_classified_options(options.into_iter().map(|option| {

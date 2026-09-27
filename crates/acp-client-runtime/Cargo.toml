@@ -1,0 +1,24 @@
+[package]
+name = "acp-client-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+test-observation = []
+
+[dependencies]
+agent-client-protocol.workspace = true
+futures-util.workspace = true
+rustix.workspace = true
+session-event-model = { path = "../session-event-model", version = "0.1.40" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true

@@ -1,0 +1,124 @@
+//! Connection-task ownership and lifecycle for provider permission requests.
+
+#[cfg(any(test, feature = "test-observation"))]
+use super::ExternalProviderApprovalRefusalWarning;
+use super::{ActiveApprovalContext, ExternalProviderApprovalRefusalReason};
+use crate::{
+    ApprovalPortOutcome, InteractionPort, approval_presentation, map_external_permission_options,
+};
+use agent_client_protocol::schema::v1::{
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome,
+};
+use agent_client_protocol::{Agent, ConnectionTo, Error, Responder};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+
+pub(super) struct PermissionDispatchState<P: InteractionPort> {
+    pub(super) interaction_port: Arc<P>,
+    pub(super) refusal_reasons:
+        Arc<Mutex<HashMap<P::OperationId, ExternalProviderApprovalRefusalReason>>>,
+    pub(super) endpoint_id: Arc<RwLock<Option<String>>>,
+    #[cfg(any(test, feature = "test-observation"))]
+    pub(super) refusal_warnings: Arc<Mutex<Vec<ExternalProviderApprovalRefusalWarning>>>,
+    #[cfg(any(test, feature = "test-observation"))]
+    pub(super) permission_outcome: Arc<std::sync::atomic::AtomicU8>,
+}
+
+pub(super) fn spawn_external_approval_dispatch<P: InteractionPort>(
+    request: RequestPermissionRequest,
+    responder: Responder<RequestPermissionResponse>,
+    connection: ConnectionTo<Agent>,
+    context: Option<ActiveApprovalContext<P>>,
+    state: PermissionDispatchState<P>,
+) -> Result<(), Error> {
+    let request_cancellation = responder.cancellation();
+    connection.spawn(async move {
+        let outcome = match context {
+            Some(context) => {
+                handle_contextual_permission_request(context, request, request_cancellation, &state)
+                    .await
+            }
+            None => RequestPermissionOutcome::Cancelled,
+        };
+        #[cfg(any(test, feature = "test-observation"))]
+        state.permission_outcome.store(
+            if matches!(outcome, RequestPermissionOutcome::Selected(_)) {
+                2
+            } else {
+                1
+            },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        responder.respond(RequestPermissionResponse::new(outcome))
+    })
+}
+
+async fn handle_contextual_permission_request<P: InteractionPort>(
+    context: ActiveApprovalContext<P>,
+    request: RequestPermissionRequest,
+    request_cancellation: agent_client_protocol::RequestCancellation,
+    state: &PermissionDispatchState<P>,
+) -> RequestPermissionOutcome {
+    let provider_session_id = request.session_id.0.to_string();
+    let presentation = approval_presentation(&request.tool_call.fields);
+    let options = map_external_permission_options(request.options);
+    let agent_cancellation = CancellationToken::new();
+    let approval = state.interaction_port.request_approval(
+        context.approval.clone(),
+        presentation,
+        options,
+        context.cancelling,
+        agent_cancellation.clone(),
+    );
+    tokio::pin!(approval);
+    let outcome = tokio::select! {
+        biased;
+        () = request_cancellation.cancelled() => {
+            agent_cancellation.cancel();
+            approval.await
+        }
+        outcome = &mut approval => outcome,
+    };
+    match outcome {
+        ApprovalPortOutcome::Selected { option_id } => {
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id))
+        }
+        ApprovalPortOutcome::Cancelled => RequestPermissionOutcome::Cancelled,
+        ApprovalPortOutcome::Unavailable => {
+            let endpoint = state
+                .endpoint_id
+                .read()
+                .await
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned());
+            tracing::warn!(
+                endpoint = %endpoint,
+                provider_session_id = %provider_session_id,
+                method = "session/request_permission",
+                reason_code = ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable.code(),
+                "provider permission request refused before approval broker",
+            );
+            #[cfg(any(test, feature = "test-observation"))]
+            if let Ok(mut warnings) = state.refusal_warnings.lock() {
+                warnings.push(ExternalProviderApprovalRefusalWarning {
+                    endpoint,
+                    provider_session_id,
+                    method: "session/request_permission",
+                    reason_code: ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable,
+                });
+            }
+            if let Ok(mut reasons) = state.refusal_reasons.lock() {
+                reasons.insert(
+                    P::operation_id(&context.approval),
+                    ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable,
+                );
+            }
+            RequestPermissionOutcome::Cancelled
+        }
+    }
+}

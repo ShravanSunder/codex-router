@@ -1,7 +1,7 @@
 //! Bounded, reviewed decision details extracted from ACP permission requests.
 
+use crate::{ApprovalArgument, ApprovalPresentation};
 use agent_client_protocol::schema::v1::{ContentBlock, ToolCallContent, ToolCallUpdateFields};
-use collaboration_protocol::{ApprovalArgument, ApprovalPresentation};
 use serde_json::Value;
 
 const MAX_TOOL_NAME_CHARS: usize = 100;
@@ -13,7 +13,7 @@ const MAX_ARGUMENT_VALUE_CHARS: usize = 512;
 const MAX_PERMISSION_DETAILS: usize = 8;
 const MAX_PERMISSION_DETAIL_CHARS: usize = 512;
 
-pub(super) fn approval_presentation(fields: &ToolCallUpdateFields) -> ApprovalPresentation {
+pub fn approval_presentation(fields: &ToolCallUpdateFields) -> ApprovalPresentation {
     ApprovalPresentation {
         tool_name: fields
             .name

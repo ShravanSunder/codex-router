@@ -1,10 +1,10 @@
 //! Bounded ACP prompt output and settlement observation.
-use crate::external_provider_runtime::{
+use crate::agent_session_client::{
     ExternalProviderPromptOutcome, ExternalProviderRuntimeError, MAX_PROMPT_OUTPUT_BYTES,
     ProviderFrameObservation, acp_operation_error, provider_frame_decode_error,
 };
-#[cfg(test)]
-use crate::external_provider_runtime::{
+#[cfg(any(test, feature = "test-observation"))]
+use crate::agent_session_client::{
     ExternalProviderToolCall, ExternalProviderToolOutcome, classify_mcp_tool_outcome,
 };
 use crate::provider_prompt_result_codec::{decode_prompt_result, decode_typed_stop_reason};
@@ -18,7 +18,7 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{ActiveSession, Agent, SessionMessage};
 use std::collections::HashSet;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-observation"))]
 use std::{collections::HashMap, sync::Arc};
 
 pub(crate) async fn read_bounded_prompt(
@@ -28,13 +28,15 @@ pub(crate) async fn read_bounded_prompt(
     >,
     output_limit_tx: tokio::sync::mpsc::UnboundedSender<()>,
     frame_observation: std::sync::Arc<ProviderFrameObservation>,
-    #[cfg(test)] test_tool_calls: Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
+    #[cfg(any(test, feature = "test-observation"))] test_tool_calls: Arc<
+        std::sync::Mutex<Vec<ExternalProviderToolCall>>,
+    >,
 ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
     use futures_util::FutureExt as _;
 
     let mut output = String::new();
     let mut unknown_update_kinds = HashSet::<String>::new();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-observation"))]
     let mut tool_calls = HashMap::<String, ExternalProviderToolCall>::new();
     let mut output_limit_tx = Some(output_limit_tx);
     let stop_reason = loop {
@@ -47,8 +49,8 @@ pub(crate) async fn read_bounded_prompt(
                     &mut output,
                     &mut output_limit_tx,
                     &mut unknown_update_kinds,
-                    #[cfg(test)] &mut tool_calls,
-                    #[cfg(test)] &test_tool_calls,
+                    #[cfg(any(test, feature = "test-observation"))] &mut tool_calls,
+                    #[cfg(any(test, feature = "test-observation"))] &test_tool_calls,
                 ).await? {
                     break decode_typed_stop_reason(reason)?;
                 }
@@ -75,17 +77,20 @@ pub(crate) async fn read_bounded_prompt(
                         &mut output,
                         &mut output_limit_tx,
                         &mut unknown_update_kinds,
-                        #[cfg(test)] &mut tool_calls,
-                        #[cfg(test)] &test_tool_calls,
+                        #[cfg(any(test, feature = "test-observation"))] &mut tool_calls,
+                        #[cfg(any(test, feature = "test-observation"))] &test_tool_calls,
                     ).await?;
                 }
                 break reason;
             }
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-observation"))]
     {
-        *test_tool_calls.lock().expect("test tool calls") = tool_calls.into_values().collect();
+        *test_tool_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            tool_calls.into_values().collect();
     }
     Ok(ExternalProviderPromptOutcome {
         output,
@@ -99,8 +104,13 @@ async fn record_prompt_update(
     output: &mut String,
     output_limit_tx: &mut Option<tokio::sync::mpsc::UnboundedSender<()>>,
     unknown_update_kinds: &mut HashSet<String>,
-    #[cfg(test)] tool_calls: &mut HashMap<String, ExternalProviderToolCall>,
-    #[cfg(test)] test_tool_calls: &Arc<std::sync::Mutex<Vec<ExternalProviderToolCall>>>,
+    #[cfg(any(test, feature = "test-observation"))] tool_calls: &mut HashMap<
+        String,
+        ExternalProviderToolCall,
+    >,
+    #[cfg(any(test, feature = "test-observation"))] test_tool_calls: &Arc<
+        std::sync::Mutex<Vec<ExternalProviderToolCall>>,
+    >,
 ) -> Result<Option<StopReason>, ExternalProviderRuntimeError> {
     match update {
         SessionMessage::SessionMessage(dispatch) => {
@@ -136,9 +146,9 @@ async fn record_prompt_update(
                             }
                         }
                         SessionUpdate::ToolCall(tool_call) => {
-                            #[cfg(not(test))]
+                            #[cfg(not(any(test, feature = "test-observation")))]
                             let _ = tool_call;
-                            #[cfg(test)]
+                            #[cfg(any(test, feature = "test-observation"))]
                             tool_calls.insert(
                                 tool_call.tool_call_id.0.to_string(),
                                 ExternalProviderToolCall {
@@ -153,9 +163,9 @@ async fn record_prompt_update(
                             );
                         }
                         SessionUpdate::ToolCallUpdate(update) => {
-                            #[cfg(not(test))]
+                            #[cfg(not(any(test, feature = "test-observation")))]
                             let _ = update;
-                            #[cfg(test)]
+                            #[cfg(any(test, feature = "test-observation"))]
                             if let Some(observation) =
                                 tool_calls.get_mut(update.tool_call_id.0.as_ref())
                             {
@@ -180,9 +190,11 @@ async fn record_prompt_update(
                         }
                         _ => {}
                     }
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-observation"))]
                     {
-                        *test_tool_calls.lock().expect("test tool calls") =
+                        *test_tool_calls
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
                             tool_calls.values().cloned().collect();
                     }
                     Ok(())

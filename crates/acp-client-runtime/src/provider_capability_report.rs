@@ -1,9 +1,9 @@
-//! Host-local capability report derived from ACP advertisements.
+//! Capability report derived from ACP advertisements.
 
 use agent_client_protocol::schema::v1::{InitializeResponse, NewSessionResponse};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ProviderCapabilityReport {
+pub struct ProviderCapabilityReport {
     pub supports_load: bool,
     pub supports_resume: bool,
     pub supports_close: bool,

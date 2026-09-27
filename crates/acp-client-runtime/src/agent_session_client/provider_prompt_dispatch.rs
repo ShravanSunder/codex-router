@@ -1,14 +1,14 @@
 //! ACP prompt submission at the provider runtime boundary.
 
 use super::{
-    ExternalProviderPromptOutcome, ExternalProviderRuntime, ExternalProviderRuntimeError,
+    AgentSessionClient, ExternalProviderPromptOutcome, ExternalProviderRuntimeError,
     ProviderCommand, ProviderPromptDispatchObservation,
 };
+use crate::InteractionPort;
 use crate::provider_prompt_content::ProviderPromptContent;
 use agent_client_protocol::schema::v1::ContentBlock;
-use collaboration_protocol::OperationId;
 
-impl ExternalProviderRuntime {
+impl<P: InteractionPort> AgentSessionClient<P> {
     pub async fn prompt(
         &self,
         provider_session_id: String,
@@ -18,10 +18,10 @@ impl ExternalProviderRuntime {
             .await
     }
 
-    pub(super) async fn prompt_for_operation(
+    pub async fn prompt_for_operation(
         &self,
         provider_session_id: String,
-        operation_id: Option<OperationId>,
+        operation_id: Option<P::OperationId>,
         prompt: String,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
@@ -36,10 +36,10 @@ impl ExternalProviderRuntime {
         .await
     }
 
-    pub(crate) async fn prompt_content(
+    pub async fn prompt_content(
         &self,
         provider_session_id: String,
-        operation_id: Option<OperationId>,
+        operation_id: Option<P::OperationId>,
         blocks: Vec<ContentBlock>,
         dispatch: Option<tokio::sync::oneshot::Sender<ProviderPromptDispatchObservation>>,
     ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {

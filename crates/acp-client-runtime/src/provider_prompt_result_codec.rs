@@ -1,8 +1,8 @@
 //! Decode an ACP prompt result without the SDK's closed stop-reason enum.
 
-use crate::external_provider_runtime::ExternalProviderRuntimeError;
+use crate::agent_session_client::ExternalProviderRuntimeError;
 use agent_client_protocol::schema::v1::StopReason;
-use collaboration_protocol::ProviderPromptStopReason;
+use session_event_model::StopReason as ProviderPromptStopReason;
 
 pub(crate) fn decode_prompt_result(
     result: &serde_json::Value,
