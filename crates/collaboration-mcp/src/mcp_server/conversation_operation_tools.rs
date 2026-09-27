@@ -8,7 +8,7 @@ macro_rules! conversation_operation_tool {
                 operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
-            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
+            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<McpToolOutput<$result>>()),
             |context: ToolCallContext<'_, CollaborationMcpServer>| {
                 Box::pin(async move {
                     let cancellation = context.request_context.ct.clone();
@@ -55,7 +55,7 @@ macro_rules! conversation_operation_tool {
 }
 
 fn operation_call_cancelled(possible_effect: OperationEffect) -> CallToolResult {
-    CallToolResult::structured_error(serde_json::json!({
+    structured_tool_error(serde_json::json!({
         "kind": "callerCancelled",
         "stage": "response",
         "effect": possible_effect,
@@ -106,7 +106,7 @@ fn conversation_operation_result<TValue: serde::Serialize>(
             data,
         ) {
             Ok(failure) => serde_json::to_value(failure)
-                .map(CallToolResult::structured_error)
+                .map(structured_tool_error)
                 .unwrap_or_else(|_| {
                     validation_failure("conversation operation failure encoding failed")
                 }),
