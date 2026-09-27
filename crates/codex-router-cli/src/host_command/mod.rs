@@ -3,9 +3,8 @@
 use std::ffi::OsString;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(test)]
-use std::path::Path;
 use std::path::PathBuf;
+use std::path::{Component, Path};
 use std::time::Duration;
 
 use clap::Parser;
@@ -175,6 +174,7 @@ pub(crate) async fn run_host_command<W: Write + Send>(
     }
     let router_root = crate::router_root_or_default(command.router_root.clone())
         .map_err(|error| HostCommandError::RouterRoot(error.to_string()))?;
+    validate_router_root(&router_root)?;
     let owner_home = nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()
         .flatten()
@@ -320,6 +320,16 @@ fn external_provider_launches(
     Ok(launches)
 }
 
+fn validate_router_root(router_root: &Path) -> Result<(), HostCommandError> {
+    if router_root
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(HostCommandError::RouterRootParentSegment);
+    }
+    Ok(())
+}
+
 pub(crate) const fn default_mcp_bind(isolated_debug: bool) -> SocketAddr {
     if isolated_debug {
         SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 18788)
@@ -372,6 +382,8 @@ pub enum HostCommandError {
     },
     #[error("failed resolving host router root: {0}")]
     RouterRoot(String),
+    #[error("host router root must not contain a '..' path segment")]
+    RouterRootParentSegment,
     #[error("HOME and CODEX_HOME are unavailable")]
     CodexHomeUnavailable,
     #[error("isolated Host cannot verify the owner home from the passwd entry")]
@@ -461,5 +473,13 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn router_root_parent_segment_is_a_typed_error() {
+        assert!(matches!(
+            validate_router_root(Path::new("/tmp/private/../router")),
+            Err(HostCommandError::RouterRootParentSegment)
+        ));
     }
 }
