@@ -21,20 +21,45 @@ use collaboration_client::{ConversationClient, ConversationCreateInput};
 mod delivery_matrix_approval;
 #[path = "delivery_matrix/support.rs"]
 mod delivery_matrix_support;
-use delivery_matrix_support::{ConfigHashGuard, PeerFixture, mcp_send};
+use delivery_matrix_support::{ConfigHashGuard, PeerFixture, mcp_send, prepare_provider_fixture};
 use proof_context::{ProofContext, ProofResult};
 use serde_json::{Value, json};
 use std::time::Duration;
 
 #[tokio::test]
-#[ignore = "requires owned automation-debug-host with --fixture-peer-registry and real Luna access"]
+#[ignore = "requires an owned isolated CLI Host with scripted provider fixture"]
 async fn delivery_matrix_reaches_codex_and_fixture_claude_peer() -> ProofResult<()> {
     let config_guard = ConfigHashGuard::capture()?;
     let result = exercise_delivery_matrix(&config_guard).await;
-    let final_config = config_guard.verify();
-    result?;
-    final_config?;
-    Ok(())
+    config_guard.verify()?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh owned isolated CLI Host with scripted provider fixture"]
+async fn approval_notice_reaches_codex_recipient() -> ProofResult<()> {
+    let config_guard = ConfigHashGuard::capture()?;
+    let result = async {
+        let mut proof = ProofContext::connect().await?;
+        let sender = proof.start_thread("Approval fixture sender").await?;
+        let approver = create_empty_conversation(&proof, &sender).await?;
+        let marker = matrix_marker("approvalNotice", "codexFocused");
+        let request_id = delivery_matrix_approval::deliver_approval_notice(
+            &mut proof, &sender, &approver, &marker, None,
+        )
+        .await?;
+        proof.record("approvalNoticeFocused", json!({"requestId":request_id}))?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+    config_guard.verify()?;
+    result
+}
+
+#[test]
+#[ignore = "creates a fresh private direct child of /tmp for the isolated CLI Host"]
+fn prepare_delivery_matrix_provider_fixture() -> ProofResult<()> {
+    prepare_provider_fixture()
 }
 
 async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult<()> {
@@ -51,13 +76,8 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
             DirectProducer::Cli => cli_send(&proof, &sender, &codex, &prompt).await?,
             DirectProducer::Mcp => mcp_send(&proof, &sender, &codex, &prompt).await?,
         }
-        let turns = proof
-            .wait_for_text(&codex, &format!("RECEIVED_{marker}"))
-            .await?;
-        if !turns_contain_input(&turns, &marker) {
-            return Err(format!("{producer:?} Codex receipt was absent from thread/read").into());
-        }
-        records.push(json!({"producer":producer.name(),"target":"codex","status":"pass","evidence":"thread/read input and reply"}));
+        wait_for_input_marker(&mut proof, &codex, &marker, Duration::from_secs(120)).await?;
+        records.push(json!({"producer":producer.name(),"target":"codex","status":"pass","evidence":"thread/read user input"}));
         config_guard.verify()?;
 
         let marker = producer.marker("claude");
@@ -79,13 +99,8 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
         &format!("{marker}. Reply exactly RECEIVED_{marker}. Do not call tools."),
     )
     .await?;
-    let turns = proof
-        .wait_for_text(&codex, &format!("RECEIVED_{marker}"))
-        .await?;
-    if !turns_contain_input(&turns, &marker) {
-        return Err("Fired wake did not appear in Codex thread/read".into());
-    }
-    records.push(json!({"producer":"wakeSend","target":"codex","status":"pass","evidence":"first fire plus thread/read input and reply"}));
+    wait_for_input_marker(&mut proof, &codex, &marker, Duration::from_secs(120)).await?;
+    records.push(json!({"producer":"wakeSend","target":"codex","status":"pass","evidence":"first fire plus thread/read user input"}));
     config_guard.verify()?;
 
     let marker = matrix_marker("wakeSend", "claude");
@@ -102,13 +117,8 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
         &format!("{marker}. Reply exactly RECEIVED_{marker}. Do not call tools."),
     )
     .await?;
-    let turns = proof
-        .wait_for_text(&codex, &format!("RECEIVED_{marker}"))
-        .await?;
-    if !turns_contain_input(&turns, &marker) {
-        return Err("Scheduled Codex input was absent from thread/read".into());
-    }
-    records.push(json!({"producer":"scheduledRun","target":"codex","status":"pass","evidence":"scheduled input and reply in thread/read"}));
+    wait_for_input_marker(&mut proof, &codex, &marker, Duration::from_secs(120)).await?;
+    records.push(json!({"producer":"scheduledRun","target":"codex","status":"pass","evidence":"scheduled user input in thread/read"}));
     config_guard.verify()?;
 
     let marker = matrix_marker("scheduledRun", "claude");
@@ -137,7 +147,7 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
     records.push(json!({"producer":"boardListen","target":"claudeCodePeer","status":"pass","evidence":"Thread Listen batch marker in fixture peer socket frame"}));
     config_guard.verify()?;
 
-    let codex = proof.start_thread("Approval notice recipient").await?;
+    let codex = create_empty_conversation(&proof, &sender).await?;
     let marker = matrix_marker("approvalNotice", "codex");
     let request_id = delivery_matrix_approval::deliver_approval_notice(
         &mut proof, &sender, &codex, &marker, None,

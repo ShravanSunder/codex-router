@@ -3,10 +3,113 @@ use super::proof_context::{ProofContext, ProofResult};
 use collaboration_client::protocol::{EndpointId, SessionId, SessionRef};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use std::{os::unix::fs::PermissionsExt as _, path::PathBuf, time::Duration};
+use std::{
+    io::Write as _,
+    os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 
 const PEER_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+pub(super) fn prepare_provider_fixture() -> ProofResult<()> {
+    let root = PathBuf::from(
+        std::env::var_os("CODEX_AUTOMATION_PROOF_ROOT")
+            .ok_or("Set CODEX_AUTOMATION_PROOF_ROOT to a new direct child of /tmp")?,
+    );
+    if root.parent() != Some(Path::new("/tmp")) || root.exists() {
+        return Err("Matrix root must be a new direct child of /tmp".into());
+    }
+    std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+    for directory in [
+        root.join("home"),
+        root.join("home/.claude"),
+        root.join("home/.claude/sessions"),
+        root.join("codex-home"),
+        root.join("codex-home/packages"),
+        root.join("codex-home/packages/standalone"),
+        root.join("codex-home/packages/standalone/current"),
+        root.join("native-socket"),
+        root.join("agent-workspace"),
+    ] {
+        std::fs::DirBuilder::new().mode(0o700).create(directory)?;
+    }
+    let owner_home =
+        PathBuf::from(std::env::var_os("HOME").ok_or("owner HOME missing")?).canonicalize()?;
+    if owner_home.starts_with(root.canonicalize()?) {
+        return Err("Owner HOME cannot be inside the matrix root".into());
+    }
+    let managed_executable = owner_home.join(".codex/packages/standalone/current/codex");
+    if !managed_executable.is_file() {
+        return Err("Managed Codex executable missing from normal home".into());
+    }
+    symlink(
+        managed_executable,
+        root.join("codex-home/packages/standalone/current/codex"),
+    )?;
+    let profile = "model = \"gpt-5.6-luna\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"isolated matrix router\"\nbase_url = \"http://127.0.0.1:43127/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n";
+    write_private_file(
+        &root.join("codex-home/codex-router-debug.config.toml"),
+        profile.as_bytes(),
+    )?;
+    write_private_file(
+        &root.join("debug-host-context.json"),
+        serde_json::to_string(&json!({
+            "kind":"isolatedDeliveryMatrix",
+            "profile":"codex-router-debug",
+            "model":"gpt-5.6-luna",
+            "port":43127,
+            "ownerHome":owner_home,
+        }))?
+        .as_bytes(),
+    )?;
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("crate parent missing")?
+        .join("codex-router-host/src/external_provider_runtime/acp_scripted_fixture.py")
+        .canonicalize()?;
+    let mut steps = vec![
+        json!({"action":"expect_request","requestName":"initialize","method":"initialize","params":{"protocolVersion":1}}),
+        json!({"action":"respond","requestName":"initialize","result":{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"delivery-matrix-fixture","version":"1"}}}),
+    ];
+    for (index, session_id) in ["matrix-provider-codex", "matrix-provider-claude"]
+        .into_iter()
+        .enumerate()
+    {
+        let request_id = 91 + index;
+        let create_name = format!("create-{index}");
+        let prompt_name = format!("prompt-{index}");
+        steps.extend([
+            json!({"action":"expect_request","requestName":create_name,"method":"session/new","params":{}}),
+            json!({"action":"respond","requestName":create_name,"result":{"sessionId":session_id}}),
+            json!({"action":"expect_request","requestName":prompt_name,"method":"session/prompt","params":{"sessionId":session_id}}),
+            json!({"action":"send","message":{"jsonrpc":"2.0","id":request_id,"method":"session/request_permission","params":{"sessionId":session_id,"toolCall":{"toolCallId":format!("matrix-permission-{index}"),"title":"Approve matrix command","kind":"execute"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"deny-once","name":"Deny once","kind":"reject_once"}]}}}),
+            json!({"action":"expect_message","message":{"jsonrpc":"2.0","id":request_id,"result":{"outcome":{"outcome":"selected"}}}}),
+            json!({"action":"respond","requestName":prompt_name,"result":{"stopReason":"end_turn"}}),
+        ]);
+    }
+    let config = json!({"version":1,"providers":{
+        "claude":{"enabled":false,"executable":null,"arguments":[]},
+        "cursor":{"enabled":true,"executable":"/usr/bin/env","arguments":["python3","-u",script,serde_json::to_string(&steps)?]}
+    }});
+    write_private_file(
+        &root.join("providers.json"),
+        format!("{}\n", serde_json::to_string_pretty(&config)?).as_bytes(),
+    )?;
+    Ok(())
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> ProofResult<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
 
 pub(super) async fn mcp_send(
     proof: &ProofContext,
@@ -85,21 +188,50 @@ async fn mcp_json(response: reqwest::Response) -> ProofResult<Value> {
 }
 
 pub(super) struct ConfigHashGuard {
-    path: PathBuf,
-    expected: Vec<u8>,
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
 }
 
 impl ConfigHashGuard {
     pub(super) fn capture() -> ProofResult<Self> {
-        let path = PathBuf::from(std::env::var_os("HOME").ok_or("HOME unavailable")?)
-            .join(".codex/config.toml");
-        let expected = Sha256::digest(std::fs::read(&path)?).to_vec();
-        Ok(Self { path, expected })
+        let root = PathBuf::from(
+            std::env::var_os("CODEX_AUTOMATION_PROOF_ROOT")
+                .ok_or("CODEX_AUTOMATION_PROOF_ROOT missing")?,
+        );
+        let marker: Value =
+            serde_json::from_slice(&std::fs::read(root.join("debug-host-context.json"))?)?;
+        let owner_home = PathBuf::from(
+            marker["ownerHome"]
+                .as_str()
+                .ok_or("Matrix marker omitted owner home")?,
+        );
+        let files = [
+            owner_home.join(".codex/config.toml"),
+            owner_home.join(".claude/settings.json"),
+        ]
+        .into_iter()
+        .map(|path| {
+            let expected = match std::fs::read(&path) {
+                Ok(bytes) => Some(Sha256::digest(bytes).to_vec()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            Ok((path, expected))
+        })
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+        Ok(Self { files })
     }
     pub(super) fn verify(&self) -> ProofResult<()> {
-        let observed = Sha256::digest(std::fs::read(&self.path)?);
-        if observed.as_slice() != self.expected.as_slice() {
-            return Err("Owner Codex config hash changed during delivery matrix; stop and report without restoration".into());
+        for (path, expected) in &self.files {
+            let observed = match std::fs::read(path) {
+                Ok(bytes) => Some(Sha256::digest(bytes).to_vec()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            if &observed != expected {
+                return Err(
+                    "Owner Codex or Claude settings changed during delivery matrix; stop and report without restoration".into(),
+                );
+            }
         }
         Ok(())
     }
@@ -114,7 +246,7 @@ pub(super) struct PeerFixture {
 
 impl PeerFixture {
     pub(super) async fn start(proof: &ProofContext) -> ProofResult<Self> {
-        let registry = proof.root.join("claude-peer-fixture");
+        let registry = proof.root.join("home/.claude/sessions");
         if !registry.is_dir() || std::fs::metadata(&registry)?.permissions().mode() & 0o077 != 0 {
             return Err("Debug Host did not enable a private fixture peer registry".into());
         }
@@ -173,13 +305,15 @@ impl PeerFixture {
         marker: &str,
         timeout: Duration,
     ) -> ProofResult<()> {
-        let received = tokio::time::timeout(timeout, self.received.recv())
-            .await?
-            .ok_or("peer fixture stopped before message")?;
-        if !received.contains(marker) {
-            return Err("peer frame omitted matrix marker".into());
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let received = tokio::time::timeout_at(deadline, self.received.recv())
+                .await?
+                .ok_or("peer fixture stopped before message")?;
+            if received.contains(marker) {
+                return Ok(());
+            }
         }
-        Ok(())
     }
     pub(super) async fn shutdown(self) -> ProofResult<()> {
         self.stop.cancel();

@@ -59,6 +59,18 @@ impl ProofContext {
         {
             return Err("Host did not establish the isolated debug profile and Luna model".into());
         }
+        if marker.get("kind").and_then(Value::as_str) == Some("isolatedDeliveryMatrix") {
+            let private_home =
+                PathBuf::from(std::env::var_os("HOME").ok_or("HOME missing")?).canonicalize()?;
+            let private_codex_home =
+                PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("isolated CODEX_HOME missing")?)
+                    .canonicalize()?;
+            if private_home != root.join("home").canonicalize()?
+                || private_codex_home != root.join("codex-home").canonicalize()?
+            {
+                return Err("Matrix HOME and CODEX_HOME must be inside the private root".into());
+            }
+        }
         let workspace = root.join("agent-workspace");
         if let Some(prior_host_pid) = prior_host_pid {
             let resumed_host_pid = marker
@@ -117,8 +129,13 @@ impl ProofContext {
             })
             .ok_or("debug native generation/schema unavailable")?;
         let endpoint = endpoint.endpoint.clone();
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME missing")?).join(".codex");
-        let paths = codex_native_integration::CodexPaths::from_codex_home(home);
+        let codex_home =
+            if marker.get("kind").and_then(Value::as_str) == Some("isolatedDeliveryMatrix") {
+                root.join("codex-home")
+            } else {
+                PathBuf::from(std::env::var_os("HOME").ok_or("HOME missing")?).join(".codex")
+            };
+        let paths = codex_native_integration::CodexPaths::from_codex_home(codex_home);
         let identity =
             codex_native_integration::executable_identity(&paths.managed_executable()).await?;
         let schema_directory = if prior_host_pid.is_some() {
