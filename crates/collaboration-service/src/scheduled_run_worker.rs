@@ -284,8 +284,10 @@ impl ScheduledRunWorker {
             None,
         );
         let prepared = match destination {
-            DestinationPreparation::Existing { target, .. } => {
-                self.execution.prepare_existing_target(&target, &sink).await
+            DestinationPreparation::Existing { target, cwd } => {
+                self.execution
+                    .prepare_existing_target(&target, &cwd, &sink)
+                    .await
             }
             DestinationPreparation::Fresh { endpoint, cwd } => {
                 self.execution

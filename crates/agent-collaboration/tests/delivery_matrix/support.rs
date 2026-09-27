@@ -275,7 +275,12 @@ impl PeerFixture {
                     accepted = listener.accept() => {
                         let (stream, _) = accepted?;
                         let mut lines = BufReader::new(stream).lines();
-                        let _auth = lines.next_line().await?.ok_or("peer auth missing")?;
+                        let auth: Value = serde_json::from_str(
+                            &lines.next_line().await?.ok_or("peer auth missing")?,
+                        )?;
+                        if auth["type"] != "auth" || auth["token"] != PEER_TOKEN {
+                            return Err("peer fixture received invalid authentication".into());
+                        }
                         let user: Value = serde_json::from_str(&lines.next_line().await?.ok_or("peer user frame missing")?)?;
                         let text = user["message"]["content"].as_str().ok_or("peer text missing")?.to_owned();
                         transmit.send(text).await.map_err(|_| "peer receiver closed")?;

@@ -90,7 +90,7 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
         config_guard.verify()?;
     }
 
-    let codex = proof.start_thread("Wake recipient").await?;
+    let codex = create_empty_conversation(&proof, &sender).await?;
     let marker = matrix_marker("wakeSend", "codex");
     wake_send(
         &proof,
@@ -120,6 +120,8 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
     wait_for_input_marker(&mut proof, &codex, &marker, Duration::from_secs(120)).await?;
     records.push(json!({"producer":"scheduledRun","target":"codex","status":"pass","evidence":"scheduled user input in thread/read"}));
     config_guard.verify()?;
+
+    records.push(json!({"producer":"scheduledRun","target":"materializedCodex","status":"pending","evidence":"isolated Codex home has no model auth to finish a first turn; default-run fake native integration test covers the route; live recipient proof follows a production restart"}));
 
     let marker = matrix_marker("scheduledRun", "claude");
     schedule_send(&mut proof, &peer.target, &marker).await?;

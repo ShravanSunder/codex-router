@@ -102,6 +102,8 @@ The suite exercises CLI and MCP messages, fired wakes, scheduled runs, Board Thr
 
 Two additional target rows remain pending: Router-hosted ACP provider sessions until PR 3 is integrated, and a Codex thread active in another app-server or desktop client. The latter needs recipient-observed proof and an actionable ownership outcome; the current Codex route claims every target on its endpoint, and an unclassified native refusal becomes `unknown` with `retryLater`.
 
+The materialized existing Codex target is a pending matrix cell in this isolated run: the private Codex home has no model authentication to finish an initial turn and return the thread to idle. A default-run fake app-server integration test covers its declared cwd and scheduled turn/start. Recipient-observed live proof remains for the post-release real-session run.
+
 After the owner replaces production with a release containing this suite's fixes, repeat one documented pass against real sessions: read the Codex recipient's exact input through `thread/read`, and obtain an explicit receipt confirmation from the Claude Code recipient. Keep that live result separate from the isolated fixture matrix.
 
 ### Restart the Host for board persistence proof

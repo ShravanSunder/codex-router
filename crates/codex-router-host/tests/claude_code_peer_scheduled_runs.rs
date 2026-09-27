@@ -130,7 +130,7 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
         .expect("initial peer evidence");
     let sink = Arc::new(RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new())));
     let prepared = router
-        .prepare_existing_target(&target, sink.as_ref())
+        .prepare_existing_target(&target, "", sink.as_ref())
         .await
         .expect("existing peer prepared");
     assert_eq!(prepared.target, target);

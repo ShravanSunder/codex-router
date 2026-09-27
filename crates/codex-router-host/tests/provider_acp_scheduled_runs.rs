@@ -345,7 +345,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
             && failure.explanation.contains("conversation create")));
     let sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
     let prepared = router
-        .prepare_existing_target(&target, &sink)
+        .prepare_existing_target(&target, "", &sink)
         .await
         .expect("existing target prepared");
     let inputs: CapturedRunInputs<SessionRef, EndpointRef> = serde_json::from_value(json!({
@@ -499,7 +499,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
 
     let stop_sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
     let prepared_stop = router
-        .prepare_existing_target(&target, &stop_sink)
+        .prepare_existing_target(&target, "", &stop_sink)
         .await
         .expect("stop target prepared");
     let stop_run_id = RunId::generate();
@@ -556,7 +556,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
 
     let refused_sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
     let prepared_refused = router
-        .prepare_existing_target(&target, &refused_sink)
+        .prepare_existing_target(&target, "", &refused_sink)
         .await
         .expect("refused target prepared");
     let refused_run_id = RunId::generate();
@@ -641,7 +641,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
 
     let pending_sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
     let prepared_pending = router
-        .prepare_existing_target(&target, &pending_sink)
+        .prepare_existing_target(&target, "", &pending_sink)
         .await
         .expect("pending target prepared");
     let pending_run_id = RunId::generate();

@@ -381,9 +381,11 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
     fn prepare_existing_target<'a>(
         &'a self,
         target: &SessionRef,
+        declared_cwd: &str,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget> {
         let target = target.clone();
+        let declared_cwd = declared_cwd.to_owned();
         Box::pin(async move {
             if self
                 .holder
@@ -397,7 +399,7 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
                 let mut effects = crate::native_thread_preparation::initial_automation_effects(
                     &DestinationPreparation::Existing {
                         target: target.clone(),
-                        cwd: String::new(),
+                        cwd: declared_cwd.clone(),
                     },
                 );
                 effects.generation = Some(admission.generation().clone());
@@ -413,7 +415,7 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
             self.prepare_native(
                 DestinationPreparation::Existing {
                     target,
-                    cwd: String::new(),
+                    cwd: declared_cwd,
                 },
                 "",
                 None,
@@ -458,11 +460,10 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
             let session_id = String::from(run.target.session_id.clone());
             match self.holder.checkout(&session_id) {
                 HeldBindingCheckout::Ready(mut binding) => {
-                    let mut cleanup =
-                        crate::codex_app_server_delivery_route::HeldBindingCleanup::new(
-                            &self.holder,
-                            &session_id,
-                        );
+                    let mut cleanup = crate::unmaterialized_thread_holder::HeldBindingCleanup::new(
+                        &self.holder,
+                        &session_id,
+                    );
                     let stale_generation = {
                         let admission = self
                             .backend
@@ -472,6 +473,12 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
                         binding.generation() != admission.generation()
                     };
                     if stale_generation {
+                        let RouteEffectEvidence::CodexAppServer(mut effects) = run.recorded else {
+                            return Err(DeliveryContractError::InvalidEvidence);
+                        };
+                        effects.submission = agent_automation::SubmissionEffect::NotDispatched;
+                        sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                            .await?;
                         cleanup.finish();
                         return Ok(RunSubmission::Rejected(DeliveryRejection {
                             reason: DeliveryRejectionReason::StaleGeneration,

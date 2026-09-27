@@ -27,6 +27,7 @@ pub struct ProofContext {
     pub client: ControlClient,
     pub native: NativeProtocolConnection,
     pub schemas: Arc<NativePayloadSchemas>,
+    private_codex_home: Option<PathBuf>,
 }
 impl ProofContext {
     pub async fn connect() -> ProofResult<Self> {
@@ -150,6 +151,9 @@ impl ProofContext {
         }
         let native =
             NativeProtocolConnection::connect(&root.join("native-socket/app-server.sock")).await?;
+        let private_codex_home = (marker.get("kind").and_then(Value::as_str)
+            == Some("isolatedDeliveryMatrix"))
+        .then(|| root.join("codex-home"));
         Ok(Self {
             root,
             workspace,
@@ -159,6 +163,7 @@ impl ProofContext {
             client,
             native,
             schemas: Arc::new(schemas),
+            private_codex_home,
         })
     }
     pub async fn start_thread(&mut self, role: &str) -> ProofResult<SessionRef> {
@@ -353,6 +358,16 @@ impl ProofContext {
             != Some(String::from(target.session_id.clone()).as_str())
         {
             return Err("History response selected a different thread".into());
+        }
+        if let Some(private_codex_home) = &self.private_codex_home {
+            let native_path = response
+                .pointer("/thread/path")
+                .and_then(Value::as_str)
+                .ok_or("Native history omitted thread path for isolated matrix")?;
+            let actual_path = std::fs::canonicalize(native_path)?;
+            if !actual_path.starts_with(private_codex_home.canonicalize()?) {
+                return Err("Matrix recipient thread path escaped isolated CODEX_HOME".into());
+            }
         }
         response
             .pointer("/thread/turns")

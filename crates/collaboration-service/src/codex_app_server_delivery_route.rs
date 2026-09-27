@@ -97,7 +97,10 @@ impl CodexAppServerDeliveryRoute {
             .checkout(&String::from(request.target.session_id.clone()));
         let (response, held_idle_submission) = match checked_out {
             HeldBindingCheckout::Ready(mut binding) => {
-                let mut checkout = HeldBindingCleanup::new(&self.holder, binding.session_id());
+                let mut checkout = crate::unmaterialized_thread_holder::HeldBindingCleanup::new(
+                    &self.holder,
+                    binding.session_id(),
+                );
                 if binding.generation() != &generation {
                     checkout.finish();
                     effects.submission = SubmissionEffect::NotDispatched;
@@ -182,35 +185,6 @@ impl CodexAppServerDeliveryRoute {
             });
         }
         Ok(receipt)
-    }
-}
-
-pub(crate) struct HeldBindingCleanup<'a> {
-    holder: &'a crate::UnmaterializedThreadHolder,
-    session_id: String,
-    active: bool,
-}
-impl<'a> HeldBindingCleanup<'a> {
-    pub(crate) fn new(holder: &'a crate::UnmaterializedThreadHolder, session_id: &str) -> Self {
-        Self {
-            holder,
-            session_id: session_id.into(),
-            active: true,
-        }
-    }
-    pub(crate) fn disarm(&mut self) {
-        self.active = false;
-    }
-    pub(crate) fn finish(&mut self) {
-        self.holder.finish(&self.session_id);
-        self.disarm();
-    }
-}
-impl Drop for HeldBindingCleanup<'_> {
-    fn drop(&mut self) {
-        if self.active {
-            self.holder.finish(&self.session_id);
-        }
     }
 }
 

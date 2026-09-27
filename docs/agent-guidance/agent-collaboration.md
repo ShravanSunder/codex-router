@@ -135,7 +135,9 @@ Mid-range waits such as 45 minutes pay a cold resume without being a schedule;
 do not use them unless the recipient is Mini. `--for` / `--until` is assignment
 lifetime, not the wait interval.
 
-Creation means the reminder is durably arranged. Add `--wait-until-first-fire`
+Creation means the reminder is durably arranged. When using `--wait-until-first-fire`,
+pass a saved UUIDv7 `--operation-id` so an interrupted wait can inspect the created wake.
+Add `--wait-until-first-fire`
 to wait for its first firing; that does not wait for native acceptance or a
 reply. With `--json`, the command emits one result whose `result.record.firstFire`
 contains the firing receipt. A wait failure emits one error that retains the
