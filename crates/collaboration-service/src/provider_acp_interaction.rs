@@ -1,5 +1,5 @@
 //! ACP client presentation and broker replies for provider interactions.
-use crate::{InteractionHistoryError, ServiceInteractionBroker};
+use crate::{InteractionHistoryError, ServiceInteractionBroker, TypedInteractionDecision};
 use collaboration_protocol::QuestionResponse;
 use message_board::{Identity, SessionRef};
 use serde_json::{Map, Value, json};
@@ -193,6 +193,23 @@ pub(crate) async fn apply_interaction_reply(
 ) -> Result<(), InteractionHistoryError> {
     match interaction {
         PendingInteraction::Approval { request, .. } => {
+            if matches!(
+                reply.pointer("/result/action").and_then(Value::as_str),
+                Some("cancel" | "decline")
+            ) || reply
+                .pointer("/result/outcome/outcome")
+                .and_then(Value::as_str)
+                == Some("cancelled")
+            {
+                broker
+                    .decide_typed_interaction(
+                        &request.request_id,
+                        actor,
+                        TypedInteractionDecision::Cancel,
+                    )
+                    .await?;
+                return Ok(());
+            }
             let option_id = reply
                 .pointer("/result/outcome/optionId")
                 .and_then(Value::as_str)
@@ -205,9 +222,11 @@ pub(crate) async fn apply_interaction_reply(
                 .decide_typed_interaction(
                     &request.request_id,
                     actor,
-                    option_id,
-                    acknowledge_persistent,
-                    None,
+                    TypedInteractionDecision::SelectApproval {
+                        option_id: option_id.to_owned(),
+                        acknowledge_persistent,
+                        note: None,
+                    },
                 )
                 .await?;
             Ok(())
@@ -216,6 +235,16 @@ pub(crate) async fn apply_interaction_reply(
             let result = reply
                 .get("result")
                 .ok_or(InteractionHistoryError::InvalidQuestion)?;
+            if result.get("action").and_then(Value::as_str) == Some("cancel") {
+                broker
+                    .decide_typed_interaction(
+                        &request.request_id,
+                        actor,
+                        TypedInteractionDecision::Cancel,
+                    )
+                    .await?;
+                return Ok(());
+            }
             let response = match result.get("action").and_then(Value::as_str) {
                 Some("accept") => QuestionResponse::Answered {
                     content: serde_json::from_value(
@@ -224,7 +253,6 @@ pub(crate) async fn apply_interaction_reply(
                     .map_err(|_| InteractionHistoryError::InvalidQuestion)?,
                 },
                 Some("decline") => QuestionResponse::Declined,
-                Some("cancel") => QuestionResponse::Cancelled,
                 _ => return Err(InteractionHistoryError::InvalidQuestion),
             };
             broker

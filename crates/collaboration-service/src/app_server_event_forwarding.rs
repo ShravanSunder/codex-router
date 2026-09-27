@@ -2,9 +2,9 @@
 use crate::router_session_app_server::thread_alias;
 use crate::{
     ApprovalPresentation, ApprovalReply, HubEvent, InteractionDisplayContext, QuestionPresentation,
-    QuestionReply, ServiceInteractionBroker, group_historical_turns, map_approval_reply,
-    map_question_form_reply, render_historical_turn, translate_approval_request,
-    translate_question_request, translate_session_item,
+    QuestionReply, ServiceInteractionBroker, TypedInteractionDecision, group_historical_turns,
+    map_approval_reply, map_question_form_reply, render_historical_turn,
+    translate_approval_request, translate_question_request, translate_session_item,
 };
 use collaboration_protocol::QuestionResponse;
 use message_board::{Identity, SessionRef};
@@ -323,16 +323,25 @@ impl AppServerEventForwarding {
                 request,
                 presentation,
             } => {
-                let option_id = match map_approval_reply(
+                let decision = match map_approval_reply(
                     &presentation,
                     reply.get("result").unwrap_or(&Value::Null),
                 ) {
-                    Ok(ApprovalReply::Selected(option_id)) => option_id,
-                    Ok(ApprovalReply::Cancelled) => {
-                        // TODO: Use the actor-checked broker Cancel decision once lane B lands it.
-                        tracing::warn!(request_id = %request.request_id, "provider TUI approval cancellation awaits broker Cancel decision");
-                        return Vec::new();
+                    Ok(ApprovalReply::Selected(option_id)) => {
+                        let acknowledge_persistent = request.options.iter().any(|option| {
+                            option.option_id == option_id
+                                && matches!(
+                                    option.choice.scope,
+                                    session_event_model::ApprovalScope::Persistent { .. }
+                                )
+                        });
+                        TypedInteractionDecision::SelectApproval {
+                            option_id: option_id.as_str().to_owned(),
+                            acknowledge_persistent,
+                            note: None,
+                        }
                     }
+                    Ok(ApprovalReply::Cancelled) => TypedInteractionDecision::Cancel,
                     Err(_) => {
                         return self
                             .retry_approval_submission(
@@ -345,21 +354,8 @@ impl AppServerEventForwarding {
                             .await;
                     }
                 };
-                let acknowledge_persistent = request.options.iter().any(|option| {
-                    option.option_id == option_id
-                        && matches!(
-                            option.choice.scope,
-                            session_event_model::ApprovalScope::Persistent { .. }
-                        )
-                });
                 let decision = broker
-                    .decide_typed_interaction(
-                        &request.request_id,
-                        &self.actor,
-                        option_id.as_str(),
-                        acknowledge_persistent,
-                        None,
-                    )
+                    .decide_typed_interaction(&request.request_id, &self.actor, decision)
                     .await;
                 match decision {
                     Ok(_) => Vec::new(),
@@ -425,9 +421,20 @@ impl AppServerEventForwarding {
                     QuestionReply::Declined => QuestionResponse::Declined,
                     QuestionReply::Cancelled => QuestionResponse::Cancelled,
                 };
-                let decision = broker
-                    .respond_question(&request.request_id, &self.actor, response)
-                    .await;
+                let decision = if response == QuestionResponse::Cancelled {
+                    broker
+                        .decide_typed_interaction(
+                            &request.request_id,
+                            &self.actor,
+                            TypedInteractionDecision::Cancel,
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    broker
+                        .respond_question(&request.request_id, &self.actor, response)
+                        .await
+                };
                 match decision {
                     Ok(()) => Vec::new(),
                     Err(error) => {

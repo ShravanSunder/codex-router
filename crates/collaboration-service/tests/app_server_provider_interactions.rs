@@ -1,7 +1,7 @@
 use collaboration_protocol::QuestionResponse;
 use collaboration_service::{
     HubEvent, NativeControlBackend, NativeGenerationGate, RouterSessionAppServerContext,
-    ServiceInteractionBroker, SessionCommandPort, SessionEventHub,
+    ServiceInteractionBroker, SessionCommandPort, SessionEventHub, TypedApprovalResolution,
     serve_router_session_app_server_connection,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -159,7 +159,10 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
         ))
         .await?;
     let selected = tokio::time::timeout(Duration::from_secs(2), agent_reply).await??;
-    assert_eq!(selected.option_id.as_str(), "allow-once");
+    assert!(
+        matches!(selected, TypedApprovalResolution::Selected(selection)
+        if selection.option_id.as_str() == "allow-once")
+    );
 
     let question: QuestionRequest = serde_json::from_value(json!({
         "requestId":"question-1","prompt":"Choose count","fields":[
@@ -301,6 +304,42 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
         QuestionResponse::Answered {
             content: serde_json::from_value(json!({"mode":{"selectedOptionIds":["safe"]}}))?
         }
+    );
+    let cancel_question: QuestionRequest = serde_json::from_value(json!({
+        "requestId":"question-cancel","prompt":"Skip this question","fields":[
+            {"kind":"boolean","fieldId":"ready","label":"Ready","description":null,"required":true}
+        ]
+    }))?;
+    let cancelled_question_reply = broker
+        .request_question(
+            backend.session.clone(),
+            actor.clone(),
+            cancel_question.clone(),
+            None,
+        )
+        .await?;
+    let _sent = backend.events.send(HubEvent {
+        sequence: 93,
+        event: SessionEvent::InteractionRequested {
+            interaction: PendingInteraction::Question {
+                approver: actor.clone(),
+                request: Box::new(cancel_question),
+            },
+        },
+    });
+    let cancel_form: Value =
+        serde_json::from_str(client.next().await.ok_or("cancel form")??.to_text()?)?;
+    assert_eq!(cancel_form["method"], "mcpServer/elicitation/request");
+    client
+        .send(Message::Text(
+            json!({"id":cancel_form["id"],"result":{"action":"cancel"}})
+                .to_string()
+                .into(),
+        ))
+        .await?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), cancelled_question_reply).await??,
+        QuestionResponse::Cancelled
     );
     let withdrawn: QuestionRequest = serde_json::from_value(json!({
         "requestId":"question-withdraw","prompt":"Choose once","fields":[
@@ -474,13 +513,61 @@ async fn app_server_approver_decides_exact_option_and_answers_question() -> Test
                 .into(),
         ))
         .await?;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), second_agent_reply).await??,
+        TypedApprovalResolution::Selected(selection) if selection.option_id.as_str() == "allow-again"
+    ));
+    let cancelled_request = ApprovalRequest {
+        request_id: "approval-cancel".into(),
+        title: "Skip this command".into(),
+        description: None,
+        subject: Some(ApprovalSubject::Command {
+            command: "pwd".into(),
+            cwd: "/tmp".into(),
+        }),
+        options_origin: session_event_model::OptionsOrigin::AgentOffered,
+        options: OfferedOptions::new(vec![OfferedOption {
+            option_id: OfferedOptionId::new("allow-only")?,
+            label: "Allow once".into(),
+            choice: ApprovalChoice::new(ApprovalEffect::Allow, ApprovalScope::Once),
+        }])?,
+    };
+    let cancelled_agent_reply = broker
+        .request_typed_approval(
+            backend.session.clone(),
+            serde_json::from_value(json!({"kind":"human","humanId":"owner"}))?,
+            cancelled_request.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+    let _sent = backend.events.send(HubEvent {
+        sequence: 96,
+        event: SessionEvent::InteractionRequested {
+            interaction: PendingInteraction::Approval {
+                approver: serde_json::from_value(json!({"kind":"human","humanId":"owner"}))?,
+                request: Box::new(cancelled_request),
+            },
+        },
+    });
+    let cancel_prompt: Value =
+        serde_json::from_str(client.next().await.ok_or("cancel prompt")??.to_text()?)?;
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), second_agent_reply)
-            .await??
-            .option_id
-            .as_str(),
-        "allow-again"
+        cancel_prompt["method"],
+        "item/commandExecution/requestApproval"
     );
+    client
+        .send(Message::Text(
+            json!({"id":cancel_prompt["id"],"result":{"decision":"cancel"}})
+                .to_string()
+                .into(),
+        ))
+        .await?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), cancelled_agent_reply).await??,
+        TypedApprovalResolution::Cancelled
+    );
+    assert!(broker.list_typed_approvals(true).await.is_empty());
     other_client.close(None).await?;
     other_server.await??;
     client.close(None).await?;

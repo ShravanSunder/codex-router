@@ -2,7 +2,8 @@ use codex_acp_adapter::{AcpSchemaCatalog, NativeStoredSessions};
 use collaboration_protocol::QuestionResponse;
 use collaboration_service::{
     AcpChannelListener, HubEvent, NativeControlBackend, NativeGenerationGate,
-    ServiceInteractionBroker, SessionCommandPort, SessionEventHub, UnmaterializedThreadHolder,
+    ServiceInteractionBroker, SessionCommandPort, SessionEventHub, TypedApprovalResolution,
+    UnmaterializedThreadHolder,
 };
 use message_board::{Identity, SessionEndpointRef};
 use serde_json::{Value, json};
@@ -208,7 +209,58 @@ async fn only_the_approver_receives_and_decides_exact_provider_options() -> Test
     )
     .await?;
     let selected = tokio::time::timeout(Duration::from_secs(2), agent_reply).await??;
-    assert_eq!(selected.option_id.as_str(), "allow-once");
+    assert!(
+        matches!(selected, TypedApprovalResolution::Selected(selection)
+        if selection.option_id.as_str() == "allow-once")
+    );
+    let cancel_request = approval("approval-cancel")?;
+    let cancelled_agent_reply = broker
+        .request_typed_approval(
+            provider.session.clone(),
+            owner.clone(),
+            cancel_request.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+    let pending_cancel = PendingInteraction::Approval {
+        approver: owner.clone(),
+        request: Box::new(cancel_request),
+    };
+    let _sent = provider.events.send(HubEvent {
+        sequence: 72,
+        event: SessionEvent::InteractionRequested {
+            interaction: pending_cancel.clone(),
+        },
+    });
+    let _sent = provider.events.send(HubEvent {
+        sequence: 73,
+        event: SessionEvent::StateChanged {
+            state: SessionState::RequiresAction {
+                pending: PendingInteractions::new(vec![pending_cancel]).ok_or("pending")?,
+            },
+        },
+    });
+    let first_cancel_frame = next_frame(&mut owner_lines).await?;
+    let second_cancel_frame = next_frame(&mut owner_lines).await?;
+    let cancel_offer = if first_cancel_frame["method"] == "session/request_permission" {
+        first_cancel_frame
+    } else {
+        second_cancel_frame
+    };
+    assert_eq!(cancel_offer["method"], "session/request_permission");
+    send_frame(
+        &mut owner_writer,
+        json!({"jsonrpc":"2.0","id":cancel_offer["id"],"result":{
+            "outcome":{"outcome":"cancelled"}
+        }}),
+    )
+    .await?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), cancelled_agent_reply).await??,
+        TypedApprovalResolution::Cancelled
+    );
+    assert!(broker.list_typed_approvals(true).await.is_empty());
     stop.cancel();
     serving.await??;
     Ok(())
@@ -281,7 +333,7 @@ async fn approver_question_form_returns_typed_answers_to_the_agent() -> TestResu
         sequence: 80,
         event: SessionEvent::InteractionRequested {
             interaction: PendingInteraction::Question {
-                approver: owner,
+                approver: owner.clone(),
                 request: Box::new(request),
             },
         },
@@ -312,6 +364,39 @@ async fn approver_question_form_returns_typed_answers_to_the_agent() -> TestResu
         QuestionResponse::Answered {
             content: serde_json::from_value(json!({"count":3,"dryRun":true}))?
         }
+    );
+    let cancel_request: QuestionRequest = serde_json::from_value(json!({
+        "requestId":"question-cancel","prompt":"Skip this question","fields":[
+            {"kind":"boolean","fieldId":"ready","label":"Ready","description":null,"required":true}
+        ]
+    }))?;
+    let cancelled_agent_reply = broker
+        .request_question(
+            provider.session.clone(),
+            owner.clone(),
+            cancel_request.clone(),
+            None,
+        )
+        .await?;
+    let _sent = provider.events.send(HubEvent {
+        sequence: 81,
+        event: SessionEvent::InteractionRequested {
+            interaction: PendingInteraction::Question {
+                approver: owner,
+                request: Box::new(cancel_request),
+            },
+        },
+    });
+    let cancel_form = next_frame(&mut lines).await?;
+    assert_eq!(cancel_form["method"], "elicitation/create");
+    send_frame(
+        &mut writer,
+        json!({"jsonrpc":"2.0","id":cancel_form["id"],"result":{"action":"cancel"}}),
+    )
+    .await?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), cancelled_agent_reply).await??,
+        QuestionResponse::Cancelled
     );
     stop.cancel();
     serving.await??;
