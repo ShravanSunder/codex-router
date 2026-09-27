@@ -84,18 +84,27 @@ mod quota_reset_pty_test {
             "inspection GETs did not target one routing account",
         )?;
 
+        stage(
+            terminal.wait_for_text("esc/ctrl-r back", SEMANTIC_WAIT),
+            "inspection cancel footer",
+        )?;
         let resize_start = terminal.transcript_len();
         stage(terminal.resize(48, 170), "resize request")?;
         stage(
-            terminal.wait_for_text_after("Reset credit", resize_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("esc/ctrl-r back", resize_start, SEMANTIC_WAIT),
             "inspection after resize",
         )?;
         let cancel_start = terminal.transcript_len();
         terminal.send(&[0x12])?;
-        stage(
-            terminal.wait_for_text_after("ctrl-r reset credits", cancel_start, SEMANTIC_WAIT),
-            "cancelled inspection browse restoration",
-        )?;
+        if let Err(error) =
+            terminal.wait_for_text_after("ctrl-r reset credits", cancel_start, SEMANTIC_WAIT)
+        {
+            let diagnostics = terminal.safe_semantic_diagnostics(cancel_start);
+            return Err(std::io::Error::other(format!(
+                "cancelled inspection browse restoration: {error}; {diagnostics}"
+            ))
+            .into());
+        }
         terminal.send(b"q")?;
         let transcript = stage(terminal.finish(SEMANTIC_WAIT), "cancelled path child exit")?;
         let request_records = stage(provider.finish(), "provider shutdown")?;
