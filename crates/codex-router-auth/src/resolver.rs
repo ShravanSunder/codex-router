@@ -324,6 +324,12 @@ impl OpenAiOAuthRefreshClient {
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|header| header.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(CredentialRefreshFailure::confirmed_unspent(
+                CredentialFailureClass::RateLimited,
+                retry_after_seconds,
+            ));
+        }
         let body = response.text().map_err(|_| {
             CredentialRefreshFailure::ambiguous(CredentialFailureClass::ProviderOutcomeAmbiguous)
         })?;
@@ -336,10 +342,6 @@ impl OpenAiOAuthRefreshClient {
                 (400, Some("invalid_grant")) => {
                     CredentialRefreshFailure::ambiguous(CredentialFailureClass::ProviderRejected)
                 }
-                (429, _) => CredentialRefreshFailure::confirmed_unspent(
-                    CredentialFailureClass::RateLimited,
-                    retry_after_seconds,
-                ),
                 (500..=599, Some("temporarily_unavailable")) => {
                     CredentialRefreshFailure::confirmed_unspent(
                         CredentialFailureClass::ProviderTemporary,

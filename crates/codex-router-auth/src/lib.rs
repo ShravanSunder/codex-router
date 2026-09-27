@@ -74,6 +74,7 @@ mod tests {
     use crate::resolver::credential_renewal_is_due;
     use crate::router_credentials::RouterCredentialBundle;
 
+    mod credential_renewal_http_outcome_tests;
     mod credential_renewal_outcome_tests;
     mod credential_renewal_tests;
 
