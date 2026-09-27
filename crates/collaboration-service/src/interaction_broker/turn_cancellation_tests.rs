@@ -42,6 +42,7 @@ async fn typed_approval_cancelled_before_admission_records_turn_cancelled() {
             typed_request("typed-before-admission"),
             turn_cancellation,
             CancellationToken::new(),
+            None,
         )
         .await;
     assert!(matches!(result, Err(InteractionHistoryError::NotPending)));
@@ -77,6 +78,7 @@ async fn typed_decision_after_turn_cancel_is_not_pending() {
             typed_request("typed-decision-race"),
             turn_cancellation.clone(),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("pending request");
@@ -128,6 +130,7 @@ async fn typed_turn_cancelled_after_record_before_insert_leaves_no_pending_row()
                     typed_request("typed-after-record"),
                     turn_cancellation,
                     CancellationToken::new(),
+                    None,
                 )
                 .await
         }
@@ -171,6 +174,7 @@ async fn typed_session_cancellation_settles_only_that_sessions_requests() {
             typed_request("first"),
             CancellationToken::new(),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("first pending");
@@ -181,6 +185,7 @@ async fn typed_session_cancellation_settles_only_that_sessions_requests() {
             typed_request("second"),
             CancellationToken::new(),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("second pending");
@@ -381,6 +386,7 @@ async fn only_approver_can_explicitly_cancel_a_pending_approval() {
             typed_request("approver-cancel-approval"),
             CancellationToken::new(),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("approval pending");
@@ -520,6 +526,7 @@ async fn retired_requester_questions_are_cancelled_with_approvals() {
             typed_request("retired-approval"),
             CancellationToken::new(),
             retirement.clone(),
+            None,
         )
         .await
         .expect("approval admitted");

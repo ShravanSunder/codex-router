@@ -34,6 +34,7 @@ pub enum InteractionCancelReason {
     TurnCancelled,
     ProviderRetired,
     ApproverUnreachable,
+    RequesterUnavailable,
     HostRestarted,
     EventPublicationFailed,
     AgentCancelled,
@@ -48,6 +49,7 @@ impl InteractionCancelReason {
             Self::TurnCancelled => "turnCancelled",
             Self::ProviderRetired => "providerRetired",
             Self::ApproverUnreachable => "approverUnreachable",
+            Self::RequesterUnavailable => "requesterUnavailable",
             Self::HostRestarted => "hostRestarted",
             Self::EventPublicationFailed => "eventPublicationFailed",
             Self::AgentCancelled => "agentCancelled",
@@ -64,6 +66,7 @@ impl From<String> for InteractionCancelReason {
             "turnCancelled" => Self::TurnCancelled,
             "providerRetired" => Self::ProviderRetired,
             "approverUnreachable" => Self::ApproverUnreachable,
+            "requesterUnavailable" => Self::RequesterUnavailable,
             "hostRestarted" => Self::HostRestarted,
             "eventPublicationFailed" => Self::EventPublicationFailed,
             "agentCancelled" => Self::AgentCancelled,
@@ -255,6 +258,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&InteractionCancelReason::ApproverCancelled).unwrap(),
             "\"approverCancelled\""
+        );
+        assert_eq!(
+            serde_json::from_str::<InteractionCancelReason>("\"requesterUnavailable\"").unwrap(),
+            InteractionCancelReason::RequesterUnavailable
         );
         assert_eq!(
             serde_json::to_string(&ProviderSettingFailureReason::OutcomeUnknown).unwrap(),

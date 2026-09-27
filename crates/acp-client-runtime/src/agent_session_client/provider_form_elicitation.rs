@@ -281,6 +281,7 @@ impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderFormElicitationHa
         let fields = canonical.fields.clone();
         let port = Arc::clone(&self.interaction_port);
         let request_cancellation = responder.cancellation();
+        let response_guard = context.responses.track();
         connection.spawn(async move {
             let agent_cancellation = CancellationToken::new();
             let answer = port.request_question(
@@ -298,7 +299,9 @@ impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderFormElicitationHa
                 }
                 response = &mut answer => response,
             };
-            responder.respond(elicitation_answer(response, &fields))
+            let queued = responder.respond(elicitation_answer(response, &fields));
+            drop(response_guard);
+            queued
         })?;
         Ok(Handled::Yes)
     }
