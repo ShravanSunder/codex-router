@@ -17,6 +17,7 @@ use codex_router_secret_store::file_backend::FileSecretStore;
 
 pub mod account;
 mod credential_runtime;
+mod credential_upkeep_worker;
 pub mod doctor;
 mod host_command;
 mod live;
@@ -59,7 +60,7 @@ use cli_argument_parsing::{CliCommand, ProfileCommand, TokenCommand};
 
 const DEFAULT_PROFILE_PORT: u16 = 8787;
 const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS: u64 = 300;
-const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 240;
+const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 180;
 const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 #[cfg(all(debug_assertions, not(test)))]
@@ -216,6 +217,84 @@ where
     }
 }
 
+fn run_serve_command_with_upkeep_start(
+    stdout: &mut impl Write,
+    command: cli_argument_parsing::ServeCommand,
+    upkeep_start: impl FnOnce(
+        &Path,
+        &Path,
+    ) -> Result<
+        credential_upkeep_worker::CredentialUpkeepWorker,
+        credential_upkeep_worker::CredentialUpkeepStartError,
+    >,
+) -> Result<(), CliError> {
+    let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
+    let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url)?;
+    let state_db = command.state_db.clone();
+    let secret_root = command.secret_root.clone();
+    let mut runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
+        bind_address,
+        upstream_endpoint,
+        command.state_db,
+        command.secret_root,
+    );
+    if let Some(audit_file) = command.audit_file {
+        runtime_config = runtime_config.with_audit_file(audit_file);
+    }
+    if let Some(report_file) = command.websocket_registry_report_file.clone() {
+        validate_websocket_registry_report_file(&report_file)?;
+        runtime_config = runtime_config.with_websocket_registry_report_file(report_file);
+    }
+    let token_reload_watcher = if command.require_local_token {
+        let secret_store =
+            FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
+        let token_service = LocalRouterTokenService::new(secret_store.clone());
+        let local_token = token_service.load_current()?;
+        let initial_token_generation = local_token.generation();
+        runtime_config = runtime_config.with_required_local_token(local_token);
+        Some((secret_store, initial_token_generation))
+    } else {
+        None
+    };
+    if let Some(now_unix_seconds) = command.now_unix_seconds {
+        runtime_config =
+            runtime_config.with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
+    }
+    let runtime = LoopbackRouterRuntime::start(runtime_config)?;
+    let _token_reload_watcher =
+        token_reload_watcher.map(|(secret_store, initial_token_generation)| {
+            LocalTokenReloadWatcher::start(
+                secret_store,
+                runtime.local_auth_reloader(),
+                initial_token_generation,
+            )
+        });
+
+    crate::presentation::host::render_progress_event(
+        stdout,
+        codex_router_host::HostProgress::RouterReady,
+    )
+    .map_err(CliError::Stdout)?;
+    writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
+    let _credential_upkeep_worker = upkeep_start(&state_db, &secret_root)?;
+    let _quota_refresh_worker = if command.background_quota_refresh_enabled {
+        Some(quota::start_background_quota_refresh_worker(
+            state_db,
+            secret_root,
+            DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+            Duration::from_secs(command.quota_refresh_interval_seconds),
+            runtime.websocket_quota_floor_notifier(),
+        )?)
+    } else {
+        None
+    };
+    let handled_connections = runtime.serve_protocol_connections(command.max_connections)?;
+    if let Some(report_file) = command.websocket_registry_report_file {
+        write_websocket_registry_report_file(&report_file, handled_connections, &runtime)?;
+    }
+    Ok(())
+}
+
 /// Executes CLI args with process-independent IO.
 pub fn run_with_io<I, W, E>(
     args: I,
@@ -231,70 +310,11 @@ where
     let command = CliCommand::parse(args)?;
     match command {
         CliCommand::Serve(command) => {
-            let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
-            let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url)?;
-            let state_db = command.state_db.clone();
-            let secret_root = command.secret_root.clone();
-            let mut runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
-                bind_address,
-                upstream_endpoint,
-                command.state_db,
-                command.secret_root,
-            );
-            if let Some(audit_file) = command.audit_file {
-                runtime_config = runtime_config.with_audit_file(audit_file);
-            }
-            if let Some(report_file) = command.websocket_registry_report_file.clone() {
-                validate_websocket_registry_report_file(&report_file)?;
-                runtime_config = runtime_config.with_websocket_registry_report_file(report_file);
-            }
-            let token_reload_watcher = if command.require_local_token {
-                let secret_store =
-                    FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
-                let token_service = LocalRouterTokenService::new(secret_store.clone());
-                let local_token = token_service.load_current()?;
-                let initial_token_generation = local_token.generation();
-                runtime_config = runtime_config.with_required_local_token(local_token);
-                Some((secret_store, initial_token_generation))
-            } else {
-                None
-            };
-            if let Some(now_unix_seconds) = command.now_unix_seconds {
-                runtime_config = runtime_config
-                    .with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
-            }
-            let runtime = LoopbackRouterRuntime::start(runtime_config)?;
-            let _token_reload_watcher =
-                token_reload_watcher.map(|(secret_store, initial_token_generation)| {
-                    LocalTokenReloadWatcher::start(
-                        secret_store,
-                        runtime.local_auth_reloader(),
-                        initial_token_generation,
-                    )
-                });
-
-            crate::presentation::host::render_progress_event(
+            run_serve_command_with_upkeep_start(
                 stdout,
-                codex_router_host::HostProgress::RouterReady,
-            )
-            .map_err(CliError::Stdout)?;
-            writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
-            let _quota_refresh_worker = if command.background_quota_refresh_enabled {
-                Some(quota::start_background_quota_refresh_worker(
-                    state_db,
-                    secret_root,
-                    DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-                    Duration::from_secs(command.quota_refresh_interval_seconds),
-                    runtime.websocket_quota_floor_notifier(),
-                )?)
-            } else {
-                None
-            };
-            let handled_connections =
-                runtime.serve_protocol_connections(command.max_connections)?;
-            if let Some(report_file) = command.websocket_registry_report_file {
-                write_websocket_registry_report_file(&report_file, handled_connections, &runtime)?;
-            }
+                command,
+                credential_upkeep_worker::start_background_credential_upkeep_worker,
+            )?;
         }
         CliCommand::Token(TokenCommand::Init { router_root }) => {
             let store =

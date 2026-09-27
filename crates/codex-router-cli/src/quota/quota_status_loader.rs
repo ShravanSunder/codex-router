@@ -166,6 +166,12 @@ pub(super) async fn quota_status_report(
             windows: display_windows,
             weekly_pace,
             weekly_quota_floor_basis_points,
+            oauth_maintenance: quota_history_state
+                .load_credential_maintenance(account.account_id())
+                .await?
+                .filter(|record| {
+                    Some(record.credential_generation) == account.active_credential_generation()
+                }),
         });
         assessment_inputs.push(assessment_input);
     }

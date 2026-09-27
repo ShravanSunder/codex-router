@@ -7,6 +7,7 @@ use sqlx::migrate::MigrateError;
 
 use crate::account_schema::LeaseShape;
 use crate::account_schema::LegacyShape;
+use crate::account_schema::validate_baseline_schema;
 use crate::account_schema::validate_legacy_schema;
 use crate::account_schema::validate_target_schema;
 use crate::sqlite::StateStoreError;
@@ -205,7 +206,7 @@ async fn migrate_legacy_or_fresh_database(
         .execute(&mut **transaction)
         .await
         .map_err(crate::sqlite::sqlx_error)?;
-    validate_target_schema(transaction).await?;
+    validate_baseline_schema(transaction).await?;
 
     let after = CriticalStateSnapshot::capture(transaction).await?;
     if before != after {
@@ -224,6 +225,7 @@ async fn migrate_legacy_or_fresh_database(
         .run_direct(None, &mut **transaction, false)
         .await
         .map_err(map_migration_error)?;
+    validate_target_schema(transaction).await?;
     preserve_legacy_version_marker(transaction).await
 }
 

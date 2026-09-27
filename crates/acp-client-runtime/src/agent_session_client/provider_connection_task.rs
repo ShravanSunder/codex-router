@@ -72,6 +72,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         let task_shutdown = shutdown.clone();
         let connection_retirement = retirement.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (admission_settled_tx, admission_settled_rx) = tokio::sync::oneshot::channel();
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(32);
         let session_capabilities = Arc::new(tokio::sync::RwLock::new(HashMap::<
             String,
@@ -241,6 +242,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     };
                     let base_capabilities = admission.as_ref().ok().map(|(_, report)| report.clone());
                     let _result = ready_tx.send(admission);
+                    let _result = admission_settled_tx.send(());
                     if admitted {
                         let mut sessions = HashMap::<
                             String,
@@ -427,9 +429,18 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     Ok(())
                 },
             );
+            tokio::pin!(connection);
             let child_exited = tokio::select! {
-                _result = connection => false,
-                _status = child.status() => true,
+                _result = &mut connection => false,
+                _status = child.status() => {
+                    // The exited child may have flushed its initialize response into stdout.
+                    // Let the connection settle admission before retiring it.
+                    tokio::select! {
+                        _settled = admission_settled_rx => {}
+                        _result = &mut connection => {}
+                    }
+                    true
+                },
             };
             connection_retirement.cancel();
             final_interaction_port.cancel_retired().await;

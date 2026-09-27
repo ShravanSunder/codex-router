@@ -5,6 +5,8 @@ mod account_migrations;
 pub mod account_routing_policy;
 mod account_schema;
 pub mod affinity_owner;
+pub mod credential_maintenance;
+mod credential_maintenance_store;
 pub mod quota_snapshot;
 pub mod repositories;
 pub mod selection_projection;
@@ -46,6 +48,7 @@ mod tests {
     use crate::affinity_owner::AffinitySourceTransport;
     use crate::affinity_owner::PreviousResponseAffinityOwnerLookup;
     use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
+    use crate::credential_maintenance::CredentialMaintenanceState;
     use crate::quota_snapshot::PersistedQuotaHistoryObservation;
     use crate::quota_snapshot::PersistedQuotaSnapshot;
     use crate::quota_snapshot::PersistedSelectorQuotaWindow;
@@ -79,6 +82,233 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn credential_refresh_claim_survives_reopen_and_activates_only_its_reserved_slot() {
+        let temp_dir = TestTempDir::new("credential_claim_reopen");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let account_id = account_id("claimed-account");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        store
+            .upsert_account(
+                &AccountRecord::new(account_id.clone(), "claim", AccountStatus::Enabled)
+                    .with_active_credential_generation(1),
+            )
+            .await
+            .expect("account should save");
+        assert!(
+            store
+                .claim_credential_refresh(&account_id, 1, 3)
+                .await
+                .expect("claim should save")
+        );
+        store.close().await.expect("state should close");
+
+        let reopened = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should reopen");
+        let claim = reopened
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("claim should read")
+            .expect("claim should persist");
+        assert_eq!(claim.state, CredentialMaintenanceState::InProgress);
+        assert_eq!(claim.claimed_successor_generation, Some(3));
+        assert!(
+            !reopened
+                .claim_credential_refresh(&account_id, 1, 4)
+                .await
+                .expect("second claim should evaluate")
+        );
+        assert!(
+            !reopened
+                .activate_claimed_credential_generation(&account_id, 1, 2, 100)
+                .await
+                .expect("wrong slot should evaluate")
+        );
+        assert!(
+            reopened
+                .activate_claimed_credential_generation(&account_id, 1, 3, 100)
+                .await
+                .expect("claimed slot should activate")
+        );
+        let active = reopened
+            .load_account(&account_id)
+            .await
+            .expect("account should load")
+            .expect("account should exist");
+        assert_eq!(active.active_credential_generation(), Some(3));
+        let health = reopened
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("health should load")
+            .expect("health should exist");
+        assert_eq!(health.state, CredentialMaintenanceState::Healthy);
+        assert_eq!(health.last_success_unix_seconds, Some(100));
+    }
+
+    #[tokio::test]
+    async fn current_generation_claim_replaces_stale_maintenance_without_reviving_old_claim() {
+        let temp_dir = TestTempDir::new("credential_claim_new_generation");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let account_id = account_id("replaced-credential-account");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        store
+            .upsert_account(
+                &AccountRecord::new(account_id.clone(), "replaced", AccountStatus::Enabled)
+                    .with_active_credential_generation(1),
+            )
+            .await
+            .expect("old account should save");
+        assert!(
+            store
+                .claim_credential_refresh(&account_id, 1, 2)
+                .await
+                .expect("old claim")
+        );
+        store
+            .upsert_account(
+                &AccountRecord::new(account_id.clone(), "replaced", AccountStatus::Enabled)
+                    .with_active_credential_generation(3),
+            )
+            .await
+            .expect("new login should save");
+
+        assert!(
+            store
+                .claim_credential_refresh(&account_id, 3, 4)
+                .await
+                .expect("new claim")
+        );
+        assert!(
+            !store
+                .activate_claimed_credential_generation(&account_id, 1, 2, 100)
+                .await
+                .expect("old claim cannot activate")
+        );
+        let claim = store
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("claim load")
+            .expect("claim exists");
+        assert_eq!(claim.credential_generation, 3);
+        assert_eq!(claim.claimed_successor_generation, Some(4));
+        assert!(
+            store
+                .activate_claimed_credential_generation(&account_id, 3, 4, 100)
+                .await
+                .expect("new claim activates")
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_success_time_survives_current_generation_failures_only() {
+        use crate::credential_maintenance::CredentialFailureClass;
+
+        let temp_dir = TestTempDir::new("maintenance_success_generation");
+        let state = AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite"))
+            .await
+            .expect("state should open");
+        let account_id = account_id("success-time-account");
+        let account = |generation| {
+            AccountRecord::new(account_id.clone(), "success time", AccountStatus::Enabled)
+                .with_active_credential_generation(generation)
+        };
+        state
+            .upsert_account(&account(1))
+            .await
+            .expect("initial account");
+        assert!(
+            state
+                .claim_credential_refresh(&account_id, 1, 2)
+                .await
+                .expect("initial claim")
+        );
+        assert!(
+            state
+                .activate_claimed_credential_generation(&account_id, 1, 2, 100)
+                .await
+                .expect("initial activation")
+        );
+
+        assert!(
+            state
+                .claim_credential_refresh(&account_id, 2, 3)
+                .await
+                .expect("same-generation claim")
+        );
+        let current_claim = state
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("claim load")
+            .expect("claim");
+        assert_eq!(current_claim.last_success_unix_seconds, Some(100));
+        assert!(
+            state
+                .finish_credential_refresh_claim(
+                    &account_id,
+                    2,
+                    3,
+                    CredentialMaintenanceState::Retrying,
+                    CredentialFailureClass::TransportUnspent,
+                    Some(200),
+                )
+                .await
+                .expect("safe claim failure")
+        );
+        assert!(
+            state
+                .record_pre_provider_local_failure(&account_id, 2, 200)
+                .await
+                .expect("same-generation local failure")
+        );
+        let current_failure = state
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("failure load")
+            .expect("failure");
+        assert_eq!(current_failure.last_success_unix_seconds, Some(100));
+
+        state
+            .upsert_account(&account(4))
+            .await
+            .expect("replacement account");
+        assert!(
+            state
+                .record_pre_provider_local_failure(&account_id, 4, 300)
+                .await
+                .expect("replacement local failure")
+        );
+        let replacement_failure = state
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("replacement failure load")
+            .expect("replacement failure");
+        assert_eq!(replacement_failure.credential_generation, 4);
+        assert_eq!(replacement_failure.last_success_unix_seconds, None);
+
+        state
+            .upsert_account(&account(6))
+            .await
+            .expect("second replacement account");
+        assert!(
+            state
+                .claim_credential_refresh(&account_id, 6, 7)
+                .await
+                .expect("replacement claim")
+        );
+        let replacement_claim = state
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("replacement claim load")
+            .expect("replacement claim");
+        assert_eq!(replacement_claim.credential_generation, 6);
+        assert_eq!(replacement_claim.last_success_unix_seconds, None);
+    }
+
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn convert_current_fixture_to_v10(database_path: &Path) {
@@ -87,6 +317,7 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE IF EXISTS credential_maintenance;
                  DROP TABLE account_routing_policies;
                  DROP TABLE session_account_affinities;
                  PRAGMA user_version = 10;",
@@ -100,6 +331,7 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE IF EXISTS credential_maintenance;
                  ALTER TABLE account_routing_policies RENAME TO account_routing_policies_current;
                  CREATE TABLE account_routing_policies (
                     account_id TEXT PRIMARY KEY NOT NULL,
@@ -124,6 +356,7 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE IF EXISTS credential_maintenance;
                  DROP TABLE session_account_affinities;
                  PRAGMA user_version = 12;",
             )

@@ -43,6 +43,7 @@ use futures_util::stream::SplitStream;
 use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async_with_config;
@@ -69,10 +70,14 @@ use tokio_util::task::TaskTracker;
 use crate::account_selection::AccountDecisionSelector;
 use crate::account_selection::ActiveReservationGuard;
 use crate::account_selection::AsyncAccountDecisionSelector;
+use crate::account_selection::LiveFloorSwitchPeerAssessor;
 use crate::account_selection::PostExhaustionRouteBandOutcome;
 use crate::account_selection::QuotaAwareAccountSelectorError;
 use crate::capacity_retry::CapacityRetryOutcome;
 use crate::capacity_retry::CapacityRetryTracker;
+
+#[path = "websocket/floor_switch_admission.rs"]
+mod floor_switch_admission;
 use crate::capacity_retry::MAX_THREAD_ID_BYTES;
 use crate::db_write_actor::DbWriteEnqueueResult;
 use crate::headers::Header;
@@ -96,6 +101,8 @@ use crate::provider_error::ProviderErrorClassification;
 use crate::provider_error::ProviderErrorObservationError;
 use crate::provider_error::classify_responses_websocket_error_envelope;
 use crate::session_account_affinity_cache::SessionAffinityActivityHandle;
+use floor_switch_admission::FloorSwitchAdmission;
+use floor_switch_admission::FloorSwitchIntent;
 
 use crate::routes::Method;
 
@@ -857,6 +864,18 @@ impl WebSocketQuotaFloorNotifier {
     pub fn signal_weekly_quota_floor_reached(&self, account_id: &AccountId) {
         self.registry.signal_weekly_quota_floor_reached(account_id);
     }
+
+    /// Defers an early switch until a safe turn boundary and a live peer assessment.
+    pub fn request_weekly_quota_floor_switch(&self, account_id: &AccountId) {
+        self.registry
+            .update_weekly_quota_floor_switch(account_id, true);
+    }
+
+    /// Clears a previously observed early-switch intent after a saved recovery observation.
+    pub fn clear_weekly_quota_floor_switch(&self, account_id: &AccountId) {
+        self.registry
+            .update_weekly_quota_floor_switch(account_id, false);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -865,6 +884,7 @@ struct WebSocketCancellationEntry {
     account_id: AccountId,
     token: CancellationToken,
     quota_floor_reconnect: CancellationToken,
+    graceful_floor_switch: watch::Sender<FloorSwitchIntent>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -927,6 +947,8 @@ struct WebSocketSessionRegistration {
     session_id: u64,
     cancellation: CancellationToken,
     quota_floor_reconnect: CancellationToken,
+    graceful_floor_switch: watch::Receiver<FloorSwitchIntent>,
+    early_floor_reconnect: CancellationToken,
 }
 
 impl WebSocketRevocationRegistry {
@@ -998,6 +1020,9 @@ impl WebSocketRevocationRegistry {
     ) -> WebSocketSessionRegistration {
         let cancellation = CancellationToken::new();
         let quota_floor_reconnect = CancellationToken::new();
+        let (graceful_floor_switch, graceful_floor_switch_receiver) =
+            watch::channel(FloorSwitchIntent::default());
+        let early_floor_reconnect = CancellationToken::new();
         let session_id = self.note_session_opened();
         if let Some(peer_addr) = peer_addr
             && let Ok(mut session_peer_addrs) = self.session_peer_addrs.lock()
@@ -1019,6 +1044,7 @@ impl WebSocketRevocationRegistry {
                     account_id,
                     token: cancellation.clone(),
                     quota_floor_reconnect: quota_floor_reconnect.clone(),
+                    graceful_floor_switch,
                 });
         }
 
@@ -1028,6 +1054,8 @@ impl WebSocketRevocationRegistry {
             session_id,
             cancellation,
             quota_floor_reconnect,
+            graceful_floor_switch: graceful_floor_switch_receiver,
+            early_floor_reconnect,
         }
     }
 
@@ -1042,6 +1070,22 @@ impl WebSocketRevocationRegistry {
             .filter(|entry| &entry.account_id == account_id)
         {
             entry.quota_floor_reconnect.cancel();
+        }
+    }
+
+    fn update_weekly_quota_floor_switch(&self, account_id: &AccountId, pending: bool) {
+        let Ok(cancellations) = self.cancellations.lock() else {
+            return;
+        };
+        for entry in cancellations
+            .values()
+            .flatten()
+            .filter(|entry| &entry.account_id == account_id)
+        {
+            entry.graceful_floor_switch.send_modify(|intent| {
+                intent.epoch = intent.epoch.saturating_add(1);
+                intent.pending = pending;
+            });
         }
     }
 
@@ -1360,12 +1404,22 @@ mod registry_tests {
 #[cfg(test)]
 #[path = "websocket-tests"]
 mod async_forwarding_tests {
+    #[path = "floor-switch-supervisor-tests.rs"]
+    mod floor_switch_supervisor_tests;
+    #[path = "floor-switch-terminal-tests.rs"]
+    mod floor_switch_terminal_tests;
+    #[path = "floor-switch-tests.rs"]
+    mod floor_switch_tests;
+
     use super::ActiveTurnReservationState;
     use super::AsyncWebSocketTunnel;
     use super::CODEX_WEBSOCKET_RECONNECT_SIGNAL;
     use super::CapacityRetryOutcome;
+    use super::FloorSwitchAdmission;
+    use super::FloorSwitchIntent;
     use super::Header;
     use super::HeaderCollection;
+    use super::LocalToUpstreamPumpContext;
     use super::MAX_THREAD_ID_BYTES;
     use super::PostExhaustionRouteBandOutcome;
     use super::TokenGeneration;
@@ -1376,6 +1430,7 @@ mod async_forwarding_tests {
     use super::WebSocketProtocolRouter;
     use super::WebSocketQuotaFloorNotifier;
     use super::WebSocketRevocationRegistry;
+    use super::WebSocketTunnelError;
     use super::capacity_retry_thread_id;
     use super::current_unix_seconds;
     use super::forward_duplex_until_complete;
@@ -1385,7 +1440,10 @@ mod async_forwarding_tests {
     use super::provider_error_classification_from_message;
     use super::pump_local_to_upstream;
     use super::record_forwarded_websocket_metadata;
+    use super::supervise_websocket_pumps;
     use super::websocket_affinity_owner_record;
+    use crate::account_selection::FloorSwitchPeerAssessment;
+    use crate::account_selection::LiveFloorSwitchPeerAssessor;
     use bytes::Bytes;
     use codex_router_auth::resolver::CredentialResolverError;
     use codex_router_auth::resolver::ResolvedProviderCredential;
@@ -1403,6 +1461,7 @@ mod async_forwarding_tests {
     use tokio::io::duplex;
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
+    use tokio::sync::watch;
     use tokio_tungstenite::WebSocketStream;
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::protocol::Role;
@@ -1477,6 +1536,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -1624,6 +1685,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -1703,14 +1766,31 @@ mod async_forwarding_tests {
             .await
             .unwrap_or_else(|error| panic!("client frame should enter local socket: {error}"));
 
+        let (_floor_intent_sender, floor_intent) = watch::channel(FloorSwitchIntent::default());
+        let early_reconnect = CancellationToken::new();
+        let hard_reconnect = CancellationToken::new();
+        let floor_admission = FloorSwitchAdmission::new(
+            floor_intent,
+            early_reconnect.clone(),
+            hard_reconnect.clone(),
+            Some(AccountId::new("acct_forward_test").expect("fixture account id")),
+            None,
+            false,
+        );
+
         let result = pump_local_to_upstream(
             local_read,
             upstream_write,
-            CancellationToken::new(),
-            CancellationToken::new(),
-            CancellationToken::new(),
-            ActiveTurnReservationState::new(None),
-            Some(published.activity_handle().clone()),
+            LocalToUpstreamPumpContext {
+                revocation: CancellationToken::new(),
+                session_shutdown: CancellationToken::new(),
+                tunnel_shutdown: CancellationToken::new(),
+                active_turn_reservation: ActiveTurnReservationState::new(None),
+                session_affinity_activity_handle: Some(published.activity_handle().clone()),
+                floor_switch_admission: floor_admission,
+                early_floor_reconnect: early_reconnect,
+                quota_floor_reconnect: hard_reconnect,
+            },
         )
         .await;
 
@@ -2656,6 +2736,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     provider_error_observer: None,
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -2743,6 +2825,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     provider_error_observer: None,
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -2817,6 +2901,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     provider_error_observer: None,
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -2940,6 +3026,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -3063,6 +3151,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -3204,6 +3294,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -3326,6 +3418,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -3438,6 +3532,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -3552,6 +3648,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -3658,6 +3756,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -3757,6 +3857,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -3874,6 +3976,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -3983,6 +4087,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -4127,6 +4233,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -4228,6 +4336,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -4324,6 +4434,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -4426,6 +4538,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -4544,6 +4658,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -4627,6 +4743,8 @@ mod async_forwarding_tests {
                 affinity_record_tasks: TaskTracker::new(),
                 affinity_owner_context: Some(&affinity_owner_context),
                 provider_error_observer: Some(provider_error_observer_for_context),
+                floor_switch_peer_assessor: None,
+                initial_turn_active: false,
                 revocation: &revocation,
                 session_shutdown: &session_shutdown,
             },
@@ -4694,6 +4812,16 @@ mod async_forwarding_tests {
                 active_turn_reservation: ActiveTurnReservationState::new(None),
                 provider_error_observer: None,
                 quota_floor_reconnect: CancellationToken::new(),
+                early_floor_reconnect: session.early_floor_reconnect.clone(),
+                graceful_floor_switch: session.graceful_floor_switch.clone(),
+                floor_switch_admission: FloorSwitchAdmission::new(
+                    session.graceful_floor_switch.clone(),
+                    session.early_floor_reconnect.clone(),
+                    session.quota_floor_reconnect.clone(),
+                    Some(AccountId::new("acct_capacity_fixture").expect("fixture account id")),
+                    None,
+                    false,
+                ),
             },
         )
         .await;
@@ -4785,6 +4913,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(Arc::new(FailingAsyncProviderErrorObserver)),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -4872,6 +5002,8 @@ mod async_forwarding_tests {
                     provider_error_observer: Some(Arc::new(
                         DefaultAlternativeSelectionProviderErrorObserver,
                     )),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -4964,6 +5096,8 @@ mod async_forwarding_tests {
                     provider_error_observer: Some(Arc::new(
                         DefaultAlternativeSelectionProviderErrorObserver,
                     )),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -5056,6 +5190,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
                 },
@@ -5135,6 +5271,8 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     provider_error_observer: None,
+                    floor_switch_peer_assessor: None,
+                    initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown_for_task,
                 },
@@ -5209,6 +5347,8 @@ mod async_forwarding_tests {
                 affinity_record_tasks: TaskTracker::new(),
                 affinity_owner_context: Some(&affinity_owner_context),
                 provider_error_observer: None,
+                floor_switch_peer_assessor: None,
+                initial_turn_active: false,
                 revocation: &revocation,
                 session_shutdown: &session_shutdown,
             },
@@ -5275,6 +5415,7 @@ where
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_record_tasks: TaskTracker,
     provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
+    floor_switch_peer_assessor: Option<Arc<dyn LiveFloorSwitchPeerAssessor>>,
     session_shutdown: CancellationToken,
     local_peer_addr: Option<SocketAddr>,
 }
@@ -5480,6 +5621,7 @@ where
             async_affinity_owner_recorder: None,
             affinity_record_tasks: TaskTracker::new(),
             provider_error_observer: None,
+            floor_switch_peer_assessor: None,
             session_shutdown: CancellationToken::new(),
             local_peer_addr: None,
         }
@@ -5507,6 +5649,7 @@ where
             async_affinity_owner_recorder: None,
             affinity_record_tasks: TaskTracker::new(),
             provider_error_observer: None,
+            floor_switch_peer_assessor: None,
             session_shutdown: CancellationToken::new(),
             local_peer_addr: None,
         }
@@ -5572,6 +5715,16 @@ where
         provider_error_observer: Arc<dyn AsyncProviderErrorObserver>,
     ) -> Self {
         self.provider_error_observer = Some(provider_error_observer);
+        self
+    }
+
+    /// Adds the live read-only peer assessor for graceful weekly-floor switching.
+    #[must_use]
+    pub(crate) fn with_floor_switch_peer_assessor(
+        mut self,
+        peer_assessor: Arc<dyn LiveFloorSwitchPeerAssessor>,
+    ) -> Self {
+        self.floor_switch_peer_assessor = Some(peer_assessor);
         self
     }
 
@@ -5663,6 +5816,7 @@ where
             connection = connect_async_with_config(upstream_request, Some(router_websocket_config()), false) => connection?,
         };
         let upstream_first_message = message_from_frame(first_frame)?;
+        let initial_turn_active = is_response_create(&upstream_first_message);
         tokio::select! {
             biased;
             () = session_registration.quota_floor_reconnect.cancelled() => {
@@ -5699,6 +5853,8 @@ where
                 affinity_record_tasks: self.affinity_record_tasks.clone(),
                 affinity_owner_context: affinity_owner_context.as_ref(),
                 provider_error_observer: self.provider_error_observer.clone(),
+                floor_switch_peer_assessor: self.floor_switch_peer_assessor.clone(),
+                initial_turn_active,
                 revocation: &revocation,
                 session_shutdown: &self.session_shutdown,
             },
@@ -5793,6 +5949,8 @@ struct WebSocketForwardingContext<'a> {
     affinity_record_tasks: TaskTracker,
     affinity_owner_context: Option<&'a WebSocketAffinityOwnerContext>,
     provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
+    floor_switch_peer_assessor: Option<Arc<dyn LiveFloorSwitchPeerAssessor>>,
+    initial_turn_active: bool,
     revocation: &'a CancellationToken,
     session_shutdown: &'a CancellationToken,
 }
@@ -5819,29 +5977,49 @@ where
     let session_registry = session_registration.registry.clone();
     let session_id = session_registration.session_id;
     let quota_floor_reconnect = session_registration.quota_floor_reconnect.clone();
+    let early_floor_reconnect = session_registration.early_floor_reconnect.clone();
+    let graceful_floor_switch = session_registration.graceful_floor_switch.clone();
     let affinity_owner_context = context.affinity_owner_context.cloned();
+    let floor_switch_admission = FloorSwitchAdmission::new(
+        graceful_floor_switch.clone(),
+        early_floor_reconnect.clone(),
+        quota_floor_reconnect.clone(),
+        affinity_owner_context
+            .as_ref()
+            .map(|context| context.account_id.clone()),
+        context.floor_switch_peer_assessor,
+        context.initial_turn_active,
+    );
     let active_turn_reservation = ActiveTurnReservationState::new(
         affinity_owner_context
             .as_ref()
             .and_then(|context| context.active_reservation_guard.clone()),
     );
     let local_active_turn_reservation = active_turn_reservation.clone();
+    let local_floor_switch_admission = floor_switch_admission.clone();
+    let local_early_floor_reconnect = early_floor_reconnect.clone();
+    let local_quota_floor_reconnect = quota_floor_reconnect.clone();
     let session_affinity_activity_handle = affinity_owner_context
         .as_ref()
         .and_then(|context| context.session_affinity_activity_handle.clone());
-    let mut local_to_upstream = tokio::spawn(async move {
+    let local_to_upstream = tokio::spawn(async move {
         pump_local_to_upstream(
             local_read,
             upstream_write,
-            local_to_upstream_revocation,
-            local_to_upstream_shutdown,
-            local_to_upstream_tunnel_shutdown,
-            local_active_turn_reservation,
-            session_affinity_activity_handle,
+            LocalToUpstreamPumpContext {
+                revocation: local_to_upstream_revocation,
+                session_shutdown: local_to_upstream_shutdown,
+                tunnel_shutdown: local_to_upstream_tunnel_shutdown,
+                active_turn_reservation: local_active_turn_reservation,
+                session_affinity_activity_handle,
+                floor_switch_admission: local_floor_switch_admission,
+                early_floor_reconnect: local_early_floor_reconnect,
+                quota_floor_reconnect: local_quota_floor_reconnect,
+            },
         )
         .await
     });
-    let mut upstream_to_local = tokio::spawn(async move {
+    let upstream_to_local = tokio::spawn(async move {
         pump_upstream_to_local(
             upstream_read,
             local_write,
@@ -5858,18 +6036,41 @@ where
                 active_turn_reservation,
                 provider_error_observer: context.provider_error_observer,
                 quota_floor_reconnect,
+                early_floor_reconnect,
+                graceful_floor_switch,
+                floor_switch_admission,
             },
         )
         .await
     });
 
-    let result = tokio::select! {
-        () = context.revocation.cancelled() => {
+    let result = supervise_websocket_pumps(
+        context.revocation,
+        context.session_shutdown,
+        &tunnel_shutdown,
+        local_to_upstream,
+        upstream_to_local,
+    )
+    .await;
+
+    drop(session_registration);
+    result
+}
+
+async fn supervise_websocket_pumps(
+    revocation: &CancellationToken,
+    session_shutdown: &CancellationToken,
+    tunnel_shutdown: &CancellationToken,
+    mut local_to_upstream: JoinHandle<Result<(), WebSocketTunnelError>>,
+    mut upstream_to_local: JoinHandle<Result<(), WebSocketTunnelError>>,
+) -> Result<(), WebSocketTunnelError> {
+    tokio::select! {
+        () = revocation.cancelled() => {
             abort_websocket_pump(&mut local_to_upstream).await;
             abort_websocket_pump(&mut upstream_to_local).await;
             Ok(())
         }
-        () = context.session_shutdown.cancelled() => {
+        () = session_shutdown.cancelled() => {
             abort_websocket_pump(&mut local_to_upstream).await;
             abort_websocket_pump(&mut upstream_to_local).await;
             Ok(())
@@ -5887,28 +6088,54 @@ where
             abort_websocket_pump(&mut local_to_upstream).await;
             flatten_websocket_pump_join(result)
         }
-    };
-
-    drop(session_registration);
-    result
+    }
 }
 
-async fn pump_local_to_upstream<LocalStream, UpstreamStream>(
-    mut local_read: SplitStream<WebSocketStream<LocalStream>>,
-    mut upstream_write: SplitSink<WebSocketStream<UpstreamStream>, Message>,
+struct LocalToUpstreamPumpContext {
     revocation: CancellationToken,
     session_shutdown: CancellationToken,
     tunnel_shutdown: CancellationToken,
     active_turn_reservation: ActiveTurnReservationState,
     session_affinity_activity_handle: Option<SessionAffinityActivityHandle>,
+    floor_switch_admission: FloorSwitchAdmission,
+    early_floor_reconnect: CancellationToken,
+    quota_floor_reconnect: CancellationToken,
+}
+
+async fn pump_local_to_upstream<LocalStream, UpstreamStream>(
+    mut local_read: SplitStream<WebSocketStream<LocalStream>>,
+    mut upstream_write: SplitSink<WebSocketStream<UpstreamStream>, Message>,
+    context: LocalToUpstreamPumpContext,
 ) -> Result<(), WebSocketTunnelError>
 where
     LocalStream: AsyncRead + AsyncWrite + Unpin,
     UpstreamStream: AsyncRead + AsyncWrite + Unpin,
 {
+    let LocalToUpstreamPumpContext {
+        revocation,
+        session_shutdown,
+        tunnel_shutdown,
+        active_turn_reservation,
+        session_affinity_activity_handle,
+        floor_switch_admission,
+        early_floor_reconnect,
+        quota_floor_reconnect,
+    } = context;
     loop {
         tokio::select! {
             biased;
+            () = quota_floor_reconnect.cancelled() => {
+                // Let the other pump deliver the client reconnect signal before this
+                // pump's completion can make the supervisor abort it.
+                tunnel_shutdown.cancel();
+                let _ = close_websocket_sink_best_effort(&mut upstream_write).await;
+                return Ok(());
+            }
+            () = early_floor_reconnect.cancelled() => {
+                tunnel_shutdown.cancel();
+                let _ = close_websocket_sink_best_effort(&mut upstream_write).await;
+                return Ok(());
+            }
             () = tunnel_shutdown.cancelled() => {
                 close_websocket_sink_best_effort(&mut upstream_write).await?;
                 return Ok(());
@@ -5937,6 +6164,11 @@ where
                 let is_close = matches!(local_message, Message::Close(_));
                 let is_response_create = is_response_create(&local_message);
                 if is_response_create {
+                    if floor_switch_admission.before_next_create().await {
+                        tunnel_shutdown.cancel();
+                        let _ = close_websocket_sink_best_effort(&mut upstream_write).await;
+                        return Ok(());
+                    }
                     active_turn_reservation.reserve_if_idle(current_unix_seconds());
                 }
                 if is_close {
@@ -5972,12 +6204,15 @@ struct UpstreamToLocalPumpContext {
     active_turn_reservation: ActiveTurnReservationState,
     provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
     quota_floor_reconnect: CancellationToken,
+    early_floor_reconnect: CancellationToken,
+    graceful_floor_switch: watch::Receiver<FloorSwitchIntent>,
+    floor_switch_admission: FloorSwitchAdmission,
 }
 
 async fn pump_upstream_to_local<LocalStream, UpstreamStream>(
     mut upstream_read: SplitStream<WebSocketStream<UpstreamStream>>,
     mut local_write: SplitSink<WebSocketStream<LocalStream>, Message>,
-    context: UpstreamToLocalPumpContext,
+    mut context: UpstreamToLocalPumpContext,
 ) -> Result<(), WebSocketTunnelError>
 where
     LocalStream: AsyncRead + AsyncWrite + Unpin,
@@ -5995,6 +6230,21 @@ where
                     .await?;
                 close_websocket_sink_best_effort(&mut local_write).await?;
                 return Ok(());
+            }
+            () = context.early_floor_reconnect.cancelled() => {
+                context.tunnel_shutdown.cancel();
+                context.active_turn_reservation.retire();
+                context.session_registry.note_quota_reconnect_signal();
+                local_write
+                    .send(Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL))
+                    .await?;
+                close_websocket_sink_best_effort(&mut local_write).await?;
+                return Ok(());
+            }
+            changed = context.graceful_floor_switch.changed() => {
+                if changed.is_ok() {
+                    context.floor_switch_admission.on_idle_intent().await;
+                }
             }
             () = context.revocation.cancelled() => {
                 close_websocket_sink_best_effort(&mut local_write).await?;
@@ -6038,14 +6288,36 @@ where
                     close_websocket_sink_best_effort(&mut local_write).await?;
                     return Ok(());
                 }
-                local_write.send(upstream_message.message).await?;
-                context.session_registry.note_upstream_message_forwarded(context.session_id);
+                let is_completed = metadata_text
+                    .as_ref()
+                    .is_some_and(|text| is_response_completed_text(text));
+                let is_terminal = is_completed
+                    || metadata_text
+                        .as_ref()
+                        .is_some_and(|text| is_response_failed_text(text));
+                if is_terminal {
+                    context
+                        .floor_switch_admission
+                        .deliver_terminal_and_release_turn(async {
+                            local_write.send(upstream_message.message).await?;
+                            context
+                                .session_registry
+                                .note_upstream_message_forwarded(context.session_id);
+                            if is_completed {
+                                context.session_registry.clear_capacity_retry(context.session_id);
+                                context.session_registry.note_response_completed(context.session_id);
+                            }
+                            context.active_turn_reservation.release_current();
+                            Ok::<(), WebSocketTunnelError>(())
+                        })
+                        .await?;
+                } else {
+                    local_write.send(upstream_message.message).await?;
+                    context
+                        .session_registry
+                        .note_upstream_message_forwarded(context.session_id);
+                }
                 if let Some(metadata_text) = metadata_text {
-                    if is_response_completed_text(&metadata_text) {
-                        context.session_registry.clear_capacity_retry(context.session_id);
-                        context.active_turn_reservation.release_current();
-                        context.session_registry.note_response_completed(context.session_id);
-                    }
                     let affinity_owner_context = context.affinity_owner_context.clone();
                     let async_affinity_owner_recorder =
                         context.async_affinity_owner_recorder.clone();
@@ -6454,6 +6726,10 @@ fn is_response_create(message: &Message) -> bool {
 
 fn is_response_completed_text(text: &str) -> bool {
     bounded_top_level_json_string_field_equals(text.as_bytes(), b"type", b"response.completed")
+}
+
+fn is_response_failed_text(text: &str) -> bool {
+    bounded_top_level_json_string_field_equals(text.as_bytes(), b"type", b"response.failed")
 }
 
 fn has_forbidden_top_level_websocket_auth_carrier(body: &[u8]) -> bool {

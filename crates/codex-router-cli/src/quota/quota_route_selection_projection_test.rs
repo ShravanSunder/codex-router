@@ -21,7 +21,8 @@ fn quota_status_selection_uses_projected_run_rate_like_runtime_selector() {
             ),
         ],
         NOW,
-    );
+    )
+    .with_current_active_sessions(1);
     let slow_burning_input = burn_down_input_from_display_windows(
         &slow_burning_account,
         &[
@@ -39,7 +40,8 @@ fn quota_status_selection_uses_projected_run_rate_like_runtime_selector() {
             ),
         ],
         NOW,
-    );
+    )
+    .with_current_active_sessions(1);
 
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,

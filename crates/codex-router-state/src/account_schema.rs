@@ -146,6 +146,13 @@ async fn validate_legacy_base_presence(
 pub(crate) async fn validate_target_schema(
     connection: &mut SqliteConnection,
 ) -> Result<(), StateStoreError> {
+    validate_baseline_schema(connection).await?;
+    validate_table(connection, "credential_maintenance", CREDENTIAL_MAINTENANCE).await
+}
+
+pub(crate) async fn validate_baseline_schema(
+    connection: &mut SqliteConnection,
+) -> Result<(), StateStoreError> {
     for (table_name, columns) in BASE_TABLES {
         validate_table(connection, table_name, columns).await?;
     }

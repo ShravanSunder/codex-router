@@ -23,11 +23,15 @@ mod tests {
     use std::net::TcpListener;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::Arc;
     use std::sync::Barrier;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::thread;
+    use std::time::Duration;
 
     use codex_router_core::ids::AccountId;
     use codex_router_core::redaction::SecretString;
@@ -36,9 +40,14 @@ mod tests {
     use codex_router_secret_store::account_tokens::account_credential_bundle_key;
     use codex_router_secret_store::account_tokens::upstream_access_token_key;
     use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_secret_store::model::SecretKey;
+    use codex_router_secret_store::model::SecretStoreError;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
+    use codex_router_state::credential_maintenance::CredentialMaintenanceRecord;
+    use codex_router_state::credential_maintenance::CredentialMaintenanceState;
     use codex_router_state::repositories::AccountStateRepository;
+    use codex_router_state::sqlite::AsyncSqliteStateStore;
     use codex_router_state::sqlite::SqliteStateStore;
 
     use super::package_name;
@@ -53,6 +62,7 @@ mod tests {
     use crate::refresh_worker::AccountRefreshInput;
     use crate::refresh_worker::RefreshWorkDecision;
     use crate::refresh_worker::RefreshWorker;
+    use crate::resolver::AsyncRouterCredentialResolver;
     use crate::resolver::CredentialRefreshClient;
     use crate::resolver::CredentialResolverError;
     use crate::resolver::NoopCredentialRefreshClient;
@@ -61,7 +71,12 @@ mod tests {
     use crate::resolver::RefreshCommitFailpoint;
     use crate::resolver::RefreshLeaseRegistry;
     use crate::resolver::RouterCredentialResolver;
+    use crate::resolver::credential_renewal_is_due;
     use crate::router_credentials::RouterCredentialBundle;
+
+    mod credential_renewal_http_outcome_tests;
+    mod credential_renewal_outcome_tests;
+    mod credential_renewal_tests;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -85,6 +100,49 @@ mod tests {
             OAuthTokenStatus::RefreshNeeded
         );
         assert_eq!(clock.classify_token(999, 120), OAuthTokenStatus::Expired);
+    }
+
+    #[test]
+    fn proactive_renewal_uses_short_lifetime_and_four_hour_age_boundaries() {
+        let maintenance = CredentialMaintenanceRecord {
+            credential_generation: 1,
+            state: CredentialMaintenanceState::Healthy,
+            failure_class: None,
+            last_success_unix_seconds: Some(1_000),
+            next_attempt_unix_seconds: None,
+            claimed_successor_generation: None,
+            consecutive_failures: 0,
+        };
+        let short =
+            AccountCredentialBundle::imported_codex_auth("short", Some("refresh".to_owned()))
+                .with_expires_unix_seconds(1_120);
+        assert!(!credential_renewal_is_due(
+            &short,
+            Some(&maintenance),
+            1_059
+        ));
+        assert!(credential_renewal_is_due(&short, Some(&maintenance), 1_060));
+        let long = AccountCredentialBundle::imported_codex_auth("long", Some("refresh".to_owned()))
+            .with_expires_unix_seconds(50_000);
+        assert!(!credential_renewal_is_due(
+            &long,
+            Some(&maintenance),
+            15_399
+        ));
+        assert!(credential_renewal_is_due(&long, Some(&maintenance), 15_400));
+        let unknown =
+            AccountCredentialBundle::imported_codex_auth("unknown", Some("refresh".to_owned()));
+        assert!(!credential_renewal_is_due(
+            &unknown,
+            Some(&maintenance),
+            15_399
+        ));
+        assert!(credential_renewal_is_due(
+            &unknown,
+            Some(&maintenance),
+            15_400
+        ));
+        assert!(credential_renewal_is_due(&long, None, 1_000));
     }
 
     #[test]
@@ -536,6 +594,7 @@ mod tests {
         expected_refresh_token: String,
         response: AccountCredentialBundle,
         calls: Arc<AtomicUsize>,
+        delay_millis: u64,
     }
 
     impl RecordingRefreshClient {
@@ -553,11 +612,17 @@ mod tests {
                 expected_refresh_token: expected_refresh_token.to_owned(),
                 response,
                 calls: Arc::new(AtomicUsize::new(0)),
+                delay_millis: 0,
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        fn with_delay_millis(mut self, delay_millis: u64) -> Self {
+            self.delay_millis = delay_millis;
+            self
         }
     }
 
@@ -566,10 +631,13 @@ mod tests {
             &self,
             account_id: &AccountId,
             refresh_token: &SecretString,
-        ) -> Result<AccountCredentialBundle, CredentialResolverError> {
+        ) -> Result<AccountCredentialBundle, crate::resolver::CredentialRefreshFailure> {
             assert_eq!(account_id.as_str(), self.expected_account_id);
             assert_eq!(refresh_token.expose_secret(), self.expected_refresh_token);
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.delay_millis != 0 {
+                thread::sleep(std::time::Duration::from_millis(self.delay_millis));
+            }
             Ok(self.response.clone())
         }
     }

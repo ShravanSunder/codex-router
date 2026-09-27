@@ -46,9 +46,7 @@ pub(crate) fn run_live_command(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LiveQuotaCommand {
-    auth_json: Option<PathBuf>,
     profiles_root: Option<PathBuf>,
-    profile_label: Option<String>,
     base_url: String,
     dry_run: bool,
     approve_network_account_use: bool,
@@ -63,9 +61,7 @@ struct LiveQuotaProfile {
 impl LiveQuotaCommand {
     fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
         let mut command = Self {
-            auth_json: None,
             profiles_root: None,
-            profile_label: None,
             base_url: DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
             dry_run: false,
             approve_network_account_use: false,
@@ -73,17 +69,10 @@ impl LiveQuotaCommand {
 
         while let Some(argument) = parser.next_string()? {
             match argument.as_str() {
-                "--auth-json" => {
-                    command.auth_json =
-                        Some(PathBuf::from(parser.next_required_value("--auth-json")?));
-                }
                 "--profiles-root" => {
                     command.profiles_root = Some(PathBuf::from(
                         parser.next_required_value("--profiles-root")?,
                     ));
-                }
-                "--profile-label" => {
-                    command.profile_label = Some(parser.next_required_value("--profile-label")?);
                 }
                 "--base-url" => {
                     command.base_url = parser.next_required_value("--base-url")?;
@@ -106,7 +95,7 @@ impl LiveQuotaCommand {
             }
         }
 
-        if command.auth_json.is_some() == command.profiles_root.is_some() {
+        if command.profiles_root.is_none() {
             return Err(CliError::LiveQuotaSourceRequired);
         }
 
@@ -114,16 +103,6 @@ impl LiveQuotaCommand {
     }
 
     fn profiles(&self) -> Result<Vec<LiveQuotaProfile>, CliError> {
-        if let Some(auth_json_path) = &self.auth_json {
-            return Ok(vec![LiveQuotaProfile {
-                label: self
-                    .profile_label
-                    .clone()
-                    .unwrap_or_else(|| "auth-json".to_owned()),
-                auth_json_path: auth_json_path.clone(),
-            }]);
-        }
-
         let profiles_root = self
             .profiles_root
             .as_ref()

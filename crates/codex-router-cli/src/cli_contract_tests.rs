@@ -73,7 +73,7 @@ use codex_router_state::sqlite::SqliteStateStore;
 use crate::account::AccountCommand;
 use crate::account::AccountCommandError;
 use crate::account::AccountImportRequest;
-use crate::account::import_codex_auth_from_request;
+use crate::account::import_codex_auth_from_request_async;
 use crate::credential_runtime::AsyncProviderCredentialResolver;
 use crate::credential_runtime::CliCredentialResolver;
 use crate::doctor::DoctorAccountState;
@@ -90,7 +90,8 @@ use crate::quota::QuotaRefreshProvider;
 use crate::quota::QuotaRefreshProviderRequest;
 use crate::quota::QuotaRefreshProviderResponse;
 use crate::quota::QuotaRefreshProviderWindow;
-use crate::quota::WeeklyQuotaFloorReachedObserver;
+use crate::quota::WeeklyQuotaFloorIntent;
+use crate::quota::WeeklyQuotaFloorIntentObserver;
 use crate::quota::refresh_quota_store_paths_with_dependencies as refresh_quota_store_paths_with_dependencies_async;
 use crate::quota::refresh_quota_store_paths_with_dependencies_and_floor_notifier as refresh_quota_store_paths_with_dependencies_and_floor_notifier_async;
 use crate::quota::refresh_quota_with_dependencies as refresh_quota_with_dependencies_async;
@@ -139,6 +140,14 @@ mod quota_auth_tests;
 #[path = "cli_contract_tests/quota_worker_tests.rs"]
 mod quota_worker_tests;
 
+#[path = "cli_contract_tests/credential_upkeep_tests.rs"]
+mod credential_upkeep_tests;
+
+#[path = "cli_contract_tests/quota_floor_websocket_tests.rs"]
+mod quota_floor_websocket_tests;
+
+#[path = "cli_contract_tests/quota_floor_graceful_websocket_tests.rs"]
+mod quota_floor_graceful_websocket_tests;
 #[path = "cli_contract_tests/quota_snapshot_tests.rs"]
 mod quota_snapshot_tests;
 

@@ -31,16 +31,25 @@ mod tests {
     use super::package_name;
     use crate::account_selection::AccountDecisionSelector;
     use crate::account_selection::AsyncAccountDecisionSelector;
+    use crate::account_selection::AsyncAccountSelectorRuntimeState;
     use crate::account_selection::AsyncRepositoryBackedAccountSelector;
+    use crate::account_selection::FloorSwitchPeerAssessment;
+    use crate::account_selection::LiveFloorSwitchPeerAssessor;
     use crate::account_selection::PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS;
     use crate::account_selection::QuotaAwareAccountSelector;
     use crate::account_selection::QuotaAwareAccountSelectorError;
     use crate::account_selection::QuotaAwareAccountState;
     use crate::account_selection::RepositoryBackedAccountSelector;
     use crate::account_selection::RouteBandAccountHolds;
+    use crate::account_selection::RouteBandQueueDegradedReason;
+    use crate::account_selection::RouteBandQueueHealth;
     use crate::account_selection::RouteBandReservationBooks;
+    use crate::account_selection::RouteBandRuntimeExhaustions;
     use crate::account_selection::RouteBandWeightedSelectors;
+    use crate::account_selection::RuntimeFloorSwitchPeerAssessor;
     use crate::account_selection::SelectedAccountDecision;
+    use crate::account_selection::mark_route_band_queue_degraded;
+    use crate::account_selection::mark_runtime_quota_exhausted;
     use crate::account_selection::release_account_reservation;
     use crate::credential_runtime::ProxyCredentialResolver;
     use crate::db_write_actor::DbWriteActor;
@@ -2215,7 +2224,7 @@ mod tests {
         };
 
         assert_eq!(selected.account_id(), eligible.account_id());
-        assert_eq!(selected.selection_reason(), "preferred_safest_quota");
+        assert_eq!(selected.selection_reason(), "preferred_idle_far_reset");
     }
 
     #[test]
@@ -2683,7 +2692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn weekly_floor_exclusion_precedes_affinity_and_stale_all_blocked_is_unavailable() {
+    async fn weekly_floor_switch_preserves_hard_affinity_until_configured_stop() {
         let temp_dir = ProxyTestTempDir::new("async_repository_selector_weekly_floor");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
@@ -2697,17 +2706,17 @@ mod tests {
             "protected",
             AccountStatus::Enabled,
         );
-        persist_account_with_selector_window_specs(
+        persist_fresh_account_with_selector_window_specs(
             &state,
             &eligible,
             "responses",
-            &[(18_000, 80, true), (604_800, 80, false)],
+            &[(18_000, 80, true), (604_800, 8, false)],
         );
-        persist_account_with_selector_window_specs(
+        persist_fresh_account_with_selector_window_specs(
             &state,
             &protected,
             "responses",
-            &[(18_000, 100, true), (604_800, 100, false)],
+            &[(18_000, 100, true), (604_800, 8, false)],
         );
         let affinity_secret = test_affinity_secret();
         persist_previous_response_owner(
@@ -2745,6 +2754,43 @@ mod tests {
             .expect("eligible peer should be selected");
         assert_eq!(selected.account_id(), eligible.account_id());
         assert_ne!(selected.selection_reason(), "previous_response_affinity");
+        let continued = selector
+            .select_upstream_account(
+                &affinity_request,
+                TokenGeneration::new(1),
+                Some(&affinity_secret),
+            )
+            .await
+            .expect("hard continuation should retain its owner above the configured floor");
+        assert_eq!(continued.account_id(), protected.account_id());
+        assert_eq!(continued.selection_reason(), "previous_response_affinity");
+
+        mutation
+            .set_weekly_quota_floor_by_label(eligible.label(), Some(floor))
+            .await
+            .expect("eligible floor should commit");
+        let fallback = selector
+            .select_upstream_account(
+                &ordinary_request,
+                TokenGeneration::new(1),
+                Some(&affinity_secret),
+            )
+            .await
+            .expect("two switch-band accounts should retain eligible fallback");
+        assert!(
+            fallback.account_id() == eligible.account_id()
+                || fallback.account_id() == protected.account_id()
+        );
+        let state = SqliteStateStore::open(&database_path).expect("fresh state should reopen");
+        for account in [&eligible, &protected] {
+            persist_fresh_account_with_selector_window_specs(
+                &state,
+                account,
+                "responses",
+                &[(18_000, 100, true), (604_800, 5, false)],
+            );
+        }
+        drop(state);
         assert_eq!(
             selector
                 .select_upstream_account(
@@ -2757,17 +2803,194 @@ mod tests {
                 reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable
             })
         );
-
-        mutation
-            .set_weekly_quota_floor_by_label(eligible.label(), Some(floor))
-            .await
-            .expect("eligible floor should commit");
         assert_eq!(
             selector
                 .select_upstream_account(
                     &ordinary_request,
                     TokenGeneration::new(1),
                     Some(&affinity_secret),
+                )
+                .await,
+            Err(HttpProxyError::Selection {
+                reason: QuotaAwareAccountSelectorError::NoEligibleAccounts
+            })
+        );
+        let state = SqliteStateStore::open(&database_path).expect("fresh state should reopen");
+        persist_fresh_account_with_selector_window_specs(
+            &state,
+            &protected,
+            "responses",
+            &[(18_000, 100, true), (604_800, 9, false)],
+        );
+        drop(state);
+
+        let continued = selector
+            .select_upstream_account(
+                &affinity_request,
+                TokenGeneration::new(1),
+                Some(&affinity_secret),
+            )
+            .await
+            .expect("above the configured floor should allow affinity continuation");
+        assert_eq!(continued.account_id(), protected.account_id());
+        assert_eq!(continued.selection_reason(), "previous_response_affinity");
+        let serialized_state = AsyncSqliteStateStore::open_read_only(&database_path)
+            .await
+            .expect("serialized selector state should reopen read-only");
+        let serialized_selector = AsyncRepositoryBackedAccountSelector::new(&serialized_state);
+        let ordinary_after_refresh = serialized_selector
+            .select_upstream_account(
+                &ordinary_request,
+                TokenGeneration::new(1),
+                Some(&affinity_secret),
+            )
+            .await
+            .expect("above the switch point should allow new selection");
+        assert_eq!(ordinary_after_refresh.account_id(), protected.account_id());
+        serialized_state
+            .close()
+            .await
+            .expect("serialized state should close");
+        mutation.close().await;
+    }
+
+    #[tokio::test]
+    async fn live_floor_switch_peer_assessment_is_read_only_and_respects_runtime_quarantine() {
+        let temp_dir = ProxyTestTempDir::new("live-floor-switch-peer");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = SqliteStateStore::open(&database_path).expect("state store should open");
+        let protected = AccountRecord::new(
+            account_id("acct_floor_source"),
+            "source",
+            AccountStatus::Enabled,
+        );
+        let peer = AccountRecord::new(
+            account_id("acct_floor_peer"),
+            "peer",
+            AccountStatus::Enabled,
+        );
+        for (account, remaining) in [(&protected, 8), (&peer, 80)] {
+            persist_fresh_account_with_selector_window_specs(
+                &state,
+                account,
+                "responses",
+                &[(18_000, 100, true), (604_800, remaining, false)],
+            );
+        }
+        drop(state);
+        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+            .await
+            .expect("floor mutation store should open");
+        mutation
+            .set_weekly_quota_floor_by_label(
+                protected.label(),
+                Some(WeeklyQuotaFloorBasisPoints::new(500).expect("valid floor")),
+            )
+            .await
+            .expect("floor should commit");
+        let state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("async state should open");
+        let reservations = RouteBandReservationBooks::default();
+        let weighted_selectors = RouteBandWeightedSelectors::default();
+        let account_holds = RouteBandAccountHolds::default();
+        let runtime_exhaustions = RouteBandRuntimeExhaustions::default();
+        let queue_health = RouteBandQueueHealth::default();
+        let runtime_state = AsyncAccountSelectorRuntimeState::new(
+            Arc::clone(&weighted_selectors),
+            Arc::clone(&account_holds),
+            Arc::clone(&reservations),
+            Arc::clone(&runtime_exhaustions),
+            Arc::clone(&queue_health),
+        );
+        let assessor = RuntimeFloorSwitchPeerAssessor::new(
+            state.clone(),
+            &runtime_state,
+            Arc::new(test_unix_seconds),
+        );
+        assert_eq!(
+            assessor
+                .assess_peer(protected.account_id(), RouteBand::Responses)
+                .await,
+            FloorSwitchPeerAssessment::SelectablePeer
+        );
+        assert!(
+            reservations
+                .lock()
+                .expect("reservations should be readable")
+                .is_empty()
+        );
+        assert!(
+            weighted_selectors
+                .lock()
+                .expect("weighted state should be readable")
+                .is_empty()
+        );
+        assert!(
+            account_holds
+                .lock()
+                .expect("hold state should be readable")
+                .is_empty()
+        );
+        let selector = AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &state,
+            runtime_state,
+            120,
+            Arc::new(test_unix_seconds),
+        );
+        let selected = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+            .expect("actual selection should use assessed peer");
+        assert_eq!(selected.account_id(), peer.account_id());
+        drop(selected);
+
+        mark_runtime_quota_exhausted(
+            &runtime_exhaustions,
+            RouteBand::Responses,
+            peer.account_id().clone(),
+            test_unix_seconds(),
+        )
+        .expect("runtime quarantine should record");
+        assert_eq!(
+            assessor
+                .assess_peer(protected.account_id(), RouteBand::Responses)
+                .await,
+            FloorSwitchPeerAssessment::NoPeer
+        );
+        let fallback = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                TokenGeneration::new(1),
+                None,
+            )
+            .await
+            .expect("runtime-quarantined peer should leave above-floor fallback");
+        assert_eq!(fallback.account_id(), protected.account_id());
+        drop(fallback);
+        mark_route_band_queue_degraded(
+            &queue_health,
+            RouteBand::Responses,
+            RouteBandQueueDegradedReason::DbWriteFailed,
+            test_unix_seconds(),
+        )
+        .expect("queue failure should record");
+        assert_eq!(
+            assessor
+                .assess_peer(protected.account_id(), RouteBand::Responses)
+                .await,
+            FloorSwitchPeerAssessment::AuthorityUnavailable
+        );
+        assert_eq!(
+            selector
+                .select_upstream_account(
+                    &HttpProxyRequest::new(Method::Post, "/v1/responses"),
+                    TokenGeneration::new(1),
+                    None,
                 )
                 .await,
             Err(HttpProxyError::Selection {
@@ -2825,8 +3048,8 @@ mod tests {
     }
 
     #[test]
-    fn repository_backed_selector_allows_retiring_affinity_owner_outside_new_work_pool() {
-        let temp_dir = ProxyTestTempDir::new("repository_selector_retiring_affinity_owner");
+    fn repository_backed_selector_keeps_low_balance_affinity_owner() {
+        let temp_dir = ProxyTestTempDir::new("repository_selector_low_balance_affinity_owner");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = match SqliteStateStore::open(&database_path) {
             Ok(state) => state,
@@ -4769,10 +4992,22 @@ mod tests {
             &state,
             &secrets,
             &protected,
-            5,
+            8,
             "protected-http-token",
         );
         persist_account_with_snapshot_and_token(&state, &secrets, &peer, 80, "peer-http-token");
+        refresh_served_floor_windows_for_test(&state, &protected, NOW, 8);
+        refresh_served_floor_windows_for_test(&state, &peer, NOW, 80);
+        let selector_inputs =
+            SelectorQuotaRepository::selector_inputs_for_route_band(&state, "responses", NOW)
+                .expect("served floor quota rows should load");
+        assert!(
+            selector_inputs.iter().all(|input| input
+                .windows()
+                .iter()
+                .all(|window| { window.status() == SelectorQuotaWindowStatus::Eligible })),
+            "served floor fixture must have fresh eligible quota windows"
+        );
         drop(state);
         set_weekly_floor_for_test(&database_path, protected.label(), 500);
 
@@ -5130,6 +5365,10 @@ mod tests {
             Err(error) => panic!("mock upstream thread panicked: {error:?}"),
         }
 
+        // The retry excludes the primary in process before its queued SQLite
+        // exhaustion write completes. Establish the durable row before asking
+        // a new repository selector to make the post-retry decision.
+        wait_for_durable_quota_exhaustion(&state, &[primary.account_id()]);
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
         wait_for_repository_selected_account(
             &runtime_state,
@@ -5235,6 +5474,16 @@ mod tests {
             Err(error) => panic!("router runtime should start: {error}"),
         };
         let router_address = runtime.local_addr();
+        let lock_runtime = must_ok(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        );
+        let lock_state =
+            must_ok(lock_runtime.block_on(AsyncSqliteStateStore::open(&database_path)));
+        let mut write_lock =
+            must_ok(lock_runtime.block_on(lock_state.acquire_connection_for_test()));
+        must_ok(lock_runtime.block_on(sqlx::query("BEGIN IMMEDIATE").execute(&mut *write_lock)));
         let large_body = format!(
             r#"{{"model":"gpt-5","large_padding":"{}"}}"#,
             "x".repeat(17 * 1024)
@@ -5247,11 +5496,11 @@ mod tests {
             )
         });
 
-        let handled = match runtime.serve_http_connections(1) {
-            Ok(handled) => handled,
-            Err(error) => panic!("router runtime should serve one client connection: {error}"),
-        };
-        assert_eq!(handled, 1);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server_thread = thread::spawn(move || {
+            runtime.serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+        });
         let response = match client_thread.join() {
             Ok(response) => response,
             Err(error) => panic!("client thread panicked: {error:?}"),
@@ -5280,6 +5529,28 @@ mod tests {
         match upstream_thread.join() {
             Ok(()) => {}
             Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+
+        let before_commit =
+            must_ok(state.load_quota_snapshot_for_route_band(primary.account_id(), "responses"))
+                .expect("initial snapshot should remain readable");
+        assert_eq!(before_commit.source(), QuotaSnapshotSource::MockEndpoint);
+        assert_eq!(before_commit.remaining_headroom(), 90);
+        lock_runtime.block_on(async move {
+            must_ok(sqlx::query("COMMIT").execute(&mut *write_lock).await);
+            drop(write_lock);
+        });
+        wait_for_durable_quota_exhaustion(&state, &[primary.account_id()]);
+        wait_for_repository_selected_account(
+            &state,
+            fallback.account_id(),
+            "durable quota state should select the fallback while serving",
+        );
+        shutdown.cancel();
+        match server_thread.join() {
+            Ok(Ok(handled)) => assert_eq!(handled, 1),
+            Ok(Err(error)) => panic!("router shutdown should succeed: {error}"),
+            Err(error) => panic!("router server thread panicked: {error:?}"),
         }
 
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
@@ -5389,11 +5660,11 @@ mod tests {
             )
         });
 
-        let handled = match runtime.serve_http_connections(1) {
-            Ok(handled) => handled,
-            Err(error) => panic!("router runtime should serve one client connection: {error}"),
-        };
-        assert_eq!(handled, 1);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server_thread = thread::spawn(move || {
+            runtime.serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+        });
         let response = match client_thread.join() {
             Ok(response) => response,
             Err(error) => panic!("client thread panicked: {error:?}"),
@@ -5417,6 +5688,19 @@ mod tests {
         match upstream_thread.join() {
             Ok(()) => {}
             Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+
+        wait_for_durable_quota_exhaustion(&state, &[primary.account_id()]);
+        wait_for_repository_selected_account(
+            &state,
+            fallback.account_id(),
+            "durable quota state should select the fallback while serving",
+        );
+        shutdown.cancel();
+        match server_thread.join() {
+            Ok(Ok(handled)) => assert_eq!(handled, 1),
+            Ok(Err(error)) => panic!("router shutdown should succeed: {error}"),
+            Err(error) => panic!("router server thread panicked: {error:?}"),
         }
 
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
@@ -5540,11 +5824,11 @@ mod tests {
             )
         });
 
-        let handled = match runtime.serve_http_connections(1) {
-            Ok(handled) => handled,
-            Err(error) => panic!("router runtime should serve one client connection: {error}"),
-        };
-        assert_eq!(handled, 1);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server_thread = thread::spawn(move || {
+            runtime.serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+        });
         let response = match client_thread.join() {
             Ok(response) => response,
             Err(error) => panic!("client thread panicked: {error:?}"),
@@ -5574,6 +5858,19 @@ mod tests {
         match upstream_thread.join() {
             Ok(()) => {}
             Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+        }
+
+        wait_for_durable_quota_exhaustion(&state, &[primary.account_id(), secondary.account_id()]);
+        wait_for_repository_selected_account(
+            &state,
+            tertiary.account_id(),
+            "durable quota state should select the fallback while serving",
+        );
+        shutdown.cancel();
+        match server_thread.join() {
+            Ok(Ok(handled)) => assert_eq!(handled, 1),
+            Ok(Err(error)) => panic!("router shutdown should succeed: {error}"),
+            Err(error) => panic!("router server thread panicked: {error:?}"),
         }
 
         let runtime_state = must_ok(SqliteStateStore::open(&database_path));
@@ -7218,6 +7515,8 @@ mod tests {
             "protected-ws-token",
         );
         persist_account_with_snapshot_and_token(&state, &secrets, &peer, 80, "peer-ws-token");
+        refresh_served_floor_windows_for_test(&state, &protected, NOW, 5);
+        refresh_served_floor_windows_for_test(&state, &peer, NOW, 80);
         drop(state);
         set_weekly_floor_for_test(&database_path, protected.label(), 500);
 
@@ -9456,6 +9755,45 @@ mod tests {
         }
     }
 
+    fn refresh_served_floor_windows_for_test(
+        state: &SqliteStateStore,
+        account: &AccountRecord,
+        observed_unix_seconds: u64,
+        remaining_headroom: u32,
+    ) {
+        let windows = [
+            PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                "responses",
+                18_000,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(remaining_headroom)
+            .with_effective(true)
+            .with_observed_unix_seconds(observed_unix_seconds)
+            .with_reset_unix_seconds(observed_unix_seconds + 18_000),
+            PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                "responses",
+                604_800,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(remaining_headroom)
+            .with_effective(false)
+            .with_observed_unix_seconds(observed_unix_seconds)
+            .with_reset_unix_seconds(observed_unix_seconds + 604_800),
+        ];
+        SelectorQuotaRepository::record_refresh_success_and_replace_selector_windows(
+            state,
+            account.account_id(),
+            "responses",
+            &windows,
+            observed_unix_seconds,
+            observed_unix_seconds + 300,
+        )
+        .expect("served floor windows should be fresh");
+    }
+
     fn persist_fresh_account_with_selector_window_specs(
         state: &SqliteStateStore,
         account: &AccountRecord,
@@ -9677,6 +10015,38 @@ mod tests {
             expected_account_id.as_str(),
             last_selected
         );
+    }
+
+    fn wait_for_durable_quota_exhaustion(state: &SqliteStateStore, accounts: &[&AccountId]) {
+        let mut last_snapshots = Vec::new();
+        for _attempt in 0..50 {
+            let snapshots = accounts
+                .iter()
+                .map(|account_id| {
+                    state
+                        .load_quota_snapshot_for_route_band(account_id, "responses")
+                        .unwrap_or_else(|error| panic!("quota snapshot should load: {error}"))
+                })
+                .collect::<Vec<_>>();
+            if snapshots.iter().all(|snapshot| {
+                snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot.source() == QuotaSnapshotSource::OpenAiEndpoint
+                        && snapshot.remaining_headroom() == 0
+                })
+            }) {
+                return;
+            }
+            last_snapshots = snapshots
+                .iter()
+                .map(|snapshot| {
+                    snapshot
+                        .as_ref()
+                        .map(|row| (row.source(), row.remaining_headroom()))
+                })
+                .collect();
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("provider quota exhaustion did not persist while serving: {last_snapshots:?}");
     }
 
     fn http_response_from_one_connection(
@@ -10162,7 +10532,8 @@ mod tests {
             &self,
             account_id: &codex_router_core::ids::AccountId,
             refresh_token: &SecretString,
-        ) -> Result<AccountCredentialBundle, CredentialResolverError> {
+        ) -> Result<AccountCredentialBundle, codex_router_auth::resolver::CredentialRefreshFailure>
+        {
             assert_eq!(account_id.as_str(), self.expected_account_id);
             assert_eq!(refresh_token.expose_secret(), self.expected_refresh_token);
             self.calls.fetch_add(1, Ordering::SeqCst);

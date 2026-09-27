@@ -140,6 +140,164 @@ fn quota_refresh_http_provider_fetches_usage_and_persists_sqlite_state() {
 }
 
 #[test]
+fn loopback_quota_401_retries_with_a_concurrently_committed_generation() {
+    let test_root = TestRoot::new("quota-http-401-generation-race");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let account_id = account_id("quota-http-401-race-account");
+    must_ok(AccountStateRepository::upsert_account(
+        &state,
+        &AccountRecord::new(
+            account_id.clone(),
+            "quota-http-race",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1),
+    ));
+    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active = AccountCredentialBundle::imported_codex_auth(
+        "rejected-access-canary",
+        Some("original-refresh-canary".to_owned()),
+    )
+    .with_expires_unix_seconds(4_000_000_000);
+    must_ok(secrets.write_secret(&active_key, &must_ok(active.to_secret_string())));
+
+    let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
+    must_ok(listener.set_nonblocking(true));
+    let address = must_ok(listener.local_addr());
+    let server_state_path = state_path.clone();
+    let server_secret_root = secret_root.clone();
+    let server_account_id = account_id.clone();
+    let server_thread = thread::spawn(move || {
+        let expected_paths = [
+            "/api/codex/usage",
+            "/api/codex/usage",
+            "/api/codex/rate-limit-reset-credits",
+            "/api/codex/usage",
+            "/api/codex/rate-limit-reset-credits",
+        ];
+        for (request_index, path) in expected_paths.iter().enumerate() {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::yield_now();
+                    }
+                    Err(error) => panic!("fixture quota request {request_index} missing: {error}"),
+                }
+            };
+            must_ok(stream.set_nonblocking(false));
+            must_ok(stream.set_read_timeout(Some(Duration::from_secs(2))));
+            let mut request_bytes = Vec::new();
+            while !request_bytes.ends_with(b"\r\n\r\n") {
+                let mut buffer = [0_u8; 1024];
+                let bytes_read = must_ok(stream.read(&mut buffer));
+                assert!(bytes_read > 0, "fixture quota request ended early");
+                request_bytes.extend_from_slice(&buffer[..bytes_read]);
+                assert!(
+                    request_bytes.len() <= 4096,
+                    "fixture quota headers too large"
+                );
+            }
+            let request = String::from_utf8_lossy(&request_bytes);
+            assert!(request.starts_with(&format!("GET {path} HTTP/1.1\r\n")));
+            let expected_access = if request_index == 0 {
+                "rejected-access-canary"
+            } else {
+                "concurrent-access-canary"
+            };
+            assert!(request.contains(&format!("authorization: Bearer {expected_access}\r\n")));
+            if request_index == 0 {
+                let successor_key = must_ok(account_credential_bundle_key(&server_account_id, 2));
+                let successor = AccountCredentialBundle::imported_codex_auth(
+                    "concurrent-access-canary",
+                    Some("concurrent-refresh-canary".to_owned()),
+                )
+                .with_expires_unix_seconds(5_000_000_000);
+                let secrets = must_ok(FileSecretStore::open(&server_secret_root));
+                must_ok(
+                    secrets.write_secret(&successor_key, &must_ok(successor.to_secret_string())),
+                );
+                let state = must_ok(SqliteStateStore::open(&server_state_path));
+                must_ok(AccountStateRepository::upsert_account(
+                    &state,
+                    &AccountRecord::new(
+                        server_account_id.clone(),
+                        "quota-http-race",
+                        AccountStatus::Enabled,
+                    )
+                    .with_active_credential_generation(2),
+                ));
+                must_ok(stream.write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                ));
+                continue;
+            }
+            let body = if *path == "/api/codex/usage" {
+                r#"{"rate_limit":{"primary_window":null,"secondary_window":{"used_percent":58,"reset_at":9000,"limit_window_seconds":604800}}}"#
+            } else {
+                r#"{"reset_credits":{"available":1}}"#
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            must_ok(stream.write_all(response.as_bytes()));
+        }
+    });
+
+    let refresh_client = RecordingRefreshClient::new(
+        "quota-http-401-race-account",
+        "original-refresh-canary",
+        AccountCredentialBundle::imported_codex_auth("unexpected-refresh", None),
+    );
+    let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+        &state_path,
+        &secret_root,
+        refresh_client.clone(),
+    ));
+    let provider = must_ok(HttpQuotaRefreshProvider::new());
+    let mut output = Vec::new();
+    let result = refresh_quota_store_paths_with_dependencies(
+        &mut output,
+        &state_path,
+        &secret_root,
+        format!("http://{address}"),
+        &resolver,
+        &provider,
+        1_100,
+    );
+    must_ok(
+        server_thread
+            .join()
+            .map_err(|_| "fixture quota server failed"),
+    );
+    must_ok(result);
+    assert_eq!(refresh_client.calls(), 0);
+    let account = must_ok(AccountStateRepository::load_account(&state, &account_id))
+        .expect("account should remain");
+    assert_eq!(account.active_credential_generation(), Some(2));
+    assert_eq!(account.status(), AccountStatus::Enabled);
+    for route_band in ["responses", "models"] {
+        let snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
+            &state,
+            &account_id,
+            route_band,
+        ))
+        .expect("quota snapshot should be saved");
+        assert_eq!(snapshot.remaining_headroom(), 42);
+    }
+    assert_eq!(must_ok(String::from_utf8(output)), "refreshed: 2\n");
+}
+
+#[test]
 fn quota_refresh_http_provider_times_out_hanging_usage_endpoint() {
     let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
     let address = must_ok(listener.local_addr());
