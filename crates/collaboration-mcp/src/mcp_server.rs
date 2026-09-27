@@ -141,7 +141,17 @@ impl CollaborationMcpServer {
                     let mut output = serde_json::Value::Object((**schema).clone());
                     bind_native_schema_refs(&mut output, native_definitions.as_ref());
                     normalize_boolean_json_schemas(&mut output);
+                    let success_description = output
+                        .pointer("/anyOf/0/$ref")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|reference| reference.strip_prefix('#'))
+                        .and_then(|pointer| output.pointer(pointer))
+                        .and_then(|success| success.get("description"))
+                        .cloned();
                     if let serde_json::Value::Object(mut fields) = output {
+                        if let Some(description) = success_description {
+                            fields.insert("description".to_owned(), description);
+                        }
                         fields
                             .entry("type".to_owned())
                             .or_insert_with(|| serde_json::Value::String("object".to_owned()));
