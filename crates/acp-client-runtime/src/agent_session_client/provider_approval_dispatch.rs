@@ -1,5 +1,6 @@
 //! Approval context lifetime for a dispatched provider prompt.
 
+use super::approval_turn_cancellation::PermissionResponseBarrier;
 use super::{
     ActiveApprovalContext, AgentSessionClient, ApprovalContextGuard, ExternalProviderPromptOutcome,
     ExternalProviderRuntimeError, ProviderPromptDispatchObservation,
@@ -53,6 +54,7 @@ impl<P: crate::InteractionPort> AgentSessionClient<P> {
                 ActiveApprovalContext {
                     approval: context,
                     cancelling: tokio_util::sync::CancellationToken::new(),
+                    responses: Arc::new(PermissionResponseBarrier::default()),
                 },
             );
         }

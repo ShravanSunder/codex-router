@@ -5,6 +5,31 @@ use crate::provider_prompt_content::acp_blocks_from_prompt_content;
 use agent_client_protocol::schema::v1::ContentBlock;
 use session_event_model::PromptContent;
 
+/// Until the Close command enters the connection queue, dropping its caller
+/// must release the admission mark. The connection task clears it afterward.
+struct PendingCloseAdmissionGuard {
+    marks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    provider_session_id: String,
+    submitted: bool,
+}
+
+impl PendingCloseAdmissionGuard {
+    fn transfer_to_connection(&mut self) {
+        self.submitted = true;
+    }
+}
+
+impl Drop for PendingCloseAdmissionGuard {
+    fn drop(&mut self) {
+        if !self.submitted {
+            self.marks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.provider_session_id);
+        }
+    }
+}
+
 impl<P: InteractionPort> AgentSessionClient<P> {
     fn retired_operation_error(&self) -> ExternalProviderRuntimeError {
         if self.sink_closed.is_cancelled() {
@@ -56,6 +81,9 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         &self,
         provider_session_id: String,
     ) -> Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        if self.settings_unresolved.read().await.get(&provider_session_id).is_some_and(|kinds| kinds.values().any(|cause| *cause == crate::provider_session_settings::UnresolvedSettingCause::OutcomeUnknown)) {
+            return Err(ExternalProviderRuntimeError::SettingsOutcomeUncertain);
+        }
         let catalog = self
             .session_settings
             .read()
@@ -94,7 +122,12 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 self.settings_unresolved
                     .write()
                     .await
-                    .insert(uncertain_session_id.clone(), kind);
+                    .entry(uncertain_session_id.clone())
+                    .or_default()
+                    .insert(
+                        kind,
+                        crate::provider_session_settings::UnresolvedSettingCause::OutcomeUnknown,
+                    );
                 Err(ExternalProviderRuntimeError::SettingOutcomeUnknown {
                     provider_session_id: uncertain_session_id,
                     setting: kind,
@@ -285,6 +318,28 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 capability: "session/close",
             });
         }
+        if !self
+            .pending_close_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(provider_session_id.clone())
+        {
+            return Err(ExternalProviderRuntimeError::LocalBusy);
+        }
+        let mut admission_guard = PendingCloseAdmissionGuard {
+            marks: Arc::clone(&self.pending_close_marks),
+            provider_session_id: provider_session_id.clone(),
+            submitted: false,
+        };
+        self.close_session_after_mark(provider_session_id, &mut admission_guard)
+            .await
+    }
+
+    async fn close_session_after_mark(
+        &self,
+        provider_session_id: String,
+        admission_guard: &mut PendingCloseAdmissionGuard,
+    ) -> Result<(), ExternalProviderRuntimeError> {
         if self.session_activity(provider_session_id.clone()).await?
             == ProviderSessionActivity::Running
         {
@@ -302,6 +357,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             })
             .await
             .map_err(|_| self.retired_operation_error())?;
+        admission_guard.transfer_to_connection();
         result.await.map_err(|_| self.retired_operation_error())?
     }
 

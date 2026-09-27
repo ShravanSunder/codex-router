@@ -5,16 +5,16 @@ use collaboration_client::{
     MessageSendRequest, OperationEffect, operation_failure_from_client_error,
 };
 use collaboration_protocol::{
-    AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult,
-    ApprovalDetailedListResult, ApprovalListParams, ConversationCloseRequest,
-    ConversationCreateOutcome, ConversationOperationSubmission, ConversationResumeRequest,
-    DeliveryOutcome, DeliveryReceipt, EndpointInventory, JournalPage, JournalReadParams,
-    JournalStatus, NativeInspectParams, NativeInspectResult, NativeInterruptParams,
-    NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
-    NativeSessionListResult, OperationId, ProviderInspectFailure, ProviderSessionInspectRequest,
-    ProviderSessionInspectResult, ProviderSessionListParams, ProviderSessionListResult,
-    ProviderSettingsAcceptRequest, ProviderSettingsFailure, ProviderSettingsResult,
-    ProviderSettingsSetRequest, RouterExecutableRelation, router_build_warning,
+    AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
+    ApprovalListResponse, ConversationCloseRequest, ConversationCreateOutcome,
+    ConversationOperationSubmission, ConversationResumeRequest, DeliveryOutcome, DeliveryReceipt,
+    EndpointInventory, JournalPage, JournalReadParams, JournalStatus, NativeInspectParams,
+    NativeInspectResult, NativeInterruptParams, NativeInterruptResult, NativeRenameParams,
+    NativeRenameResult, NativeSessionListParams, NativeSessionListResult, OperationId,
+    ProviderInspectFailure, ProviderSessionInspectRequest, ProviderSessionInspectResult,
+    ProviderSessionListParams, ProviderSessionListResult, ProviderSettingsAcceptRequest,
+    ProviderSettingsFailure, ProviderSettingsResult, ProviderSettingsSetRequest,
+    RouterExecutableRelation, router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -353,7 +353,7 @@ impl CollaborationMcpServer {
         message_tool_result(result)
     }
 
-    #[tool(name = "approval_list", description = "Lists approval requests and every offered choice, including persistent effects. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ApprovalDetailedListResult>())]
+    #[tool(name = "approval_list", description = "Lists approval requests. Set includeOptions for offered choices and persistent effects. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<ApprovalListResponse>())]
     async fn approval_list(
         &self,
         Parameters(request): Parameters<ApprovalListParams>,
@@ -362,7 +362,17 @@ impl CollaborationMcpServer {
             Ok(value) => value,
             Err(error) => return failure(error, OperationEffect::None),
         };
-        let result = client.list_approvals_with_options(request.pending).await;
+        let result = if request.include_options {
+            client
+                .list_approvals_with_options(request.pending)
+                .await
+                .map(ApprovalListResponse::Detailed)
+        } else {
+            client
+                .list_pending_approvals(request.pending)
+                .await
+                .map(ApprovalListResponse::Legacy)
+        };
         let _closed = client.close().await;
         structured_result(result, OperationEffect::None)
     }

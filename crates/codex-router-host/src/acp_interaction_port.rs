@@ -1,6 +1,7 @@
 //! Host policy adapter for the ACP client's provider interactions.
 
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use acp_client_runtime::{
     ApprovalPortOutcome, InteractionFuture, InteractionPort, RefusedApprovalOffer, SessionEventSink,
@@ -17,6 +18,8 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::ExternalProviderApprovalContext;
+
+const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Default)]
 pub(crate) struct HostInteractionPort {
@@ -88,9 +91,9 @@ impl InteractionPort for HostInteractionPort {
             };
             let receiver = match broker
                 .request_typed_approval(
-                    requester,
-                    approver,
-                    request,
+                    requester.clone(),
+                    approver.clone(),
+                    request.clone(),
                     turn_cancellation.clone(),
                     context.binding_retirement.clone(),
                 )
@@ -99,6 +102,31 @@ impl InteractionPort for HostInteractionPort {
                 Ok(receiver) => receiver,
                 Err(collaboration_service::InteractionHistoryError::NotPending) => {
                     return ApprovalPortOutcome::Cancelled;
+                }
+                Err(collaboration_service::InteractionHistoryError::SelfApprover) => {
+                    let refusal = RefusedTypedApproval {
+                        request_id: request.request_id,
+                        title: request.title,
+                        description: request.description,
+                        subject: request.subject,
+                        options: request
+                            .options
+                            .iter()
+                            .map(|option| RefusedApprovalOption {
+                                option_id: option.option_id.as_str().to_owned(),
+                                label: option.label.clone(),
+                                provider_kind: "selfApprover".to_owned(),
+                            })
+                            .collect(),
+                        reason: "set a different approver".to_owned(),
+                    };
+                    if let Err(error) = broker
+                        .record_typed_refusal(requester, approver, refusal)
+                        .await
+                    {
+                        tracing::error!(%error, "self-approver refusal could not be recorded");
+                    }
+                    return ApprovalPortOutcome::Unavailable;
                 }
                 Err(error) => {
                     tracing::error!(%error, "provider approval could not be admitted");
@@ -124,6 +152,10 @@ impl InteractionPort for HostInteractionPort {
                 }
                 () = agent_cancellation.cancelled() => {
                     let settled = broker.cancel_typed_approval(&request_id, "agentCancelled").await.is_ok();
+                    (approval_receiver_outcome(receiver.await), settled)
+                }
+                () = tokio::time::sleep(APPROVAL_DECISION_TIMEOUT) => {
+                    let settled = broker.cancel_typed_approval(&request_id, "timedOut").await.is_ok();
                     (approval_receiver_outcome(receiver.await), settled)
                 }
                 selected = &mut receiver => {
@@ -161,6 +193,19 @@ impl InteractionPort for HostInteractionPort {
                 || agent_cancellation.is_cancelled()
                 || context.binding_retirement.is_cancelled()
             {
+                let reason = if turn_cancellation.is_cancelled() {
+                    "turnCancelled"
+                } else if context.binding_retirement.is_cancelled() {
+                    "providerRetired"
+                } else {
+                    "agentCancelled"
+                };
+                if let Err(error) = broker
+                    .record_cancelled_question(requester, approver, request, reason)
+                    .await
+                {
+                    tracing::error!(%error, "cancelled provider question could not be recorded");
+                }
                 return QuestionResponse::Cancelled;
             }
             let request_id = request.request_id.clone();
@@ -171,7 +216,15 @@ impl InteractionPort for HostInteractionPort {
                     request: Box::new(request.clone()),
                 },
             };
-            let receiver = match broker.request_question(requester, approver, request).await {
+            let receiver = match broker
+                .request_question(
+                    requester,
+                    approver,
+                    request,
+                    Some(context.binding_retirement.clone()),
+                )
+                .await
+            {
                 Ok(receiver) => receiver,
                 Err(error) => {
                     tracing::error!(%error, "provider question could not be admitted");
@@ -199,7 +252,13 @@ impl InteractionPort for HostInteractionPort {
                     let settled = broker.cancel_question(&request_id, "agentCancelled").await.is_ok();
                     (receiver.await.unwrap_or(QuestionResponse::Cancelled), settled)
                 }
-                settled = &mut receiver => (settled.unwrap_or(QuestionResponse::Cancelled), true),
+                settled = &mut receiver => {
+                    let response = settled.unwrap_or(QuestionResponse::Cancelled);
+                    let resolved_here = !turn_cancellation.is_cancelled()
+                        && !context.binding_retirement.is_cancelled()
+                        && !agent_cancellation.is_cancelled();
+                    (response, resolved_here)
+                },
             };
             if resolved_here {
                 let _ = self
@@ -284,8 +343,21 @@ impl InteractionPort for HostInteractionPort {
                     tracing::error!(%error, "failed to cancel provider approvals for Session")
                 }
             }
-            if let Err(error) = broker.cancel_questions(&requester, reason).await {
-                tracing::error!(%error, "failed to cancel provider questions for Session");
+            match broker.cancel_questions(&requester, reason).await {
+                Ok(request_ids) => {
+                    let session_id = String::from(context.target.session_id.clone());
+                    for request_id in request_ids {
+                        let _ = self
+                            .publish(
+                                &session_id,
+                                SessionEvent::InteractionResolved { request_id },
+                            )
+                            .await;
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to cancel provider questions for Session")
+                }
             }
         })
     }

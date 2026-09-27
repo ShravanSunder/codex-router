@@ -324,7 +324,6 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
         assert_eq!(bytes, expected.as_bytes());
     }
     queue.shutdown().await;
-    backend.shutdown().await.expect("supervisor shuts down");
     let hub_target: message_board::SessionRef =
         serde_json::from_value(serde_json::to_value(target).expect("target JSON"))
             .expect("hub target");
@@ -340,6 +339,7 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
         })
         .collect::<Vec<_>>();
     assert_eq!(started, queued_input_ids);
+    backend.shutdown().await.expect("supervisor shuts down");
 }
 
 #[tokio::test]

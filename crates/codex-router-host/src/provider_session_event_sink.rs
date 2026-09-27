@@ -42,7 +42,7 @@ pub(crate) struct HubSessionEventSink {
     sender: StdMutex<Option<mpsc::UnboundedSender<HubCommand>>>,
     consumer: Mutex<Option<JoinHandle<()>>>,
     backlog: Arc<AtomicUsize>,
-    backlog_warned: StdMutex<HashSet<String>>,
+    backlog_warned: Arc<StdMutex<HashSet<String>>>,
     not_publishing: Arc<StdMutex<HashSet<String>>>,
     catalog_refresh: StdMutex<Option<mpsc::UnboundedSender<String>>>,
 }
@@ -51,8 +51,10 @@ impl HubSessionEventSink {
     pub(crate) fn new(hub: Arc<ProviderSessionEventHub>, endpoint: SessionEndpointRef) -> Self {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let backlog = Arc::new(AtomicUsize::new(0));
+        let backlog_warned = Arc::new(StdMutex::new(HashSet::new()));
         let not_publishing = Arc::new(StdMutex::new(HashSet::new()));
         let consumer_backlog = Arc::clone(&backlog);
+        let consumer_warned = Arc::clone(&backlog_warned);
         let consumer_failures = Arc::clone(&not_publishing);
         let consumer = tokio::spawn(async move {
             while let Some(command) = receiver.recv().await {
@@ -63,6 +65,12 @@ impl HubSessionEventSink {
                         event,
                         completion,
                     } => {
+                        let session_closed = matches!(
+                            &event,
+                            SessionEvent::StateChanged {
+                                state: session_event_model::SessionState::Closed,
+                            }
+                        );
                         let result = hub.publish(session.clone(), event).await.map(|_| ()).map_err(|error| {
                             tracing::error!(%error, session_id = %session.session_id.as_str(), "provider Session event publication failed");
                             consumer_failures
@@ -71,6 +79,17 @@ impl HubSessionEventSink {
                                 .insert(session.session_id.as_str().to_owned());
                             EventSinkClosed
                         });
+                        if session_closed && result.is_ok() {
+                            let session_id = session.session_id.as_str();
+                            consumer_warned
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remove(session_id);
+                            consumer_failures
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remove(session_id);
+                        }
                         if let Some(completion) = completion {
                             let _ = completion.send(result);
                         }
@@ -111,7 +130,7 @@ impl HubSessionEventSink {
             sender: StdMutex::new(Some(sender)),
             consumer: Mutex::new(Some(consumer)),
             backlog,
-            backlog_warned: StdMutex::new(HashSet::new()),
+            backlog_warned,
             not_publishing,
             catalog_refresh: StdMutex::new(None),
         }
@@ -516,7 +535,7 @@ mod tests {
             SessionEvent::TurnEnded {
                 turn_id: "old-turn".into(),
                 outcome: TurnOutcome::Lost {
-                    reason: "providerRetired".into(),
+                    reason: session_event_model::TurnLostReason::ProviderRetired,
                 },
             },
         )
@@ -576,6 +595,51 @@ mod tests {
             Some("session-one")
         );
         sink.shutdown().await.expect("drain");
+    }
+
+    #[tokio::test]
+    async fn closing_session_releases_backlog_and_publication_tracking() {
+        let root = tempfile::tempdir().expect("temporary store");
+        let store = ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("provider store");
+        let hub = Arc::new(ProviderSessionEventHub::new(Arc::new(Mutex::new(store))));
+        let endpoint = SessionEndpointRef {
+            service_id: ServiceId::try_from("00000000-0000-4000-8000-000000000001".to_owned())
+                .expect("service"),
+            endpoint_id: EndpointId::try_from("fixture-provider".to_owned()).expect("endpoint"),
+        };
+        let sink = HubSessionEventSink::new(hub, endpoint);
+        sink.backlog_warned
+            .lock()
+            .expect("backlog lock")
+            .insert("session-one".to_owned());
+        sink.publish(
+            "session-one",
+            SessionEvent::StateChanged {
+                state: session_event_model::SessionState::Closed,
+            },
+        )
+        .expect("close event queued");
+        sink.not_publishing
+            .lock()
+            .expect("publication lock")
+            .insert("session-one".to_owned());
+        sink.shutdown().await.expect("close event drained");
+        assert!(
+            !sink
+                .backlog_warned
+                .lock()
+                .expect("backlog lock")
+                .contains("session-one")
+        );
+        assert!(
+            !sink
+                .not_publishing
+                .lock()
+                .expect("publication lock")
+                .contains("session-one")
+        );
     }
 }
 

@@ -4,8 +4,9 @@ use std::collections::VecDeque;
 
 use collaboration_protocol::{
     BoundedObservationRequest, BoundedObservationResult, ChannelDescription, CodexGeneration,
-    EndpointAvailability, ObservationEndReason, ProviderSessionListenReady,
-    ProviderSessionListenRequest, SessionRef,
+    EndpointAvailability, ObservationEndReason, ProviderObservationEventTooLarge,
+    ProviderObservationEventTooLargeKind, ProviderSessionListenReady, ProviderSessionListenRequest,
+    SessionRef,
 };
 use serde_json::{Value, json};
 use session_event_model::SessionEvent;
@@ -61,9 +62,20 @@ impl ProviderSessionSubscription {
         {
             event
         } else {
-            self.snapshot.clear();
-            self.closed = true;
-            json!({"kind":"resyncRequired"})
+            let sequence = event
+                .get("sequence")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let item_id = event
+                .pointer("/event/item/itemId")
+                .or_else(|| event.pointer("/event/itemId"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            json!(ProviderObservationEventTooLarge {
+                kind: ProviderObservationEventTooLargeKind::EventTooLarge,
+                sequence,
+                item_id,
+            })
         }
     }
 }
@@ -80,7 +92,11 @@ pub(crate) async fn listen(
             target: request.target,
             generation,
         },
-        snapshot: attachment.snapshot.into_iter().map(event_value).collect(),
+        snapshot: attachment
+            .snapshot
+            .into_iter()
+            .map(event_value_bounded)
+            .collect(),
         receiver: attachment.receiver,
         closed: false,
     })
@@ -116,17 +132,41 @@ async fn collect(
         tokio::time::timeout_at(deadline, attach(&request.target, identity))
             .await
             .map_err(|_| ObservationFailure::Unavailable)??;
+    if request.after_sequence.is_some() && request.epoch.is_none() {
+        return Err(ObservationFailure::InvalidField);
+    }
+    let current_epoch = attachment.epoch;
+    if request.epoch.is_some_and(|epoch| epoch != current_epoch) {
+        return Ok(BoundedObservationResult {
+            target: request.target,
+            generation,
+            attached: true,
+            events: vec![json!({"kind":"resyncRequired"})],
+            end_reason: ObservationEndReason::ResyncRequired,
+            continuation_gap: true,
+            epoch: Some(current_epoch),
+        });
+    }
     let mut events = Vec::new();
     let mut bytes = 0_usize;
-    let mut snapshot = attachment.snapshot.into_iter();
+    let mut snapshot = attachment.snapshot.into_iter().filter(|event| {
+        request
+            .after_sequence
+            .is_none_or(|after| event.sequence > after)
+    });
     let mut receiver = attachment.receiver;
     let end_reason = loop {
         let event = if let Some(event) = snapshot.next() {
             if matches!(&event.event, SessionEvent::ResyncRequired { .. }) {
-                let _ = append_event(&mut events, &mut bytes, event_value(event), &request)?;
+                let _ = append_event(
+                    &mut events,
+                    &mut bytes,
+                    event_value_bounded(event),
+                    &request,
+                )?;
                 break ObservationEndReason::ResyncRequired;
             }
-            event_value(event)
+            event_value_bounded(event)
         } else {
             let received = tokio::select! {
                 () = tokio::time::sleep_until(deadline) => break ObservationEndReason::DeadlineReached,
@@ -139,10 +179,15 @@ async fn collect(
                         ..
                     },
                 ) => {
-                    let _ = append_event(&mut events, &mut bytes, event_value(event), &request)?;
+                    let _ = append_event(
+                        &mut events,
+                        &mut bytes,
+                        event_value_bounded(event),
+                        &request,
+                    )?;
                     break ObservationEndReason::ResyncRequired;
                 }
-                Ok(event) => event_value(event),
+                Ok(event) => event_value_bounded(event),
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     let _ = append_event(
                         &mut events,
@@ -171,6 +216,7 @@ async fn collect(
         events,
         end_reason,
         continuation_gap: true,
+        epoch: Some(current_epoch),
     })
 }
 
@@ -241,6 +287,27 @@ async fn attach(
 
 fn event_value(event: HubEvent) -> Value {
     json!({"sequence":event.sequence,"event":event.event})
+}
+
+fn event_value_bounded(event: HubEvent) -> Value {
+    let sequence = event.sequence;
+    let item_id = match &event.event {
+        SessionEvent::ItemStarted { item } | SessionEvent::ItemUpdated { item } => {
+            Some(item.item_id.clone())
+        }
+        SessionEvent::ItemCompleted { item_id } => Some(item_id.clone()),
+        _ => None,
+    };
+    let value = event_value(event);
+    if serde_json::to_vec(&value).is_ok_and(|encoded| encoded.len() <= MAX_CONTROL_EVENT_BYTES) {
+        value
+    } else {
+        json!(ProviderObservationEventTooLarge {
+            kind: ProviderObservationEventTooLargeKind::EventTooLarge,
+            sequence,
+            item_id,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]

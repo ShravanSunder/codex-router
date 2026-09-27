@@ -11,8 +11,8 @@ pub use collaboration_protocol::QuestionResponse;
 use message_board::{Identity, SessionRef};
 use serde::{Deserialize, Serialize};
 use session_event_model::{
-    ApprovalRequest, ApprovalScope, ApprovalSubject, OfferedOptionId, QuestionField,
-    QuestionRequest,
+    ApprovalRequest, ApprovalScope, ApprovalSubject, InteractionCancelReason, OfferedOptionId,
+    QuestionField, QuestionRequest,
 };
 use tokio::sync::Mutex;
 
@@ -112,7 +112,9 @@ impl InteractionHistoryRecord {
                         .options
                         .iter()
                         .any(|option| &option.option_id == option_id),
-                    InteractionHistoryState::Cancelled { reason } => !reason.trim().is_empty(),
+                    InteractionHistoryState::Cancelled { reason } => {
+                        !reason.as_str().trim().is_empty()
+                    }
                 }
             }
             Self::Question {
@@ -132,14 +134,8 @@ impl InteractionHistoryRecord {
                         }
                     }
             }
-            Self::RefusedApproval {
-                requester,
-                approver,
-                refusal,
-            } => {
-                !refusal.request_id.is_empty()
-                    && !refusal.reason.trim().is_empty()
-                    && !matches!(approver, Identity::Session { session } if session == requester)
+            Self::RefusedApproval { refusal, .. } => {
+                !refusal.request_id.is_empty() && !refusal.reason.trim().is_empty()
             }
         }
     }
@@ -163,7 +159,7 @@ pub enum QuestionHistoryState {
 pub enum InteractionHistoryState {
     Pending,
     Decided { option_id: OfferedOptionId },
-    Cancelled { reason: String },
+    Cancelled { reason: InteractionCancelReason },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -277,6 +273,32 @@ pub(super) struct InteractionHistoryStore {
     records: Mutex<BTreeMap<String, InteractionHistoryRecord>>,
 }
 
+fn validate_question_response_record(
+    record: &InteractionHistoryRecord,
+    actor: &Identity,
+    response: &QuestionResponse,
+) -> Result<(), InteractionHistoryError> {
+    let InteractionHistoryRecord::Question {
+        approver,
+        request,
+        state,
+        ..
+    } = record
+    else {
+        return Err(InteractionHistoryError::NotPending);
+    };
+    if approver != actor {
+        return Err(InteractionHistoryError::WrongActor);
+    }
+    if state != &QuestionHistoryState::Pending {
+        return Err(InteractionHistoryError::AlreadySettled);
+    }
+    if let QuestionResponse::Answered { content } = response {
+        validate_question_content(request, content)?;
+    }
+    Ok(())
+}
+
 impl InteractionHistoryStore {
     pub(super) async fn load(path: PathBuf) -> Result<Self, InteractionHistoryError> {
         let records: BTreeMap<String, InteractionHistoryRecord> =
@@ -303,7 +325,7 @@ impl InteractionHistoryStore {
                     if state == &InteractionHistoryState::Pending =>
                 {
                     *state = InteractionHistoryState::Cancelled {
-                        reason: "hostRestarted".to_owned(),
+                        reason: InteractionCancelReason::HostRestarted,
                     };
                     had_pending = true;
                 }
@@ -391,7 +413,7 @@ impl InteractionHistoryStore {
             approver,
             request,
             state: InteractionHistoryState::Cancelled {
-                reason: reason.to_owned(),
+                reason: reason.to_owned().into(),
             },
         };
         if !record.is_valid_stored_value() {
@@ -426,7 +448,7 @@ impl InteractionHistoryStore {
             return Err(InteractionHistoryError::AlreadySettled);
         }
         *state = InteractionHistoryState::Cancelled {
-            reason: reason.to_owned(),
+            reason: reason.to_owned().into(),
         };
         self.persist(&next).await?;
         *records = next;
@@ -454,7 +476,7 @@ impl InteractionHistoryStore {
                 && state == &InteractionHistoryState::Pending
             {
                 *state = InteractionHistoryState::Cancelled {
-                    reason: reason.to_owned(),
+                    reason: reason.to_owned().into(),
                 };
                 cancelled.push(request_id.clone());
             }
@@ -472,7 +494,13 @@ impl InteractionHistoryStore {
             .lock()
             .await
             .values()
-            .filter(|record| matches!(record, InteractionHistoryRecord::Approval { state, .. } if !pending_only || state == &InteractionHistoryState::Pending))
+            .filter(|record| match record {
+                InteractionHistoryRecord::Approval { state, .. } => {
+                    !pending_only || state == &InteractionHistoryState::Pending
+                }
+                InteractionHistoryRecord::RefusedApproval { .. } => !pending_only,
+                InteractionHistoryRecord::Question { .. } => false,
+            })
             .cloned()
             .collect()
     }
@@ -514,6 +542,35 @@ impl InteractionHistoryStore {
         Ok(())
     }
 
+    pub(super) async fn record_cancelled_question(
+        &self,
+        requester: SessionRef,
+        approver: Identity,
+        request: QuestionRequest,
+        reason: &str,
+    ) -> Result<(), InteractionHistoryError> {
+        let record = InteractionHistoryRecord::Question {
+            requester,
+            approver,
+            request,
+            state: QuestionHistoryState::Cancelled {
+                reason: reason.to_owned(),
+            },
+        };
+        if !record.is_valid_stored_value() {
+            return Err(InteractionHistoryError::InvalidQuestion);
+        }
+        let mut records = self.records.lock().await;
+        if records.contains_key(record.request_id()) {
+            return Err(InteractionHistoryError::AlreadyExists);
+        }
+        let mut next = records.clone();
+        next.insert(record.request_id().to_owned(), record);
+        self.persist(&next).await?;
+        *records = next;
+        Ok(())
+    }
+
     pub(super) async fn list_questions(&self, pending_only: bool) -> Vec<InteractionHistoryRecord> {
         self.records.lock().await.values()
             .filter(|record| matches!(record, InteractionHistoryRecord::Question { state, .. } if !pending_only || state == &QuestionHistoryState::Pending))
@@ -530,24 +587,7 @@ impl InteractionHistoryStore {
         let record = records
             .get(request_id)
             .ok_or(InteractionHistoryError::NotPending)?;
-        let InteractionHistoryRecord::Question {
-            approver,
-            request,
-            state,
-            ..
-        } = record
-        else {
-            return Err(InteractionHistoryError::NotPending);
-        };
-        if approver != actor {
-            return Err(InteractionHistoryError::WrongActor);
-        }
-        if state != &QuestionHistoryState::Pending {
-            return Err(InteractionHistoryError::AlreadySettled);
-        }
-        if let QuestionResponse::Answered { content } = response {
-            validate_question_content(request, content)?;
-        }
+        validate_question_response_record(record, actor, response)?;
         let mut next = records.clone();
         let Some(InteractionHistoryRecord::Question { state, .. }) = next.get_mut(request_id)
         else {
@@ -567,6 +607,18 @@ impl InteractionHistoryStore {
         Ok(())
     }
 
+    pub(super) async fn validate_question_response(
+        &self,
+        request_id: &str,
+        actor: &Identity,
+        response: &QuestionResponse,
+    ) -> Result<(), InteractionHistoryError> {
+        let records = self.records.lock().await;
+        let record = records
+            .get(request_id)
+            .ok_or(InteractionHistoryError::NotPending)?;
+        validate_question_response_record(record, actor, response)
+    }
     pub(super) async fn cancel_questions(
         &self,
         requester: &SessionRef,

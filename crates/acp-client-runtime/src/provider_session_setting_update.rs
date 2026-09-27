@@ -56,7 +56,12 @@ pub(crate) async fn apply_loaded_setting(
                 .settings_unresolved
                 .write()
                 .await
-                .insert(provider_session_id.clone(), kind);
+                .entry(provider_session_id.clone())
+                .or_default()
+                .insert(
+                    kind,
+                    crate::provider_session_settings::UnresolvedSettingCause::OutcomeUnknown,
+                );
             Err(ExternalProviderRuntimeError::SettingOutcomeUnknown {
                 provider_session_id,
                 setting: kind,
@@ -81,8 +86,11 @@ pub(crate) async fn apply_loaded_setting(
                 .insert(provider_session_id.clone(), catalog.clone());
             *handles.last_settings_catalog.write().await = Some(catalog);
             let mut unresolved = handles.settings_unresolved.write().await;
-            if unresolved.get(&provider_session_id) == Some(&kind) {
-                unresolved.remove(&provider_session_id);
+            if let Some(kinds) = unresolved.get_mut(&provider_session_id) {
+                kinds.remove(&kind);
+                if kinds.is_empty() {
+                    unresolved.remove(&provider_session_id);
+                }
             }
             drop(unresolved);
             if let Some(capabilities) = handles

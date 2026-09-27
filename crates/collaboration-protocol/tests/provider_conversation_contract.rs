@@ -204,7 +204,8 @@ fn provider_create_settings_and_partial_settlement_have_additive_typed_shapes() 
     let settlement = json!({
         "kind":"createdWithoutSettings", "target":session("created"),
         "applied":[{"setting":"mode","value":"plan"}],
-        "failed":[{"setting":"model","value":"provider-model","reason":"agent refused"}]
+        "failed":[{"setting":"model","value":"provider-model","reason":"agent refused"}],
+        "notApplied":[{"setting":"effort","value":"high"}]
     });
     let decoded: ConversationOperationSettlement =
         serde_json::from_value(settlement.clone()).expect("partial settlement");
@@ -212,6 +213,17 @@ fn provider_create_settings_and_partial_settlement_have_additive_typed_shapes() 
         serde_json::to_value(decoded).expect("round trip"),
         settlement
     );
+    let outcome = json!({
+        "kind":"createdWithoutSettings",
+        "operationId":"019f0000-0000-7000-8000-000000000010",
+        "target":session("created"),
+        "applied":[{"setting":"mode","value":"plan"}],
+        "failed":[{"setting":"model","value":"provider-model","reason":"agent refused"}],
+        "notApplied":[{"setting":"effort","value":"high"}]
+    });
+    let decoded: ConversationCreateOutcome =
+        serde_json::from_value(outcome.clone()).expect("partial outcome with untried setting");
+    assert_eq!(serde_json::to_value(decoded).expect("round trip"), outcome);
 }
 
 #[test]

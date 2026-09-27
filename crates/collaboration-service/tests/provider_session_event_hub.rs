@@ -8,7 +8,7 @@ use collaboration_service::{
 use message_board::SessionRef;
 use session_event_model::{
     ConfigValue, ConfigValueState, PendingInteraction, SessionEvent, SessionItem, SessionItemKind,
-    SessionSettings, SessionState, StopReason, TurnOutcome,
+    SessionSettings, SessionState, StopReason, TurnLostReason, TurnOutcome,
 };
 use tokio::sync::Mutex;
 
@@ -61,6 +61,161 @@ fn user_item(item_id: &str) -> SessionEvent {
             text: Some(item_id.to_owned()),
         },
     }
+}
+
+fn updated_item(item_id: &str, text: String) -> SessionEvent {
+    SessionEvent::ItemUpdated {
+        item: SessionItem {
+            item_id: item_id.to_owned(),
+            kind: SessionItemKind::AgentMessage,
+            text: Some(text),
+        },
+    }
+}
+
+#[tokio::test]
+async fn cumulative_updates_retain_one_latest_item_and_order_for_two_observers() -> TestResult {
+    let (_root, hub) = hub(1_024).await?;
+    let target = session()?;
+    hub.publish(target.clone(), updated_item("message", String::new()))
+        .await?;
+    let mut first = hub.attach(target.clone()).await?;
+    let mut second = hub.attach(target.clone()).await?;
+    let mut text = String::new();
+    for _ in 0..1_000 {
+        text.push('x');
+        hub.publish(target.clone(), updated_item("message", text.clone()))
+            .await?;
+    }
+    for _ in 0..1_000 {
+        ensure_eq!(
+            receive_hub_event(&mut first.receiver).await?,
+            receive_hub_event(&mut second.receiver).await?
+        );
+    }
+    let first_late = hub.attach(target.clone()).await?;
+    let second_late = hub.attach(target).await?;
+    ensure_eq!(first_late.snapshot, second_late.snapshot);
+    ensure_eq!(first_late.snapshot.len(), 1);
+    ensure_eq!(first_late.snapshot[0].sequence, 1_001);
+    let retained_bytes = first_late
+        .snapshot
+        .iter()
+        .map(|event| serde_json::to_vec(&event.event).map(|encoded| encoded.len()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .sum::<usize>();
+    ensure!(retained_bytes < 2 * text.len());
+    hub.publish(
+        session()?,
+        SessionEvent::ItemCompleted {
+            item_id: "message".into(),
+        },
+    )
+    .await?;
+    let completed = hub.attach(session()?).await?;
+    ensure_eq!(completed.snapshot.len(), 2);
+    ensure_eq!(completed.snapshot[0].sequence, 1_001);
+    ensure_eq!(completed.snapshot[1].sequence, 1_002);
+    ensure!(matches!(
+        &completed.snapshot[1].event,
+        SessionEvent::ItemCompleted { item_id } if item_id == "message"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn unloaded_session_evacuates_accumulated_history() -> TestResult {
+    let (_root, hub) = hub(8).await?;
+    let target = session()?;
+    hub.publish(target.clone(), user_item("before-close"))
+        .await?;
+    hub.publish(
+        target.clone(),
+        SessionEvent::StateChanged {
+            state: SessionState::Unloaded,
+        },
+    )
+    .await?;
+    ensure!(hub.attach(target).await?.snapshot.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn closed_session_evacuates_history_and_remains_closed() -> TestResult {
+    let (_root, hub) = hub(8).await?;
+    let target = session()?;
+    hub.publish(target.clone(), user_item("before-close"))
+        .await?;
+    let mut attached = hub.attach(target.clone()).await?;
+    hub.publish(
+        target.clone(),
+        SessionEvent::StateChanged {
+            state: SessionState::Closed,
+        },
+    )
+    .await?;
+    ensure_eq!(hub.state(target.clone()).await?, SessionState::Closed);
+    ensure!(hub.attach(target).await?.snapshot.is_empty());
+    ensure_eq!(
+        receive_hub_event(&mut attached.receiver).await?.event,
+        SessionEvent::StateChanged {
+            state: SessionState::Closed
+        }
+    );
+    ensure_eq!(
+        receive_hub_event(&mut attached.receiver).await,
+        Err(HubReceiveError::ResyncRequired)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn projection_rejection_resyncs_only_that_session() -> TestResult {
+    let (_root, hub) = hub(8).await?;
+    let affected = session()?;
+    let other: SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89","endpointId":"claude-local"},
+        "sessionId":"provider-session-2"
+    }))?;
+    let approval: PendingInteraction = serde_json::from_value(serde_json::json!({
+        "kind":"approval", "approver":{"kind":"human","humanId":"owner"}, "request":{
+            "requestId":"approval-1", "title":"Run command", "options":[
+                {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}}
+            ]
+        }
+    }))?;
+    hub.publish(
+        affected.clone(),
+        SessionEvent::InteractionRequested {
+            interaction: approval,
+        },
+    )
+    .await?;
+    let mut stale = hub.attach(affected.clone()).await?;
+    let invalid = hub
+        .publish(
+            affected.clone(),
+            SessionEvent::TurnEnded {
+                turn_id: "ended-with-pending".into(),
+                outcome: TurnOutcome::Lost {
+                    reason: TurnLostReason::ProviderRetired,
+                },
+            },
+        )
+        .await?;
+    ensure!(matches!(invalid.event, SessionEvent::ResyncRequired { .. }));
+    ensure_eq!(
+        receive_hub_event(&mut stale.receiver).await,
+        Err(HubReceiveError::ResyncRequired)
+    );
+    ensure_eq!(hub.state(affected.clone()).await?, SessionState::Unloaded);
+    ensure!(hub.attach(affected).await?.snapshot.is_empty());
+    let published = hub
+        .publish(other.clone(), user_item("other-session"))
+        .await?;
+    ensure_eq!(hub.attach(other).await?.snapshot, vec![published]);
+    Ok(())
 }
 
 // R24-R25: two subscribers receive the same ordered live events.
@@ -152,7 +307,7 @@ async fn unobservable_steer_end_returns_the_live_session_to_idle() -> TestResult
         SessionEvent::TurnEnded {
             turn_id: "steer-turn".into(),
             outcome: TurnOutcome::Lost {
-                reason: "endNotObservable".into(),
+                reason: TurnLostReason::EndNotObservable,
             },
         },
     )
@@ -403,14 +558,14 @@ async fn replay_reset_replaces_lost_history_and_resyncs_old_subscribers() -> Tes
         SessionEvent::TurnEnded {
             turn_id: "old-turn".into(),
             outcome: TurnOutcome::Lost {
-                reason: "providerRetired".into(),
+                reason: TurnLostReason::ProviderRetired,
             },
         },
     )
     .await?;
     let mut stale = hub.attach(target.clone()).await?;
 
-    ensure_eq!(hub.begin_history_replay(target.clone()).await?, 1);
+    ensure_eq!(hub.begin_history_replay(target.clone()).await?, 2);
     ensure_eq!(
         receive_hub_event(&mut stale.receiver).await,
         Err(HubReceiveError::ResyncRequired)

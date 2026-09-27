@@ -50,7 +50,7 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
         ]
     })).expect("question");
     let agent_reply = broker
-        .request_question(requester, approver.clone(), request)
+        .request_question(requester, approver.clone(), request, None)
         .await
         .expect("pending question");
     let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("socket pair");

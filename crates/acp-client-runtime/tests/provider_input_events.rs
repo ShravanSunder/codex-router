@@ -334,7 +334,7 @@ async fn started_new_turn_uses_the_steer_input_id() {
         SessionEvent::TurnEnded {
             turn_id,
             outcome: session_event_model::TurnOutcome::Lost {
-                reason: "endNotObservable".to_owned()
+                reason: session_event_model::TurnLostReason::EndNotObservable
             },
         }
     );
@@ -581,7 +581,13 @@ async fn text_and_thought_chunks_publish_ordered_items() {
         })
     );
     assert!(matches!(
-        observed.last(),
+        observed.iter().rev().nth(1),
         Some(SessionEvent::TurnEnded { .. })
+    ));
+    assert!(matches!(
+        observed.last(),
+        Some(SessionEvent::StateChanged {
+            state: session_event_model::SessionState::Unloaded
+        })
     ));
 }

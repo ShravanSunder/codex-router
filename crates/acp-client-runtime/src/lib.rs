@@ -67,8 +67,9 @@ pub use provider_session_actor::{
 };
 pub use provider_session_settings::{
     AppliedProviderSetting, EffectiveProviderSettings, FailedProviderSetting,
-    InvalidSettingSessionDisposition, ProviderConfigOption, ProviderConfigValue,
-    ProviderSettingChoice, ProviderSettingKind, ProviderSettingsCatalog, RequestedProviderSettings,
+    InvalidSettingSessionDisposition, NotAppliedProviderSetting, ProviderConfigOption,
+    ProviderConfigValue, ProviderSettingChoice, ProviderSettingKind, ProviderSettingsCatalog,
+    RequestedProviderSettings,
 };
 pub use session_event_sink::{
     EventSinkClosed, HistoryReplayFuture, HistoryReplayUnavailable, SessionEventSink,

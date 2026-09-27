@@ -286,9 +286,16 @@ async fn history_replay_reset_precedes_session_load() {
         Some("model-a")
     );
     assert_eq!(last_catalog, catalog);
-    assert!(matches!(events.lock().expect("events").last(),
-        Some(SessionEvent::SettingsChanged { settings })
-            if settings.model.as_deref() == Some("model-a")));
+    let published = events.lock().expect("events");
+    assert!(published.iter().any(|event| matches!(event,
+        SessionEvent::SettingsChanged { settings }
+            if settings.model.as_deref() == Some("model-a"))));
+    assert!(matches!(
+        published.last(),
+        Some(SessionEvent::StateChanged {
+            state: session_event_model::SessionState::Unloaded,
+        })
+    ));
     assert!(
         !marker.with_extension("early").exists(),
         "load waited for reset"

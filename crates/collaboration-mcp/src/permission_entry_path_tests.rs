@@ -681,6 +681,18 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
     let listed = &list["result"]["structuredContent"]["approvals"][0];
     assert_eq!(listed["requestId"], pending.request_id);
     assert_eq!(listed["requester"], serde_json::json!(fixture.requester));
+    assert_eq!(listed["approver"], serde_json::json!(fixture.approver));
+    assert!(listed.get("optionsOrigin").is_none());
+    let detailed = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        20,
+        "approval_list",
+        json!({"pending":true,"includeOptions":true}),
+    )
+    .await;
+    let listed = &detailed["result"]["structuredContent"]["approvals"][0];
     assert_eq!(
         listed["approver"],
         json!({"kind":"session","session":fixture.approver})
@@ -776,7 +788,7 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
     })).expect("question");
     let agent_reply = fixture
         .broker
-        .request_question(requester, approver, question)
+        .request_question(requester, approver, question, None)
         .await
         .expect("pending question");
     fixture.await_delivery(0).await;

@@ -5,6 +5,33 @@ use super::*;
 use crate::provider_item_projection::ProviderItemProjection;
 use agent_client_protocol::schema::v1::CloseSessionRequest;
 
+fn untried_settings(
+    requested: &crate::RequestedProviderSettings,
+    failed_kind: crate::ProviderSettingKind,
+) -> Vec<crate::NotAppliedProviderSetting> {
+    let mut after_failure = false;
+    let mut untried = Vec::new();
+    for (kind, value) in [
+        (crate::ProviderSettingKind::Mode, requested.mode.as_ref()),
+        (crate::ProviderSettingKind::Model, requested.model.as_ref()),
+        (
+            crate::ProviderSettingKind::Effort,
+            requested.effort.as_ref(),
+        ),
+    ] {
+        if after_failure && let Some(value) = value {
+            untried.push(crate::NotAppliedProviderSetting {
+                kind,
+                value: value.clone(),
+            });
+        }
+        if kind == failed_kind {
+            after_failure = true;
+        }
+    }
+    untried
+}
+
 pub(super) fn register_provider_session<P: InteractionPort>(
     registration: ProviderSessionRegistration<P>,
     sessions: &mut HashMap<String, tokio::sync::mpsc::Sender<ProviderSessionCommand<P>>>,
@@ -156,11 +183,12 @@ pub(super) async fn run_create_admission<P: InteractionPort>(inputs: CreateAdmis
                     } else {
                         ExternalProviderRuntimeError::CreatedWithoutSettings {
                             provider_session_id: provider_session_id.clone(),
+                            not_applied: untried_settings(&requested_settings, kind).into_boxed_slice(),
                             applied,
                             failed: crate::FailedProviderSetting {
                                 kind,
                                 value,
-                                reason: "invalidSetting".to_owned(),
+                                reason: session_event_model::ProviderSettingFailureReason::InvalidSetting,
                             },
                         }
                     };
@@ -178,21 +206,23 @@ pub(super) async fn run_create_admission<P: InteractionPort>(inputs: CreateAdmis
                     reason,
                 }) => Some(ExternalProviderRuntimeError::CreatedWithoutSettings {
                     provider_session_id: provider_session_id.clone(),
+                    not_applied: untried_settings(&requested_settings, kind).into_boxed_slice(),
                     applied,
                     failed: crate::FailedProviderSetting {
                         kind,
                         value,
-                        reason,
+                        reason: reason.into(),
                     },
                 }),
                 Some(SettingSetupFailure::Uncertain { kind, value }) => {
                     Some(ExternalProviderRuntimeError::CreatedWithoutSettings {
                         provider_session_id: provider_session_id.clone(),
+                        not_applied: untried_settings(&requested_settings, kind).into_boxed_slice(),
                         applied,
                         failed: crate::FailedProviderSetting {
                             kind,
                             value,
-                            reason: "outcomeUnknown".to_owned(),
+                            reason: session_event_model::ProviderSettingFailureReason::OutcomeUnknown,
                         },
                     })
                 }

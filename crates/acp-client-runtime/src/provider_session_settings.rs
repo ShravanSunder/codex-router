@@ -21,11 +21,17 @@ pub struct EffectiveProviderSettings {
     pub effort: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProviderSettingKind {
     Mode,
     Model,
     Effort,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnresolvedSettingCause {
+    DefiniteFailure,
+    OutcomeUnknown,
 }
 
 impl ProviderSettingKind {
@@ -49,7 +55,13 @@ pub struct AppliedProviderSetting {
 pub struct FailedProviderSetting {
     pub kind: ProviderSettingKind,
     pub value: String,
-    pub reason: String,
+    pub reason: session_event_model::ProviderSettingFailureReason,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotAppliedProviderSetting {
+    pub kind: ProviderSettingKind,
+    pub value: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

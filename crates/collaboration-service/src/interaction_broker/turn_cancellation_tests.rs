@@ -52,8 +52,17 @@ async fn typed_approval_cancelled_before_admission_records_turn_cancelled() {
         .expect("terminal history");
     assert!(matches!(
         record.approval_state(),
-        Some(InteractionHistoryState::Cancelled { reason }) if reason == "turnCancelled"
+        Some(InteractionHistoryState::Cancelled { reason }) if reason.as_str() == "turnCancelled"
     ));
+    let row = broker
+        .list_detailed(false)
+        .await
+        .expect("detailed list")
+        .approvals
+        .into_iter()
+        .find(|row| row.request_id == "typed-before-admission")
+        .expect("cancelled approval listed");
+    assert_eq!(row.reason.as_deref(), Some("turnCancelled"));
 }
 
 #[tokio::test]
@@ -93,7 +102,7 @@ async fn typed_decision_after_turn_cancel_is_not_pending() {
         .expect("terminal history");
     assert!(matches!(
         record.approval_state(),
-        Some(InteractionHistoryState::Cancelled { reason }) if reason == "turnCancelled"
+        Some(InteractionHistoryState::Cancelled { reason }) if reason.as_str() == "turnCancelled"
     ));
 }
 
@@ -127,6 +136,10 @@ async fn typed_turn_cancelled_after_record_before_insert_leaves_no_pending_row()
         .await
         .expect("recorded boundary reached")
         .expect("boundary signal");
+    assert!(
+        broker.typed_pending_approvals.try_lock().is_ok(),
+        "history admission must not hold the pending map lock across file I/O"
+    );
     turn_cancellation.cancel();
     resume_tx.send(()).expect("resume broker admission");
     assert!(matches!(
@@ -141,7 +154,7 @@ async fn typed_turn_cancelled_after_record_before_insert_leaves_no_pending_row()
         .expect("terminal history");
     assert!(matches!(
         record.approval_state(),
-        Some(InteractionHistoryState::Cancelled { reason }) if reason == "turnCancelled"
+        Some(InteractionHistoryState::Cancelled { reason }) if reason.as_str() == "turnCancelled"
     ));
 }
 
@@ -188,4 +201,230 @@ async fn typed_session_cancellation_settles_only_that_sessions_requests() {
             .contains_key("second")
     );
     drop(second);
+}
+
+fn typed_question(request_id: &str) -> session_event_model::QuestionRequest {
+    serde_json::from_value(serde_json::json!({
+        "requestId": request_id,
+        "prompt": "Proceed?",
+        "fields": [{"kind":"boolean","fieldId":"yes","label":"Yes","description":null,"required":true}]
+    }))
+    .expect("typed question")
+}
+
+#[tokio::test]
+async fn dead_question_receiver_is_cancelled_in_history_before_answer() {
+    let (broker, _, _) = super::tests::fixture_broker().await;
+    let (requester, approver) = typed_participants(&broker);
+    let receiver = broker
+        .request_question(
+            requester,
+            approver.clone(),
+            typed_question("dead-question"),
+            None,
+        )
+        .await
+        .expect("question admitted");
+    drop(receiver);
+    assert!(matches!(
+        broker
+            .respond_question(
+                "dead-question",
+                &approver,
+                QuestionResponse::Answered {
+                    content: serde_json::from_value(serde_json::json!({"yes":true}))
+                        .expect("answer")
+                }
+            )
+            .await,
+        Err(InteractionHistoryError::NotPending)
+    ));
+    let record = broker
+        .interaction_history
+        .interaction("dead-question")
+        .await
+        .expect("history");
+    assert!(matches!(
+        record,
+        InteractionHistoryRecord::Question {
+            state: QuestionHistoryState::Cancelled { .. },
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn receiver_closed_during_answer_never_persists_answered() {
+    let (broker, _, _) = super::tests::fixture_broker().await;
+    let (requester, approver) = typed_participants(&broker);
+    let receiver = broker
+        .request_question(
+            requester,
+            approver.clone(),
+            typed_question("closing-question"),
+            None,
+        )
+        .await
+        .expect("question admitted");
+    let (recorded_tx, recorded_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    *broker.question_before_send.lock().await = Some(TypedAdmissionPause {
+        recorded: recorded_tx,
+        resume: resume_rx,
+    });
+    let answer_task = tokio::spawn({
+        let broker = Arc::clone(&broker);
+        async move {
+            broker
+                .respond_question(
+                    "closing-question",
+                    &approver,
+                    QuestionResponse::Answered {
+                        content: serde_json::from_value(serde_json::json!({"yes": true}))
+                            .expect("answer"),
+                    },
+                )
+                .await
+        }
+    });
+    recorded_rx.await.expect("before-send boundary");
+    let recorded = broker
+        .interaction_history
+        .interaction("closing-question")
+        .await
+        .expect("history");
+    assert!(matches!(
+        recorded,
+        InteractionHistoryRecord::Question {
+            state: QuestionHistoryState::Pending,
+            ..
+        }
+    ));
+    drop(receiver);
+    resume_tx.send(()).expect("resume response");
+    assert!(matches!(
+        answer_task.await.expect("answer task"),
+        Err(InteractionHistoryError::NotPending)
+    ));
+    let recorded = broker
+        .interaction_history
+        .interaction("closing-question")
+        .await
+        .expect("history");
+    assert!(matches!(
+        recorded,
+        InteractionHistoryRecord::Question {
+            state: QuestionHistoryState::Cancelled { .. },
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn question_answer_delivery_reports_later_history_write_failure() {
+    let (broker, _, directory) = super::tests::fixture_broker().await;
+    let (requester, approver) = typed_participants(&broker);
+    let receiver = broker
+        .request_question(
+            requester,
+            approver.clone(),
+            typed_question("write-failure-question"),
+            None,
+        )
+        .await
+        .expect("question admitted");
+    tokio::fs::create_dir(directory.join("interaction-history.json.tmp"))
+        .await
+        .expect("block temporary history file");
+    let answer = QuestionResponse::Answered {
+        content: serde_json::from_value(serde_json::json!({"yes": true})).expect("answer"),
+    };
+    assert!(matches!(
+        broker
+            .respond_question("write-failure-question", &approver, answer.clone())
+            .await,
+        Err(InteractionHistoryError::Unavailable)
+    ));
+    assert_eq!(receiver.await.expect("response was delivered"), answer);
+    assert!(
+        !broker
+            .pending_questions
+            .lock()
+            .await
+            .contains_key("write-failure-question")
+    );
+    let record = broker
+        .interaction_history
+        .interaction("write-failure-question")
+        .await
+        .expect("history");
+    assert!(matches!(
+        record,
+        InteractionHistoryRecord::Question {
+            state: QuestionHistoryState::Pending,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn retired_requester_questions_are_cancelled_with_approvals() {
+    let (broker, _, _) = super::tests::fixture_broker().await;
+    let (requester, approver) = typed_participants(&broker);
+    let retirement = CancellationToken::new();
+    let approval = broker
+        .request_typed_approval(
+            requester.clone(),
+            approver.clone(),
+            typed_request("retired-approval"),
+            CancellationToken::new(),
+            retirement.clone(),
+        )
+        .await
+        .expect("approval admitted");
+    let question = broker
+        .request_question(
+            requester.clone(),
+            approver,
+            typed_question("retired-question"),
+            Some(retirement.clone()),
+        )
+        .await
+        .expect("question admitted");
+    let question_only_requester =
+        super::board_session_ref(&super::tests::session(&broker.service_id, "question-only"))
+            .expect("question-only requester");
+    let (_, question_only_approver) = typed_participants(&broker);
+    let question_only = broker
+        .request_question(
+            question_only_requester,
+            question_only_approver,
+            typed_question("retired-question-only"),
+            Some(retirement.clone()),
+        )
+        .await
+        .expect("question-only admitted");
+    retirement.cancel();
+    let retired = broker
+        .cancel_retired_typed_approvals()
+        .await
+        .expect("retired interactions");
+    assert_eq!(retired.len(), 3);
+    assert!(approval.await.is_err());
+    assert_eq!(
+        question.await.expect("question settled"),
+        QuestionResponse::Cancelled
+    );
+    assert_eq!(
+        question_only.await.expect("question-only settled"),
+        QuestionResponse::Cancelled
+    );
+    let record = broker
+        .interaction_history
+        .interaction("retired-question")
+        .await
+        .expect("history");
+    assert!(
+        matches!(record, InteractionHistoryRecord::Question { state: QuestionHistoryState::Cancelled { reason }, .. } if reason == "providerRetired")
+    );
 }

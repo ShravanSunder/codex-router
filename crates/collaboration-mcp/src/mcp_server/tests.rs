@@ -824,6 +824,7 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
             .map(AsRef::<str>::as_ref)
             .collect::<Vec<_>>(),
         vec![
+            "approval_list",
             "board_message_show",
             "board_thread_listen_cancel",
             "board_thread_listen_show",
@@ -867,6 +868,7 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
         "lastRejection":null
     });
     let valid_instances = std::collections::BTreeMap::from([
+        ("approval_list", serde_json::json!({"approvals":[]})),
         ("board_message_show", message),
         ("board_thread_listen_cancel", listen.clone()),
         ("board_thread_listen_show", listen),
@@ -923,6 +925,35 @@ fn advertised_object_roots_preserve_original_catalog_semantics() {
             advertised_validator.is_valid(valid),
             "valid result narrowed for {name}"
         );
+        if name.as_ref() == "approval_list" {
+            let requester = serde_json::json!({
+                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+                "sessionId":"requester"
+            });
+            for result in [
+                serde_json::json!({"approvals":[{
+                    "requestId":"legacy", "requester":requester, "approver":requester,
+                    "generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1},
+                    "state":"pendingClientDecision", "decision":null, "operation":{},
+                    "expiresAt":"2026-09-27T00:00:00Z"
+                }]}),
+                serde_json::json!({"approvals":[{
+                    "requestId":"refused", "requester":requester,
+                    "approver":{"kind":"human","humanId":"owner"},
+                    "state":"refused", "reason":"malformed options", "title":"Run command",
+                    "description":null, "options":[]
+                }]}),
+            ] {
+                assert!(
+                    original_validator.is_valid(&result),
+                    "original list rejected {result}"
+                );
+                assert!(
+                    advertised_validator.is_valid(&result),
+                    "advertised list rejected {result}"
+                );
+            }
+        }
         for instance in &non_objects {
             assert_eq!(
                 original_validator.is_valid(instance),

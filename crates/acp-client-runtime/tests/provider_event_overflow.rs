@@ -228,16 +228,16 @@ async fn output_byte_limit_cancels_turn_and_keeps_agent_stop_reason() {
             .iter()
             .any(|event| matches!(event, SessionEvent::TurnStarted { .. }))
     );
-    assert!(matches!(
-        events.last(),
-        Some(SessionEvent::TurnEnded {
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::TurnEnded {
             outcome: TurnOutcome::Ended {
                 stop_reason: StopReason::EndTurn,
                 local_cause: Some(LocalCause::OutputOverflow),
             },
             ..
-        })
-    ));
+        }
+    )));
 }
 
 /// A closed event consumer is a typed shutdown, without inventing an agent
@@ -318,7 +318,17 @@ async fn provider_eof_ends_running_turn_lost() {
             .iter()
             .any(|event| matches!(event, SessionEvent::TurnStarted { .. }))
     );
-    assert!(matches!(events.last(), Some(SessionEvent::TurnEnded {
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnEnded {
         outcome: TurnOutcome::Lost { reason }, ..
-    }) if reason == "providerRetired"));
+    } if reason == &session_event_model::TurnLostReason::ProviderRetired))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(SessionEvent::StateChanged {
+            state: session_event_model::SessionState::Unloaded
+        })
+    ));
 }

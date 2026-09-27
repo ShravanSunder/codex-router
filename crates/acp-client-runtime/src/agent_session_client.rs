@@ -225,7 +225,18 @@ pub struct AgentSessionClient<P: InteractionPort> {
     auth_status: Arc<tokio::sync::RwLock<session_event_model::ProviderAuthStatus>>,
     session_settings: Arc<tokio::sync::RwLock<HashMap<String, crate::ProviderSettingsCatalog>>>,
     last_settings_catalog: Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
-    settings_unresolved: Arc<tokio::sync::RwLock<HashMap<String, crate::ProviderSettingKind>>>,
+    settings_unresolved: Arc<
+        tokio::sync::RwLock<
+            HashMap<
+                String,
+                HashMap<
+                    crate::ProviderSettingKind,
+                    crate::provider_session_settings::UnresolvedSettingCause,
+                >,
+            >,
+        >,
+    >,
+    pending_close_marks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     shutdown: CancellationToken,
     sink_closed: CancellationToken,
     retirement: CancellationToken,

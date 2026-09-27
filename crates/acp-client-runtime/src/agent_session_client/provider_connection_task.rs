@@ -25,6 +25,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         let task_shutdown_failed = Arc::clone(&shutdown_failed);
         let task_shutdown = shutdown.clone();
         let connection_retirement = retirement.clone();
+        let task_connection_retirement = retirement.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (admission_settled_tx, admission_settled_rx) = tokio::sync::oneshot::channel();
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(32);
@@ -49,9 +50,16 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         let task_last_settings_catalog = Arc::clone(&last_settings_catalog);
         let settings_unresolved = Arc::new(tokio::sync::RwLock::new(HashMap::<
             String,
-            crate::ProviderSettingKind,
+            HashMap<
+                crate::ProviderSettingKind,
+                crate::provider_session_settings::UnresolvedSettingCause,
+            >,
         >::new()));
         let task_settings_unresolved = Arc::clone(&settings_unresolved);
+        let pending_close_marks = Arc::new(std::sync::Mutex::new(std::collections::HashSet::<
+            String,
+        >::new()));
+        let task_pending_close_marks = Arc::clone(&pending_close_marks);
         let tool_registry = Arc::new(ProviderConnectionActivity::default());
         let task_tool_registry = Arc::clone(&tool_registry);
         let retirement_registry = Arc::clone(&tool_registry);
@@ -94,6 +102,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         let task_approval_contexts = Arc::clone(&approval_contexts);
         let known_sessions = ProviderKnownSessions::default();
         let request_known_sessions = known_sessions.clone();
+        let retirement_known_sessions = known_sessions.clone();
         let permission_refusal_reasons = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let callback_permission_refusal_reasons = Arc::clone(&permission_refusal_reasons);
         let endpoint_id = Arc::new(tokio::sync::RwLock::new(None::<String>));
@@ -326,12 +335,19 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                                     *task_last_settings_catalog.write().await = Some(catalog);
                                                 }
                                                 let unresolved_kind = match setup_error.as_ref() {
-                                                    Some(ExternalProviderRuntimeError::InvalidSetting { setting, .. }) => Some(*setting),
-                                                    Some(ExternalProviderRuntimeError::CreatedWithoutSettings { failed, .. }) => Some(failed.kind),
+                                                    Some(ExternalProviderRuntimeError::InvalidSetting { setting, .. }) => Some((*setting, crate::provider_session_settings::UnresolvedSettingCause::DefiniteFailure)),
+                                                    Some(ExternalProviderRuntimeError::CreatedWithoutSettings { failed, .. }) => Some((failed.kind, if failed.reason == session_event_model::ProviderSettingFailureReason::OutcomeUnknown { crate::provider_session_settings::UnresolvedSettingCause::OutcomeUnknown } else { crate::provider_session_settings::UnresolvedSettingCause::DefiniteFailure })),
                                                     _ => None,
                                                 };
-                                                if let Some(kind) = unresolved_kind {
-                                                    task_settings_unresolved.write().await.insert(created.provider_session_id.clone(), kind);
+                                                if let Some((kind, cause)) = unresolved_kind {
+                                                    task_settings_unresolved.write().await.entry(created.provider_session_id.clone()).or_default().insert(kind, cause);
+                                                }
+                                                if let Some(ExternalProviderRuntimeError::CreatedWithoutSettings { not_applied, .. }) = setup_error.as_ref() {
+                                                    let mut unresolved = task_settings_unresolved.write().await;
+                                                    let unresolved_kinds = unresolved.entry(created.provider_session_id.clone()).or_default();
+                                                    for setting in not_applied.iter() {
+                                                        unresolved_kinds.insert(setting.kind, crate::provider_session_settings::UnresolvedSettingCause::DefiniteFailure);
+                                                    }
                                                 }
                                             }
                                             let result = if settings_sink_closed {
@@ -398,6 +414,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                         }
                                         PendingSessionAdmission::Close { provider_session_id, result, reply } => {
                                             pending_closes.remove(&provider_session_id);
+                                            task_pending_close_marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&provider_session_id);
                                             if result.is_ok() {
                                                 sessions.remove(&provider_session_id);
                                                 known_sessions.forget(&provider_session_id).await;
@@ -412,6 +429,12 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                     }
                                 }
                                 completion = admission_tasks.join_next(), if !admission_tasks.is_empty() => {
+                                    if matches!(completion, Some(Err(_))) {
+                                        task_shutdown_failed.store(true, Ordering::Relaxed);
+                                        break;
+                                    }
+                                }
+                                completion = session_tasks.join_next(), if !session_tasks.is_empty() => {
                                     if matches!(completion, Some(Err(_))) {
                                         task_shutdown_failed.store(true, Ordering::Relaxed);
                                         break;
@@ -501,7 +524,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             });
                                         }
                                         ProviderCommand::Prompt { provider_session_id, input_id, operation_id, prompt, dispatch, reply } => {
-                                            if pending_closes.contains(&provider_session_id) {
+                                            if pending_closes.contains(&provider_session_id) || task_pending_close_marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&provider_session_id) {
                                                 if let Some(dispatch) = dispatch {
                                                     let _result = dispatch.send(ProviderPromptDispatchObservation::NotSubmitted);
                                                 }
@@ -537,7 +560,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                                             let _result = session.send(ProviderSessionCommand::Cancel { expected_operation_id, reply }).await;
                                         }
                                         ProviderCommand::Steer { provider_session_id, input_id, prompt, reply } => {
-                                            if pending_closes.contains(&provider_session_id) {
+                                            if pending_closes.contains(&provider_session_id) || task_pending_close_marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&provider_session_id) {
                                                 let _result = reply.send(Err(ExternalProviderRuntimeError::LocalBusy));
                                                 continue;
                                             }
@@ -591,6 +614,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                         while let Ok(completion) = admission_rx.try_recv() {
                             fail_pending_session_admission(completion);
                         }
+                        task_connection_retirement.cancel();
+                        task_interaction_port.cancel_retired().await;
                         task_shutdown.cancel();
                         while let Some(result) = admission_tasks.join_next().await {
                             if result.is_err() {
@@ -619,20 +644,28 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                     true
                 },
             };
+            connection_retirement.cancel();
+            final_interaction_port.cancel_retired().await;
             for (session_id, turn_id) in retirement_registry.drain_running_turns() {
                 let _result = retirement_event_sink.publish(
                     &session_id,
                     session_event_model::SessionEvent::TurnEnded {
                         turn_id,
                         outcome: session_event_model::TurnOutcome::Lost {
-                            reason: "providerRetired".to_owned(),
+                            reason: session_event_model::TurnLostReason::ProviderRetired,
                         },
                     },
                 );
                 retirement_todos.forget_session(&session_id);
             }
-            connection_retirement.cancel();
-            final_interaction_port.cancel_retired().await;
+            for session_id in retirement_known_sessions.snapshot().await {
+                let _result = retirement_event_sink.publish(
+                    &session_id,
+                    session_event_model::SessionEvent::StateChanged {
+                        state: session_event_model::SessionState::Unloaded,
+                    },
+                );
+            }
             #[cfg(unix)]
             if !child_exited
                 && let Some(process_id) = rustix::process::Pid::from_raw(child.id().cast_signed())
@@ -676,6 +709,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             session_settings,
             last_settings_catalog,
             settings_unresolved,
+            pending_close_marks,
             shutdown,
             sink_closed: client_sink_closed,
             retirement,

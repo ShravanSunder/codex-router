@@ -83,6 +83,13 @@ impl SessionObservation {
                     OperationError::before_dispatch("observation-collect", Some(target), error)),
             }
         } else {
+            if request.after_sequence.is_some() || request.epoch.is_some() {
+                return Err(OperationError::before_dispatch(
+                    "observation-validation",
+                    Some(target),
+                    ClientError::InvalidRequest("paging is available only for provider Sessions"),
+                ));
+            }
             let deadline = tokio::time::Instant::now()
                 .checked_add(Duration::from_secs(request.timeout_seconds))
                 .ok_or_else(|| {

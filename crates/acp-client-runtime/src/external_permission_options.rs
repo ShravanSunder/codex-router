@@ -92,6 +92,8 @@ mod tests {
     use super::*;
 
     /// Oracle: specification R17 requires persistent scope and disclosure before selection.
+    /// Claude source: claude-agent-acp 0.81.2 snapshot e6681d2,
+    /// permissions/effects.ts:68-104,168-170,198-200.
     #[test]
     fn persistent_options_keep_effect_order_and_provider_destination() {
         let options = vec![
@@ -105,7 +107,7 @@ mod tests {
             ),
             (
                 ProviderPersistenceTarget::ClaudeSettingsRule,
-                "Claude Code permission rule in its settings",
+                "May add a Claude Code permission rule to its local settings, or apply only to this Session; Claude chooses and does not report which.",
             ),
             (
                 ProviderPersistenceTarget::Unspecified,

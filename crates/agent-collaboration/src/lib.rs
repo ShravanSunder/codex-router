@@ -26,7 +26,7 @@ pub fn command_help() -> String {
     );
     help.replace(
         "  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n",
-        "  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n  events observe --endpoint ID --session ID --attach [--timeout-seconds 60] [--max-events 256] [--max-bytes 262144]\n  approval list|decide --help\n  question list|answer --help\n",
+        "  events listen --endpoint ID --session ID --attach [--timeout-seconds 60]\n  events observe --endpoint ID --session ID --attach [--timeout-seconds 60] [--max-events 256] [--max-bytes 262144] [--after-sequence N --epoch N]\n  approval list|decide --help\n  question list|answer --help\n",
     )
     .replace(
         "  wake send --to ADDRESS --from ADDRESS",
