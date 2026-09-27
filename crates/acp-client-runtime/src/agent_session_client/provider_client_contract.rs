@@ -132,6 +132,8 @@ pub enum ExternalProviderRuntimeError {
     UnsupportedProtocol { actual: AcpProtocolVersion },
     #[error("provider conversation is busy")]
     LocalBusy,
+    #[error("provider session settings need resolution before work can start")]
+    SettingsUnresolved,
     #[error("provider does not advertise steering")]
     UnsupportedSteering,
     #[error("provider conversation operation is not active")]

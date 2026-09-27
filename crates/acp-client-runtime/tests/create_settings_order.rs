@@ -1,0 +1,312 @@
+//! A real ACP subprocess proves that create settings finish before any prompt.
+
+#![allow(clippy::expect_used)]
+
+use std::{path::PathBuf, sync::Arc};
+
+use acp_client_runtime::{
+    AgentSessionClient, ApprovalPortOutcome, EventSinkOverflow, ExternalProviderLaunch,
+    HistoryReplayFuture, InteractionFuture, InteractionPort, ProviderPersistenceTarget,
+    RefusedApprovalOffer, RequestedProviderSettings, SessionEventSink,
+};
+use session_event_model::{ApprovalRequest, SessionEvent};
+use tokio_util::sync::CancellationToken;
+
+const SETTINGS_FIXTURE: &str = r#"
+import json,sys
+receipt=sys.argv[1]
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+def option(id,current,values,category):
+    return {'id':id,'name':id,'category':category,'type':'select',
+            'currentValue':current,'options':[{'value':v,'name':v} for v in values]}
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'settings-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+current={'mode':'auto','model':'a','effort':'low'}
+def options(): return [
+    option('mode',current['mode'],['auto','ask'],'mode'),
+    option('model',current['model'],['a','b'],'model'),
+    option('effort',current['effort'],['low','high'],'thought_level')]
+send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session','configOptions':options()}})
+seen=[]
+for expected_id,expected_value in [('mode','ask'),('model','b'),('effort','high')]:
+    request=read()
+    assert request['method']=='session/set_config_option', request
+    assert request['params']['configId']==expected_id, request
+    assert request['params']['value']==expected_value, request
+    seen.append(expected_id)
+    current[expected_id]=expected_value
+    send({'jsonrpc':'2.0','id':request['id'],'result':{'configOptions':options()}})
+request=read()
+assert request['method']=='session/prompt', request
+seen.append('prompt')
+with open(receipt,'w') as output: json.dump(seen,output)
+send({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+
+const FAILED_SETTINGS_FIXTURE: &str = r#"
+import json,sys
+mode,receipt=sys.argv[1:]
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value),flush=True)
+def option(id,current,values):
+    return {'id':id,'name':id,'category':id,'type':'select',
+            'currentValue':current,'options':[{'value':v,'name':v} for v in values]}
+request=read()
+assert request['method']=='initialize'
+send({'jsonrpc':'2.0','id':request['id'],'result':{
+    'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'close':{}}},
+    'agentInfo':{'name':'settings-failure-fixture','version':'1'}}})
+request=read()
+assert request['method']=='session/new'
+options=[option('mode','auto',['auto','ask']),option('model','a',['a','b'])]
+send({'jsonrpc':'2.0','id':request['id'],'result':{
+    'sessionId':'fixture-session','configOptions':options}})
+if mode=='invalid':
+    close=read()
+    assert close['method']=='session/close',close
+    with open(receipt,'w') as output: output.write('closed')
+    send({'jsonrpc':'2.0','id':close['id'],'result':{}})
+else:
+    set_mode=read()
+    assert set_mode['method']=='session/set_config_option'
+    assert set_mode['params']['configId']=='mode'
+    options[0]=option('mode','ask',['auto','ask'])
+    send({'jsonrpc':'2.0','id':set_mode['id'],'result':{'configOptions':options}})
+    set_model=read()
+    assert set_model['method']=='session/set_config_option'
+    assert set_model['params']['configId']=='model'
+    send({'jsonrpc':'2.0','id':set_model['id'],'error':{'code':-32603,'message':'private agent detail'}})
+    prompt=read()
+    assert prompt['method']=='session/prompt',prompt
+    with open(receipt,'w') as output: output.write('prompt-after-accept')
+    send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+sys.stdin.read()
+"#;
+
+struct NoopInteractionPort;
+impl InteractionPort for NoopInteractionPort {
+    type Context = ();
+    type OperationId = u64;
+    fn operation_id(_context: &Self::Context) -> Self::OperationId {
+        1
+    }
+    fn binding_retirement(_context: &Self::Context) -> CancellationToken {
+        CancellationToken::new()
+    }
+    fn request_approval(
+        &self,
+        _context: Self::Context,
+        _request: ApprovalRequest,
+        _turn_cancellation: CancellationToken,
+        _agent_cancellation: CancellationToken,
+    ) -> InteractionFuture<'_, ApprovalPortOutcome> {
+        Box::pin(async { ApprovalPortOutcome::Cancelled })
+    }
+    fn record_refusal(
+        &self,
+        _context: Self::Context,
+        _refusal: RefusedApprovalOffer,
+    ) -> InteractionFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn cancel_all(
+        &self,
+        _context: Self::Context,
+        _reason: &'static str,
+    ) -> InteractionFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn cancel_retired(&self) -> InteractionFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
+struct NoopEventSink;
+impl SessionEventSink for NoopEventSink {
+    fn begin_history_replay(&self, _session_id: &str) -> HistoryReplayFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+    fn publish(&self, _session_id: &str, _event: SessionEvent) -> Result<(), EventSinkOverflow> {
+        Ok(())
+    }
+}
+
+/// Oracle: specification R14 requires mode, model and effort to be applied
+/// after session/new and before the first prompt, re-reading options each time.
+#[tokio::test]
+async fn create_applies_requested_settings_before_first_prompt() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let receipt = root.path().join("exchange.json");
+    let client = AgentSessionClient::initialize(
+        ExternalProviderLaunch {
+            executable: PathBuf::from("python3"),
+            arguments: vec![
+                "-u".to_owned(),
+                "-c".to_owned(),
+                SETTINGS_FIXTURE.to_owned(),
+                receipt.to_string_lossy().into_owned(),
+            ],
+            environment: Vec::new(),
+            persistence_target: ProviderPersistenceTarget::Unspecified,
+        },
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+
+    let created = client
+        .create_session_with_settings(
+            root.path().to_path_buf(),
+            RequestedProviderSettings {
+                mode: Some("ask".to_owned()),
+                model: Some("b".to_owned()),
+                effort: Some("high".to_owned()),
+            },
+        )
+        .await
+        .expect("settings applied");
+    assert_eq!(created.effective_settings.mode.as_deref(), Some("ask"));
+    assert_eq!(created.effective_settings.model.as_deref(), Some("b"));
+    assert_eq!(created.effective_settings.effort.as_deref(), Some("high"));
+
+    let prompt = client
+        .prompt_with_approval_context(created.provider_session_id, "Proceed".to_owned(), ())
+        .await;
+    client.shutdown().await;
+    assert!(prompt.is_ok(), "prompt result: {prompt:?}");
+    let seen: Vec<String> =
+        serde_json::from_slice(&std::fs::read(receipt).expect("receipt")).expect("receipt JSON");
+    assert_eq!(seen, ["mode", "model", "effort", "prompt"]);
+}
+
+fn failure_fixture_launch(mode: &str, receipt: &std::path::Path) -> ExternalProviderLaunch {
+    ExternalProviderLaunch {
+        executable: PathBuf::from("python3"),
+        arguments: vec![
+            "-u".to_owned(),
+            "-c".to_owned(),
+            FAILED_SETTINGS_FIXTURE.to_owned(),
+            mode.to_owned(),
+            receipt.to_string_lossy().into_owned(),
+        ],
+        environment: Vec::new(),
+        persistence_target: ProviderPersistenceTarget::Unspecified,
+    }
+}
+
+/// Oracle: specification R14 rejects an unoffered value with advertised
+/// choices and closes the newly created Session when close is supported.
+#[tokio::test]
+async fn invalid_first_setting_closes_created_session() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let receipt = root.path().join("closed.txt");
+    let client = AgentSessionClient::initialize(
+        failure_fixture_launch("invalid", &receipt),
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let result = client
+        .create_session_with_settings(
+            root.path().to_path_buf(),
+            RequestedProviderSettings {
+                mode: Some("impossible".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await;
+    client.shutdown().await;
+    let Err(acp_client_runtime::ExternalProviderRuntimeError::InvalidSetting {
+        setting,
+        value,
+        advertised,
+        disposition,
+        ..
+    }) = result
+    else {
+        panic!(
+            "invalid setting result: {result:?}; close receipt: {:?}",
+            std::fs::read_to_string(&receipt)
+        )
+    };
+    assert_eq!(setting, acp_client_runtime::ProviderSettingKind::Mode);
+    assert_eq!(value, "impossible");
+    assert_eq!(advertised, ["auto", "ask"]);
+    assert_eq!(
+        disposition,
+        acp_client_runtime::InvalidSettingSessionDisposition::Closed
+    );
+    assert_eq!(
+        std::fs::read_to_string(receipt).expect("close receipt"),
+        "closed"
+    );
+}
+
+/// Oracle: specification R14 reports a partly applied setup and blocks work
+/// until the caller explicitly accepts the effective settings.
+#[tokio::test]
+async fn partial_setup_blocks_prompt_until_settings_are_accepted() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let receipt = root.path().join("accepted.txt");
+    let client = AgentSessionClient::initialize(
+        failure_fixture_launch("partial", &receipt),
+        Arc::new(NoopInteractionPort),
+        Arc::new(NoopEventSink),
+    )
+    .await
+    .expect("fixture initializes");
+    let result = client
+        .create_session_with_settings(
+            root.path().to_path_buf(),
+            RequestedProviderSettings {
+                mode: Some("ask".to_owned()),
+                model: Some("b".to_owned()),
+                effort: None,
+            },
+        )
+        .await;
+    let Err(acp_client_runtime::ExternalProviderRuntimeError::CreatedWithoutSettings {
+        provider_session_id,
+        applied,
+        failed,
+    }) = result
+    else {
+        panic!("partial setup result: {result:?}")
+    };
+    assert_eq!(provider_session_id, "fixture-session");
+    assert_eq!(applied.len(), 1);
+    assert_eq!(
+        applied[0].kind,
+        acp_client_runtime::ProviderSettingKind::Mode
+    );
+    assert_eq!(failed.kind, acp_client_runtime::ProviderSettingKind::Model);
+    assert!(!failed.reason.contains("private agent detail"));
+    assert!(client.settings_unresolved(&provider_session_id).await);
+    let blocked = client
+        .prompt_with_approval_context(provider_session_id.clone(), "too early".to_owned(), ())
+        .await;
+    assert!(matches!(
+        blocked,
+        Err(acp_client_runtime::ExternalProviderRuntimeError::SettingsUnresolved)
+    ));
+    client
+        .accept_session_settings(provider_session_id.clone())
+        .await
+        .expect("caller accepts effective settings");
+    let prompt = client
+        .prompt_with_approval_context(provider_session_id, "Proceed".to_owned(), ())
+        .await;
+    client.shutdown().await;
+    assert!(prompt.is_ok(), "prompt after accept: {prompt:?}");
+    assert_eq!(
+        std::fs::read_to_string(receipt).expect("prompt receipt"),
+        "prompt-after-accept"
+    );
+}

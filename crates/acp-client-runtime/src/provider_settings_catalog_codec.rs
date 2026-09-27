@@ -42,6 +42,13 @@ pub(crate) fn catalog_from_session_response(
     }
 }
 
+pub(crate) fn replace_catalog_config_options(
+    catalog: &mut ProviderSettingsCatalog,
+    options: &[SessionConfigOption],
+) {
+    catalog.config_options = options.iter().filter_map(project_config_option).collect();
+}
+
 fn project_config_option(option: &SessionConfigOption) -> Option<ProviderConfigOption> {
     let (current_value, choices) = match &option.kind {
         SessionConfigKind::Select(select) => {
