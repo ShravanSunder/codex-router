@@ -2,6 +2,17 @@
 
 use std::path::{Path, PathBuf};
 
+#[test]
+fn public_protocol_error_uses_client_owned_version() {
+    let error = acp_client_runtime::ExternalProviderRuntimeError::UnsupportedProtocol {
+        actual: acp_client_runtime::AcpProtocolVersion::new(0),
+    };
+    assert_eq!(
+        error.to_string(),
+        "provider selected unsupported ACP protocol version ProtocolVersion(0)"
+    );
+}
+
 fn rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;

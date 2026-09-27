@@ -735,7 +735,7 @@ fn prompt_content_gate_matches_advertised_optional_types() {
         for (content_type, wire_block) in &examples {
             let block: ContentBlock =
                 serde_json::from_value(wire_block.clone()).expect("ACP content example");
-            let result = ProviderPromptContent::new(vec![block], &report);
+            let result = ProviderPromptContent::new_for_test(vec![block], &report);
             let accepted = match *content_type {
                 "text" | "resourceLink" => true,
                 "image" => report.accepts_image,
@@ -850,11 +850,15 @@ async fn unsupported_protocol_version_is_rejected() {
         .await
         .expect_err("v0 must not be admitted");
 
+    assert_eq!(
+        error.to_string(),
+        "provider selected unsupported ACP protocol version ProtocolVersion(0)"
+    );
     assert!(matches!(
-        error,
+        &error,
         ExternalProviderRuntimeError::UnsupportedProtocol {
-            actual: ProtocolVersion::V0
-        }
+            actual
+        } if *actual == acp_client_runtime::AcpProtocolVersion::new(0)
     ));
     assert_process_reaped(&process_id_path).await;
 }

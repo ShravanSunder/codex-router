@@ -17,7 +17,7 @@ use crate::provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
     ProviderSteeringOutcome, run_provider_session,
 };
-use crate::{InteractionPort, SessionEventSink};
+use crate::{AcpProtocolVersion, InteractionPort, SessionEventSink};
 use agent_client_protocol::schema::ProtocolVersion;
 #[cfg(any(test, feature = "test-observation"))]
 use agent_client_protocol::schema::v1::ToolKind;
@@ -32,7 +32,7 @@ pub(crate) use approval_turn_cancellation::ProviderTurnCancellation;
 use approval_turn_cancellation::{ActiveApprovalContext, active_turn_cancellation};
 use external_approval_dispatch::{PermissionDispatchState, spawn_external_approval_dispatch};
 use provider_acp_error_mapping::acp_load_session_error;
-pub use provider_acp_error_mapping::acp_operation_error;
+pub(crate) use provider_acp_error_mapping::acp_operation_error;
 pub(crate) use provider_frame_observation::ProviderFrameObservation;
 use provider_initialize_request::initialize_provider_connection;
 use provider_request_fallback::{
@@ -201,7 +201,7 @@ pub enum ExternalProviderRuntimeError {
     #[error("provider ACP initialization timed out")]
     InitializeTimeout,
     #[error("provider selected unsupported ACP protocol version {actual:?}")]
-    UnsupportedProtocol { actual: ProtocolVersion },
+    UnsupportedProtocol { actual: AcpProtocolVersion },
     #[error("provider conversation is busy")]
     LocalBusy,
     #[error("provider does not advertise steering")]
@@ -242,11 +242,11 @@ pub enum ExternalProviderRuntimeError {
     Operation(String),
 }
 
-pub fn sanitized_initialization_error(error: &agent_client_protocol::Error) -> String {
+pub(crate) fn sanitized_initialization_error(error: &agent_client_protocol::Error) -> String {
     sanitized_acp_error(error, "initialize", "initialize")
 }
 
-pub fn sanitized_acp_error(
+pub(crate) fn sanitized_acp_error(
     error: &agent_client_protocol::Error,
     method: &str,
     stage: &str,
@@ -608,7 +608,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                             }, capability_report))
                         }
                         Ok(response) => Err(ExternalProviderRuntimeError::UnsupportedProtocol {
-                            actual: response.protocol_version,
+                            actual: AcpProtocolVersion::from_sdk(response.protocol_version),
                         }),
                         Err(error) => {
                             Err(ExternalProviderRuntimeError::Initialize(

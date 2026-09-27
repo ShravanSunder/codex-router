@@ -1,11 +1,10 @@
 //! Test-only observations retained across ACP client extraction.
 use super::*;
-pub(super) use agent_client_protocol::schema::ProtocolVersion;
 pub(super) use agent_client_protocol::schema::v1::ToolKind;
 
 pub(super) const MAX_ACP_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
-pub(crate) use acp_client_runtime::sanitized_initialization_error;
+pub(crate) use acp_client_runtime::sanitized_initialization_error_for_test as sanitized_initialization_error;
 
 pub(super) fn has_completed_router_endpoints_call(tool_calls: &[ExternalProviderToolCall]) -> bool {
     tool_calls.iter().any(|tool_call| {

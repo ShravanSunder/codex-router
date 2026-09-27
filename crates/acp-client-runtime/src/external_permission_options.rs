@@ -22,7 +22,7 @@ enum ExternalPermissionKind {
     Unsupported { provider_kind: String },
 }
 
-pub fn map_external_permission_options(
+pub(crate) fn map_external_permission_options(
     options: Vec<PermissionOption>,
 ) -> ExternalPermissionOptionMapping {
     map_classified_options(options.into_iter().map(|option| {

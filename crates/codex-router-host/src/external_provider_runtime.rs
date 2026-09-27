@@ -14,7 +14,10 @@ use crate::acp_interaction_port::{HostInteractionPort, NoopSessionEventSink};
 #[cfg(test)]
 use crate::{ProviderSessionActivity, ProviderSteeringOutcome};
 #[cfg(test)]
-use acp_client_runtime::{acp_operation_error, sanitized_acp_error};
+use acp_client_runtime::{
+    acp_operation_error_for_test as acp_operation_error,
+    sanitized_acp_error_for_test as sanitized_acp_error,
+};
 
 pub use acp_client_runtime::{
     ExternalProviderAdmission, ExternalProviderApprovalRefusalReason,

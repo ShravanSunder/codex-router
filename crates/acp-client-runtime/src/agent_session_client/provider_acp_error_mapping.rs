@@ -3,7 +3,9 @@
 use super::ExternalProviderRuntimeError;
 use agent_client_protocol::schema::v1::ErrorCode;
 
-pub fn acp_operation_error(error: agent_client_protocol::Error) -> ExternalProviderRuntimeError {
+pub(crate) fn acp_operation_error(
+    error: agent_client_protocol::Error,
+) -> ExternalProviderRuntimeError {
     if agent_client_protocol::is_incoming_transport_closed(&error) {
         return ExternalProviderRuntimeError::TransportFailure;
     }

@@ -13,7 +13,7 @@ const MAX_ARGUMENT_VALUE_CHARS: usize = 512;
 const MAX_PERMISSION_DETAILS: usize = 8;
 const MAX_PERMISSION_DETAIL_CHARS: usize = 512;
 
-pub fn approval_presentation(fields: &ToolCallUpdateFields) -> ApprovalPresentation {
+pub(crate) fn approval_presentation(fields: &ToolCallUpdateFields) -> ApprovalPresentation {
     ApprovalPresentation {
         tool_name: fields
             .name

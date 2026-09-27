@@ -10,7 +10,7 @@ pub struct ProviderPromptContent {
 }
 
 impl ProviderPromptContent {
-    pub fn new(
+    pub(crate) fn new(
         blocks: Vec<ContentBlock>,
         capabilities: &ProviderCapabilityReport,
     ) -> Result<Self, ExternalProviderRuntimeError> {
@@ -34,5 +34,13 @@ impl ProviderPromptContent {
 
     pub(crate) fn into_blocks(self) -> Vec<ContentBlock> {
         self.blocks
+    }
+
+    #[cfg(feature = "test-observation")]
+    pub fn new_for_test(
+        blocks: Vec<ContentBlock>,
+        capabilities: &ProviderCapabilityReport,
+    ) -> Result<Self, ExternalProviderRuntimeError> {
+        Self::new(blocks, capabilities)
     }
 }

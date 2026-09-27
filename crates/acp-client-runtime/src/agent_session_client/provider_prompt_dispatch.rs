@@ -36,7 +36,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         .await
     }
 
-    pub async fn prompt_content(
+    pub(crate) async fn prompt_content(
         &self,
         provider_session_id: String,
         operation_id: Option<P::OperationId>,
