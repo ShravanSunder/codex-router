@@ -36,7 +36,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         self.settings_unresolved
             .read()
             .await
-            .contains(provider_session_id)
+            .contains_key(provider_session_id)
     }
 
     pub async fn accept_session_settings(
@@ -55,6 +55,27 @@ impl<P: InteractionPort> AgentSessionClient<P> {
             .await
             .remove(&provider_session_id);
         Ok(catalog.effective_settings())
+    }
+
+    pub async fn set_setting(
+        &self,
+        provider_session_id: String,
+        kind: crate::ProviderSettingKind,
+        value: String,
+    ) -> Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::SetSetting {
+                provider_session_id,
+                kind,
+                value,
+                reply,
+            })
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
+        result
+            .await
+            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
     }
 
     #[must_use]

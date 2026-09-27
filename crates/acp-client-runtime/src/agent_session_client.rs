@@ -12,13 +12,13 @@ mod provider_initialize_request;
 mod provider_prompt_dispatch;
 mod provider_request_fallback;
 mod provider_session_admission;
-mod provider_setting_application;
+pub(crate) mod provider_setting_application;
 
 use crate::ProviderCapabilityReport;
 use crate::provider_prompt_content::ProviderPromptContent;
 use crate::provider_session_actor::{
     ProviderPromptDispatchObservation, ProviderSessionActivity, ProviderSessionCommand,
-    ProviderSteeringOutcome, run_provider_session,
+    ProviderSessionSettingsHandles, ProviderSteeringOutcome, run_provider_session,
 };
 use crate::{AcpProtocolVersion, InteractionPort, SessionEventSink};
 use agent_client_protocol::schema::ProtocolVersion;
@@ -140,6 +140,14 @@ enum ProviderCommand<P: InteractionPort> {
         provider_session_id: String,
         reply: tokio::sync::oneshot::Sender<Result<(), ExternalProviderRuntimeError>>,
     },
+    SetSetting {
+        provider_session_id: String,
+        kind: crate::ProviderSettingKind,
+        value: String,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError>,
+        >,
+    },
 }
 
 enum PendingSessionAdmission<P: InteractionPort> {
@@ -171,7 +179,7 @@ pub struct AgentSessionClient<P: InteractionPort> {
     session_capabilities: Arc<tokio::sync::RwLock<HashMap<String, ProviderCapabilityReport>>>,
     session_settings: Arc<tokio::sync::RwLock<HashMap<String, crate::ProviderSettingsCatalog>>>,
     last_settings_catalog: Arc<tokio::sync::RwLock<Option<crate::ProviderSettingsCatalog>>>,
-    settings_unresolved: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    settings_unresolved: Arc<tokio::sync::RwLock<HashMap<String, crate::ProviderSettingKind>>>,
     shutdown: CancellationToken,
     retirement: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,

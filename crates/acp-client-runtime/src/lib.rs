@@ -43,6 +43,7 @@ mod provider_prompt_content;
 mod provider_prompt_observation;
 mod provider_prompt_result_codec;
 mod provider_session_actor;
+mod provider_session_setting_update;
 mod provider_session_settings;
 mod provider_settings_catalog_codec;
 mod provider_update_kind;
