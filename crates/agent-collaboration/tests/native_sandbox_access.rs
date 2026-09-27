@@ -29,6 +29,7 @@ async fn codex_sandbox_requires_exact_control_socket_permission() -> ProofResult
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        owner_human_id: None,
     })
     .await?;
     let command: Vec<OsString> = vec![

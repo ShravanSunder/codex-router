@@ -52,6 +52,7 @@ sys.stdin.read()
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: None,
+            owner_human_id: None,
         },
         vec![ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
@@ -196,6 +197,7 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: None,
+            owner_human_id: None,
         },
         vec![ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("binding"),

@@ -661,6 +661,7 @@ dependencies = [
  "futures-util",
  "indicatif",
  "iocraft",
+ "message-board",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",

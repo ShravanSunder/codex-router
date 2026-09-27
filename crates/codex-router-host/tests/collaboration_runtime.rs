@@ -20,6 +20,7 @@ async fn post_bind_manifest_failure_releases_mcp_port() {
         mcp_bind,
         native_schema: None,
         peer_registry_directory: None,
+        owner_human_id: None,
     })
     .await;
     assert!(result.is_err());
@@ -44,10 +45,17 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        owner_human_id: Some(
+            "test-owner"
+                .to_owned()
+                .try_into()
+                .expect("test owner identity"),
+        ),
     };
     let mut runtime = CollaborationRuntime::start(inputs())
         .await
         .unwrap_or_else(|e| panic!("start: {e}"));
+    assert_eq!(runtime.owner_human_id().as_str(), "test-owner");
     assert!(root.join("provider-operations.sqlite").is_file());
     let manifest: collaboration_protocol::ServiceManifest = serde_json::from_slice(
         &std::fs::read(root.join("service.json")).unwrap_or_else(|e| panic!("manifest read: {e}")),
@@ -324,6 +332,7 @@ async fn occupied_mcp_port_is_a_visible_startup_failure_without_fallback() {
         mcp_bind,
         native_schema: None,
         peer_registry_directory: None,
+        owner_human_id: None,
     })
     .await;
     let error = match result {

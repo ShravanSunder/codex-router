@@ -13,6 +13,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 pub struct CollaborationRuntimeInputs {
+    pub owner_human_id: Option<message_board::HumanId>,
     pub directory: PathBuf,
     pub codex_home: PathBuf,
     pub backend_socket: PathBuf,
@@ -89,6 +90,7 @@ pub struct BackendSchemaEvidence<'a> {
     pub export: &'a codex_native_integration::NativeSchemaExport,
 }
 pub struct CollaborationRuntime {
+    owner_human_id: message_board::HumanId,
     board_store: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
     provider_store:
         Option<std::sync::Arc<tokio::sync::Mutex<collaboration_service::ProviderOperationStore>>>,
@@ -183,6 +185,10 @@ impl CollaborationRuntime {
         provider_launches: Vec<crate::ExternalProviderStartup>,
         relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
     ) -> io::Result<Self> {
+        let owner_human_id =
+            crate::owner_identity_resolution::resolve_owner_human_id(inputs.owner_human_id.clone())
+                .await
+                .map_err(io::Error::other)?;
         let service_id = load_service_identity(&inputs.directory)?;
         let service_epoch = new_service_uuid()?;
         let native_digest = if let Some(export) = &inputs.native_schema {
@@ -489,6 +495,7 @@ impl CollaborationRuntime {
             tokio::spawn(async move { maintenance_store.run_maintenance(maintenance_stop).await })
         });
         Ok(Self {
+            owner_human_id,
             board_store,
             provider_store,
             external_provider_supervisor,
@@ -513,6 +520,11 @@ impl CollaborationRuntime {
             observer_task: None,
             mcp: Some(mcp),
         })
+    }
+
+    #[must_use]
+    pub fn owner_human_id(&self) -> &message_board::HumanId {
+        &self.owner_human_id
     }
 
     #[must_use]

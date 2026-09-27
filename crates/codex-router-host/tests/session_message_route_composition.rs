@@ -42,6 +42,7 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: Some(registry.clone()),
+            owner_human_id: None,
         },
         vec![
             ExternalProviderStartup::Launch(

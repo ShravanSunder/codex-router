@@ -39,6 +39,7 @@ mod managed_app_server;
 mod operator_connection;
 mod operator_messages;
 mod owned_router;
+mod owner_identity_resolution;
 mod process_group_child;
 mod provider_configuration_file;
 pub use provider_configuration_file::{

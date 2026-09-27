@@ -37,6 +37,7 @@ impl PreExecTelemetry for HostPreExecTelemetry {
 }
 
 pub(super) struct ForegroundHostInputs {
+    pub owner_human_id: Option<message_board::HumanId>,
     pub router_root: PathBuf,
     pub port: u16,
     pub mcp_bind: SocketAddr,
@@ -51,6 +52,7 @@ pub(super) async fn run_foreground_host(
     telemetry: Option<crate::telemetry::TelemetryShutdownHandle>,
 ) -> Result<(), HostCommandError> {
     let ForegroundHostInputs {
+        owner_human_id,
         router_root,
         port,
         mcp_bind,
@@ -154,6 +156,7 @@ pub(super) async fn run_foreground_host(
         port,
         mcp_bind,
         provider_operation_retention_days,
+        owner_human_id.as_ref(),
         &external_provider_launches,
     );
     let provider_startups = super::provider_launch_configuration::configured_provider_startups(
@@ -170,6 +173,9 @@ pub(super) async fn run_foreground_host(
     })
     .with_provider_operation_retention_days(provider_operation_retention_days)
     .with_collaboration_directory(collaboration_directory, codex_home);
+    if let Some(owner_human_id) = owner_human_id {
+        config = config.with_owner_human_id(owner_human_id);
+    }
     for provider_startup in provider_startups {
         config = config.with_external_provider_startup(provider_startup);
     }
@@ -197,6 +203,7 @@ fn host_replacement_command(
     port: u16,
     mcp_bind: SocketAddr,
     provider_operation_retention_days: std::num::NonZeroU32,
+    owner_human_id: Option<&message_board::HumanId>,
     external_provider_launches: &[codex_router_host::ExternalProviderLaunchBinding],
 ) -> ChildCommandSpec {
     let mut arguments = vec![
@@ -210,6 +217,10 @@ fn host_replacement_command(
         OsString::from("--provider-operation-retention-days"),
         OsString::from(provider_operation_retention_days.to_string()),
     ];
+    if let Some(owner_human_id) = owner_human_id {
+        arguments.push(OsString::from("--owner-human-id"));
+        arguments.push(OsString::from(owner_human_id.as_str()));
+    }
     for binding in external_provider_launches {
         let (executable_flag, argument_flag) = binding.command_flags();
         arguments.push(OsString::from(executable_flag));
@@ -266,6 +277,7 @@ mod tests {
                 19087,
                 mcp_bind,
                 std::num::NonZeroU32::new(60).expect("positive"),
+                None,
                 &[],
             ),
             ChildCommandSpec::new(executable).with_arguments([
@@ -298,6 +310,7 @@ mod tests {
             19087,
             mcp_bind,
             std::num::NonZeroU32::new(60).expect("positive"),
+            None,
             &[provider],
         );
         assert_eq!(
@@ -316,6 +329,39 @@ mod tests {
                 OsString::from("/tmp/agent"),
                 OsString::from("--cursor-acp-arguments"),
                 OsString::from("acp"),
+            ])
+        );
+    }
+
+    #[test]
+    fn replacement_command_preserves_owner_override() {
+        let owner = message_board::HumanId::try_from("chosen-owner".to_owned())
+            .expect("valid owner identity");
+        let executable = PathBuf::from("/tmp/codex-router");
+        let router_root = PathBuf::from("/tmp/router-root");
+        let command = host_replacement_command(
+            executable.clone(),
+            router_root.clone(),
+            19087,
+            SocketAddr::from(([127, 0, 0, 1], 19088)),
+            std::num::NonZeroU32::new(60).expect("positive"),
+            Some(&owner),
+            &[],
+        );
+        assert_eq!(
+            command,
+            ChildCommandSpec::new(executable).with_arguments([
+                OsString::from("host"),
+                OsString::from("--router-root"),
+                router_root.into_os_string(),
+                OsString::from("--port"),
+                OsString::from("19087"),
+                OsString::from("--mcp-bind"),
+                OsString::from("127.0.0.1:19088"),
+                OsString::from("--provider-operation-retention-days"),
+                OsString::from("60"),
+                OsString::from("--owner-human-id"),
+                OsString::from("chosen-owner"),
             ])
         );
     }
