@@ -190,6 +190,7 @@ pub(crate) async fn run_host_command<W: Write + Send>(
         return foreground_launch::run_foreground_host(
             foreground_launch::ForegroundHostInputs {
                 router_root,
+                require_debug_isolation: command.require_debug_isolation,
                 port: command.port.unwrap_or_else(|| {
                     if cfg!(all(debug_assertions, not(test)))
                         && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none()
@@ -371,6 +372,14 @@ pub enum HostCommandError {
     OperationFailed(String),
     #[error(transparent)]
     DebugProfile(#[from] codex_native_integration::DebugProfileError),
+    #[error("isolated Host requires a readable debug profile at {path}: {source}")]
+    IsolatedDebugProfile {
+        path: PathBuf,
+        #[source]
+        source: codex_native_integration::DebugProfileError,
+    },
+    #[error("isolated Host launch requires a debug build")]
+    IsolatedDebugBuildRequired,
     #[error("failed resolving host router root: {0}")]
     RouterRoot(String),
     #[error("HOME and CODEX_HOME are unavailable")]

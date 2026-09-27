@@ -19,10 +19,10 @@ use host_replacement_observation::{binary_version, observe_continuous_lock, veri
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test]
-async fn installed_mode_rejects_host_before_publication_when_fixture_launchctl_fails()
+async fn default_router_root_with_custom_codex_home_keeps_launchctl_policy()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new()?;
-    let router_root = directory.path().join("router");
+    let router_root = directory.path().join(".codex-router");
     let codex_home = directory.path().join("codex");
     let socket_path = codex_native_integration::CodexPaths::from_codex_home(codex_home.clone())
         .app_server_socket();
@@ -64,6 +64,104 @@ async fn installed_mode_rejects_host_before_publication_when_fixture_launchctl_f
 }
 
 #[tokio::test]
+async fn private_router_root_without_debug_profile_never_invokes_launchctl()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new()?;
+    let owner_codex_home = directory.path().join(".codex");
+    let launchctl_executable = directory.path().join("launchctl");
+    install_launchctl_fixture(&launchctl_executable)?;
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
+    let router_root = directory.path().join("private-router");
+    let launchctl_log = directory.path().join("launchctl.log");
+    let output = tokio::process::Command::new(&binary)
+        .args(["host", "--router-root"])
+        .arg(&router_root)
+        .env("HOME", directory.path())
+        .env("CODEX_HOME", &owner_codex_home)
+        .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
+        .env("CODEX_ROUTER_DEBUG_LAUNCHCTL", &launchctl_executable)
+        .env("CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG", &launchctl_log)
+        .env("OTEL_SDK_DISABLED", "true")
+        .output()
+        .await?;
+    let error = String::from_utf8(output.stderr)?;
+    check(
+        !output.status.success(),
+        "private router root unexpectedly started",
+    )?;
+    check(
+        error.contains("isolated Host requires a readable debug profile"),
+        &error,
+    )?;
+    check(
+        error.contains(
+            &owner_codex_home
+                .join("codex-router-debug.config.toml")
+                .display()
+                .to_string(),
+        ),
+        &error,
+    )?;
+    check(
+        !launchctl_log.exists(),
+        "private router root invoked launchctl",
+    )?;
+    check(
+        !router_root.exists(),
+        "private router root created router state",
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_router_root_with_profile_requires_dedicated_socket_before_launchctl()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new()?;
+    let codex_home = directory.path().join("private-codex");
+    std::fs::create_dir_all(&codex_home)?;
+    let profile = codex_home.join("codex-router-debug.config.toml");
+    std::fs::write(
+        &profile,
+        "model_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"fixture\"\nbase_url = \"http://127.0.0.1:19087/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n",
+    )?;
+    let router_root = directory.path().join("private-router");
+    let launchctl_executable = directory.path().join("launchctl");
+    let launchctl_log = directory.path().join("launchctl.log");
+    install_launchctl_fixture(&launchctl_executable)?;
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_codex-router"))
+        .args(["host", "--router-root"])
+        .arg(&router_root)
+        .args(["--port", "19087"])
+        .env("HOME", directory.path())
+        .env("CODEX_HOME", &codex_home)
+        .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
+        .env("CODEX_ROUTER_DEBUG_LAUNCHCTL", &launchctl_executable)
+        .env("CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG", &launchctl_log)
+        .env_remove("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET")
+        .env("OTEL_SDK_DISABLED", "true")
+        .output()
+        .await?;
+    let error = String::from_utf8(output.stderr)?;
+    check(
+        !output.status.success(),
+        "private router root unexpectedly started",
+    )?;
+    check(
+        error.contains("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET"),
+        &error,
+    )?;
+    check(
+        !launchctl_log.exists(),
+        "private router root invoked launchctl",
+    )?;
+    check(
+        !router_root.exists(),
+        "private router root created router state",
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn installed_cli_restarts_host_from_new_install_path()
 -> Result<(), Box<dyn std::error::Error>> {
     run_host_install_journey(false).await
@@ -77,7 +175,7 @@ async fn installed_cli_restarts_host_after_atomic_binary_install()
 
 async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new()?;
-    let router_root = directory.path().join("router");
+    let router_root = directory.path().join(".codex-router");
     let codex_home = directory.path().join("codex");
     let socket_path = codex_native_integration::CodexPaths::from_codex_home(codex_home.clone())
         .app_server_socket();

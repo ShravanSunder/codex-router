@@ -460,12 +460,12 @@ fn debug_default_router_root_for_home(home: &Path) -> PathBuf {
 pub(crate) fn app_server_socket_or_default(
     context: &CliContext,
     paths: &codex_native_integration::CodexPaths,
+    isolated_debug: bool,
 ) -> Result<PathBuf, &'static str> {
     codex_native_integration::select_app_server_endpoint(
         codex_native_integration::AppServerEndpointSelection {
             paths,
-            debug_defaults: cfg!(all(debug_assertions, not(test)))
-                && context.env_var(USE_HOME_DEFAULT_ENV).is_none(),
+            debug_defaults: isolated_debug,
             requested_socket: context.env_var(DEBUG_APP_SERVER_SOCKET_ENV),
         },
     )

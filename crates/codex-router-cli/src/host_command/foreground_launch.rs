@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,6 +39,7 @@ impl PreExecTelemetry for HostPreExecTelemetry {
 
 pub(super) struct ForegroundHostInputs {
     pub router_root: PathBuf,
+    pub require_debug_isolation: bool,
     pub port: u16,
     pub mcp_bind: SocketAddr,
     pub provider_operation_retention_days: std::num::NonZeroU32,
@@ -52,6 +54,7 @@ pub(super) async fn run_foreground_host(
 ) -> Result<(), HostCommandError> {
     let ForegroundHostInputs {
         router_root,
+        require_debug_isolation,
         port,
         mcp_bind,
         provider_operation_retention_days,
@@ -59,8 +62,19 @@ pub(super) async fn run_foreground_host(
         external_provider_launches,
     } = inputs;
     let launch_started_at = std::time::Instant::now();
-    let isolated_debug = cfg!(all(debug_assertions, not(test)))
-        && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none();
+    let codex_home = resolve_codex_home(context)?;
+    let isolated_debug = is_isolated_host(&router_root, context, require_debug_isolation);
+    let debug_profile = if isolated_debug {
+        let path = codex_home.join("codex-router-debug.config.toml");
+        let profile = codex_native_integration::DebugCodexProfile::read(&codex_home, port)
+            .map_err(|source| HostCommandError::IsolatedDebugProfile { path, source })?;
+        if !cfg!(all(debug_assertions, not(test))) {
+            return Err(HostCommandError::IsolatedDebugBuildRequired);
+        }
+        Some(profile)
+    } else {
+        None
+    };
     if isolated_debug {
         let home = context
             .env_var("HOME")
@@ -71,23 +85,19 @@ pub(super) async fn run_foreground_host(
         )
         .map_err(|message| HostCommandError::RouterRoot(message.to_owned()))?;
     }
-    let codex_home = resolve_codex_home(context)?;
     let codex_paths = CodexPaths::from_codex_home(codex_home.clone());
-    let app_server_socket = crate::app_server_socket_or_default(context, &codex_paths)
-        .map_err(|message| HostCommandError::AppServerSocket(message.to_owned()))?;
+    let app_server_socket =
+        crate::app_server_socket_or_default(context, &codex_paths, isolated_debug)
+            .map_err(|message| HostCommandError::AppServerSocket(message.to_owned()))?;
     let collaboration_directory = router_root.join("agent-communication");
     let control_socket =
         RouterControlSocketPath::in_collaboration_directory(&collaboration_directory)?;
     let profile = CodexRouterProfile::new(port);
     let app_server_spec =
         AppServerCommandSpec::new(&codex_paths, &profile, &control_socket, &app_server_socket);
-    let app_server_spec = if isolated_debug {
-        app_server_spec.with_debug_profile(&codex_native_integration::DebugCodexProfile::read(
-            &codex_home,
-            port,
-        )?)
-    } else {
-        app_server_spec
+    let app_server_spec = match debug_profile.as_ref() {
+        Some(profile) => app_server_spec.with_debug_profile(profile),
+        None => app_server_spec,
     };
     codex_router_host::record_debug_readiness_timing("profileAndSpec", launch_started_at);
     // Validate the native destination before touching state or launch policy.
@@ -191,6 +201,21 @@ pub(super) async fn run_foreground_host(
     Ok(())
 }
 
+fn is_isolated_host(
+    router_root: &Path,
+    context: &CliContext,
+    require_debug_isolation: bool,
+) -> bool {
+    if require_debug_isolation {
+        return true;
+    }
+    let Some(home) = context.env_var("HOME") else {
+        return true;
+    };
+    let home = Path::new(home);
+    router_root != home.join(".codex-router")
+}
+
 fn host_replacement_command(
     executable: PathBuf,
     router_root: PathBuf,
@@ -250,9 +275,26 @@ fn resolve_codex_home(context: &CliContext) -> Result<PathBuf, HostCommandError>
 
 #[cfg(test)]
 mod tests {
-    use super::host_replacement_command;
+    use super::{host_replacement_command, is_isolated_host};
+    use crate::CliContext;
     use codex_router_host::ChildCommandSpec;
     use std::{ffi::OsString, net::SocketAddr, path::PathBuf};
+
+    #[test]
+    fn only_private_router_root_or_explicit_flag_selects_isolation() {
+        let context = CliContext::new(vec![
+            ("HOME".to_owned(), "/tmp/fixture-owner".to_owned()),
+            ("CODEX_ROUTER_USE_HOME_DEFAULT".to_owned(), "1".to_owned()),
+        ]);
+        let owner_root = PathBuf::from("/tmp/fixture-owner/.codex-router");
+        assert!(!is_isolated_host(&owner_root, &context, false));
+        assert!(is_isolated_host(
+            &PathBuf::from("/tmp/fixture-owner/private-router"),
+            &context,
+            false,
+        ));
+        assert!(is_isolated_host(&owner_root, &context, true));
+    }
 
     #[test]
     fn replacement_command_preserves_explicit_mcp_bind() {
