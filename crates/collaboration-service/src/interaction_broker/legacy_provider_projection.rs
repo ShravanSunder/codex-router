@@ -19,17 +19,19 @@ pub(super) fn project_typed_legacy_approval(
 ) -> Option<ApprovalRequestRecord> {
     use session_event_model::{ApprovalEffect, ApprovalScope};
     let InteractionHistoryRecord::Approval {
-        requester,
         approver: message_board::Identity::Session { session: approver },
         request,
         state,
         legacy_metadata: Some(metadata),
+        ..
     } = record
     else {
         return None;
     };
-    let requester: SessionRef =
-        serde_json::from_value(serde_json::to_value(requester).ok()?).ok()?;
+    let requester = match &metadata.requested_by {
+        Some(collaboration_protocol::ProviderIdentity::Session(session)) => session.clone(),
+        Some(collaboration_protocol::ProviderIdentity::Human { .. }) | None => return None,
+    };
     let approver: SessionRef = serde_json::from_value(serde_json::to_value(approver).ok()?).ok()?;
     let (state, reason, decision) = match state {
         InteractionHistoryState::Pending => (ApprovalState::PendingClientDecision, None, None),

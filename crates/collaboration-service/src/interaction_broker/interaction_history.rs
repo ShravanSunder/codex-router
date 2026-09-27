@@ -8,7 +8,8 @@ use std::{
 
 pub use collaboration_protocol::QuestionResponse;
 use collaboration_protocol::{
-    CodexGeneration, OperationId, QuestionAnswerValue, SessionRef as ProtocolSessionRef,
+    CodexGeneration, OperationId, ProviderIdentity, QuestionAnswerValue,
+    SessionRef as ProtocolSessionRef,
 };
 use message_board::{Identity, SessionRef};
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,7 @@ pub enum InteractionHistoryRecord {
         request: ApprovalRequest,
         state: InteractionHistoryState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        legacy_metadata: Option<LegacyApprovalMetadata>,
+        legacy_metadata: Option<Box<LegacyApprovalMetadata>>,
     },
     Question {
         requester: SessionRef,
@@ -49,6 +50,8 @@ pub struct LegacyApprovalMetadata {
     pub target: ProtocolSessionRef,
     pub generation: CodexGeneration,
     pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<ProviderIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -429,7 +432,7 @@ impl InteractionHistoryStore {
         approver: Identity,
         request: ApprovalRequest,
         reason: &str,
-        legacy_metadata: Option<LegacyApprovalMetadata>,
+        legacy_metadata: Option<Box<LegacyApprovalMetadata>>,
     ) -> Result<(), InteractionHistoryError> {
         let record = InteractionHistoryRecord::Approval {
             requester,
