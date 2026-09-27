@@ -7,7 +7,7 @@ use codex_router_host::{
 };
 use collaboration_protocol::{
     DeliveryOutcome, MessageContent, MessageDelivery, MessageText, ProviderOperationKind,
-    ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess,
+    ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess, SessionId,
 };
 use collaboration_service::{ProviderOperationStore, ProviderSessionRecord, SessionDeliveryRoute};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -99,11 +99,13 @@ async fn typed_queue_keeps_blocks_and_input_identity_through_fifo() {
         .await
         .expect("first event");
     assert_eq!(&first_bytes, b"first");
+    let mut other_actor = target.clone();
+    other_actor.session_id = SessionId::try_from("other-session".to_owned()).expect("actor ID");
 
     let unsupported = route
         .queue_contents(
             target.clone(),
-            target.clone().into(),
+            other_actor.clone().into(),
             vec![
                 session_event_model::PromptContent::image(
                     "image/png".into(),
@@ -126,7 +128,7 @@ async fn typed_queue_keeps_blocks_and_input_identity_through_fifo() {
     let queued = route
         .queue_contents(
             target.clone(),
-            target.clone().into(),
+            other_actor.into(),
             vec![
                 session_event_model::PromptContent::resource_link(
                     "https://example.test/context".into(),

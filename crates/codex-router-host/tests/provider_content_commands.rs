@@ -43,7 +43,7 @@ sys.stdin.read()
 }
 
 #[tokio::test]
-async fn direct_content_prompt_checks_actor_and_capability_before_two_block_send() {
+async fn non_creator_content_prompt_is_accepted_after_capability_validation() {
     let root = tempfile::tempdir().expect("provider root");
     let target = target();
     let binding = provider_binding(&target);
@@ -105,24 +105,10 @@ async fn direct_content_prompt_checks_actor_and_capability_before_two_block_send
     };
     let mut other_actor = target.clone();
     other_actor.session_id = SessionId::try_from("other-session".to_owned()).expect("actor ID");
-    let unauthorized = route
-        .prompt_contents(
-            target.clone(),
-            other_actor.into(),
-            InputId::generate(),
-            contents(),
-        )
-        .await;
-    assert!(matches!(
-        unauthorized,
-        Err(ProviderPromptContentsError::Admission(
-            ProviderQueueAdmissionError::UnauthorizedActor
-        ))
-    ));
     let unsupported = route
         .prompt_contents(
             target.clone(),
-            target.clone().into(),
+            other_actor.clone().into(),
             InputId::generate(),
             vec![PromptContent::image("image/png".into(), "aGVsbG8=".into(), None).expect("image")],
         )
@@ -138,7 +124,7 @@ async fn direct_content_prompt_checks_actor_and_capability_before_two_block_send
     let submitted = route
         .prompt_contents(
             target.clone(),
-            target.into(),
+            other_actor.into(),
             InputId::generate(),
             contents(),
         )

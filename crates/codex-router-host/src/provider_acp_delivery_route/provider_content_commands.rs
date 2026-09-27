@@ -10,8 +10,6 @@ pub enum ProviderQueueAdmissionError {
     Unavailable,
     #[error("provider session is live elsewhere")]
     LiveElsewhere,
-    #[error("actor is not authorized for this provider session")]
-    UnauthorizedActor,
     #[error("session settings are unresolved")]
     SettingsUnresolved,
     #[error("provider prompt content is empty")]
@@ -75,9 +73,6 @@ impl ProviderAcpDeliveryRoute {
             .await
             .map_err(|_| ProviderQueueAdmissionError::Unavailable)?
             .ok_or(ProviderQueueAdmissionError::SessionNotFound)?;
-        if actor != record.created_by && actor != record.approver {
-            return Err(ProviderQueueAdmissionError::UnauthorizedActor.into());
-        }
         match ensure_provider_session_loaded(
             &self.supervisor,
             &self.store,
@@ -151,7 +146,7 @@ impl ProviderAcpDeliveryRoute {
                 return Err(ProviderQueueAdmissionError::Unavailable.into());
             }
         }
-        let record = self
+        let _record = self
             .store
             .lock()
             .await
@@ -159,9 +154,6 @@ impl ProviderAcpDeliveryRoute {
             .await
             .map_err(|_| ProviderQueueAdmissionError::Unavailable)?
             .ok_or(ProviderQueueAdmissionError::SessionNotFound)?;
-        if actor != record.created_by && actor != record.approver {
-            return Err(ProviderQueueAdmissionError::UnauthorizedActor.into());
-        }
         let runtime = self
             .supervisor
             .runtime_for(&target.endpoint)
@@ -178,10 +170,21 @@ impl ProviderAcpDeliveryRoute {
         if let Some(content_type) = unsupported_content_type(&contents, &capabilities) {
             return Err(ProviderQueueAdmissionError::UnsupportedContent { content_type }.into());
         }
-        runtime
-            .steer_session_contents_with_input(String::from(target.session_id), input_id, contents)
-            .await
-            .map_err(Into::into)
+        let outcome = runtime
+            .steer_session_contents_with_input(
+                String::from(target.session_id.clone()),
+                input_id.clone(),
+                contents,
+            )
+            .await?;
+        tracing::info!(
+            ?target,
+            ?actor,
+            ?input_id,
+            ?outcome,
+            "provider content steer settled"
+        );
+        Ok(outcome)
     }
 
     pub async fn queue_contents(
@@ -216,9 +219,6 @@ impl ProviderAcpDeliveryRoute {
             .await
             .map_err(|_| ProviderQueueAdmissionError::Unavailable)?
             .ok_or(ProviderQueueAdmissionError::SessionNotFound)?;
-        if actor != record.created_by && actor != record.approver {
-            return Err(ProviderQueueAdmissionError::UnauthorizedActor);
-        }
         let runtime = self
             .supervisor
             .runtime_for(&target.endpoint)
