@@ -8,13 +8,13 @@
 - After the versioned change reaches `main`, publish the matching `v<version>`
   tag and require `.github/workflows/release.yml` to publish the GitHub release
   artifact, update `ShravanSunder/homebrew-taps`, and verify the Homebrew
-  installation. A local `cargo install` is not a release and does not satisfy
-  this requirement.
-- On development machines, install local builds with Cargo; do not install or
-  upgrade `codex-router` via Homebrew. Install both workspace binaries so their
-  shared protocol and CLI surfaces stay aligned:
-  `cargo install --path crates/codex-router-cli --locked --force` and
-  `cargo install --path crates/agent-collaboration --locked --force`.
+  installation.
+- On development machines, the installed `codex-router`, `agent-collaboration`
+  and `agent-sessions` come from the Homebrew tap, the same release artifact
+  users get: `brew update && brew upgrade codex-router`. Do not `cargo install`
+  these binaries; a copy in `~/.cargo/bin` comes earlier on `PATH` and silently
+  shadows the Homebrew one. Exercise unreleased code through `cargo run`,
+  tests, or an isolated debug Host, not by installing it.
 - Keep release publication separate from production process replacement.
   Publishing or installing a new binary never authorizes restarting the
   running production router.
