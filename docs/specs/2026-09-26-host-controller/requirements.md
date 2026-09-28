@@ -134,7 +134,7 @@ All rows marked `authorized` are normative-eligible.
     (`tmp/host-controller-research/w12-desktop-attach.md`). Without one, attaching
     needs a change in the desktop app, which is outside this design's goal boundary
     (no upstream change).
-  `tmp/host-controller-research/w2-desktop-app.md` in the main checkout.
+
 Further owner confirmations on 2026-09-26, after design review:
 
 - **R8 scope.** Stopping a component guarantees that its own process group is
