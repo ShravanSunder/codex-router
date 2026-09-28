@@ -2,6 +2,7 @@
 
 ## Unreleased - 2026-09-24
 
+- Restore CLI and MCP prompts to existing Codex conversations when Claude or Cursor ACP routes share the Host. The client now sends the exact SessionRef on `session/load`, so a new ACP connection selects the Codex route without weakening rejection of unknown bare Session IDs.
 - Invalid `conversation create --from` identity JSON now exits 2 with `invalidField`; provider creates accept Human creators and Approvers, including an owner-selected `--approver-owner` shortcut.
 - `wake send --wait-until-first-fire --json` now emits one result with `result.record.firstFire`, or one error retaining the created wake under `created`.
 - Scheduled runs can deliver their first input to a Codex conversation created without an initial prompt.
