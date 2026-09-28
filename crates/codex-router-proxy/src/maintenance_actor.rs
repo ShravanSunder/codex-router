@@ -693,12 +693,14 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("test state store should open: {error}"));
         let old_affinity = SessionAccountAffinity::new(
+            codex_router_core::provider::Provider::Openai,
             "session-old",
             AccountId::new("acct_old")
                 .unwrap_or_else(|error| panic!("test account should validate: {error}")),
             999,
         );
         let cutoff_affinity = SessionAccountAffinity::new(
+            codex_router_core::provider::Provider::Openai,
             "session-cutoff",
             AccountId::new("acct_cutoff")
                 .unwrap_or_else(|error| panic!("test account should validate: {error}")),

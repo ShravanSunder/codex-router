@@ -498,7 +498,12 @@ mod tests {
     #[test]
     fn persisted_reconciliation_preserves_last_seen_and_live_touch_wins() {
         let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
-        let persisted = SessionAccountAffinity::new("session-db", account_id("acct-a"), 1_000);
+        let persisted = SessionAccountAffinity::new(
+            codex_router_core::provider::Provider::Openai,
+            "session-db",
+            account_id("acct-a"),
+            1_000,
+        );
         let seeded = reconcile_persisted_session_account_affinity(
             &cache,
             Provider::Openai,
@@ -525,7 +530,12 @@ mod tests {
         );
         assert!(seeded.activity_handle().touch_if_current(5_600).unwrap());
 
-        let older = SessionAccountAffinity::new("session-db", account_id("acct-b"), 8_250);
+        let older = SessionAccountAffinity::new(
+            codex_router_core::provider::Provider::Openai,
+            "session-db",
+            account_id("acct-b"),
+            8_250,
+        );
         let reconciled = reconcile_persisted_session_account_affinity(
             &cache,
             Provider::Openai,
@@ -544,8 +554,12 @@ mod tests {
     fn persisted_reconciliation_uses_default_75_minute_ttl() {
         for (age, expected_fresh) in [(4_499, true), (4_500, false), (4_501, false)] {
             let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
-            let persisted =
-                SessionAccountAffinity::new("session-db-boundary", account_id("acct-a"), 1_000);
+            let persisted = SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
+                "session-db-boundary",
+                account_id("acct-a"),
+                1_000,
+            );
             let reconciled = reconcile_persisted_session_account_affinity(
                 &cache,
                 Provider::Openai,

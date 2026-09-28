@@ -51,8 +51,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let terminal_id = AccountId::new("upkeep-terminal").expect("terminal id");
     state
         .upsert_account(
-            &AccountRecord::new(terminal_id.clone(), "terminal", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                terminal_id.clone(),
+                "terminal",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .await
         .expect("terminal account");
@@ -83,8 +88,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let cooldown_id = AccountId::new("upkeep-cooldown").expect("cooldown id");
     state
         .upsert_account(
-            &AccountRecord::new(cooldown_id.clone(), "cooldown", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                cooldown_id.clone(),
+                "cooldown",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .await
         .expect("cooldown account");
@@ -110,8 +120,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let reauth_id = AccountId::new("upkeep-reauth").expect("reauth id");
     state
         .upsert_account(
-            &AccountRecord::new(reauth_id.clone(), "reauth", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                reauth_id.clone(),
+                "reauth",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .await
         .expect("reauth account");
@@ -200,8 +215,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     ] {
         claim_state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), label, AccountStatus::Disabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    label,
+                    AccountStatus::Disabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await
             .expect("prior fixture account should disable");
@@ -209,8 +229,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let claimed_id = AccountId::new("upkeep-claimed").expect("claimed id");
     claim_state
         .upsert_account(
-            &AccountRecord::new(claimed_id.clone(), "claimed", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                claimed_id.clone(),
+                "claimed",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .await
         .expect("claimed account");

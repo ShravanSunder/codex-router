@@ -45,8 +45,13 @@ fn quota_401_renews_once_and_retries_with_the_committed_generation() {
         let account_id = account_id("quota-401-account");
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), "quota-401", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "quota-401",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         ));
         let secrets = must_ok(FileSecretStore::open(&secret_root));
         let key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -139,6 +144,7 @@ impl QuotaRefreshProvider for ConcurrentGenerationQuotaProvider {
             must_ok(AccountStateRepository::upsert_account(
                 &state,
                 &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
                     self.account_id.clone(),
                     "quota-race",
                     AccountStatus::Enabled,
@@ -169,8 +175,13 @@ fn quota_401_reuses_a_concurrently_committed_generation_without_oauth_refresh() 
     let account_id = account_id("quota-401-race-account");
     must_ok(AccountStateRepository::upsert_account(
         &state,
-        &AccountRecord::new(account_id.clone(), "quota-race", AccountStatus::Enabled)
-            .with_active_credential_generation(1),
+        &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "quota-race",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1),
     ));
     let secrets = must_ok(FileSecretStore::open(&secret_root));
     let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -236,8 +247,13 @@ fn quota_401_does_not_bypass_terminal_or_retry_cooldown_maintenance() {
         let account_id = account_id("quota-401-maintenance-account");
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), "maintenance", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "maintenance",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         ));
         let secrets = must_ok(FileSecretStore::open(&secret_root));
         let key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -315,7 +331,12 @@ fn quota_refresh_rejects_non_provider_base_url_before_token_egress() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_refresh_reject");
-    let account = AccountRecord::new(account_id.clone(), "reject", AccountStatus::Enabled);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "reject",
+        AccountStatus::Enabled,
+    );
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
     let access_key = must_ok(upstream_access_token_key(&account_id));
@@ -359,8 +380,13 @@ fn quota_refresh_resolver_refreshes_expired_access_token_before_provider_egress(
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_quota_refresh");
-    let account = AccountRecord::new(account_id.clone(), "refresh", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "refresh",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
     let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -461,8 +487,13 @@ fn quota_refresh_store_paths_uses_current_thread_runtime_without_nested_runtime(
     let secret_root = test_root.path().join("custom-secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
     let account_id = account_id("acct_quota_store_paths");
-    let account = AccountRecord::new(account_id.clone(), "store-paths", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "store-paths",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets = must_ok(FileSecretStore::open(&secret_root));
     let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -515,8 +546,13 @@ fn quota_refresh_missing_refresh_token_fails_closed_before_provider_egress() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_quota_missing_refresh");
-    let account = AccountRecord::new(account_id.clone(), "missing", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "missing",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
     let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -575,12 +611,14 @@ fn quota_refresh_continues_after_one_account_provider_failure() {
     let failing_account_id = account_id("acct_quota_provider_failing");
     let healthy_account_id = account_id("acct_quota_provider_healthy");
     let failing_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         failing_account_id.clone(),
         "failing",
         AccountStatus::Enabled,
     )
     .with_active_credential_generation(1);
     let healthy_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         healthy_account_id.clone(),
         "healthy",
         AccountStatus::Enabled,
@@ -674,9 +712,13 @@ fn quota_refresh_preserves_enabled_account_when_401_recovery_is_unavailable() {
             (&rejected_account_id, "rejected"),
             (&healthy_account_id, "healthy"),
         ] {
-            let account =
-                AccountRecord::new(account_id.clone(), account_label, AccountStatus::Enabled)
-                    .with_active_credential_generation(1);
+            let account = AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                account_label,
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1);
             must_ok(AccountStateRepository::upsert_account(&state, &account));
         }
         let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));

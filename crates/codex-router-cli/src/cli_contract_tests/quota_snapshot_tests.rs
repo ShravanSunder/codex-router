@@ -67,8 +67,13 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
         let account_id = account_id("floor-fault-account");
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), "floor-fault", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "floor-fault",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         ));
         let secrets = must_ok(FileSecretStore::open(&secret_root));
         let key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -143,8 +148,13 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_quota_selector");
-    let account = AccountRecord::new(account_id.clone(), "selector", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "selector",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
     let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -264,12 +274,14 @@ fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
     let floor_account_id = account_id("acct_a_floor");
     let healthy_account_id = account_id("acct_b_healthy");
     let floor_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         floor_account_id.clone(),
         "floor-account",
         AccountStatus::Enabled,
     )
     .with_active_credential_generation(1);
     let healthy_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         healthy_account_id.clone(),
         "healthy-account",
         AccountStatus::Enabled,
@@ -360,8 +372,13 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
     let account_id = account_id("acct_switch_intent");
     must_ok(AccountStateRepository::upsert_account(
         &state,
-        &AccountRecord::new(account_id.clone(), "switch-intent", AccountStatus::Enabled)
-            .with_active_credential_generation(1),
+        &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "switch-intent",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1),
     ));
     let secrets = must_ok(FileSecretStore::open(&secret_root));
     let key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -451,8 +468,13 @@ fn quota_refresh_weekly_only_response_is_known_with_five_hour_no_data() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_quota_partial");
-    let account = AccountRecord::new(account_id.clone(), "partial", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "partial",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
     let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -556,8 +578,13 @@ fn quota_refresh_missing_reset_response_is_unknown_fallback() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_quota_missing_reset");
-    let account = AccountRecord::new(account_id.clone(), "missing-reset", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "missing-reset",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
     let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));

@@ -12,8 +12,13 @@ fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked()
     let token_service = LocalRouterTokenService::new(secrets.clone());
     let local_token = must_ok(token_service.rotate_with_token("current-token"));
     let account_id = account_id("acct_background_served");
-    let account = AccountRecord::new(account_id.clone(), "served", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "served",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let snapshot =
         PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
@@ -151,8 +156,13 @@ fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_bloc
     let token_service = LocalRouterTokenService::new(secrets.clone());
     let local_token = must_ok(token_service.rotate_with_token("current-token"));
     let account_id = account_id("acct_background_served_ws");
-    let account = AccountRecord::new(account_id.clone(), "served-ws", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "served-ws",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let snapshot =
         PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)

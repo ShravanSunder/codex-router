@@ -111,7 +111,9 @@ implement core-defined traits for quota fetching and OAuth (`QuotaFetcher`, `Cre
 No CHECK on provider values, per the repository rule (`AGENTS.md:69-77`). Provider membership is a Rust
 `Provider` enum parsed on every row decode; an unknown value fails closed with a field-tagged
 `CorruptAccount { field: "provider" }` (G8). Labels stay unique across providers because account ids are
-label-derived (`acct_<label>`); `account login` refuses an existing label.
+label-derived (`acct_<label>`). `account login` refuses a label that belongs to a different account or a
+different provider. Logging in again to the same account (same label, same provider) is the existing
+re-login path and stays allowed; it activates a new credential generation (R21; clears `needs_login`).
 
 **D2 — One listener, route prefix.** `/anthropic` on the existing `serve` listener. One process owns the
 account core's in-memory state (pins, runtime exclusions). A second listener in the same process would

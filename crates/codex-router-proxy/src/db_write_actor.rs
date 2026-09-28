@@ -1452,6 +1452,7 @@ mod tests {
             actor.try_enqueue(DbWriteCommand::session_account_affinity(
                 RouteBand::Responses,
                 SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-blocking",
                     account_id("acct_session_blocking"),
                     1_000,
@@ -1469,6 +1470,7 @@ mod tests {
             actor.try_enqueue(DbWriteCommand::session_account_affinity(
                 RouteBand::Responses,
                 SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-queued",
                     account_id("acct_session_queued"),
                     1_001,
@@ -1513,6 +1515,7 @@ mod tests {
             actor.try_enqueue(DbWriteCommand::session_account_affinity(
                 RouteBand::Responses,
                 SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-closed-optional-queue",
                     account_id("acct_session_closed"),
                     1_000,
@@ -1959,6 +1962,7 @@ mod tests {
             DbWriteCommand::session_account_affinity(
                 RouteBand::Responses,
                 SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-success",
                     account_id("acct_session_success"),
                     1_001,
@@ -2100,6 +2104,7 @@ mod tests {
             actor.try_enqueue(DbWriteCommand::session_account_affinity(
                 RouteBand::Responses,
                 SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-write-failure",
                     account_id("acct_session_write_failure"),
                     1_000,
@@ -2131,6 +2136,7 @@ mod tests {
             actor.try_enqueue(DbWriteCommand::session_account_affinity(
                 RouteBand::Responses,
                 SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-debounced",
                     selected_account_id.clone(),
                     1_000,
@@ -2143,6 +2149,7 @@ mod tests {
                 actor.try_enqueue(DbWriteCommand::session_account_affinity(
                     RouteBand::Responses,
                     SessionAccountAffinity::new(
+                        codex_router_core::provider::Provider::Openai,
                         "session-debounced",
                         selected_account_id.clone(),
                         last_seen_unix_seconds,
@@ -2167,7 +2174,12 @@ mod tests {
         assert_eq!(
             repository.records(),
             vec![RecordedDbWrite::SessionAccountAffinity(
-                SessionAccountAffinity::new("session-debounced", selected_account_id, 1_000,)
+                SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
+                    "session-debounced",
+                    selected_account_id,
+                    1_000,
+                )
             )],
             "unchanged-account refreshes should wait for the debounce deadline"
         );
@@ -2186,6 +2198,7 @@ mod tests {
         assert_eq!(
             repository.records()[1],
             RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 "session-debounced",
                 account_id("acct_debounced_session"),
                 1_002,
@@ -2207,6 +2220,7 @@ mod tests {
                 actor.try_enqueue(DbWriteCommand::session_account_affinity(
                     RouteBand::Responses,
                     SessionAccountAffinity::new(
+                        codex_router_core::provider::Provider::Openai,
                         "session-simultaneous-first",
                         selected_account_id.clone(),
                         last_seen_unix_seconds,
@@ -2232,6 +2246,7 @@ mod tests {
             repository.records(),
             vec![RecordedDbWrite::SessionAccountAffinity(
                 SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-simultaneous-first",
                     selected_account_id,
                     1_000,
@@ -2259,6 +2274,7 @@ mod tests {
                 actor.try_enqueue(DbWriteCommand::session_account_affinity(
                     RouteBand::Responses,
                     SessionAccountAffinity::new(
+                        codex_router_core::provider::Provider::Openai,
                         "session-account-change",
                         account_id,
                         last_seen_unix_seconds,
@@ -2275,11 +2291,13 @@ mod tests {
             repository.records(),
             vec![
                 RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-account-change",
                     account_id("acct_before_change"),
                     1_000,
                 )),
                 RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-account-change",
                     changed_account_id,
                     1_002,
@@ -2300,6 +2318,7 @@ mod tests {
                 actor.try_enqueue(DbWriteCommand::session_account_affinity(
                     RouteBand::Responses,
                     SessionAccountAffinity::new(
+                        codex_router_core::provider::Provider::Openai,
                         "session-shutdown-refresh",
                         selected_account_id.clone(),
                         last_seen_unix_seconds,
@@ -2315,11 +2334,13 @@ mod tests {
             repository.records(),
             vec![
                 RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-shutdown-refresh",
                     selected_account_id.clone(),
                     1_000,
                 )),
                 RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-shutdown-refresh",
                     selected_account_id,
                     1_001,
@@ -2342,6 +2363,7 @@ mod tests {
                 let result = actor.try_enqueue(DbWriteCommand::session_account_affinity(
                     RouteBand::Responses,
                     SessionAccountAffinity::new(
+                        codex_router_core::provider::Provider::Openai,
                         session_id,
                         account_id(account_id_value),
                         last_seen_unix_seconds,
@@ -2369,16 +2391,19 @@ mod tests {
             repository.records(),
             vec![
                 RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-capacity-one",
                     account_id("acct_capacity_one"),
                     1_000,
                 )),
                 RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-capacity-one",
                     account_id("acct_capacity_one"),
                     1_001,
                 )),
                 RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
                     "session-capacity-two",
                     account_id("acct_capacity_two"),
                     1_002,
@@ -2396,7 +2421,12 @@ mod tests {
         assert_eq!(
             actor.try_enqueue(DbWriteCommand::session_account_affinity(
                 RouteBand::Responses,
-                SessionAccountAffinity::new("session-maximum-wait", account_id.clone(), 1_000,),
+                SessionAccountAffinity::new(
+                    codex_router_core::provider::Provider::Openai,
+                    "session-maximum-wait",
+                    account_id.clone(),
+                    1_000,
+                ),
             )),
             DbWriteEnqueueResult::Enqueued
         );
@@ -2406,6 +2436,7 @@ mod tests {
                 actor.try_enqueue(DbWriteCommand::session_account_affinity(
                     RouteBand::Responses,
                     SessionAccountAffinity::new(
+                        codex_router_core::provider::Provider::Openai,
                         "session-maximum-wait",
                         account_id.clone(),
                         last_seen_unix_seconds,
@@ -2432,6 +2463,7 @@ mod tests {
         assert_eq!(
             repository.records()[1],
             RecordedDbWrite::SessionAccountAffinity(SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 "session-maximum-wait",
                 account_id,
                 1_116,

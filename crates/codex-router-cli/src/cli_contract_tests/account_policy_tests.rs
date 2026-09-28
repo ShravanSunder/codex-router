@@ -66,6 +66,7 @@ fn account_status_commands_parse_and_preserve_credential_generation() {
     must_ok(AccountStateRepository::upsert_account(
         &state,
         &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_primary"),
             "primary".to_owned(),
             AccountStatus::Enabled,
@@ -214,6 +215,7 @@ fn account_set_weekly_floor_updates_disables_and_lists_policy() {
     must_ok(AccountStateRepository::upsert_account(
         &state,
         &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_primary"),
             "primary".to_owned(),
             AccountStatus::Enabled,
@@ -285,6 +287,7 @@ fn account_set_weekly_floor_label_failures_are_redacted_and_do_not_mutate() {
         must_ok(AccountStateRepository::upsert_account(
             &state,
             &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id(account_id_value),
                 label.to_owned(),
                 AccountStatus::Enabled,
@@ -340,6 +343,7 @@ fn account_list_renders_friendly_table_without_account_ids() {
     must_ok(AccountStateRepository::upsert_account(
         &state,
         &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_primary"),
             "primary".to_owned(),
             AccountStatus::Enabled,

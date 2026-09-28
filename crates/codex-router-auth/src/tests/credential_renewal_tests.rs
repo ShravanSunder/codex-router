@@ -9,8 +9,13 @@ async fn token_expiring_during_secret_read_cannot_be_emitted() {
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "expiring", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "expiring",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -77,8 +82,13 @@ async fn replacement_expiring_during_held_refresh_cannot_be_emitted() {
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "expiring", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "expiring",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -185,8 +195,13 @@ async fn cancelled_waiter_does_not_cancel_provider_rotation_or_release_account_l
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "cancelled", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "cancelled",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -296,8 +311,13 @@ async fn separate_process_resolvers_use_one_rotating_refresh() {
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "cross process", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "cross process",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -368,8 +388,13 @@ async fn cancelled_waiter_keeps_lock_until_blocking_secret_write_and_activation_
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "held", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "held",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -458,8 +483,13 @@ async fn transient_secret_write_failure_retries_commit_without_second_provider_u
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "write", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "write",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -524,8 +554,13 @@ async fn inaccessible_successor_slot_records_local_retry_without_provider_use() 
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "inaccessible", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "inaccessible",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );

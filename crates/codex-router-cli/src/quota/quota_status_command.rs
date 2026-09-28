@@ -197,6 +197,7 @@ mod weekly_floor_save_error_tests {
             .expect("state should open");
         state
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 "duplicate",
                 AccountStatus::Enabled,

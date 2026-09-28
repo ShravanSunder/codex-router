@@ -9,8 +9,13 @@ fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
     let state = must_ok(SqliteStateStore::open(&state_path));
     let secrets = must_ok(FileSecretStore::open(&secret_root));
     let account_id = account_id("acct_cli_serve");
-    let account = AccountRecord::new(account_id.clone(), "cli-serve", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "cli-serve",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let snapshot =
         PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
@@ -180,8 +185,13 @@ fn serve_command_dispatches_websocket_upgrade_through_runtime() {
     let state = must_ok(SqliteStateStore::open(&state_path));
     let secrets = must_ok(FileSecretStore::open(&secret_root));
     let account_id = account_id("acct_cli_ws");
-    let account = AccountRecord::new(account_id.clone(), "cli-ws", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "cli-ws",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let snapshot =
         PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
@@ -384,8 +394,13 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
     ] {
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), "upkeep", status)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "upkeep",
+                status,
+            )
+            .with_active_credential_generation(1),
         ));
         let key = must_ok(account_credential_bundle_key(account_id, 1));
         must_ok(

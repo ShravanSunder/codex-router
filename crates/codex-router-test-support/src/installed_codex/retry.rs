@@ -157,6 +157,7 @@ fn seed_retry_accounts(
     for (index, token) in TEST_ACCOUNT_TOKENS.iter().take(account_count).enumerate() {
         let account_id = account_id(&format!("acct_retry_integration_{index}"))?;
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id.clone(),
             format!("retry-integration-{index}"),
             AccountStatus::Enabled,

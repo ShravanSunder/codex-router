@@ -495,8 +495,13 @@ pub(super) fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
 }
 
 pub(super) fn account(account_id: &str, label: &str) -> AccountRecord {
-    AccountRecord::new(test_account_id(account_id), label, AccountStatus::Enabled)
-        .with_active_credential_generation(1)
+    AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        test_account_id(account_id),
+        label,
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1)
 }
 
 pub(super) fn account_id(value: &str) -> AccountId {

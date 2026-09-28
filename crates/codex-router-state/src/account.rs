@@ -46,21 +46,19 @@ pub struct AccountRecord {
 impl AccountRecord {
     /// Creates account metadata.
     #[must_use]
-    pub fn new(account_id: AccountId, label: impl Into<String>, status: AccountStatus) -> Self {
+    pub fn new(
+        provider: Provider,
+        account_id: AccountId,
+        label: impl Into<String>,
+        status: AccountStatus,
+    ) -> Self {
         Self {
             account_id,
             label: label.into(),
-            provider: Provider::Openai,
+            provider,
             status,
             active_credential_generation: None,
         }
-    }
-
-    /// Sets the provider for this account.
-    #[must_use]
-    pub const fn with_provider(mut self, provider: Provider) -> Self {
-        self.provider = provider;
-        self
     }
 
     /// Sets the active credential generation.

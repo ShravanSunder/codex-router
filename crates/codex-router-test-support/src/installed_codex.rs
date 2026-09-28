@@ -1462,6 +1462,7 @@ fn disable_accounts_outside_fixtures(
             continue;
         }
         let mut disabled_account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account.account_id().clone(),
             account.label().to_owned(),
             AccountStatus::Disabled,
@@ -1491,8 +1492,13 @@ fn seed_smoke_account(
     let weekly_reset_unix_seconds = observed_unix_seconds.saturating_add(fixture.weekly_reset);
     let stale_after_unix_seconds =
         observed_unix_seconds.saturating_add(SMOKE_SELECTOR_STALE_AFTER_SECONDS);
-    let account = AccountRecord::new(account_id.clone(), fixture.label, AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        fixture.label,
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     AccountStateRepository::upsert_account(state, &account)
         .map_err(|error| format!("failed to seed smoke account {}: {error}", fixture.label))?;
     let snapshot =

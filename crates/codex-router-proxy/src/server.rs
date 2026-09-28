@@ -464,6 +464,10 @@ impl LoopbackRouterRuntimeConfig {
         self
     }
 
+    fn session_account_affinity_cache(&self) -> SharedSessionAccountAffinityCache {
+        SessionAccountAffinityCache::shared(self.session_pin_idle_ttl)
+    }
+
     /// Sets the private audit JSONL file path.
     #[must_use]
     pub fn with_audit_file(mut self, audit_file_path: PathBuf) -> Self {
@@ -539,6 +543,7 @@ impl LoopbackRouterRuntime {
         >,
         #[cfg(not(test))] _completion_sender: Option<()>,
     ) -> Result<Self, LoopbackRouterRuntimeError> {
+        let session_affinity_cache = config.session_account_affinity_cache();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -571,8 +576,6 @@ impl LoopbackRouterRuntime {
         let websocket_revocations = WebSocketRevocationRegistry::new();
         let route_band_queue_health = RouteBandQueueHealth::default();
         let selection_reservation_lock = SelectionReservationLock::default();
-        let session_affinity_cache =
-            SessionAccountAffinityCache::shared(config.session_pin_idle_ttl);
         let db_write_actor = DbWriteActor::start_on_handle(
             runtime.handle(),
             Arc::new(SqliteDbWriteRepository::new(
@@ -2584,8 +2587,13 @@ mod tests {
         let state = SqliteStateStore::open(&database_path).expect("fixture state");
         AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), "shutdown", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "shutdown",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .expect("fixture account");
         let secrets = FileSecretStore::open(&secret_root).expect("fixture secrets");
@@ -2612,6 +2620,45 @@ mod tests {
             .expect("fixture router should start")
             .with_credential_refresh_shutdown_drain(drain_limit);
         (router, account_id, database_path, secrets)
+    }
+
+    #[test]
+    fn runtime_affinity_cache_uses_configured_session_pin_idle_ttl() {
+        let configured_ttl = Duration::from_secs(30 * 60);
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new("127.0.0.1", 0).expect("loopback bind"),
+            UpstreamEndpoint::new("http://127.0.0.1:1/v1").expect("fixture upstream"),
+            PathBuf::from("unused-state.sqlite"),
+            PathBuf::from("unused-secrets"),
+        )
+        .with_session_pin_idle_ttl(configured_ttl);
+        let runtime_cache = config.session_account_affinity_cache();
+        let account_id = AccountId::new("runtime-pin-account").expect("account id");
+
+        let selection = crate::session_account_affinity_cache::publish_session_account_affinity(
+            &runtime_cache,
+            codex_router_core::provider::Provider::Openai,
+            "runtime-pin-session",
+            &account_id,
+            RouteBand::Responses,
+            None,
+            1_000,
+        )
+        .expect("runtime cache should publish the pin");
+        drop(selection);
+
+        for (now_unix_seconds, expected_fresh) in [(2_799, true), (2_800, false)] {
+            let lookup = crate::session_account_affinity_cache::lookup_session_account_affinity(
+                &runtime_cache,
+                codex_router_core::provider::Provider::Openai,
+                "runtime-pin-session",
+                RouteBand::Responses,
+                None,
+                now_unix_seconds,
+            )
+            .expect("runtime cache lookup should succeed");
+            assert_eq!(lookup.is_some(), expected_fresh, "time={now_unix_seconds}");
+        }
     }
 
     fn open_read_only_after_shutdown(

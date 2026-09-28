@@ -23,8 +23,13 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
     let seed_account = |account_id: &AccountId, label: &str, remaining: u32, access: &str| {
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), label, AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                label,
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         ));
         let key = must_ok(account_credential_bundle_key(account_id, 1));
         let bundle = AccountCredentialBundle::imported_codex_auth(

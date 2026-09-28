@@ -64,8 +64,13 @@ fn device_login_commit_preserves_old_secret_and_invalidates_quota() {
     must_ok(
         runtime.block_on(
             state.upsert_account(
-                &AccountRecord::new(account_id.clone(), "device", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "device",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             ),
         ),
     );
@@ -159,8 +164,13 @@ fn device_relogin_waits_for_claimed_refresh_then_wins_the_active_generation() {
     let account_id = account_id("device-refresh-race");
     must_ok(AccountStateRepository::upsert_account(
         &state,
-        &AccountRecord::new(account_id.clone(), "race", AccountStatus::Enabled)
-            .with_active_credential_generation(1),
+        &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "race",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1),
     ));
     let secrets = must_ok(FileSecretStore::open(&secret_root));
     let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -354,6 +364,107 @@ JSON
     assert!(output.stdout.contains("account_id: acct_device_primary\n"));
     assert!(!output.stdout.contains("device-access-canary"));
     assert!(!output.stdout.contains("device-refresh-canary"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn account_login_reauthenticates_the_same_openai_account() {
+    let test_root = TestRoot::new("account-login-reuses-openai-account");
+    must_ok(fs::create_dir(test_root.path()));
+    let router_root = test_root.path().join("router");
+    must_ok(fs::create_dir(&router_root));
+    let state_path = router_root.join("state.sqlite");
+    let secret_root = router_root.join("secrets");
+    let account_id = account_id("acct_device_primary");
+    let runtime = test_async_runtime();
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    must_ok(
+        runtime.block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "device primary",
+                    AccountStatus::Disabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_bundle = must_ok(
+        AccountCredentialBundle::imported_codex_auth(
+            "expired-access-canary",
+            Some("expired-refresh-canary".to_owned()),
+        )
+        .to_secret_string(),
+    );
+    must_ok(secrets.write_secret(&active_key, &active_bundle));
+    assert!(must_ok(
+        runtime.block_on(state.mark_credential_unrefreshable(&account_id, 1))
+    ));
+    must_ok(runtime.block_on(state.close()));
+
+    let codex_bin = test_root.path().join("fake-codex");
+    must_ok(fs::write(
+        &codex_bin,
+        r#"#!/bin/sh
+set -eu
+cat > "$CODEX_HOME/auth.json" <<'JSON'
+{"auth_mode":"chatgpt","tokens":{"access_token":"relogin-access-canary","refresh_token":"relogin-refresh-canary"}}
+JSON
+"#,
+    ));
+    let mut permissions = must_ok(fs::metadata(&codex_bin)).permissions();
+    permissions.set_mode(0o700);
+    must_ok(fs::set_permissions(&codex_bin, permissions));
+
+    let output = run_cli(
+        [
+            "codex-router",
+            "account",
+            "login",
+            "--router-root",
+            path_to_str(&router_root),
+            "--label",
+            "device primary",
+            "--device-auth",
+            "--codex-bin",
+            path_to_str(&codex_bin),
+            "--allow-plaintext-file-secrets",
+        ],
+        CliContext::new(Vec::new()),
+    );
+
+    let reopened = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let account = must_ok(runtime.block_on(reopened.load_account(&account_id)))
+        .unwrap_or_else(|| panic!("re-logged-in account should remain"));
+    assert_eq!(account.label(), "device primary");
+    assert_eq!(account.status(), AccountStatus::Enabled);
+    assert_eq!(account.active_credential_generation(), Some(2));
+    assert!(must_ok(runtime.block_on(reopened.load_credential_maintenance(&account_id))).is_none());
+    must_ok(runtime.block_on(reopened.close()));
+
+    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let new_key = must_ok(account_credential_bundle_key(&account_id, 2));
+    let new_bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
+        secrets.read_secret(&new_key),
+    )));
+    assert_eq!(
+        new_bundle.access_token().expose_secret(),
+        "relogin-access-canary"
+    );
+    assert_eq!(
+        new_bundle.refresh_token().map(SecretString::expose_secret),
+        Some("relogin-refresh-canary")
+    );
+    assert!(
+        output
+            .stdout
+            .contains("logged in account: device primary\n")
+    );
+    assert!(!output.stdout.contains("relogin-access-canary"));
     assert!(output.stderr.is_empty());
 }
 

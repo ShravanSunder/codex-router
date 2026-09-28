@@ -93,8 +93,13 @@ mod tests {
             .expect("state should open");
         store
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "claim", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "claim",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await
             .expect("account should save");
@@ -159,8 +164,13 @@ mod tests {
             .expect("state should open");
         store
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "replaced", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "replaced",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await
             .expect("old account should save");
@@ -172,8 +182,13 @@ mod tests {
         );
         store
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "replaced", AccountStatus::Enabled)
-                    .with_active_credential_generation(3),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "replaced",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(3),
             )
             .await
             .expect("new login should save");
@@ -215,8 +230,13 @@ mod tests {
             .expect("state should open");
         let account_id = account_id("success-time-account");
         let account = |generation| {
-            AccountRecord::new(account_id.clone(), "success time", AccountStatus::Enabled)
-                .with_active_credential_generation(generation)
+            AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "success time",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(generation)
         };
         state
             .upsert_account(&account(1))
@@ -482,9 +502,18 @@ mod tests {
         let store = AsyncSqliteStateStore::open(&database_path)
             .await
             .expect("state store should open");
-        let first = SessionAccountAffinity::new("session-123", account_id("acct_first"), 1_000);
-        let replacement =
-            SessionAccountAffinity::new("session-123", account_id("acct_replacement"), 1_100);
+        let first = SessionAccountAffinity::new(
+            codex_router_core::provider::Provider::Openai,
+            "session-123",
+            account_id("acct_first"),
+            1_000,
+        );
+        let replacement = SessionAccountAffinity::new(
+            codex_router_core::provider::Provider::Openai,
+            "session-123",
+            account_id("acct_replacement"),
+            1_100,
+        );
 
         AsyncSessionAccountAffinityRepository::upsert_session_account_affinity(&store, &first)
             .await
@@ -514,8 +543,12 @@ mod tests {
         let store = AsyncSqliteStateStore::open(&database_path)
             .await
             .expect("state store should open");
-        let openai_affinity =
-            SessionAccountAffinity::new("same-session", account_id("acct_openai"), 1_000);
+        let openai_affinity = SessionAccountAffinity::new(
+            codex_router_core::provider::Provider::Openai,
+            "same-session",
+            account_id("acct_openai"),
+            1_000,
+        );
         let claude_affinity = SessionAccountAffinity::with_pin_state(
             Provider::Claude,
             "same-session",
@@ -585,9 +618,24 @@ mod tests {
             .await
             .expect("state store should open");
         for affinity in [
-            SessionAccountAffinity::new("session-old", account_id("acct_old"), 999),
-            SessionAccountAffinity::new("session-cutoff", account_id("acct_cutoff"), 1_000),
-            SessionAccountAffinity::new("session-fresh", account_id("acct_fresh"), 1_001),
+            SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
+                "session-old",
+                account_id("acct_old"),
+                999,
+            ),
+            SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
+                "session-cutoff",
+                account_id("acct_cutoff"),
+                1_000,
+            ),
+            SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
+                "session-fresh",
+                account_id("acct_fresh"),
+                1_001,
+            ),
         ] {
             AsyncSessionAccountAffinityRepository::upsert_session_account_affinity(
                 &store, &affinity,
@@ -646,14 +694,23 @@ mod tests {
             .await
             .expect("state store should open");
         let account_id = account_id("acct_immutable_provider");
-        let openai_account =
-            AccountRecord::new(account_id.clone(), "shared-label", AccountStatus::Enabled);
+        let openai_account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "shared-label",
+            AccountStatus::Enabled,
+        );
         store
             .upsert_account(&openai_account)
             .await
             .expect("OpenAI account should persist");
 
-        let claude_account = openai_account.clone().with_provider(Provider::Claude);
+        let claude_account = AccountRecord::new(
+            Provider::Claude,
+            account_id.clone(),
+            "shared-label",
+            AccountStatus::Enabled,
+        );
         assert_eq!(
             store.upsert_account(&claude_account).await,
             Err(StateStoreError::AccountProviderImmutable)
@@ -734,6 +791,7 @@ mod tests {
         let v10 = SqliteStateStore::open(&database_path)
             .unwrap_or_else(|error| panic!("v10 fixture should open: {error}"));
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_v11_preserved"),
             "preserved",
             AccountStatus::Enabled,
@@ -839,6 +897,7 @@ mod tests {
         let account_id = account_id("acct_v12_preserved");
         store
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 "v12-preserved",
                 AccountStatus::Enabled,
@@ -938,6 +997,7 @@ mod tests {
         let account_id = account_id("acct_v12_sync_rollback");
         store
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 "v12-sync-rollback",
                 AccountStatus::Enabled,
@@ -982,6 +1042,7 @@ mod tests {
         let account_id = account_id("acct_weekly_floor");
         store
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 "weekly-floor",
                 AccountStatus::Enabled,
@@ -1103,6 +1164,7 @@ mod tests {
         let account_id = account_id("acct_read_only_v11");
         store
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 "read-only-v11",
                 AccountStatus::Enabled,
@@ -1222,6 +1284,7 @@ mod tests {
         let temp_dir = TestTempDir::new("v12_production_migration_contention");
         let database_path = temp_dir.path().join("state.sqlite");
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_migration_contention"),
             "migration-contention",
             AccountStatus::Enabled,
@@ -1319,6 +1382,7 @@ mod tests {
         for (account_id, label) in [(&account_a, "policy-a"), (&account_b, "policy-b")] {
             store
                 .upsert_account(&AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
                     account_id.clone(),
                     label,
                     AccountStatus::Enabled,
@@ -1372,6 +1436,7 @@ mod tests {
         for account_id_value in ["acct_duplicate_a", "acct_duplicate_b"] {
             state
                 .upsert_account(&AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
                     account_id(account_id_value),
                     "duplicate-label",
                     AccountStatus::Enabled,
@@ -1425,6 +1490,7 @@ mod tests {
         let account_id = account_id("acct_current_label");
         state
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 "old-label",
                 AccountStatus::Enabled,
@@ -1437,6 +1503,7 @@ mod tests {
 
         state
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 "new-label",
                 AccountStatus::Enabled,
@@ -1471,6 +1538,7 @@ mod tests {
         let account_id = account_id("acct_policy_busy");
         store
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 "busy-policy",
                 AccountStatus::Enabled,
@@ -1540,6 +1608,7 @@ mod tests {
         let account_id = account_id("acct_policy_busy_then_release");
         store
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 "busy-then-release",
                 AccountStatus::Enabled,
@@ -1646,7 +1715,12 @@ mod tests {
             Ok(account_id) => account_id,
             Err(error) => panic!("account id should parse: {error}"),
         };
-        let account = AccountRecord::new(account_id.clone(), "primary", AccountStatus::Enabled);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "primary",
+            AccountStatus::Enabled,
+        );
         if let Err(error) = store.upsert_account(&account) {
             panic!("account should persist: {error}");
         }
@@ -1710,8 +1784,13 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_selector_windows");
-        let account = AccountRecord::new(account_id.clone(), "selector", AccountStatus::Enabled)
-            .with_active_credential_generation(3);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "selector",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(3);
         if let Err(error) = AccountStateRepository::upsert_account(&store, &account) {
             panic!("account should persist: {error}");
         }
@@ -1779,9 +1858,13 @@ mod tests {
             Err(error) => panic!("sync state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_async_selector_windows");
-        let account =
-            AccountRecord::new(account_id.clone(), "async-selector", AccountStatus::Enabled)
-                .with_active_credential_generation(9);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "async-selector",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(9);
         if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
             panic!("account should persist: {error}");
         }
@@ -1850,6 +1933,7 @@ mod tests {
             Err(error) => panic!("writable async state store should open and migrate: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_async_read_only"),
             "read-only",
             AccountStatus::Enabled,
@@ -1874,6 +1958,7 @@ mod tests {
 
         let write_error = read_only_store
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id("acct_async_read_only_blocked"),
                 "blocked",
                 AccountStatus::Enabled,
@@ -1918,8 +2003,13 @@ mod tests {
             Err(error) => panic!("sync state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_sync_seeded_quota_status");
-        let account = AccountRecord::new(account_id.clone(), "sync-seeded", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "sync-seeded",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
             panic!("sync seed should persist account: {error}");
         }
@@ -2805,9 +2895,13 @@ mod tests {
         };
         let account = account_id("acct_projection_stale_cleanup");
         let reservation_id = ReservationId::new("reservation_projection_stale_cleanup");
-        let account_record =
-            AccountRecord::new(account.clone(), "projection-stale", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account_record = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account.clone(),
+            "projection-stale",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         store
             .upsert_account(&account_record)
             .await
@@ -2998,9 +3092,13 @@ mod tests {
             Err(error) => panic!("async state store should open and migrate: {error}"),
         };
         let account = account_id("acct_projection_session_count");
-        let account_record =
-            AccountRecord::new(account.clone(), "projection", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account_record = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account.clone(),
+            "projection",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         store
             .upsert_account(&account_record)
             .await
@@ -3101,9 +3199,13 @@ mod tests {
             Err(error) => panic!("async state store should open and migrate: {error}"),
         };
         let account = account_id("acct_projection_per_connection");
-        let account_record =
-            AccountRecord::new(account.clone(), "projection", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account_record = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account.clone(),
+            "projection",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         store
             .upsert_account(&account_record)
             .await
@@ -3224,9 +3326,13 @@ mod tests {
             Err(error) => panic!("async state store should open and migrate: {error}"),
         };
         let account = account_id("acct_projection_zero_active");
-        let account_record =
-            AccountRecord::new(account.clone(), "zero-active", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account_record = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account.clone(),
+            "zero-active",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         store
             .upsert_account(&account_record)
             .await
@@ -3295,9 +3401,13 @@ mod tests {
             Err(error) => panic!("async state store should open and migrate: {error}"),
         };
         let account = account_id("acct_projection_one_observation");
-        let account_record =
-            AccountRecord::new(account.clone(), "one-observation", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account_record = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account.clone(),
+            "one-observation",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         store
             .upsert_account(&account_record)
             .await
@@ -3362,9 +3472,13 @@ mod tests {
             Err(error) => panic!("async state store should open and migrate: {error}"),
         };
         let account = account_id("acct_projection_partial_active");
-        let account_record =
-            AccountRecord::new(account.clone(), "partial-active", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account_record = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account.clone(),
+            "partial-active",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         store
             .upsert_account(&account_record)
             .await
@@ -3456,8 +3570,13 @@ mod tests {
             Err(error) => panic!("sync state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_quota_exhausted");
-        let account = AccountRecord::new(account_id.clone(), "exhausted", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "exhausted",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
             panic!("account should persist: {error}");
         }
@@ -3541,6 +3660,7 @@ mod tests {
         };
         let account_id = account_id("acct_unknown_exhausted");
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id.clone(),
             "unknown-exhausted",
             AccountStatus::Enabled,
@@ -3605,9 +3725,13 @@ mod tests {
             Err(error) => panic!("sync state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_exhausted_ttl");
-        let account =
-            AccountRecord::new(account_id.clone(), "exhausted-ttl", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "exhausted-ttl",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &account) {
             panic!("account should persist: {error}");
         }
@@ -3656,8 +3780,13 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_refresh_success");
-        let account = AccountRecord::new(account_id.clone(), "refresh", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "refresh",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         if let Err(error) = AccountStateRepository::upsert_account(&store, &account) {
             panic!("account should persist: {error}");
         }
@@ -3783,8 +3912,13 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_refresh_failure");
-        let account = AccountRecord::new(account_id.clone(), "failure", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "failure",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         if let Err(error) = AccountStateRepository::upsert_account(&store, &account) {
             panic!("account should persist: {error}");
         }
@@ -3867,13 +4001,23 @@ mod tests {
         let beta_id = account_id("acct_beta_empty");
         if let Err(error) = AccountStateRepository::upsert_account(
             &store,
-            &AccountRecord::new(alpha_id.clone(), "alpha", AccountStatus::Enabled),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                alpha_id.clone(),
+                "alpha",
+                AccountStatus::Enabled,
+            ),
         ) {
             panic!("alpha account should persist: {error}");
         }
         if let Err(error) = AccountStateRepository::upsert_account(
             &store,
-            &AccountRecord::new(beta_id, "beta", AccountStatus::Enabled),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                beta_id,
+                "beta",
+                AccountStatus::Enabled,
+            ),
         ) {
             panic!("beta account should persist: {error}");
         }
@@ -4059,7 +4203,12 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_credential_mutation");
-        let account = AccountRecord::new(account_id.clone(), "mutation", AccountStatus::Disabled);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "mutation",
+            AccountStatus::Disabled,
+        );
         if let Err(error) = AccountStateRepository::upsert_account(&store, &account) {
             panic!("account should persist: {error}");
         }
@@ -4179,9 +4328,13 @@ mod tests {
             Err(error) => panic!("sync state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_async_activation_disabled_race");
-        let enabled_account =
-            AccountRecord::new(account_id.clone(), "race", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let enabled_account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "race",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &enabled_account) {
             panic!("enabled account should persist: {error}");
         }
@@ -4190,9 +4343,13 @@ mod tests {
             Ok(store) => store,
             Err(error) => panic!("async state store should open and migrate: {error}"),
         };
-        let disabled_account =
-            AccountRecord::new(account_id.clone(), "race", AccountStatus::Disabled)
-                .with_active_credential_generation(1);
+        let disabled_account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "race",
+            AccountStatus::Disabled,
+        )
+        .with_active_credential_generation(1);
         if let Err(error) = async_store.upsert_account(&disabled_account).await {
             panic!("disabled account should persist: {error}");
         }
@@ -4235,6 +4392,7 @@ mod tests {
         };
         let account_id = account_id("acct_provider_rejection_generation_guard");
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id.clone(),
             "provider-rejection",
             AccountStatus::Enabled,
@@ -4307,6 +4465,7 @@ mod tests {
         };
         let account_id = account_id("acct_selector_mutation");
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id.clone(),
             "selector-mutation",
             AccountStatus::Disabled,
@@ -4380,8 +4539,13 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_code_review_status_only");
-        let account = AccountRecord::new(account_id.clone(), "status-only", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "status-only",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         if let Err(error) = AccountStateRepository::upsert_account(&store, &account) {
             panic!("account should persist: {error}");
         }
@@ -4434,6 +4598,7 @@ mod tests {
         };
 
         if let Err(error) = store.upsert_account(&AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             healthy_id.clone(),
             "healthy",
             AccountStatus::Enabled,
@@ -4461,6 +4626,7 @@ mod tests {
         assert_eq!(
             store.load_account(&healthy_id),
             Ok(Some(AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 healthy_id,
                 "healthy",
                 AccountStatus::Enabled
@@ -4501,7 +4667,12 @@ mod tests {
             Err(error) => panic!("state store should open and migrate: {error}"),
         };
         let account_id = account_id("acct_contract");
-        let account = AccountRecord::new(account_id.clone(), "contract", AccountStatus::Enabled);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "contract",
+            AccountStatus::Enabled,
+        );
         let snapshot =
             PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
                 .with_observed_unix_seconds(1_200)
@@ -4753,9 +4924,24 @@ mod tests {
         let beta_id = account_id("acct_beta");
         let alpha_id = account_id("acct_alpha");
         let disabled_id = account_id("acct_disabled");
-        let beta = AccountRecord::new(beta_id, "beta", AccountStatus::Enabled);
-        let alpha = AccountRecord::new(alpha_id, "alpha", AccountStatus::Enabled);
-        let disabled = AccountRecord::new(disabled_id, "disabled", AccountStatus::Disabled);
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            beta_id,
+            "beta",
+            AccountStatus::Enabled,
+        );
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            alpha_id,
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let disabled = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            disabled_id,
+            "disabled",
+            AccountStatus::Disabled,
+        );
 
         if let Err(error) = AccountStateRepository::upsert_account(&store, &beta) {
             panic!("beta account should persist: {error}");

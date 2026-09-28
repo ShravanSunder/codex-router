@@ -102,8 +102,13 @@ async fn truncated_429_body_preserves_retry_after_and_blocks_refresh_before_cool
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "rate limited", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "rate limited",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );

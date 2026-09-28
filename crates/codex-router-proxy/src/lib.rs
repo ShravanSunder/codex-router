@@ -1382,9 +1382,20 @@ mod tests {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         let disabled = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_disabled"),
             "disabled",
             AccountStatus::Disabled,
@@ -1422,6 +1433,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_route_specific"),
             "route-specific",
             AccountStatus::Enabled,
@@ -1560,6 +1572,7 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_route_specific"),
             "route-specific",
             AccountStatus::Enabled,
@@ -1619,11 +1632,13 @@ mod tests {
         let state = SqliteStateStore::open(&database_path)
             .unwrap_or_else(|error| panic!("state store should open: {error}"));
         let stale_account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_async_stale_authority"),
             "async-stale-authority",
             AccountStatus::Enabled,
         );
         let exhausted_account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_async_fresh_exhausted"),
             "async-fresh-exhausted",
             AccountStatus::Enabled,
@@ -1692,11 +1707,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let limited = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_limited"),
             "limited",
             AccountStatus::Enabled,
         );
         let fallback = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_fallback"),
             "fallback",
             AccountStatus::Enabled,
@@ -1805,11 +1822,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let fast_burn = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_fast_burn"),
             "fast-burn",
             AccountStatus::Enabled,
         );
         let slow_burn = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_slow_burn"),
             "slow-burn",
             AccountStatus::Enabled,
@@ -1885,8 +1904,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -1969,7 +1998,12 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let account = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &account,
@@ -2034,8 +2068,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -2103,11 +2147,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let short_rich_weekly_poor = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_short_rich_weekly_poor"),
             "short-rich-weekly-poor",
             AccountStatus::Enabled,
         );
         let weekly_healthy = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_weekly_healthy"),
             "weekly-healthy",
             AccountStatus::Enabled,
@@ -2192,11 +2238,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let exhausted = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_exhausted"),
             "exhausted",
             AccountStatus::Enabled,
         );
         let eligible = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_eligible"),
             "eligible",
             AccountStatus::Enabled,
@@ -2237,6 +2285,7 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let unknown = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_unknown"),
             "unknown",
             AccountStatus::Enabled,
@@ -2274,8 +2323,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -2321,8 +2380,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -2373,12 +2442,17 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
         let preferred = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_preferred"),
             "preferred",
             AccountStatus::Enabled,
         );
-        let mapped =
-            AccountRecord::new(account_id("acct_mapped"), "mapped", AccountStatus::Enabled);
+        let mapped = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_mapped"),
+            "mapped",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &preferred,
@@ -2397,6 +2471,7 @@ mod tests {
             .expect("async state should open");
         async_state
             .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 " session-inside-ttl ",
                 mapped.account_id().clone(),
                 10_001,
@@ -2431,12 +2506,17 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
         let preferred = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_preferred"),
             "preferred",
             AccountStatus::Enabled,
         );
-        let mapped =
-            AccountRecord::new(account_id("acct_mapped"), "mapped", AccountStatus::Enabled);
+        let mapped = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_mapped"),
+            "mapped",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &preferred,
@@ -2455,6 +2535,7 @@ mod tests {
             .expect("async state should open");
         async_state
             .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 "session-at-ttl",
                 mapped.account_id().clone(),
                 10_000,
@@ -2489,6 +2570,7 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
         let available = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_available"),
             "available",
             AccountStatus::Enabled,
@@ -2505,6 +2587,7 @@ mod tests {
             .expect("async state should open");
         async_state
             .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 "session-unavailable",
                 account_id("acct_missing"),
                 10_000,
@@ -2539,6 +2622,7 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
         let selected_account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_first_selection"),
             "first-selection",
             AccountStatus::Enabled,
@@ -2584,6 +2668,7 @@ mod tests {
                     .await
                     .expect("session affinity should load")
                     == Some(SessionAccountAffinity::new(
+                        codex_router_core::provider::Provider::Openai,
                         "session-first-selection",
                         selected_account.account_id().clone(),
                         10_100,
@@ -2605,11 +2690,13 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
         let session_owner = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_session_owner"),
             "session-owner",
             AccountStatus::Enabled,
         );
         let response_owner = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_response_owner"),
             "response-owner",
             AccountStatus::Enabled,
@@ -2640,6 +2727,7 @@ mod tests {
             .expect("async state should open");
         async_state
             .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 "session-rebound",
                 session_owner.account_id().clone(),
                 10_000,
@@ -2698,11 +2786,13 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
         let eligible = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_floor_eligible"),
             "eligible",
             AccountStatus::Enabled,
         );
         let protected = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_floor_protected"),
             "protected",
             AccountStatus::Enabled,
@@ -2861,11 +2951,13 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
         let protected = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_floor_source"),
             "source",
             AccountStatus::Enabled,
         );
         let peer = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_floor_peer"),
             "peer",
             AccountStatus::Enabled,
@@ -3009,8 +3101,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -3057,11 +3159,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let preferred = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_preferred"),
             "preferred",
             AccountStatus::Enabled,
         );
         let retiring = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_retiring"),
             "retiring",
             AccountStatus::Enabled,
@@ -3112,11 +3216,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let preferred = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_compact_preferred"),
             "compact-preferred",
             AccountStatus::Enabled,
         );
         let affinity_owner = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_compact_affinity_owner"),
             "compact-affinity-owner",
             AccountStatus::Enabled,
@@ -3167,7 +3273,12 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -3198,7 +3309,12 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -3239,11 +3355,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let exhausted = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_exhausted"),
             "exhausted",
             AccountStatus::Enabled,
         );
         let eligible = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_eligible"),
             "eligible",
             AccountStatus::Enabled,
@@ -3294,11 +3412,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let exhausted = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_exhausted"),
             "exhausted",
             AccountStatus::Enabled,
         );
         let eligible = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_eligible"),
             "eligible",
             AccountStatus::Enabled,
@@ -3354,7 +3474,12 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -3384,7 +3509,12 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -3418,7 +3548,12 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -3453,11 +3588,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let weekly_exhausted = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_weekly_exhausted"),
             "weekly-exhausted",
             AccountStatus::Enabled,
         );
         let eligible = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_weekly_eligible"),
             "weekly-eligible",
             AccountStatus::Enabled,
@@ -3502,6 +3639,7 @@ mod tests {
         let state = SqliteStateStore::open(&database_path)
             .unwrap_or_else(|error| panic!("state store should open: {error}"));
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_weekly_only"),
             "weekly-only",
             AccountStatus::Enabled,
@@ -3534,8 +3672,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -3591,16 +3739,23 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let askluna = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_askluna"),
             "askluna",
             AccountStatus::Enabled,
         );
         let matches = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_matches"),
             "matches",
             AccountStatus::Enabled,
         );
-        let ssdev = AccountRecord::new(account_id("acct_ssdev"), "ssdev", AccountStatus::Enabled);
+        let ssdev = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_ssdev"),
+            "ssdev",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &askluna,
@@ -3655,16 +3810,23 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let askluna = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_askluna"),
             "askluna",
             AccountStatus::Enabled,
         );
         let matches = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_matches"),
             "matches",
             AccountStatus::Enabled,
         );
-        let ssdev = AccountRecord::new(account_id("acct_ssdev"), "ssdev", AccountStatus::Enabled);
+        let ssdev = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_ssdev"),
+            "ssdev",
+            AccountStatus::Enabled,
+        );
         let now = test_unix_seconds();
         persist_account_with_selector_window_reset_specs(
             &state,
@@ -3779,8 +3941,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_reset_specs(
             &state,
             &alpha,
@@ -3860,16 +4032,23 @@ mod tests {
         };
         let now = test_unix_seconds();
         let askluna = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_askluna"),
             "askluna",
             AccountStatus::Enabled,
         );
         let matches = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_matches"),
             "matches",
             AccountStatus::Enabled,
         );
-        let ssdev = AccountRecord::new(account_id("acct_ssdev"), "ssdev", AccountStatus::Enabled);
+        let ssdev = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_ssdev"),
+            "ssdev",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_reset_specs(
             &state,
             &askluna,
@@ -4082,8 +4261,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -4147,8 +4336,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -4210,8 +4409,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -4269,8 +4478,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -4330,8 +4549,18 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_windows(&state, &alpha, &["models", "responses"], 10);
         persist_account_with_selector_windows(&state, &beta, &["models", "responses"], 10);
 
@@ -4854,6 +5083,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_runtime"),
             "runtime",
             AccountStatus::Enabled,
@@ -4980,11 +5210,13 @@ mod tests {
         let state = SqliteStateStore::open(&database_path).expect("state should open");
         let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
         let protected = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_served_http_protected"),
             "protected",
             AccountStatus::Enabled,
         );
         let peer = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_served_http_peer"),
             "peer",
             AccountStatus::Enabled,
@@ -5065,6 +5297,7 @@ mod tests {
         let state = SqliteStateStore::open(&database_path).expect("state should open");
         let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
         let protected = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_served_http_floor_forecast"),
             "protected-forecast",
             AccountStatus::Enabled,
@@ -5150,11 +5383,13 @@ mod tests {
         let state = SqliteStateStore::open(&database_path).expect("state should open");
         let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
         let first = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_all_floor_first"),
             "sensitive-first-label",
             AccountStatus::Enabled,
         );
         let second = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_all_floor_second"),
             "sensitive-second-label",
             AccountStatus::Enabled,
@@ -5247,11 +5482,13 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let primary = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_primary_quota"),
             "primary-quota",
             AccountStatus::Enabled,
         );
         let fallback = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_fallback_quota"),
             "fallback-quota",
             AccountStatus::Enabled,
@@ -5392,11 +5629,13 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let primary = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_primary_large_quota"),
             "primary-large-quota",
             AccountStatus::Enabled,
         );
         let fallback = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_fallback_large_quota"),
             "fallback-large-quota",
             AccountStatus::Enabled,
@@ -5576,11 +5815,13 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let primary = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_primary_unreplayable_quota"),
             "primary-unreplayable-quota",
             AccountStatus::Enabled,
         );
         let fallback = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_fallback_unreplayable_quota"),
             "fallback-unreplayable-quota",
             AccountStatus::Enabled,
@@ -5726,16 +5967,19 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let primary = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_primary_quota_chain"),
             "primary-quota-chain",
             AccountStatus::Enabled,
         );
         let secondary = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_secondary_quota_chain"),
             "secondary-quota-chain",
             AccountStatus::Enabled,
         );
         let tertiary = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_tertiary_quota_chain"),
             "tertiary-quota-chain",
             AccountStatus::Enabled,
@@ -5896,11 +6140,13 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let primary = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_primary_all_exhausted"),
             "primary-all-exhausted",
             AccountStatus::Enabled,
         );
         let secondary = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_secondary_all_exhausted"),
             "secondary-all-exhausted",
             AccountStatus::Enabled,
@@ -6035,8 +6281,18 @@ mod tests {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_snapshot_and_token(&state, &secrets, &alpha, 50, "alpha-token");
         persist_account_with_snapshot_and_token(&state, &secrets, &beta, 50, "beta-token");
 
@@ -6170,11 +6426,17 @@ mod tests {
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
         let secrets = FileSecretStore::open(&secret_path).expect("secret store should open");
         let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_http_alpha"),
             "alpha",
             AccountStatus::Enabled,
         );
-        let beta = AccountRecord::new(account_id("acct_http_beta"), "beta", AccountStatus::Enabled);
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_http_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_snapshot_and_token(&state, &secrets, &alpha, 50, "http-alpha-token");
         persist_account_with_snapshot_and_token(&state, &secrets, &beta, 50, "http-beta-token");
         drop(state);
@@ -6359,6 +6621,7 @@ mod tests {
         assert_eq!(
             persisted,
             Some(SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 "assembled-http-session",
                 alpha.account_id().clone(),
                 RETENTION_NOW,
@@ -6381,6 +6644,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_audit_raw_id_canary"),
             "raw-account-email-canary@example.com",
             AccountStatus::Enabled,
@@ -6561,6 +6825,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_runtime_streaming"),
             "runtime-streaming",
             AccountStatus::Enabled,
@@ -6688,8 +6953,18 @@ mod tests {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_snapshot_and_token(&state, &secrets, &alpha, 90, "alpha-token");
         persist_account_with_snapshot_and_token(&state, &secrets, &beta, 90, "beta-token");
         let affinity_secret = must_ok(load_or_create_router_affinity_hash_secret(&secrets))
@@ -6824,8 +7099,12 @@ mod tests {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
-        let account =
-            AccountRecord::new(account_id("acct_ws_runtime"), "ws", AccountStatus::Enabled);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_ws_runtime"),
+            "ws",
+            AccountStatus::Enabled,
+        );
         persist_account_with_snapshot_and_token(
             &state,
             &secrets,
@@ -7066,6 +7345,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_ws_runtime_large"),
             "ws-large",
             AccountStatus::Enabled,
@@ -7223,6 +7503,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_ws_rotation"),
             "ws-rotation",
             AccountStatus::Enabled,
@@ -7358,6 +7639,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_ws_fragmented"),
             "ws-fragmented",
             AccountStatus::Enabled,
@@ -7506,11 +7788,13 @@ mod tests {
         let state = SqliteStateStore::open(&database_path).expect("state should open");
         let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
         let protected = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_served_ws_protected"),
             "protected",
             AccountStatus::Enabled,
         );
         let peer = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_served_ws_peer"),
             "peer",
             AccountStatus::Enabled,
@@ -7616,6 +7900,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_ws_concurrent"),
             "ws-concurrent",
             AccountStatus::Enabled,
@@ -7894,6 +8179,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_ws_pair"),
             "ws-pair",
             AccountStatus::Enabled,
@@ -8338,6 +8624,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_ws_error_drain"),
             "ws-error-drain",
             AccountStatus::Enabled,
@@ -8559,6 +8846,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_ws_shutdown"),
             "ws-shutdown",
             AccountStatus::Enabled,
@@ -8687,6 +8975,7 @@ mod tests {
             Err(error) => panic!("secret store should open: {error}"),
         };
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_ws_after_reject"),
             "ws-after-reject",
             AccountStatus::Enabled,
@@ -9287,11 +9576,13 @@ mod tests {
             Err(error) => panic!("state store should open: {error}"),
         };
         let observed = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_observed"),
             "observed",
             AccountStatus::Enabled,
         );
         let fallback = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_fallback"),
             "fallback",
             AccountStatus::Enabled,
@@ -10848,11 +11139,13 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
         let preferred = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_websocket_preferred"),
             "websocket-preferred",
             AccountStatus::Enabled,
         );
         let mapped = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id("acct_websocket_mapped"),
             "websocket-mapped",
             AccountStatus::Enabled,
@@ -10875,6 +11168,7 @@ mod tests {
             .expect("async state should open");
         async_state
             .upsert_session_account_affinity(&SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 "websocket-session",
                 mapped.account_id().clone(),
                 1_000,
@@ -11150,8 +11444,18 @@ mod tests {
         let temp_dir = ProxyTestTempDir::new("websocket-router-affinity");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = must_ok(SqliteStateStore::open(&database_path));
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
-        let beta = AccountRecord::new(account_id("acct_beta"), "beta", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -11206,7 +11510,12 @@ mod tests {
         let temp_dir = ProxyTestTempDir::new("websocket-router-replaced-affinity-secret");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = must_ok(SqliteStateStore::open(&database_path));
-        let alpha = AccountRecord::new(account_id("acct_alpha"), "alpha", AccountStatus::Enabled);
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
         persist_account_with_selector_window_specs(
             &state,
             &alpha,
@@ -11257,8 +11566,13 @@ mod tests {
         ));
         let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
         let account_id = account_id("acct_selected");
-        let account = AccountRecord::new(account_id.clone(), "selected", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "selected",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
         must_ok(
@@ -11322,8 +11636,13 @@ mod tests {
         let state = must_ok(SqliteStateStore::open(&state_database_path));
         let secrets = must_ok(FileSecretStore::open(&secret_store_root));
         let account_id = account_id("acct_proxy_runtime_refresh");
-        let account = AccountRecord::new(account_id.clone(), "runtime", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "runtime",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
         must_ok(
@@ -11375,8 +11694,13 @@ mod tests {
         ));
         let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
         let account_id = account_id("acct_selected");
-        let account = AccountRecord::new(account_id.clone(), "selected", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "selected",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
         must_ok(

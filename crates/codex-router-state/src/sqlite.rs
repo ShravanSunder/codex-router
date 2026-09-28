@@ -582,6 +582,14 @@ pub enum StateStoreError {
         /// Corrupt field name.
         field: &'static str,
     },
+    /// Session-to-account affinity metadata is corrupt.
+    #[error("corrupt session account affinity for {session_id}: {field}")]
+    CorruptSessionAccountAffinity {
+        /// Affected provider session id.
+        session_id: String,
+        /// Corrupt field name.
+        field: &'static str,
+    },
     /// Quota snapshot metadata is corrupt; affected snapshot fails closed.
     #[error("corrupt quota snapshot metadata for {account_id}: {field}")]
     CorruptQuotaSnapshot {
@@ -5387,28 +5395,19 @@ fn parse_session_account_affinity_row(
     last_seen_unix_seconds: i64,
     pin_version: i64,
 ) -> Result<SessionAccountAffinity, StateStoreError> {
-    let diagnostic_id = account_id_value
-        .as_deref()
-        .unwrap_or(&session_id)
-        .to_owned();
-    let provider = Provider::parse(&provider_value).ok_or(StateStoreError::CorruptAccount {
-        account_id: diagnostic_id.clone(),
-        field: "provider",
-    })?;
+    let corrupt_affinity = |field| StateStoreError::CorruptSessionAccountAffinity {
+        session_id: session_id.clone(),
+        field,
+    };
+    let provider = Provider::parse(&provider_value).ok_or_else(|| corrupt_affinity("provider"))?;
     let account_id = account_id_value
         .map(|account_id_value| {
-            AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
-                account_id: account_id_value,
-                field: "account_id",
-            })
+            AccountId::new(account_id_value).map_err(|_| corrupt_affinity("account_id"))
         })
         .transpose()?;
-    let last_seen_unix_seconds = i64_to_u64(
-        last_seen_unix_seconds,
-        &diagnostic_id,
-        "last_seen_unix_seconds",
-    )?;
-    let pin_version = i64_to_u64(pin_version, &diagnostic_id, "pin_version")?;
+    let last_seen_unix_seconds = u64::try_from(last_seen_unix_seconds)
+        .map_err(|_| corrupt_affinity("last_seen_unix_seconds"))?;
+    let pin_version = u64::try_from(pin_version).map_err(|_| corrupt_affinity("pin_version"))?;
     Ok(SessionAccountAffinity::with_pin_state(
         provider,
         session_id,
@@ -5416,6 +5415,27 @@ fn parse_session_account_affinity_row(
         pin_version,
         last_seen_unix_seconds,
     ))
+}
+
+#[cfg(test)]
+#[test]
+fn corrupt_session_account_affinity_uses_pin_specific_error() {
+    let error = parse_session_account_affinity_row(
+        "unknown-provider".to_owned(),
+        "session-corrupt-provider".to_owned(),
+        None,
+        1_000,
+        0,
+    )
+    .expect_err("unknown stored providers must fail closed");
+
+    assert!(matches!(
+        error,
+        StateStoreError::CorruptSessionAccountAffinity {
+            session_id,
+            field: "provider"
+        } if session_id == "session-corrupt-provider"
+    ));
 }
 
 fn parse_previous_response_owner_row(
@@ -5500,7 +5520,7 @@ fn parse_account_row(
         })
         .transpose()?;
 
-    let mut account = AccountRecord::new(parsed_account_id, label, status).with_provider(provider);
+    let mut account = AccountRecord::new(provider, parsed_account_id, label, status);
     if let Some(generation) = active_credential_generation {
         account = account.with_active_credential_generation(generation);
     }

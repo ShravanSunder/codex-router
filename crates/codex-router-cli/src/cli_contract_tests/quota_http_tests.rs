@@ -8,8 +8,13 @@ fn quota_refresh_http_provider_fetches_usage_and_persists_sqlite_state() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_quota_http");
-    let account = AccountRecord::new(account_id.clone(), "quota-http", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "quota-http",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
     let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
@@ -150,6 +155,7 @@ fn loopback_quota_401_retries_with_a_concurrently_committed_generation() {
     must_ok(AccountStateRepository::upsert_account(
         &state,
         &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id.clone(),
             "quota-http-race",
             AccountStatus::Enabled,
@@ -229,6 +235,7 @@ fn loopback_quota_401_retries_with_a_concurrently_committed_generation() {
                 must_ok(AccountStateRepository::upsert_account(
                     &state,
                     &AccountRecord::new(
+                        codex_router_core::provider::Provider::Openai,
                         server_account_id.clone(),
                         "quota-http-race",
                         AccountStatus::Enabled,

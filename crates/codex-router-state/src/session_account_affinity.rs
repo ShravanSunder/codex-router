@@ -14,15 +14,16 @@ pub struct SessionAccountAffinity {
 }
 
 impl SessionAccountAffinity {
-    /// Creates an active OpenAI pin for existing Codex routing callers.
+    /// Creates an active pin for one provider session.
     #[must_use]
     pub fn new(
+        provider: Provider,
         session_id: impl Into<String>,
         account_id: AccountId,
         last_seen_unix_seconds: u64,
     ) -> Self {
         Self::with_pin_state(
-            Provider::Openai,
+            provider,
             session_id,
             Some(account_id),
             0,

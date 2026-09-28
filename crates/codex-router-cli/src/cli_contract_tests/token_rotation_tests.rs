@@ -12,8 +12,13 @@ fn serve_command_reloads_token_rotation_without_restart() {
     let token_service = LocalRouterTokenService::new(secrets.clone());
     must_ok(token_service.rotate_with_token("token-a"));
     let account_id = account_id("acct_cli_rotate");
-    let account = AccountRecord::new(account_id.clone(), "cli-rotate", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "cli-rotate",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let snapshot =
         PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)

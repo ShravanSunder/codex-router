@@ -16,8 +16,13 @@ fn quota_status_projects_held_switch_and_distinct_saved_floor_thresholds() {
     ] {
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), label, AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                label,
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         ));
         let windows = [
             PersistedSelectorQuotaWindow::new(
@@ -107,6 +112,7 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let primary_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id("acct_primary"),
         "primary",
         AccountStatus::Enabled,
@@ -353,10 +359,20 @@ fn quota_status_selection_uses_active_session_count() {
     must_ok(fs::create_dir_all(&router_root));
     let state_path = router_root.join("state.sqlite");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let busy_account = AccountRecord::new(account_id("acct_busy"), "busy", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
-    let idle_account = AccountRecord::new(account_id("acct_idle"), "idle", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let busy_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id("acct_busy"),
+        "busy",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
+    let idle_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id("acct_idle"),
+        "idle",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(
         &state,
         &busy_account,
@@ -461,6 +477,7 @@ fn quota_status_marks_active_client_mirror_unavailable_when_rows_are_corrupt() {
     let state_path = router_root.join("state.sqlite");
     let state = must_ok(SqliteStateStore::open(&state_path));
     let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id("acct_primary"),
         "primary",
         AccountStatus::Enabled,
@@ -617,6 +634,7 @@ fn quota_status_plain_uses_persisted_history_for_run_rate() {
     let state_path = router_root.join("state.sqlite");
     let state = must_ok(SqliteStateStore::open(&state_path));
     let primary_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id("acct_primary_history"),
         "primary",
         AccountStatus::Enabled,

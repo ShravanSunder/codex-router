@@ -14,6 +14,7 @@ use fixtures::*;
 mod history_contracts;
 mod legacy_shapes;
 mod presence_fixtures;
+mod provider_migration;
 mod schema_contracts;
 mod schema_integrity;
 mod transaction_recovery;

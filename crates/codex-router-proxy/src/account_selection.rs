@@ -174,7 +174,8 @@ const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 /// Default v1 minimum account reuse period for adjacent normal requests.
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 /// Idle time after which a Codex session may move to another account.
-pub const PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS: u64 = 75 * 60;
+pub const PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS: u64 =
+    DEFAULT_SESSION_PIN_IDLE_TTL.as_secs();
 const ACTIVE_SESSION_RESERVATION_UNITS: u32 = 1;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 const RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS: u64 = 300;
@@ -3276,6 +3277,7 @@ mod tests {
         let repository = SlowSelectionProjectionRepository::new_with_blocking_affinity(
             vec![persisted_owner.clone(), account_id("acct_b")],
             codex_router_state::session_account_affinity::SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 "session-failed-reservation",
                 persisted_owner.clone(),
                 900,
@@ -3419,6 +3421,7 @@ mod tests {
         let repository = SlowSelectionProjectionRepository::new_with_blocking_affinity(
             vec![account_id("acct_a"), persisted_owner.clone()],
             codex_router_state::session_account_affinity::SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
                 "session-post-await",
                 persisted_owner,
                 7_900,

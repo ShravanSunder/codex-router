@@ -11,6 +11,7 @@ use std::time::UNIX_EPOCH;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_credential_lock::AccountCredentialLock;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
@@ -380,7 +381,7 @@ fn import_codex_auth_text(
     let state = runtime.block_on(AsyncSqliteStateStore::open(
         &router_root.join("state.sqlite"),
     ))?;
-    ensure_account_label_unused(&state, &trimmed_label, &runtime)?;
+    ensure_account_label_available(&state, &trimmed_label, Provider::Openai, &runtime)?;
     let secrets = FileSecretStore::open(router_root.join("secrets"))?;
 
     let mut request = AccountImportRequest::new(
@@ -416,7 +417,7 @@ fn login_with_codex_device_auth(
     allow_plaintext_file_secrets: bool,
 ) -> Result<(), AccountCommandError> {
     let label = normalize_label(&label)?;
-    ensure_account_label_unused_at_router_root(&router_root, &label)?;
+    ensure_account_label_available_at_router_root(&router_root, &label, Provider::Openai)?;
     if !allow_plaintext_file_secrets {
         return Err(AccountCommandError::PlaintextFileSecretsNotAllowed);
     }
@@ -569,6 +570,7 @@ pub async fn import_codex_auth_from_request_async(
     if existing_account.is_none() {
         state
             .upsert_account(&AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 request.account_id.clone(),
                 request.label.clone(),
                 AccountStatus::Disabled,
@@ -639,9 +641,10 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
     Ok(())
 }
 
-fn ensure_account_label_unused_at_router_root(
+fn ensure_account_label_available_at_router_root(
     router_root: &Path,
     label: &str,
+    provider: Provider,
 ) -> Result<(), AccountCommandError> {
     let state_database_path = router_root.join("state.sqlite");
     if !state_database_path.exists() {
@@ -650,25 +653,31 @@ fn ensure_account_label_unused_at_router_root(
 
     let runtime = account_command_runtime()?;
     let state = runtime.block_on(AsyncSqliteStateStore::open(&state_database_path))?;
-    ensure_account_label_unused(&state, label, &runtime)?;
+    ensure_account_label_available(&state, label, provider, &runtime)?;
     runtime.block_on(state.close())?;
     Ok(())
 }
 
-fn ensure_account_label_unused(
+fn ensure_account_label_available(
     state: &AsyncSqliteStateStore,
     label: &str,
+    provider: Provider,
     runtime: &tokio::runtime::Runtime,
 ) -> Result<(), AccountCommandError> {
     let accounts = runtime.block_on(state.list_accounts())?;
     let account_id = account_id_from_label(label)?;
-    if accounts
-        .iter()
-        .any(|account| account.label() == label || account.account_id() == &account_id)
-    {
-        return Err(AccountCommandError::DuplicateAccountLabel {
-            label: label.to_owned(),
-        });
+    for account in accounts {
+        if account.label() != label && account.account_id() != &account_id {
+            continue;
+        }
+        let is_same_account = account.label() == label
+            && account.account_id() == &account_id
+            && account.provider() == provider;
+        if !is_same_account {
+            return Err(AccountCommandError::DuplicateAccountLabel {
+                label: label.to_owned(),
+            });
+        }
     }
     Ok(())
 }
@@ -808,11 +817,11 @@ mod account_provider_cli_tests {
             ))
             .expect("test state should open");
         let existing_account = AccountRecord::new(
+            Provider::Claude,
             account_id_from_label("shared-label").expect("test account id should parse"),
             "shared-label",
             AccountStatus::Enabled,
-        )
-        .with_provider(Provider::Claude);
+        );
         runtime
             .block_on(state.upsert_account(&existing_account))
             .expect("Claude account should persist");
@@ -848,11 +857,11 @@ mod account_provider_cli_tests {
             ("claude-label", Provider::Claude),
         ] {
             let account = AccountRecord::new(
+                provider,
                 account_id_from_label(label).expect("test account id should parse"),
                 label,
                 AccountStatus::Enabled,
-            )
-            .with_provider(provider);
+            );
             runtime
                 .block_on(state.upsert_account(&account))
                 .expect("test account should persist");
