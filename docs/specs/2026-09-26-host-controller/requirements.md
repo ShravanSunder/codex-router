@@ -77,7 +77,7 @@ All rows marked `authorized` are normative-eligible.
 | U6 | Owner/operator; Codex clients | `agent-proxy-services` (today's `serve`) restarts on an update only when proxy code changed, decided by a simple fingerprint. | authorized (owner: "serve should restart if proxy code changes… hash or something simple") | must |
 | U7 | Agent Studio (future) | A stable control surface that stays available across Host-service and app-server restarts. | authorized (owner problem statement; K2 decision places the control surface on the keeper) | should |
 | U9 | Hosted session user on Claude or Cursor (via Router) | A codex-router update that does not change provider-hosting code must not end live Claude or Cursor turns. The provider host restarts only when its own code changes. | authorized (owner decision P3, 2026-09-27) | must |
-| U8 | Codex desktop app user | The desktop app should not contend with the Host for the default endpoint. | **hypothesis**: owner-reported, but W2 evidence shows the installed app attaches as a client or runs its own private stdio app-server; no takeover was observed | open |
+| U8 | Codex desktop app user | The desktop app should use the owner's shared app-server through the default socket, instead of running its own private app-server that competes with Router for thread ownership (Router delivery refused with `-32600 active writer` while the app held a thread). | **authorized need (owner, 2026-09-27: "I would like the codex app to use my app server socket"); feasibility open**, see below | should |
 
 ### Kept from 2026-09-13
 
@@ -120,7 +120,20 @@ All rows marked `authorized` are normative-eligible.
 
 ## Open
 
-- **U8, desktop app contention.** Awaiting what the owner observed. Evidence:
+- **U8, desktop app attach (feasibility).** Observed on 2026-09-27 at 20:40 EDT:
+  - Build: ChatGPT/Codex desktop app 26.924.22138, bundling codex 0.158.0-alpha.2.1.
+  - Six seconds after launch the app spawned its own stdio app-server (PID 48477) with
+    `-c plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true`.
+  - `CODEX_APP_SERVER_USE_LOCAL_DAEMON=1` was in its environment, and the shared
+    socket was up (PID 37492). Nothing from the app connected to it.
+  - The app's daemon-reuse branch requires an empty config-override list, and this
+    build always adds that plugin override (W2).
+  - So a Router restart gap does not explain the private app-server; the app's own
+    policy does.
+  - Whether any user-reachable setting removes the override is under investigation
+    (`tmp/host-controller-research/w12-desktop-attach.md`). Without one, attaching
+    needs a change in the desktop app, which is outside this design's goal boundary
+    (no upstream change).
   `tmp/host-controller-research/w2-desktop-app.md` in the main checkout.
 Further owner confirmations on 2026-09-26, after design review:
 
