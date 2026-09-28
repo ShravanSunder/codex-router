@@ -77,7 +77,7 @@ All rows marked `authorized` are normative-eligible.
 | U6 | Owner/operator; Codex clients | `agent-proxy-services` (today's `serve`) restarts on an update only when proxy code changed, decided by a simple fingerprint. | authorized (owner: "serve should restart if proxy code changes… hash or something simple") | must |
 | U7 | Agent Studio (future) | A stable control surface that stays available across Host-service and app-server restarts. | authorized (owner problem statement; K2 decision places the control surface on the keeper) | should |
 | U9 | Hosted session user on Claude or Cursor (via Router) | A codex-router update that does not change provider-hosting code must not end live Claude or Cursor turns. The provider host restarts only when its own code changes. | authorized (owner decision P3, 2026-09-27) | must |
-| U8 | Codex desktop app user | The desktop app should use the owner's shared app-server through the default socket, instead of running its own private app-server that competes with Router for thread ownership (Router delivery refused with `-32600 active writer` while the app held a thread). | **authorized need (owner, 2026-09-27: "I would like the codex app to use my app server socket"); feasibility open**, see below | should |
+| U8 | Owner using the Codex iPhone app | The iPhone app must reach the owner's shared app-server through Remote Control while the Codex desktop app is running. Today the desktop's private app-server enables Remote Control for the same installation identity, and the iPhone cannot reach the owner's server until the desktop app is killed. Ideally the desktop app would also use the shared app-server. | authorized need (owner, 2026-09-27/28); partly outside Router's control (see Open) | should |
 
 ### Kept from 2026-09-13
 
@@ -120,20 +120,22 @@ All rows marked `authorized` are normative-eligible.
 
 ## Open
 
-- **U8, desktop app attach (feasibility).** Observed on 2026-09-27 at 20:40 EDT:
-  - Build: ChatGPT/Codex desktop app 26.924.22138, bundling codex 0.158.0-alpha.2.1.
-  - Six seconds after launch the app spawned its own stdio app-server (PID 48477) with
-    `-c plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true`.
-  - `CODEX_APP_SERVER_USE_LOCAL_DAEMON=1` was in its environment, and the shared
-    socket was up (PID 37492). Nothing from the app connected to it.
-  - The app's daemon-reuse branch requires an empty config-override list, and this
-    build always adds that plugin override (W2).
-  - So a Router restart gap does not explain the private app-server; the app's own
-    policy does.
-  - Whether any user-reachable setting removes the override is under investigation
-    (`tmp/host-controller-research/w12-desktop-attach.md`). Without one, attaching
-    needs a change in the desktop app, which is outside this design's goal boundary
-    (no upstream change).
+- **U8, desktop app and Remote Control.** Established facts:
+  - The desktop app (26.924.22138, codex 0.158.0-alpha.2.1) always runs a
+    private stdio app-server. Its daemon-reuse branch needs no config overrides,
+    and a local host always adds the `codex-app-tools` override (W12), so no
+    user setting can make it attach to the shared socket.
+  - At launch it sends `remoteControl/enable` to that private app-server (desktop
+    log, 2026-09-27 20:40:42 EDT).
+  - Every app-server on `~/.codex` shares `installation_id`, and the Remote
+    Control enrollment is cached in `state_5.sqlite` (W14). Upstream has no
+    duplicate-host arbitration, and the cloud's behavior with two live hosts is
+    not observable from the client.
+  - Remaining owner-side test: turn off Remote Control in the desktop app, if
+    such a setting exists, and confirm the iPhone then reaches the shared
+    app-server.
+  - A desktop that ignores that, or has no setting, needs an upstream change,
+    which is outside this design's goal boundary.
 
 Further owner confirmations on 2026-09-26, after design review:
 

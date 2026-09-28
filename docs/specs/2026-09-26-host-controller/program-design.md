@@ -881,7 +881,7 @@ sequenceDiagram
   OPS->>GC: restart (update: official updater first, existing)
   GC->>GC: require transition == None, else Busy · hold ActiveMutation::GenerationTransition [added]
   GC->>GC: schema export for the candidate executable → GenerationEvidence
-  GC->>GM: spawn --listen unix://…/gen-‹epoch›-‹N+1›.sock · probe ≤ GENERATION_READY_DEADLINE [changed]
+  GC->>GM: spawn --listen unix://…/gen-‹epoch›-‹N+1›.sock with Remote Control disabled (internal marker, no --remote-control) · probe ≤ GENERATION_READY_DEADLINE [changed]
   alt schema digest changed
     GC->>SVC: prepare an incoming services child with the N+1 payload (6.1 Prepare only · the active child stays on N)
   else unchanged
@@ -899,6 +899,7 @@ sequenceDiagram
     else no ack (channel loss or stuck) · or the prepared child died
       GC->>SVC: services replacement via 6.2 with the N+1 payload (forced predicate if unresponsive) [C4]
     end
+    GC->>GM: remoteControl/enable {ephemeral: true} · wait for Connected (only N+1 becomes the Remote Control host; N stays host until then) [W14]
     alt services committed on N+1 (ack, or the replacement Active)
       OPS-->>OPS: Terminal GenerationRestarted{N+1, services_commit: Committed | ServicesReplaced} · admission stays held
       Note over GN: Settling for GENERATION_SETTLE
@@ -1352,7 +1353,7 @@ Payer: one unnecessary restart.
 | Unresponsive old proxy SIGKILLed mid-renewal | forced path | account may become `reauth_required` (existing recovery, `credential_renewal.rs:389-436`); recorded residual | operator |
 | Ring overflow during a long E4 outage | `retained_from` greater than what the front door last saw | `ReplayComplete{TruncatedBefore}` → the front door gets `historyUnavailable` for the gap (RSP code) | `ProviderHostRuntime` |
 | Provider stdout EOF while unlinked | E11's client retires the provider (#82 semantics) | `ProviderRetired` is sent on the next Attach snapshot as `Retired{reason}`; sessions are `lost` | `ProviderHostRuntime` |
-| Remote Control with two live generations | *gap:* unverified | V2 gate runs with Remote Control enabled in an isolated non-production setup. **No fallback is pre-approved**: a conflict returns to design. | caller / V2 |
+| Remote Control with two live generations | prevented by construction (W14) | Every generation shares `installation_id` and the cached enrollment, and upstream has no duplicate-host arbitration. So a candidate is launched with Remote Control **disabled**: no `--remote-control`, plus `CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED=1`, which selects `DisabledEphemeral`. Omitting the flag alone does not work, because `ResolvePersisted` would re-enable it. At promotion the keeper calls `remoteControl/enable {ephemeral: true}` on N+1 and waits for `Connected`, then retires N. The persisted preference is never written. The marker is upstream-internal; the repo already uses it in debug launches (`app_server_launch.rs:36-53`). It is pinned to the verified Codex version and checked by V2, with Remote Control enabled in an isolated non-production setup. | `GenerationController` |
 
 ## 10. Cross-cutting
 
