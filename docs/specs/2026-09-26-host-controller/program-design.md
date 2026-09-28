@@ -330,9 +330,9 @@ pub enum OperatorTerminal {
     Status(KeeperStatus),
     UpdateCompleted(UpdateOutcome),
     UpdateResultUnknown { update_id: UpdateId },
-    GenerationRestarted { generation: GenerationId, services_commit: ServicesCommit, remote_control: RemoteControlCondition }, // PR3: existing classification, observed ≤ 10 s after enable; the transition releases once N is gone
+    GenerationRestarted { generation: GenerationId, services_commit: ServicesCommit, remote_control: RemoteControlCondition }, // C2: the current generation's condition AS OF this terminal (typically Disabled while the fence is pending); the later bounded enable updates KeeperStatus, not this reply
     GenerationRestartFailed { reason: GenerationFailure, current: Option<GenerationId> },
-    CodexUpdated { generation: GenerationId, from_version: String, to_version: String, services_commit: ServicesCommit },
+    CodexUpdated { generation: GenerationId, from_version: String, to_version: String, services_commit: ServicesCommit, remote_control: RemoteControlCondition }, // same as-of-terminal meaning (C2)
     CodexUnchanged { version: String },
     CodexUpdateFailed { stage: CodexUpdateStage, reason: CodexUpdateFailure, current: Option<GenerationId> }, // existing update outcomes (codex_update_preparation.rs:122-208)
     ProxyRestarted,
@@ -905,7 +905,9 @@ sequenceDiagram
       Note over GN: Settling for GENERATION_SETTLE
       GC->>SVC: RetireGeneration{N} · retires only admissions of N (generation-targeted) · clients reconnect to N+1
       GC->>GN: group stop (6.8) · N's Remote Control transport ends with the process [PR2 fence]
-      GC->>GM: remoteControl/enable {ephemeral: true} · observe ≤ REMOTE_CONTROL_OBSERVE_DEADLINE (10 s, existing) → Connected | LocalReadyRemoteDegraded [PR3]
+      opt resolved Remote Control launch policy = Enabled (production), after N's group is empty [C3]
+        GC->>GM: remoteControl/enable {ephemeral: true} · observe ≤ REMOTE_CONTROL_OBSERVE_DEADLINE (10 s) → Connected | LocalReadyRemoteDegraded · updates KeeperStatus, not the earlier terminal [C2]
+      end
       GC->>GC: remove alias gen-…-N.sock · sweep its physical socket if refused · release GenerationTransition [added]
     else recovery Prepare failed (services may still be on N) [CC3]
       OPS-->>OPS: Terminal GenerationRestarted{N+1, services_commit: ServicesReplacementFailed{reason}}
@@ -1391,7 +1393,7 @@ Payer: one unnecessary restart.
 | Unresponsive old proxy SIGKILLed mid-renewal | forced path | account may become `reauth_required` (existing recovery, `credential_renewal.rs:389-436`); recorded residual | operator |
 | Ring overflow during a long E4 outage | `retained_from` greater than what the front door last saw | `ReplayComplete{TruncatedBefore}` → the front door gets `historyUnavailable` for the gap (RSP code) | `ProviderHostRuntime` |
 | Provider stdout EOF while unlinked | E11's client retires the provider (#82 semantics) | `ProviderRetired` is sent on the next Attach snapshot as `Retired{reason}`; sessions are `lost` | `ProviderHostRuntime` |
-| Remote Control with two live generations | prevented by a process-lifetime fence (PR2) | Every generation shares `installation_id` and the cached enrollment, and upstream has no duplicate-host arbitration (W14). A `Disabled` reply does not prove the transport has stopped (`remote_control/mod.rs:373-398`). So the candidate is launched with Remote Control **disabled** (no `--remote-control`, plus `CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED=1`; repo precedent `app_server_launch.rs:36-53`). Remote Control is enabled on N+1 only **after N's process group is empty**, at the end of the settle and group stop. Only one Remote Control transport can exist, and the cost is an iPhone gap of about the settle plus the stop. Enable is observed for the existing 10 s deadline (`host_configuration.rs:197-206`). If it doesn't connect, the result is the existing `LocalReadyRemoteDegraded` classification (`lifecycle_state.rs:248-257`), shown in status, while the upstream transport keeps retrying. There is **no** rollback to N after publication (PR3). The same rule applies to fresh generation 1, crash recovery and R11 adoption fallback. The internal marker is pinned to the verified Codex version and checked by V2. | `GenerationController` |
+| Remote Control with two live generations | prevented by a process-lifetime fence (PR2) | Every generation shares `installation_id` and the cached enrollment, and upstream has no duplicate-host arbitration (W14). A `Disabled` reply does not prove the transport has stopped (`remote_control/mod.rs:373-398`). So the candidate is launched with Remote Control **disabled** (no `--remote-control`, plus `CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED=1`; repo precedent `app_server_launch.rs:36-53`). Remote Control is enabled on N+1 only **after N's process group is empty**, at the end of the settle and group stop. Only one Remote Control transport can exist, and the cost is an iPhone gap of about the settle plus the stop. Enable is observed for the existing 10 s deadline (`host_configuration.rs:197-206`). If it doesn't connect, the result is the existing `LocalReadyRemoteDegraded` classification (`lifecycle_state.rs:248-257`), shown in status, while the upstream transport keeps retrying. There is **no** rollback to N after publication (PR3). Enable happens **only when the resolved Remote Control launch policy is Enabled**, which is the owner's production launch. A policy of Disabled (debug and isolated launches, `app_server_launch.rs:36-53`) keeps every generation disabled (C3). The terminal reply carries the condition as of the reply; the post-fence enable updates status. Under the CC3 branch, enable waits until services commits N+1 and N's group is empty, and never holds the original reply. The same rule applies to fresh generation 1, crash recovery and R11 adoption fallback. The internal marker is pinned to the verified Codex version and checked by V2. | `GenerationController` |
 
 ## 10. Cross-cutting
 

@@ -77,7 +77,7 @@ All rows marked `authorized` are normative-eligible.
 | U6 | Owner/operator; Codex clients | `agent-proxy-services` (today's `serve`) restarts on an update only when proxy code changed, decided by a simple fingerprint. | authorized (owner: "serve should restart if proxy code changes… hash or something simple") | must |
 | U7 | Agent Studio (future) | A stable control surface that stays available across Host-service and app-server restarts. | authorized (owner problem statement; K2 decision places the control surface on the keeper) | should |
 | U9 | Hosted session user on Claude or Cursor (via Router) | A codex-router update that does not change provider-hosting code must not end live Claude or Cursor turns. The provider host restarts only when its own code changes. | authorized (owner decision P3, 2026-09-27) | must |
-| U8 | Owner using the Codex iPhone app | The iPhone app reaches the owner's shared app-server through Remote Control. The desktop app, at startup, either finds the owner's app-server on the default socket and uses it, or makes its own and keeps Remote Control there until it is relaunched (owner, 2026-09-28). So the owner's app-server must be up whenever the desktop app starts. If the desktop app started first, it is relaunched once the owner's app-server is running. | authorized (owner, 2026-09-28: "the keeper should make sure my app server is running and relaunch codex desktop app to make sure it uses my app server") | should |
+| U8 | Owner using the Codex iPhone app | The iPhone app reaches the owner's shared app-server through Remote Control. Owner-observed behavior (2026-09-27/28): when the desktop app starts while the owner's app-server is up, the iPhone's Remote Control reaches the owner's app-server; when it starts first, the iPhone reaches the desktop's own app-server until the desktop app is relaunched. The desktop's local chat always runs on its own private app-server (W12). So a desktop app that started before the owner's app-server is relaunched once that app-server is running. | authorized (owner, 2026-09-28: "the keeper should make sure my app server is running and relaunch codex desktop app to make sure it uses my app server") | should |
 
 ### Kept from 2026-09-13
 
@@ -120,11 +120,14 @@ All rows marked `authorized` are normative-eligible.
 
 ## Open
 
-- **U8, owner's model (confirmed 2026-09-28).** At startup the desktop app
-  either finds the owner's app-server (and Remote Control uses it) or makes its
-  own and hosts Remote Control there until relaunch. Router itself keeps working
-  either way; what is lost is Remote Control to the owner's app-server.
-  Evidence: W12, W14, and the owner's direct observation.
+- **U8, owner's model (confirmed 2026-09-28).** The desktop app's startup
+  order decides where the iPhone's Remote Control lands: on the owner's
+  app-server if it was up when the desktop started, otherwise on the desktop's
+  own app-server until the desktop is relaunched. Router itself keeps working
+  either way.
+  - The desktop's local chat never uses the shared socket in this build (W12).
+  - The Remote Control outcome is owner-observed; its cloud-side mechanism is not
+    visible in the client code (W14). V12's real-app run verifies it.
 
 Further owner confirmations on 2026-09-26, after design review:
 
