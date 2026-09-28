@@ -6,7 +6,9 @@ pub mod config;
 pub mod error;
 pub mod ids;
 pub mod local_auth;
+pub mod provider;
 pub mod redaction;
+pub mod route_profile;
 pub mod router_compatibility;
 pub mod routes;
 

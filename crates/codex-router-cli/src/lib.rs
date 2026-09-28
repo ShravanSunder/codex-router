@@ -12,6 +12,7 @@ use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
 use codex_router_proxy::server::LoopbackBindAddress;
 use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
+use codex_router_proxy::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
 use codex_router_proxy::upstream::UpstreamEndpoint;
 use codex_router_secret_store::file_backend::FileSecretStore;
 
@@ -61,6 +62,7 @@ use cli_argument_parsing::{CliCommand, ProfileCommand, TokenCommand};
 const DEFAULT_PROFILE_PORT: u16 = 8787;
 const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS: u64 = 300;
 const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 180;
+const DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS: u64 = DEFAULT_SESSION_PIN_IDLE_TTL.as_secs();
 const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 #[cfg(all(debug_assertions, not(test)))]
@@ -229,16 +231,9 @@ fn run_serve_command_with_upkeep_start(
         credential_upkeep_worker::CredentialUpkeepStartError,
     >,
 ) -> Result<(), CliError> {
-    let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
-    let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url)?;
+    let mut runtime_config = base_serve_runtime_config(&command)?;
     let state_db = command.state_db.clone();
     let secret_root = command.secret_root.clone();
-    let mut runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
-        bind_address,
-        upstream_endpoint,
-        command.state_db,
-        command.secret_root,
-    );
     if let Some(audit_file) = command.audit_file {
         runtime_config = runtime_config.with_audit_file(audit_file);
     }
@@ -294,6 +289,52 @@ fn run_serve_command_with_upkeep_start(
         write_websocket_registry_report_file(&report_file, handled_connections, &runtime)?;
     }
     Ok(())
+}
+
+fn base_serve_runtime_config(
+    command: &cli_argument_parsing::ServeCommand,
+) -> Result<LoopbackRouterRuntimeConfig, CliError> {
+    let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
+    let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url.clone())?;
+    Ok(LoopbackRouterRuntimeConfig::new_tokenless(
+        bind_address,
+        upstream_endpoint,
+        command.state_db.clone(),
+        command.secret_root.clone(),
+    )
+    .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds)))
+}
+
+#[cfg(test)]
+mod session_pin_idle_ttl_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn serve_flag_reaches_runtime_configuration() {
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--session-pin-idle-ttl-seconds"),
+            OsString::from("1800"),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+        let runtime_config = base_serve_runtime_config(&command)
+            .unwrap_or_else(|error| panic!("serve runtime config should build: {error}"));
+        let expected_config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new(&command.listen_host, command.port)
+                .expect("serve bind address should be valid"),
+            UpstreamEndpoint::new(command.upstream_base_url.clone())
+                .expect("serve upstream endpoint should be valid"),
+            command.state_db,
+            command.secret_root,
+        )
+        .with_session_pin_idle_ttl(Duration::from_secs(1_800));
+
+        assert_eq!(runtime_config, expected_config);
+    }
 }
 
 /// Executes CLI args with process-independent IO.

@@ -756,6 +756,7 @@ mod tests {
         ] {
             state
                 .upsert_account(&AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
                     account_id.clone(),
                     label,
                     AccountStatus::Enabled,

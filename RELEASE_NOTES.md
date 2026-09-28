@@ -2,6 +2,9 @@
 
 ## Unreleased - 2026-09-24
 
+- Add provider identity to accounts and session pins, and migrate existing rows to OpenAI. The state migration blocks downgrade because older binaries reject its unknown migration version. Restart `serve` after upgrading; an older running process still writes pins with the previous schema and those upserts fail.
+- Let `account login` create a new credential generation for the same account and provider; refuse a label owned by a different account or provider.
+- Set Codex session-pin idle expiry to 75 minutes by default, configurable with `serve --session-pin-idle-ttl-seconds`; show each account's provider in `account list`.
 - Restore CLI and MCP prompts to existing Codex conversations when Claude or Cursor ACP routes share the Host. The client now sends the exact SessionRef on `session/load`, so a new ACP connection selects the Codex route without weakening rejection of unknown bare Session IDs.
 - Invalid `conversation create --from` identity JSON now exits 2 with `invalidField`; provider creates accept Human creators and Approvers, including an owner-selected `--approver-owner` shortcut.
 - `wake send --wait-until-first-fire --json` now emits one result with `result.record.firstFire`, or one error retaining the created wake under `created`.

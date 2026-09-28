@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO accounts (\n                account_id, label, status, active_credential_generation, provider\n             )\n             VALUES (?1, ?2, ?3, ?4, ?5)\n             ON CONFLICT(account_id) DO UPDATE SET\n               label = excluded.label,\n               status = excluded.status,\n               active_credential_generation = excluded.active_credential_generation\n             WHERE accounts.provider = excluded.provider",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "0646f2c1f73fa78742b87333d101322cf6a27143e8b94fd6b2e773f6c8a0d80c"
+}

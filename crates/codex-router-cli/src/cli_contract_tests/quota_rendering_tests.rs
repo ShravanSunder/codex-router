@@ -8,6 +8,7 @@ fn quota_status_reads_sqlite_rows_without_provider_io() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let primary_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id("acct_primary"),
         "primary",
         AccountStatus::Enabled,
@@ -77,6 +78,7 @@ fn quota_status_snapshot_rows_show_unknown_pace_until_window_metadata_exists() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let primary_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id("acct_snapshot_pace"),
         "snapshot",
         AccountStatus::Enabled,
@@ -144,6 +146,7 @@ fn quota_status_shows_two_user_quota_windows_per_account() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let primary_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id("acct_primary"),
         "primary",
         AccountStatus::Enabled,
@@ -258,6 +261,7 @@ fn quota_status_table_format_renders_account_rows_without_legacy_tables() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let primary_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id("acct_primary"),
         "primary",
         AccountStatus::Enabled,
@@ -360,6 +364,7 @@ fn quota_status_default_keeps_single_human_status_block_without_refresh() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let primary_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id("acct_primary"),
         "primary",
         AccountStatus::Enabled,
@@ -413,6 +418,7 @@ fn quota_status_redacts_unsafe_account_labels() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id("acct_unsafe_status_label"),
         "person@example.com",
         AccountStatus::Enabled,

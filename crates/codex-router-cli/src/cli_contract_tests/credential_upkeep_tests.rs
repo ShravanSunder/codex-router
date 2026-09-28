@@ -52,8 +52,13 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
     ] {
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), "upkeep", status)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "upkeep",
+                status,
+            )
+            .with_active_credential_generation(1),
         ));
         let key = must_ok(account_credential_bundle_key(&account_id, 1));
         must_ok(
@@ -161,8 +166,13 @@ fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
     let account_id = account_id("upkeep-shutdown");
     must_ok(AccountStateRepository::upsert_account(
         &state,
-        &AccountRecord::new(account_id.clone(), "shutdown", AccountStatus::Enabled)
-            .with_active_credential_generation(1),
+        &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "shutdown",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1),
     ));
     let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
     must_ok(
@@ -252,6 +262,7 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
         must_ok(AccountStateRepository::upsert_account(
             &state,
             &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 format!("queued-{index}"),
                 AccountStatus::Enabled,

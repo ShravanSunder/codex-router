@@ -79,6 +79,15 @@ pub enum CliError {
         value: String,
     },
 
+    /// Numeric option must be nonzero.
+    #[error("value for {option} must be greater than zero: {value}")]
+    ZeroNumericOption {
+        /// Option name.
+        option: &'static str,
+        /// Raw option value.
+        value: String,
+    },
+
     /// CLI argument is not UTF-8.
     #[error("non-UTF-8 CLI argument: {value:?}")]
     NonUtf8Argument {

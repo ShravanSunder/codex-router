@@ -422,7 +422,12 @@ impl AuthorityFixture {
         let state = AsyncSqliteStateStore::open(&self.database_path)
             .await
             .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
-        let mut account = AccountRecord::new(self.account_id.clone(), "authority", status);
+        let mut account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            self.account_id.clone(),
+            "authority",
+            status,
+        );
         if let Some(generation) = generation {
             account = account.with_active_credential_generation(generation);
         }
@@ -444,8 +449,13 @@ impl AuthorityFixture {
             .unwrap_or_else(|error| panic!("fixture decoy id should parse: {error}"));
         state
             .upsert_account(
-                &AccountRecord::new(decoy_id, "decoy", AccountStatus::Enabled)
-                    .with_active_credential_generation(99),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    decoy_id,
+                    "decoy",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(99),
             )
             .await
             .unwrap_or_else(|error| panic!("fixture decoy should write: {error}"));

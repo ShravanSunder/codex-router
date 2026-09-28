@@ -32,6 +32,13 @@ pub(super) const ACCOUNTS: &[ColumnSpec] = &[
     column!("status", "TEXT", true, 0),
     column!("active_credential_generation", "INTEGER", false, 0),
 ];
+pub(super) const CURRENT_ACCOUNTS: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("label", "TEXT", true, 0),
+    column!("status", "TEXT", true, 0),
+    column!("active_credential_generation", "INTEGER", false, 0),
+    column!("provider", "TEXT", true, 0),
+];
 pub(super) const QUOTA_SNAPSHOTS: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 1),
     column!("source", "TEXT", true, 0),
@@ -171,6 +178,19 @@ pub(super) const SESSION_ACCOUNT_AFFINITIES: &[ColumnSpec] = &[
     column!("session_id", "TEXT", true, 1),
     column!("account_id", "TEXT", true, 0),
     column!("last_seen_unix_seconds", "INTEGER", true, 0),
+];
+pub(super) const CURRENT_SESSION_ACCOUNT_AFFINITIES: &[ColumnSpec] = &[
+    column!("provider", "TEXT", true, 1),
+    column!("session_id", "TEXT", true, 2),
+    column!("account_id", "TEXT", false, 0),
+    column!("last_seen_unix_seconds", "INTEGER", true, 0),
+    ColumnSpec {
+        name: "pin_version",
+        declared_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+        accepted_defaults: NO_OR_ZERO_DEFAULT,
+    },
 ];
 pub(super) const CREDENTIAL_MAINTENANCE: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 1),

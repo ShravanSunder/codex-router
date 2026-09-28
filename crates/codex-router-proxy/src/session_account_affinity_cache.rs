@@ -4,16 +4,18 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 use codex_router_core::routes::RouteBand;
 use codex_router_state::session_account_affinity::SessionAccountAffinity;
 
 use crate::db_write_actor::DbWriteActor;
 use crate::db_write_actor::DbWriteCommand;
 
-/// Strict soft-affinity idle lifetime.
-pub const SESSION_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS: u64 = 7_200;
+/// Default idle lifetime shared by provider session pins.
+pub const DEFAULT_SESSION_PIN_IDLE_TTL: Duration = Duration::from_secs(75 * 60);
 const CACHE_PRUNE_INTERVAL_SECONDS: u64 = 60;
 
 /// Shared process-local session affinity cache.
@@ -30,18 +32,29 @@ struct SessionAccountAffinityEntry {
     owner_token: Arc<()>,
 }
 
-/// Process-local current owner for each supplied session identity.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SessionAffinityKey {
+    provider: Provider,
+    session_id: String,
+}
+
+/// Process-local current owner for each provider-scoped session identity.
+#[derive(Debug)]
 pub struct SessionAccountAffinityCache {
-    entries: HashMap<String, SessionAccountAffinityEntry>,
+    entries: HashMap<SessionAffinityKey, SessionAccountAffinityEntry>,
     last_pruned_unix_seconds: Option<u64>,
+    idle_ttl: Duration,
 }
 
 impl SessionAccountAffinityCache {
-    /// Creates a shared empty cache.
+    /// Creates a shared empty cache with the configured pin idle lifetime.
     #[must_use]
-    pub fn shared() -> SharedSessionAccountAffinityCache {
-        Arc::new(Mutex::new(Self::default()))
+    pub fn shared(idle_ttl: Duration) -> SharedSessionAccountAffinityCache {
+        Arc::new(Mutex::new(Self {
+            entries: HashMap::new(),
+            last_pruned_unix_seconds: None,
+            idle_ttl,
+        }))
     }
 }
 
@@ -70,6 +83,7 @@ impl SessionAccountAffinitySelection {
 #[derive(Clone)]
 pub struct SessionAffinityActivityHandle {
     cache: SharedSessionAccountAffinityCache,
+    provider: Provider,
     session_id: String,
     account_id: AccountId,
     owner_token: Arc<()>,
@@ -90,6 +104,7 @@ impl fmt::Debug for SessionAffinityActivityHandle {
 impl PartialEq for SessionAffinityActivityHandle {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.cache, &other.cache)
+            && self.provider == other.provider
             && self.session_id == other.session_id
             && self.account_id == other.account_id
             && Arc::ptr_eq(&self.owner_token, &other.owner_token)
@@ -109,7 +124,11 @@ impl SessionAffinityActivityHandle {
             .cache
             .lock()
             .map_err(|_error| SessionAccountAffinityCacheUnavailable)?;
-        let Some(entry) = cache.entries.get_mut(&self.session_id) else {
+        let key = SessionAffinityKey {
+            provider: self.provider,
+            session_id: self.session_id.clone(),
+        };
+        let Some(entry) = cache.entries.get_mut(&key) else {
             return Ok(false);
         };
         if entry.account_id != self.account_id
@@ -121,6 +140,7 @@ impl SessionAffinityActivityHandle {
         entry.last_seen_unix_seconds = entry.last_seen_unix_seconds.max(now_unix_seconds);
         enqueue_affinity_write(
             self.writer.as_ref(),
+            self.provider,
             &self.session_id,
             &self.account_id,
             self.route_band,
@@ -133,6 +153,7 @@ impl SessionAffinityActivityHandle {
 /// Looks up a fresh current owner without renewing it.
 pub fn lookup_session_account_affinity(
     cache: &SharedSessionAccountAffinityCache,
+    provider: Provider,
     session_id: &str,
     route_band: RouteBand,
     writer: Option<&DbWriteActor>,
@@ -142,22 +163,27 @@ pub fn lookup_session_account_affinity(
         .lock()
         .map_err(|_error| SessionAccountAffinityCacheUnavailable)?;
     prune_if_due(&mut cache_guard, now_unix_seconds);
-    let Some(entry) = cache_guard.entries.get(session_id) else {
+    let key = SessionAffinityKey {
+        provider,
+        session_id: session_id.to_owned(),
+    };
+    let Some(entry) = cache_guard.entries.get(&key) else {
         return Ok(None);
     };
     if now_unix_seconds.saturating_sub(entry.last_seen_unix_seconds)
-        >= SESSION_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS
+        >= cache_guard.idle_ttl.as_secs()
     {
         return Ok(None);
     }
     Ok(Some(selection_from_entry(
-        cache, session_id, route_band, writer, entry,
+        cache, provider, session_id, route_band, writer, entry,
     )))
 }
 
 /// Rechecks live state after a database await and seeds only a fresh persisted row.
 pub fn reconcile_persisted_session_account_affinity(
     cache: &SharedSessionAccountAffinityCache,
+    provider: Provider,
     session_id: &str,
     persisted: Option<&SessionAccountAffinity>,
     route_band: RouteBand,
@@ -168,41 +194,50 @@ pub fn reconcile_persisted_session_account_affinity(
         .lock()
         .map_err(|_error| SessionAccountAffinityCacheUnavailable)?;
     prune_if_due(&mut cache_guard, now_unix_seconds);
-    if let Some(live_entry) = cache_guard.entries.get(session_id)
+    let key = SessionAffinityKey {
+        provider,
+        session_id: session_id.to_owned(),
+    };
+    if let Some(live_entry) = cache_guard.entries.get(&key)
         && now_unix_seconds.saturating_sub(live_entry.last_seen_unix_seconds)
-            < SESSION_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS
+            < cache_guard.idle_ttl.as_secs()
     {
         return Ok(Some(selection_from_entry(
-            cache, session_id, route_band, writer, live_entry,
+            cache, provider, session_id, route_band, writer, live_entry,
         )));
     }
     let Some(persisted) = persisted.filter(|persisted| {
-        persisted.session_id() == session_id
+        persisted.provider() == provider
+            && persisted.session_id() == session_id
             && now_unix_seconds.saturating_sub(persisted.last_seen_unix_seconds())
-                < SESSION_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS
+                < cache_guard.idle_ttl.as_secs()
     }) else {
+        return Ok(None);
+    };
+    let Some(persisted_account_id) = persisted.account_id() else {
         return Ok(None);
     };
 
     let owner_token = cache_guard
         .entries
-        .get(session_id)
-        .filter(|entry| entry.account_id == *persisted.account_id())
+        .get(&key)
+        .filter(|entry| entry.account_id == *persisted_account_id)
         .map_or_else(|| Arc::new(()), |entry| Arc::clone(&entry.owner_token));
     cache_guard.entries.insert(
-        session_id.to_owned(),
+        key,
         SessionAccountAffinityEntry {
-            account_id: persisted.account_id().clone(),
+            account_id: persisted_account_id.clone(),
             last_seen_unix_seconds: persisted.last_seen_unix_seconds(),
             owner_token: Arc::clone(&owner_token),
         },
     );
     Ok(Some(SessionAccountAffinitySelection {
-        account_id: persisted.account_id().clone(),
+        account_id: persisted_account_id.clone(),
         activity_handle: SessionAffinityActivityHandle {
             cache: Arc::clone(cache),
+            provider,
             session_id: session_id.to_owned(),
-            account_id: persisted.account_id().clone(),
+            account_id: persisted_account_id.clone(),
             owner_token,
             route_band,
             writer: writer.cloned(),
@@ -213,6 +248,7 @@ pub fn reconcile_persisted_session_account_affinity(
 /// Publishes the selected owner and queues durability before selector serialization is released.
 pub fn publish_session_account_affinity(
     cache: &SharedSessionAccountAffinityCache,
+    provider: Provider,
     session_id: &str,
     account_id: &AccountId,
     route_band: RouteBand,
@@ -223,9 +259,13 @@ pub fn publish_session_account_affinity(
         .lock()
         .map_err(|_error| SessionAccountAffinityCacheUnavailable)?;
     prune_if_due(&mut cache_guard, now_unix_seconds);
+    let key = SessionAffinityKey {
+        provider,
+        session_id: session_id.to_owned(),
+    };
     let entry = cache_guard
         .entries
-        .entry(session_id.to_owned())
+        .entry(key)
         .or_insert_with(|| SessionAccountAffinityEntry {
             account_id: account_id.clone(),
             last_seen_unix_seconds: now_unix_seconds,
@@ -238,18 +278,20 @@ pub fn publish_session_account_affinity(
     entry.last_seen_unix_seconds = entry.last_seen_unix_seconds.max(now_unix_seconds);
     enqueue_affinity_write(
         writer,
+        provider,
         session_id,
         account_id,
         route_band,
         entry.last_seen_unix_seconds,
     );
     Ok(selection_from_entry(
-        cache, session_id, route_band, writer, entry,
+        cache, provider, session_id, route_band, writer, entry,
     ))
 }
 
 fn selection_from_entry(
     cache: &SharedSessionAccountAffinityCache,
+    provider: Provider,
     session_id: &str,
     route_band: RouteBand,
     writer: Option<&DbWriteActor>,
@@ -259,6 +301,7 @@ fn selection_from_entry(
         account_id: entry.account_id.clone(),
         activity_handle: SessionAffinityActivityHandle {
             cache: Arc::clone(cache),
+            provider,
             session_id: session_id.to_owned(),
             account_id: entry.account_id.clone(),
             owner_token: Arc::clone(&entry.owner_token),
@@ -275,15 +318,16 @@ fn prune_if_due(cache: &mut SessionAccountAffinityCache, now_unix_seconds: u64) 
         return;
     }
     cache.last_pruned_unix_seconds = Some(now_unix_seconds);
+    let idle_ttl_seconds = cache.idle_ttl.as_secs();
     cache.entries.retain(|_, entry| {
-        now_unix_seconds.saturating_sub(entry.last_seen_unix_seconds)
-            < SESSION_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS
+        now_unix_seconds.saturating_sub(entry.last_seen_unix_seconds) < idle_ttl_seconds
             || Arc::strong_count(&entry.owner_token) > 1
     });
 }
 
 fn enqueue_affinity_write(
     writer: Option<&DbWriteActor>,
+    provider: Provider,
     session_id: &str,
     account_id: &AccountId,
     route_band: RouteBand,
@@ -294,7 +338,13 @@ fn enqueue_affinity_write(
     };
     let _enqueue_result = writer.try_enqueue(DbWriteCommand::session_account_affinity(
         route_band,
-        SessionAccountAffinity::new(session_id, account_id.clone(), last_seen_unix_seconds),
+        SessionAccountAffinity::with_pin_state(
+            provider,
+            session_id,
+            Some(account_id.clone()),
+            0,
+            last_seen_unix_seconds,
+        ),
     ));
 }
 
@@ -307,11 +357,12 @@ mod tests {
     }
 
     #[test]
-    fn lookup_is_strict_at_two_hours_and_does_not_renew() {
-        for (age, expected_fresh) in [(7_199, true), (7_200, false), (7_201, false)] {
-            let cache = SessionAccountAffinityCache::shared();
+    fn default_ttl_expires_after_75_idle_minutes_without_renewal() {
+        for (age, expected_fresh) in [(4_499, true), (4_500, false), (4_501, false)] {
+            let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
             let selected = publish_session_account_affinity(
                 &cache,
+                Provider::Openai,
                 "session-boundary",
                 &account_id("acct-a"),
                 RouteBand::Responses,
@@ -323,6 +374,7 @@ mod tests {
 
             let lookup = lookup_session_account_affinity(
                 &cache,
+                Provider::Openai,
                 "session-boundary",
                 RouteBand::Responses,
                 None,
@@ -334,10 +386,78 @@ mod tests {
     }
 
     #[test]
+    fn configured_ttl_is_used_for_expiry() {
+        let cache = SessionAccountAffinityCache::shared(Duration::from_secs(30 * 60));
+        let _selected = publish_session_account_affinity(
+            &cache,
+            Provider::Openai,
+            "session-configured-ttl",
+            &account_id("acct-a"),
+            RouteBand::Responses,
+            None,
+            1_000,
+        )
+        .unwrap_or_else(|_| panic!("publication should succeed"));
+
+        for (age, expected_fresh) in [(1_799, true), (1_800, false)] {
+            let lookup = lookup_session_account_affinity(
+                &cache,
+                Provider::Openai,
+                "session-configured-ttl",
+                RouteBand::Responses,
+                None,
+                1_000 + age,
+            )
+            .unwrap_or_else(|_| panic!("lookup should succeed"));
+            assert_eq!(lookup.is_some(), expected_fresh, "age={age}");
+        }
+    }
+
+    #[test]
+    fn same_session_id_has_independent_provider_owners() {
+        let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
+        let openai_selection = publish_session_account_affinity(
+            &cache,
+            Provider::Openai,
+            "shared-session-id",
+            &account_id("acct-openai"),
+            RouteBand::Responses,
+            None,
+            1_000,
+        )
+        .unwrap_or_else(|_| panic!("OpenAI publication should succeed"));
+        let _claude_selection = publish_session_account_affinity(
+            &cache,
+            Provider::Claude,
+            "shared-session-id",
+            &account_id("acct-claude"),
+            RouteBand::Responses,
+            None,
+            1_100,
+        )
+        .unwrap_or_else(|_| panic!("Claude publication should succeed"));
+
+        let openai_lookup = lookup_session_account_affinity(
+            &cache,
+            Provider::Openai,
+            "shared-session-id",
+            RouteBand::Responses,
+            None,
+            1_101,
+        )
+        .unwrap_or_else(|_| panic!("OpenAI lookup should succeed"));
+        assert_eq!(
+            openai_lookup.map(|selection| selection.account_id().clone()),
+            Some(openai_selection.account_id().clone())
+        );
+    }
+
+    #[test]
     fn stale_handle_cannot_renew_after_a_to_b_to_a() {
-        let cache = SessionAccountAffinityCache::shared();
+        let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
         let original_a = publish_session_account_affinity(
             &cache,
+            Provider::Openai,
             "session-cycle",
             &account_id("acct-a"),
             RouteBand::Responses,
@@ -347,6 +467,7 @@ mod tests {
         .unwrap_or_else(|_| panic!("A publication should succeed"));
         let _b = publish_session_account_affinity(
             &cache,
+            Provider::Openai,
             "session-cycle",
             &account_id("acct-b"),
             RouteBand::Responses,
@@ -356,6 +477,7 @@ mod tests {
         .unwrap_or_else(|_| panic!("B publication should succeed"));
         let current_a = publish_session_account_affinity(
             &cache,
+            Provider::Openai,
             "session-cycle",
             &account_id("acct-a"),
             RouteBand::Responses,
@@ -375,40 +497,53 @@ mod tests {
 
     #[test]
     fn persisted_reconciliation_preserves_last_seen_and_live_touch_wins() {
-        let cache = SessionAccountAffinityCache::shared();
-        let persisted = SessionAccountAffinity::new("session-db", account_id("acct-a"), 1_000);
+        let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
+        let persisted = SessionAccountAffinity::new(
+            codex_router_core::provider::Provider::Openai,
+            "session-db",
+            account_id("acct-a"),
+            1_000,
+        );
         let seeded = reconcile_persisted_session_account_affinity(
             &cache,
+            Provider::Openai,
             "session-db",
             Some(&persisted),
             RouteBand::Responses,
             None,
-            8_199,
+            5_499,
         )
         .unwrap_or_else(|_| panic!("reconciliation should succeed"))
-        .unwrap_or_else(|| panic!("7,199-second row should seed"));
+        .unwrap_or_else(|| panic!("4,499-second row should seed"));
         assert!(
             lookup_session_account_affinity(
                 &cache,
+                Provider::Openai,
                 "session-db",
                 RouteBand::Responses,
                 None,
-                8_200,
+                5_500,
             )
             .unwrap_or_else(|_| panic!("lookup-only boundary check should succeed"))
             .is_none(),
-            "seeding at age 7,199 must preserve persisted last-seen and expire at age 7,200"
+            "seeding at age 4,499 must preserve persisted last-seen and expire at age 4,500"
         );
-        assert!(seeded.activity_handle().touch_if_current(8_300).unwrap());
+        assert!(seeded.activity_handle().touch_if_current(5_600).unwrap());
 
-        let older = SessionAccountAffinity::new("session-db", account_id("acct-b"), 8_250);
+        let older = SessionAccountAffinity::new(
+            codex_router_core::provider::Provider::Openai,
+            "session-db",
+            account_id("acct-b"),
+            8_250,
+        );
         let reconciled = reconcile_persisted_session_account_affinity(
             &cache,
+            Provider::Openai,
             "session-db",
             Some(&older),
             RouteBand::Responses,
             None,
-            8_301,
+            5_601,
         )
         .unwrap_or_else(|_| panic!("second reconciliation should succeed"))
         .unwrap_or_else(|| panic!("live owner should remain"));
@@ -416,13 +551,18 @@ mod tests {
     }
 
     #[test]
-    fn persisted_reconciliation_is_strict_at_two_hours() {
-        for (age, expected_fresh) in [(7_199, true), (7_200, false), (7_201, false)] {
-            let cache = SessionAccountAffinityCache::shared();
-            let persisted =
-                SessionAccountAffinity::new("session-db-boundary", account_id("acct-a"), 1_000);
+    fn persisted_reconciliation_uses_default_75_minute_ttl() {
+        for (age, expected_fresh) in [(4_499, true), (4_500, false), (4_501, false)] {
+            let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
+            let persisted = SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
+                "session-db-boundary",
+                account_id("acct-a"),
+                1_000,
+            );
             let reconciled = reconcile_persisted_session_account_affinity(
                 &cache,
+                Provider::Openai,
                 "session-db-boundary",
                 Some(&persisted),
                 RouteBand::Responses,
@@ -436,9 +576,10 @@ mod tests {
 
     #[test]
     fn expired_entry_with_current_handle_can_renew_after_real_activity() {
-        let cache = SessionAccountAffinityCache::shared();
+        let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
         let published = publish_session_account_affinity(
             &cache,
+            Provider::Openai,
             "session-idle-activity",
             &account_id("acct-a"),
             RouteBand::Responses,
@@ -450,10 +591,11 @@ mod tests {
         assert!(
             lookup_session_account_affinity(
                 &cache,
+                Provider::Openai,
                 "session-idle-activity",
                 RouteBand::Responses,
                 None,
-                8_200,
+                5_500,
             )
             .unwrap_or_else(|_| panic!("lookup should succeed"))
             .is_none()
@@ -461,16 +603,17 @@ mod tests {
         assert!(
             published
                 .activity_handle()
-                .touch_if_current(8_300)
+                .touch_if_current(5_600)
                 .unwrap_or_else(|_| panic!("touch should succeed"))
         );
         assert!(
             lookup_session_account_affinity(
                 &cache,
+                Provider::Openai,
                 "session-idle-activity",
                 RouteBand::Responses,
                 None,
-                8_300,
+                5_600,
             )
             .unwrap_or_else(|_| panic!("lookup should succeed"))
             .is_some()

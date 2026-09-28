@@ -76,8 +76,13 @@ impl QuotaResetFixture {
             let account_id = AccountId::new(account_id)?;
             state
                 .upsert_account(
-                    &AccountRecord::new(account_id.clone(), label, AccountStatus::Enabled)
-                        .with_active_credential_generation(generation),
+                    &AccountRecord::new(
+                        codex_router_core::provider::Provider::Openai,
+                        account_id.clone(),
+                        label,
+                        AccountStatus::Enabled,
+                    )
+                    .with_active_credential_generation(generation),
                 )
                 .await?;
             state

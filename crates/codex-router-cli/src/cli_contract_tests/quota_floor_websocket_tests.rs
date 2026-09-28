@@ -17,8 +17,13 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         |account_id: &AccountId, label: &str, weekly_remaining: u32, access_token: &str| {
             must_ok(AccountStateRepository::upsert_account(
                 &state,
-                &AccountRecord::new(account_id.clone(), label, AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    label,
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             ));
             let key = must_ok(account_credential_bundle_key(account_id, 1));
             must_ok(
@@ -79,6 +84,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         9,
         "floor-socket-access-canary",
     );
+    migrate_test_state_database(&state_path);
 
     let initial_status = run_cli(
         [

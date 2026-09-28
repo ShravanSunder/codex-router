@@ -186,8 +186,13 @@ fn seed_route_native_account(
     fixture: RouteNativeAccountFixture,
 ) -> Result<(), String> {
     let account_id = account_id(fixture.account_id)?;
-    let account = AccountRecord::new(account_id.clone(), fixture.label, AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        fixture.label,
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     AccountStateRepository::upsert_account(state, &account).map_err(|error| {
         format!(
             "failed to seed route-native account {}: {error}",

@@ -1,10 +1,13 @@
 //! Command vocabulary, option validation and native argument preservation.
 use super::{
     AccountCommand, CliError, DEFAULT_CHATGPT_BACKEND_BASE_URL, DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
-    DEFAULT_PROFILE_PORT, DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS, HostCommand, LiveCommand,
-    QuotaCommand, Shell, default_router_root, router_secret_root_or_default,
+    DEFAULT_PROFILE_PORT, DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
+    DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS, HostCommand, LiveCommand, QuotaCommand, Shell,
+    default_router_root, router_secret_root_or_default,
 };
-use std::{ffi::OsString, path::PathBuf};
+use std::ffi::OsString;
+use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum CliCommand {
@@ -82,6 +85,7 @@ pub(super) struct ServeCommand {
     pub(super) upstream_base_url: String,
     pub(super) now_unix_seconds: Option<u64>,
     pub(super) max_snapshot_age_seconds: u64,
+    pub(super) session_pin_idle_ttl_seconds: u64,
     pub(super) quota_refresh_interval_seconds: u64,
     pub(super) background_quota_refresh_enabled: bool,
     pub(super) require_local_token: bool,
@@ -118,6 +122,10 @@ impl ServeCommand {
             max_snapshot_age_seconds: options
                 .max_snapshot_age_seconds
                 .unwrap_or(DEFAULT_MAX_SNAPSHOT_AGE_SECONDS),
+            session_pin_idle_ttl_seconds: options
+                .session_pin_idle_ttl_seconds
+                .map(NonZeroU64::get)
+                .unwrap_or(DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS),
             quota_refresh_interval_seconds: options
                 .quota_refresh_interval_seconds
                 .unwrap_or(DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS),
@@ -139,6 +147,7 @@ struct ServeCommandOptions {
     upstream_base_url: Option<String>,
     now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: Option<u64>,
+    session_pin_idle_ttl_seconds: Option<NonZeroU64>,
     quota_refresh_interval_seconds: Option<u64>,
     disable_background_quota_refresh: bool,
     require_local_token: bool,
@@ -157,6 +166,7 @@ impl ServeCommandOptions {
             upstream_base_url: None,
             now_unix_seconds: None,
             max_snapshot_age_seconds: None,
+            session_pin_idle_ttl_seconds: None,
             quota_refresh_interval_seconds: None,
             disable_background_quota_refresh: false,
             require_local_token: false,
@@ -195,6 +205,13 @@ impl ServeCommandOptions {
                     let value = parser.next_required_value("--max-snapshot-age-seconds")?;
                     options.max_snapshot_age_seconds =
                         Some(parse_u64_option("--max-snapshot-age-seconds", &value)?);
+                }
+                "--session-pin-idle-ttl-seconds" => {
+                    let value = parser.next_required_value("--session-pin-idle-ttl-seconds")?;
+                    options.session_pin_idle_ttl_seconds = Some(parse_nonzero_u64_option(
+                        "--session-pin-idle-ttl-seconds",
+                        &value,
+                    )?);
                 }
                 "--quota-refresh-interval-seconds" => {
                     let value = parser.next_required_value("--quota-refresh-interval-seconds")?;
@@ -539,6 +556,14 @@ fn parse_u64_option(option: &'static str, value: &str) -> Result<u64, CliError> 
         })
 }
 
+fn parse_nonzero_u64_option(option: &'static str, value: &str) -> Result<NonZeroU64, CliError> {
+    let parsed_value = parse_u64_option(option, value)?;
+    NonZeroU64::new(parsed_value).ok_or_else(|| CliError::ZeroNumericOption {
+        option,
+        value: value.to_owned(),
+    })
+}
+
 fn parse_usize_option(option: &'static str, value: &str) -> Result<usize, CliError> {
     value
         .parse::<usize>()
@@ -546,4 +571,47 @@ fn parse_usize_option(option: &'static str, value: &str) -> Result<usize, CliErr
             option,
             value: value.to_owned(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArgumentParser;
+    use super::ServeCommand;
+    use std::ffi::OsString;
+
+    #[test]
+    fn serve_session_pin_idle_ttl_defaults_to_75_minutes_and_accepts_override() {
+        let mut default_parser = ArgumentParser::new(Vec::new());
+        let default_command = ServeCommand::parse(&mut default_parser)
+            .unwrap_or_else(|error| panic!("default serve command should parse: {error}"));
+        assert_eq!(default_command.session_pin_idle_ttl_seconds, 75 * 60);
+
+        let arguments = [
+            OsString::from("--session-pin-idle-ttl-seconds"),
+            OsString::from("1800"),
+        ];
+        let mut configured_parser = ArgumentParser::new(arguments.into());
+        let configured_command = ServeCommand::parse(&mut configured_parser)
+            .unwrap_or_else(|error| panic!("configured serve command should parse: {error}"));
+        assert_eq!(configured_command.session_pin_idle_ttl_seconds, 1_800);
+    }
+
+    #[test]
+    fn serve_session_pin_idle_ttl_rejects_zero_during_parse() {
+        let arguments = [
+            OsString::from("--session-pin-idle-ttl-seconds"),
+            OsString::from("0"),
+        ];
+        let mut parser = ArgumentParser::new(arguments.into());
+        let error = ServeCommand::parse(&mut parser)
+            .expect_err("session pin idle TTL must be greater than zero");
+
+        assert!(matches!(
+            error,
+            super::CliError::ZeroNumericOption {
+                option: "--session-pin-idle-ttl-seconds",
+                value
+            } if value == "0"
+        ));
+    }
 }

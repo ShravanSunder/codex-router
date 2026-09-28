@@ -11,8 +11,13 @@ async fn independent_async_resolvers_use_one_rotating_refresh_generation() {
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "independent", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "independent",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -71,6 +76,7 @@ async fn orphaned_successor_is_skipped_and_unresolved_claim_blocks_old_token_reu
         state
             .upsert_account(
                 &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
                     orphan_account_id.clone(),
                     "orphaned",
                     AccountStatus::Enabled,
@@ -126,6 +132,7 @@ async fn orphaned_successor_is_skipped_and_unresolved_claim_blocks_old_token_reu
         state
             .upsert_account(
                 &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
                     blocked_account_id.clone(),
                     "blocked",
                     AccountStatus::Enabled,
@@ -186,8 +193,13 @@ async fn claimed_staged_successor_activates_without_reusing_old_refresh_token() 
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "staged", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "staged",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -245,8 +257,13 @@ async fn expired_claimed_successor_is_renewed_before_provider_egress() {
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "staged", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "staged",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -327,8 +344,13 @@ async fn typed_refresh_failures_persist_retry_or_reauth_without_reusing_ambiguou
         must_ok(
             state
                 .upsert_account(
-                    &AccountRecord::new(account_id.clone(), name, AccountStatus::Enabled)
-                        .with_active_credential_generation(1),
+                    &AccountRecord::new(
+                        codex_router_core::provider::Provider::Openai,
+                        account_id.clone(),
+                        name,
+                        AccountStatus::Enabled,
+                    )
+                    .with_active_credential_generation(1),
                 )
                 .await,
         );
@@ -400,8 +422,13 @@ async fn elapsed_retry_deadline_renews_even_when_ordinary_renewal_is_not_due() {
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "retry", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "retry",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
@@ -483,8 +510,13 @@ async fn confirmed_unspent_failure_retries_transient_sqlite_disposition_without_
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "retry", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "retry",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );

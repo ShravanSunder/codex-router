@@ -260,8 +260,13 @@ mod tests {
         ));
         let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
         let account_id = account_id("acct_active_bundle");
-        let account = AccountRecord::new(account_id.clone(), "active", AccountStatus::Enabled)
-            .with_active_credential_generation(2);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "active",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(2);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let inactive_key = must_ok(account_credential_bundle_key(&account_id, 1));
         let active_key = must_ok(account_credential_bundle_key(&account_id, 2));
@@ -318,8 +323,13 @@ mod tests {
         ));
         let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
         let account_id = account_id("acct_refresh_bundle");
-        let account = AccountRecord::new(account_id.clone(), "refresh", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "refresh",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
         must_ok(
@@ -373,9 +383,13 @@ mod tests {
         ));
         let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
         let account_id = account_id("acct_secret_write_failpoint");
-        let account =
-            AccountRecord::new(account_id.clone(), "secret-write", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "secret-write",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
         must_ok(
@@ -435,9 +449,13 @@ mod tests {
         ));
         let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
         let account_id = account_id("acct_state_commit_failpoint");
-        let account =
-            AccountRecord::new(account_id.clone(), "state-commit", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "state-commit",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
         must_ok(
@@ -493,9 +511,13 @@ mod tests {
         let state = must_ok(SqliteStateStore::open(&database_path));
         let secrets = must_ok(FileSecretStore::open(&secret_path));
         let account_id = account_id("acct_single_flight_bundle");
-        let account =
-            AccountRecord::new(account_id.clone(), "single-flight", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "single-flight",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
         let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
         must_ok(

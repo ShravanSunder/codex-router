@@ -46,10 +46,14 @@ async fn populated_native_baseline_requires_writable_upgrade_and_preserves_accou
         .expect("secret fixture should save");
 
     let mut connection = open_test_connection(database_path, false).await;
-    sqlx::query("INSERT INTO accounts VALUES ('preserved-account', 'preserved', 'disabled', 41)")
-        .execute(&mut connection)
-        .await
-        .expect("account should seed");
+    sqlx::query(
+        "INSERT INTO accounts (
+            account_id, label, status, active_credential_generation, provider
+         ) VALUES ('preserved-account', 'preserved', 'disabled', 41, 'openai')",
+    )
+    .execute(&mut connection)
+    .await
+    .expect("account should seed");
     sqlx::query("INSERT INTO quota_snapshots VALUES ('preserved-account', 'provider', 123, 'responses', 44, 999, 7, 0)")
         .execute(&mut connection)
         .await
@@ -58,7 +62,11 @@ async fn populated_native_baseline_requires_writable_upgrade_and_preserves_accou
         .execute(&mut connection)
         .await
         .expect("new table should be removed for baseline fixture");
-    let maintenance_version = MIGRATOR.iter().last().expect("new migration").version;
+    let maintenance_version = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 202609250001)
+        .expect("credential maintenance migration")
+        .version;
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?1")
         .bind(maintenance_version)
         .execute(&mut connection)
