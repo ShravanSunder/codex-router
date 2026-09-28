@@ -354,7 +354,10 @@ impl AcpConversation {
                 ));
             }
             self.target = Some(target.clone());
-            let params = json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata_effort(request.effort.as_deref())}});
+            let params = json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":{
+                "codexRouter":router_metadata_effort(request.effort.as_deref()),
+                "router":{"sessionRef":target}
+            }});
             self.validate("LoadSessionRequest", &params)
                 .map_err(|source| {
                     crate::OperationError::before_dispatch("load", Some(target.clone()), source)

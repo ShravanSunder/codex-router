@@ -351,6 +351,11 @@ async fn reusable_acp_client_orders_load_updates_and_detaches_on_caller_cancel()
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(frame["method"], method);
             if method == "session/load" {
+                let expected = json!({"endpoint":endpoint,"sessionId":"owned"});
+                if frame.pointer("/params/_meta/router/sessionRef") != Some(&expected) {
+                    writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":frame["id"],"error":{"code":-32602,"message":"ACP Session endpoint unknown; include _meta.router.sessionRef"}})).as_bytes()).await.unwrap();
+                    return;
+                }
                 writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"owned","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"history"}}}})).as_bytes()).await.unwrap();
             }
             writer

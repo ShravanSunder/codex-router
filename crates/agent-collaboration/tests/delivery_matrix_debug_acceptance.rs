@@ -43,6 +43,22 @@ async fn delivery_matrix_reaches_codex_and_fixture_claude_peer() -> ProofResult<
 
 #[tokio::test]
 #[ignore = "requires a fresh owned isolated CLI Host with scripted provider fixture"]
+async fn codex_acp_cli_create_then_prompt_load_route() -> ProofResult<()> {
+    let config_guard = ConfigHashGuard::capture()?;
+    let mut proof = ProofContext::connect().await?;
+    let creator = proof.start_thread("Codex ACP load-route creator").await?;
+    let target = cli_codex_create_then_prompt_load_route(&proof, &creator).await?;
+    proof.record(
+        "codexAcpLoadRoute",
+        json!({"target":target,"status":"passedLoadRoute"}),
+    )?;
+    config_guard.verify()?;
+    proof.client.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh owned isolated CLI Host with scripted provider fixture"]
 async fn approval_notice_reaches_codex_recipient() -> ProofResult<()> {
     let config_guard = ConfigHashGuard::capture()?;
     let result = async {
@@ -123,6 +139,16 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
     let mut peer = PeerFixture::start(&proof).await?;
     let sender = proof.start_thread("Delivery matrix sender").await?;
     let mut records = Vec::new();
+
+    // CLI create and prompt open separate ACP connections. This catches a
+    // multi-route load rejection that message_send to codex-local cannot see.
+    let codex_load = cli_codex_create_then_prompt_load_route(&proof, &sender).await?;
+    records.push(
+        json!({"producer":"conversationPromptCli","target":"codexAcp",
+        "status":"pass","evidence":"separate-connection session/load routed past ACP -32602",
+        "sessionId":codex_load.session_id}),
+    );
+    config_guard.verify()?;
 
     for producer in [DirectProducer::Cli, DirectProducer::Mcp] {
         let codex = proof.start_thread(producer.codex_role()).await?;
@@ -348,6 +374,89 @@ async fn create_empty_conversation(
             Err("Empty conversation creation stayed pending".into())
         }
     }
+}
+
+async fn cli_codex_create_then_prompt_load_route(
+    proof: &ProofContext,
+    creator: &SessionRef,
+) -> ProofResult<SessionRef> {
+    let creator_json = serde_json::to_string(creator)?;
+    let create = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "conversation",
+            "create",
+            "--endpoint",
+            "codex-local",
+            "--model",
+            "gpt-5.6-luna",
+            "--effort",
+            "low",
+            "--access",
+            "workspace-write",
+            "--from",
+            &creator_json,
+            "--cwd",
+        ])
+        .arg(&proof.workspace)
+        .arg("--service-directory")
+        .arg(&proof.service_directory)
+        .arg("--json")
+        .output()
+        .await?;
+    if !create.status.success() {
+        return Err("CLI conversation create failed in Codex ACP matrix cell".into());
+    }
+    let created = String::from_utf8(create.stdout)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["kind"] == "created")
+        .ok_or("CLI conversation create did not return a target")?;
+    let target: SessionRef = serde_json::from_value(created["target"].clone())?;
+    let target_json = serde_json::to_string(&target)?;
+    let prompt = tokio::time::timeout(
+        Duration::from_secs(35),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args([
+                "conversation",
+                "prompt",
+                "--to",
+                &target_json,
+                "--from",
+                &creator_json,
+                "--cwd",
+            ])
+            .arg(&proof.workspace)
+            .args([
+                "--text",
+                "Reply briefly without tools.",
+                "--timeout-seconds",
+                "15",
+                "--service-directory",
+            ])
+            .arg(&proof.service_directory)
+            .arg("--json")
+            .output(),
+    )
+    .await??;
+    let records = String::from_utf8(prompt.stdout)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    if records.is_empty() {
+        return Err("CLI conversation prompt returned no result".into());
+    }
+    if !prompt.status.success()
+        && records
+            .last()
+            .and_then(|record| record.pointer("/error/stage"))
+            .and_then(Value::as_str)
+            != Some("prompt")
+    {
+        return Err("Codex ACP conversation failed before prompt dispatch".into());
+    }
+    // The isolated matrix home has no model authentication. Prompt settlement
+    // is a separate live cell; here only the route's load admission is proved.
+    Ok(target)
 }
 
 async fn wait_for_input_marker(
