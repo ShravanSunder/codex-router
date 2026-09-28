@@ -404,6 +404,7 @@ where
 
         let mut projected_account =
             BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
+                .with_provider(input.provider())
                 .with_account_enabled(input.account_status() == AccountStatus::Enabled)
                 .with_active_credential(input.active_credential_generation().is_some())
                 .with_current_active_sessions(current_active_sessions);
@@ -662,6 +663,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use codex_router_core::ids::AccountId;
+    use codex_router_core::provider::Provider;
 
     use crate::account::AccountRecord;
     use crate::account::AccountStatus;
@@ -739,6 +741,21 @@ mod tests {
             "projection should use the read-only active-count snapshot"
         );
         assert_eq!(projection.accounts()[0].account_id(), &account_id);
+    }
+
+    #[tokio::test]
+    async fn projection_preserves_account_provider_for_route_profile_filtering() {
+        let account_id = account_id("acct_claude_projection");
+        let state = ReadOnlyProjectionPurityRepository::new(account_id.clone())
+            .with_provider(Provider::Claude);
+
+        let projection =
+            project_route_band_selection_inputs_read_only(&state, "claude_messages", 1_000, 7_200)
+                .await
+                .unwrap_or_else(|error| panic!("provider projection should succeed: {error}"));
+
+        assert_eq!(projection.accounts().len(), 1);
+        assert_eq!(projection.accounts()[0].provider(), Provider::Claude);
     }
 
     #[tokio::test]
@@ -978,6 +995,7 @@ mod tests {
 
     struct ReadOnlyProjectionPurityRepository {
         account_id: AccountId,
+        provider: Provider,
         mutating_active_count_reads: AtomicUsize,
         read_only_active_count_reads: AtomicUsize,
         rollup_refreshes: AtomicUsize,
@@ -992,6 +1010,7 @@ mod tests {
         fn new(account_id: AccountId) -> Self {
             Self {
                 account_id,
+                provider: Provider::Openai,
                 mutating_active_count_reads: AtomicUsize::new(0),
                 read_only_active_count_reads: AtomicUsize::new(0),
                 rollup_refreshes: AtomicUsize::new(0),
@@ -1008,6 +1027,11 @@ mod tests {
                 policy_error: true,
                 ..Self::new(account_id)
             }
+        }
+
+        fn with_provider(mut self, provider: Provider) -> Self {
+            self.provider = provider;
+            self
         }
 
         fn with_policy_floor(
@@ -1057,14 +1081,17 @@ mod tests {
                 .with_reset_unix_seconds(2_000)
                 .with_observed_unix_seconds(now_unix_seconds)
                 .with_effective(true);
-                Ok(vec![SelectorQuotaInput::new(
-                    self.account_id.clone(),
-                    "safe-label",
-                    AccountStatus::Enabled,
-                    Some(1),
-                    route_band,
-                    vec![window],
-                )])
+                Ok(vec![
+                    SelectorQuotaInput::new(
+                        self.account_id.clone(),
+                        "safe-label",
+                        AccountStatus::Enabled,
+                        Some(1),
+                        route_band,
+                        vec![window],
+                    )
+                    .with_provider(self.provider),
+                ])
             })
         }
 

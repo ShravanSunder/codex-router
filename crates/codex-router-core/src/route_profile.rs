@@ -56,6 +56,27 @@ pub enum WindowKind {
     Weekly,
 }
 
+impl WindowKind {
+    /// Returns the stable storage name for this quota window.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FiveHour => "five_hour",
+            Self::Weekly => "weekly",
+        }
+    }
+
+    /// Parses a stable storage name for a quota window.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "five_hour" => Some(Self::FiveHour),
+            "weekly" => Some(Self::Weekly),
+            _ => None,
+        }
+    }
+}
+
 /// Selection rule applied to a route's quota window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowRule {
@@ -100,6 +121,29 @@ const OPENAI_WINDOWS: [WindowPolicy; 1] = [WindowPolicy {
     rule: WindowRule::LegacyOpenAi,
 }];
 
+/// Default percentage of five-hour quota use at which a Claude account becomes reserve.
+pub const DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT: u8 = 95;
+
+/// Returns Claude's two selection-window inputs for one configured near-full threshold.
+#[must_use]
+pub const fn claude_window_policies_for_percent(percent: u8) -> [WindowPolicy; 2] {
+    [
+        WindowPolicy {
+            kind: WindowKind::FiveHour,
+            rule: WindowRule::NearFullReserve { percent },
+        },
+        WindowPolicy {
+            kind: WindowKind::Weekly,
+            rule: WindowRule::WeeklyFloor {
+                early_switch_bps: 300,
+            },
+        },
+    ]
+}
+
+pub const CLAUDE_WINDOW_POLICIES: [WindowPolicy; 2] =
+    claude_window_policies_for_percent(DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT);
+
 /// Current OpenAI Responses WebSocket routing behavior.
 pub const RESPONSES_WEBSOCKET: RouteProfile = RouteProfile {
     name: "responses-websocket",
@@ -126,9 +170,21 @@ pub const RESPONSES_HTTP: RouteProfile = RouteProfile {
     windows: &OPENAI_WINDOWS,
 };
 
+/// Claude Messages routing behavior.
+pub const CLAUDE_MESSAGES: RouteProfile = RouteProfile {
+    name: "claude-messages",
+    provider: Provider::Claude,
+    continuation: ContinuationModel::ClientCarried,
+    switch_point: SwitchPoint::NextRequest,
+    pin_renewal: PinRenewal::OnSuccess,
+    attempt_policy: AttemptPolicy::AtMostTwo,
+    windows: &CLAUDE_WINDOW_POLICIES,
+};
+
 #[cfg(test)]
 mod tests {
     use super::AttemptPolicy;
+    use super::CLAUDE_MESSAGES;
     use super::ContinuationModel;
     use super::HardPinKey;
     use super::PinRenewal;
@@ -136,6 +192,7 @@ mod tests {
     use super::RESPONSES_WEBSOCKET;
     use super::SwitchPoint;
     use super::WindowKind;
+    use super::WindowPolicy;
     use super::WindowRule;
     use crate::provider::Provider;
 
@@ -180,5 +237,41 @@ mod tests {
         };
         assert_eq!(window.kind, WindowKind::Weekly);
         assert_eq!(window.rule, WindowRule::LegacyOpenAi);
+    }
+
+    #[test]
+    fn claude_messages_profile_encodes_quota_window_policy() {
+        assert_eq!(CLAUDE_MESSAGES.provider, Provider::Claude);
+        assert_eq!(
+            CLAUDE_MESSAGES.continuation,
+            ContinuationModel::ClientCarried
+        );
+        assert_eq!(CLAUDE_MESSAGES.switch_point, SwitchPoint::NextRequest);
+        assert_eq!(CLAUDE_MESSAGES.pin_renewal, PinRenewal::OnSuccess);
+        assert_eq!(CLAUDE_MESSAGES.attempt_policy, AttemptPolicy::AtMostTwo);
+        assert_eq!(
+            CLAUDE_MESSAGES.windows,
+            &[
+                WindowPolicy {
+                    kind: WindowKind::FiveHour,
+                    rule: WindowRule::NearFullReserve { percent: 95 },
+                },
+                WindowPolicy {
+                    kind: WindowKind::Weekly,
+                    rule: WindowRule::WeeklyFloor {
+                        early_switch_bps: 300,
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn window_kinds_have_stable_storage_names_and_reject_unknown_values() {
+        assert_eq!(WindowKind::FiveHour.as_str(), "five_hour");
+        assert_eq!(WindowKind::parse("five_hour"), Some(WindowKind::FiveHour));
+        assert_eq!(WindowKind::Weekly.as_str(), "weekly");
+        assert_eq!(WindowKind::parse("weekly"), Some(WindowKind::Weekly));
+        assert_eq!(WindowKind::parse("future_window"), None);
     }
 }

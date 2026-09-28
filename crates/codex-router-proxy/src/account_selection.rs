@@ -14,6 +14,11 @@ use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::CLAUDE_WINDOW_POLICIES;
+use codex_router_core::route_profile::RESPONSES_HTTP;
+use codex_router_core::route_profile::RESPONSES_WEBSOCKET;
+use codex_router_core::route_profile::RouteProfile;
+use codex_router_core::route_profile::WindowPolicy;
 use codex_router_core::routes::RouteBand;
 use codex_router_quota::snapshot::SnapshotFreshness;
 use codex_router_selection::burn_down::AccountAvailability;
@@ -32,6 +37,7 @@ use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
 use codex_router_selection::burn_down::assess_route_band;
 use codex_router_selection::reservation::ReservationBook;
 use codex_router_selection::reservation::ReservationHandle;
+use codex_router_selection::selection_outcome::SelectionOutcome;
 use codex_router_selection::weighted_deficit::WeightedDeficitSelector;
 #[cfg(test)]
 use codex_router_state::account::AccountStatus;
@@ -62,6 +68,7 @@ use crate::db_write_actor::DbWriteCommand;
 use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
 use crate::routes::RouteClass;
+use crate::routes::RouteKind;
 use crate::routes::classify_route;
 use crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
 use crate::session_account_affinity_cache::SessionAccountAffinityCache;
@@ -79,8 +86,8 @@ pub(crate) use floor_switch_peer::RuntimeFloorSwitchPeerAssessor;
 
 /// Process-lifetime weighted state partitioned by route band.
 pub type RouteBandWeightedSelectors = Arc<Mutex<HashMap<String, WeightedDeficitSelector>>>;
-/// Process-lifetime account-hold state partitioned by route band.
-pub type RouteBandAccountHolds = Arc<Mutex<HashMap<String, AccountHold>>>;
+/// Process-lifetime account-hold state partitioned by provider and route band.
+pub type RouteBandAccountHolds = Arc<Mutex<HashMap<ProviderRouteBand, AccountHold>>>;
 /// Process-lifetime active reservation state partitioned by route band.
 pub type RouteBandReservationBooks = Arc<Mutex<HashMap<String, ReservationBook>>>;
 /// Process-lifetime runtime quota exhaustion state partitioned by route band.
@@ -89,6 +96,36 @@ pub type RouteBandRuntimeExhaustions = Arc<Mutex<HashMap<String, Vec<RuntimeQuot
 pub type RouteBandQueueHealth = Arc<Mutex<HashMap<String, RouteBandQueueDegradedState>>>;
 /// Async critical section for active-count projection and reservation.
 pub(crate) type SelectionReservationLock = Arc<AsyncMutex<()>>;
+
+/// Process-local cooldown scope for one provider's route band.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ProviderRouteBand {
+    provider: Provider,
+    route_band: RouteBand,
+}
+
+impl ProviderRouteBand {
+    /// Creates a cooldown scope for a provider route.
+    #[must_use]
+    pub const fn new(provider: Provider, route_band: RouteBand) -> Self {
+        Self {
+            provider,
+            route_band,
+        }
+    }
+
+    /// Returns the provider scoped by this cooldown key.
+    #[must_use]
+    pub const fn provider(self) -> Provider {
+        self.provider
+    }
+
+    /// Returns the route band scoped by this cooldown key.
+    #[must_use]
+    pub const fn route_band(self) -> RouteBand {
+        self.route_band
+    }
+}
 
 /// Process-local dependencies shared by async account selectors.
 #[derive(Clone)]
@@ -449,7 +486,7 @@ impl Drop for ActiveReservationGuardInner {
     }
 }
 
-/// Process-local account hold for one route band.
+/// Process-local account hold for one provider route band.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountHold {
     account_id: AccountId,
@@ -753,6 +790,7 @@ where
     selection_reservation_lock: SelectionReservationLock,
     minimum_account_hold_cooldown_seconds: u64,
     clock: UnixClock,
+    claude_window_policies: [WindowPolicy; 2],
 }
 
 #[cfg(test)]
@@ -832,6 +870,7 @@ where
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
+            claude_window_policies: CLAUDE_WINDOW_POLICIES,
         }
     }
 
@@ -857,6 +896,7 @@ where
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
+            claude_window_policies: CLAUDE_WINDOW_POLICIES,
         }
     }
 
@@ -884,6 +924,7 @@ where
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
+            claude_window_policies: CLAUDE_WINDOW_POLICIES,
         }
     }
 
@@ -912,6 +953,7 @@ where
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
+            claude_window_policies: CLAUDE_WINDOW_POLICIES,
         }
     }
 
@@ -961,6 +1003,7 @@ where
             selection_reservation_lock: runtime_state.selection_reservation_lock,
             minimum_account_hold_cooldown_seconds,
             clock,
+            claude_window_policies: CLAUDE_WINDOW_POLICIES,
         }
     }
 
@@ -980,6 +1023,13 @@ where
         self.session_affinity_writer = Some(db_write_actor);
         self
     }
+
+    /// Sets the Claude route window policies supplied by runtime configuration.
+    #[must_use]
+    pub const fn with_window_policies(mut self, policies: [WindowPolicy; 2]) -> Self {
+        self.claude_window_policies = policies;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -995,6 +1045,7 @@ where
     ) -> Result<SelectedAccountDecision, HttpProxyError> {
         let route_kind = route_kind_for_request(request)?;
         let route_band = route_kind.route_band();
+        let route_profile = route_profile_for_kind(route_kind);
         let now_unix_seconds = (self.clock)();
         let selector_inputs = self
             .state_repository
@@ -1007,8 +1058,11 @@ where
             .iter()
             .map(account_input_from_selector_input)
             .collect::<Vec<_>>();
+        let selector_accounts =
+            filter_selector_accounts_for_provider(selector_accounts, route_profile.provider);
         let assessment_input =
-            BurnDownRouteBandAssessmentInput::new(route_band, now_unix_seconds, selector_accounts);
+            BurnDownRouteBandAssessmentInput::new(route_band, now_unix_seconds, selector_accounts)
+                .with_route_profile(route_profile);
         let assessment = assess_route_band(assessment_input);
         if assessment.selected_pool() == SelectedPool::None {
             return Err(empty_assessment_selection_error(&assessment));
@@ -1071,6 +1125,7 @@ where
             }
             return select_affinity_owner(
                 route_band,
+                route_profile.provider,
                 owner.account_id(),
                 &assessment,
                 &mut account_holds,
@@ -1081,6 +1136,7 @@ where
 
         select_from_burn_down_assessment(
             route_band.as_str(),
+            route_profile.provider,
             &assessment,
             weighted_selector,
             &mut account_holds,
@@ -1106,6 +1162,7 @@ where
         Box::pin(async move {
             let route_kind = route_kind_for_request(request)?;
             let route_band = route_kind.route_band();
+            let route_profile = route_profile_for_kind(route_kind);
             let _selection_reservation_guard = self.selection_reservation_lock.lock().await;
             let now_unix_seconds = (self.clock)();
             route_band_queue_health_allows_selection(&self.route_band_queue_health, route_band)
@@ -1142,13 +1199,20 @@ where
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
             })?;
+            let selector_accounts =
+                filter_selector_accounts_for_provider(selector_accounts, route_profile.provider);
             let short_quota_wait_delay_seconds =
                 short_quota_wait_delay_seconds(&selector_accounts, now_unix_seconds);
-            let assessment_input = BurnDownRouteBandAssessmentInput::new(
+            let mut assessment_input = BurnDownRouteBandAssessmentInput::new(
                 route_band,
                 now_unix_seconds,
                 selector_accounts,
-            );
+            )
+            .with_route_profile(route_profile);
+            if route_profile.provider == Provider::Claude {
+                assessment_input =
+                    assessment_input.with_window_policies(self.claude_window_policies.to_vec());
+            }
             let assessment = assess_route_band(assessment_input);
             let affinity_owner_account_id = if route_kind.previous_response_affinity_capable() {
                 match previous_response_id(request)? {
@@ -1211,7 +1275,7 @@ where
                 Some(session_id) => {
                     if let Some(cached) = lookup_session_account_affinity(
                         &self.session_affinity_cache,
-                        Provider::Openai,
+                        route_profile.provider,
                         session_id,
                         route_band,
                         self.session_affinity_writer.as_ref(),
@@ -1225,7 +1289,7 @@ where
                         let persisted =
                             AsyncSessionAccountAffinityRepository::load_session_account_affinity(
                                 self.state_repository,
-                                Provider::Openai,
+                                route_profile.provider,
                                 session_id,
                             )
                             .await
@@ -1236,7 +1300,7 @@ where
                             })?;
                         reconcile_persisted_session_account_affinity(
                             &self.session_affinity_cache,
-                            Provider::Openai,
+                            route_profile.provider,
                             session_id,
                             persisted.as_ref(),
                             route_band,
@@ -1279,6 +1343,7 @@ where
                 }
                 let selected = select_affinity_owner(
                     route_band,
+                    route_profile.provider,
                     &owner_account_id,
                     &assessment,
                     &mut account_holds,
@@ -1295,6 +1360,7 @@ where
                 )?;
                 return publish_selected_session_affinity(
                     selected,
+                    route_profile.provider,
                     &self.session_affinity_cache,
                     self.session_affinity_writer.as_ref(),
                     session_id,
@@ -1305,13 +1371,15 @@ where
 
             if let Some(session_affinity) = session_affinity.as_ref()
                 && assessment_account_is_available(&assessment, session_affinity.account_id())
-                && !assessment_account_yields_for_floor_switch(
+                && !assessment_account_must_yield(
                     &assessment,
                     session_affinity.account_id(),
+                    route_profile,
                 )
             {
                 let selected = select_affinity_owner(
                     route_band,
+                    route_profile.provider,
                     session_affinity.account_id(),
                     &assessment,
                     &mut account_holds,
@@ -1328,6 +1396,7 @@ where
                 )?;
                 return publish_selected_session_affinity(
                     selected,
+                    route_profile.provider,
                     &self.session_affinity_cache,
                     self.session_affinity_writer.as_ref(),
                     session_id,
@@ -1338,6 +1407,7 @@ where
 
             let selected = select_from_burn_down_assessment(
                 route_band.as_str(),
+                route_profile.provider,
                 &assessment,
                 weighted_selector,
                 &mut account_holds,
@@ -1354,6 +1424,7 @@ where
             )?;
             publish_selected_session_affinity(
                 selected,
+                route_profile.provider,
                 &self.session_affinity_cache,
                 self.session_affinity_writer.as_ref(),
                 session_id,
@@ -1390,21 +1461,23 @@ fn account_id_from_affinity_owner_lookup(
 
 fn select_affinity_owner(
     route_band: RouteBand,
+    provider: Provider,
     owner_account_id: &AccountId,
     assessment: &BurnDownRouteBandAssessmentResult,
-    account_holds: &mut HashMap<String, AccountHold>,
+    account_holds: &mut HashMap<ProviderRouteBand, AccountHold>,
     now_unix_seconds: u64,
     selection_reason: &'static str,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
+    let selection_scope = ProviderRouteBand::new(provider, route_band);
     if !assessment_account_is_available(assessment, owner_account_id) {
-        account_holds.remove(route_band.as_str());
+        account_holds.remove(&selection_scope);
         return Err(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
         });
     }
 
     account_holds.insert(
-        route_band.as_str().to_owned(),
+        selection_scope,
         AccountHold::new(owner_account_id.clone(), now_unix_seconds),
     );
     Ok(SelectedAccountDecision::new(
@@ -1426,18 +1499,26 @@ fn assessment_account_is_available(
     })
 }
 
-fn assessment_account_yields_for_floor_switch(
+fn assessment_account_must_yield(
     assessment: &BurnDownRouteBandAssessmentResult,
     account_id: &AccountId,
+    route_profile: RouteProfile,
 ) -> bool {
     assessment.accounts().iter().any(|account| {
-        account.account_id() == account_id
-            && account.routing_reason() == RoutingReason::HeldFloorSwitch
+        if account.account_id() != account_id {
+            return false;
+        }
+        if route_profile.provider == Provider::Claude {
+            return assessment.selected_pool() == SelectedPool::Usable
+                && account.availability() == AccountAvailability::Reserve;
+        }
+        account.routing_reason() == RoutingReason::HeldFloorSwitch
     })
 }
 
 fn publish_selected_session_affinity(
     selected: SelectedAccountDecision,
+    provider: Provider,
     cache: &SharedSessionAccountAffinityCache,
     writer: Option<&DbWriteActor>,
     session_id: Option<&str>,
@@ -1450,7 +1531,7 @@ fn publish_selected_session_affinity(
 
     let published = publish_session_account_affinity(
         cache,
-        Provider::Openai,
+        provider,
         session_id,
         selected.account_id(),
         route_band,
@@ -1619,20 +1700,22 @@ fn select_from_burn_down_assessment_without_hold(
 
 fn select_from_burn_down_assessment(
     route_band: &str,
+    provider: Provider,
     assessment: &BurnDownRouteBandAssessmentResult,
     _weighted_selector: &mut WeightedDeficitSelector,
-    account_holds: &mut HashMap<String, AccountHold>,
+    account_holds: &mut HashMap<ProviderRouteBand, AccountHold>,
     minimum_account_hold_cooldown_seconds: u64,
     now_unix_seconds: u64,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
+    let selection_scope = ProviderRouteBand::new(provider, assessment.route_band());
     let weighted_candidates = assessment.weighted_candidates();
     if weighted_candidates.is_empty() {
-        account_holds.remove(route_band);
+        account_holds.remove(&selection_scope);
         return Err(empty_assessment_selection_error(assessment));
     }
 
     if let Some(held_account_id) = reusable_held_account_id(
-        route_band,
+        selection_scope,
         account_holds,
         weighted_candidates,
         minimum_account_hold_cooldown_seconds,
@@ -1654,7 +1737,7 @@ fn select_from_burn_down_assessment(
             reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
         })?;
     account_holds.insert(
-        route_band.to_owned(),
+        selection_scope,
         AccountHold::new(selected_account_id.clone(), now_unix_seconds),
     );
 
@@ -1708,9 +1791,13 @@ fn assessment_has_unavailable_quota_authority(
 fn strict_preferred_account_id(
     assessment: &BurnDownRouteBandAssessmentResult,
 ) -> Result<AccountId, HttpProxyError> {
-    assessment
-        .preferred_next()
-        .cloned()
+    let typed_choice =
+        SelectionOutcome::chosen_from_assessment(assessment).and_then(|outcome| match outcome {
+            SelectionOutcome::Chosen { account, .. } => Some(account),
+            SelectionOutcome::Unavailable(_) => None,
+        });
+    typed_choice
+        .or_else(|| assessment.preferred_next().cloned())
         .or_else(|| {
             assessment
                 .weighted_candidates()
@@ -1864,13 +1951,13 @@ fn exhausted_account_short_quota_wait_delay_seconds(
 }
 
 fn reusable_held_account_id(
-    route_band: &str,
-    account_holds: &mut HashMap<String, AccountHold>,
+    selection_scope: ProviderRouteBand,
+    account_holds: &mut HashMap<ProviderRouteBand, AccountHold>,
     weighted_candidates: &[(AccountId, u32)],
     minimum_account_hold_cooldown_seconds: u64,
     now_unix_seconds: u64,
 ) -> Option<AccountId> {
-    let hold = account_holds.get(route_band)?;
+    let hold = account_holds.get(&selection_scope)?;
     let hold_age_seconds = now_unix_seconds.saturating_sub(hold.selected_unix_seconds);
     let reusable = hold_age_seconds < minimum_account_hold_cooldown_seconds
         && weighted_candidates
@@ -1879,7 +1966,7 @@ fn reusable_held_account_id(
     if reusable {
         Some(hold.account_id.clone())
     } else {
-        account_holds.remove(route_band);
+        account_holds.remove(&selection_scope);
         None
     }
 }
@@ -1893,8 +1980,19 @@ fn account_input_from_selector_input(input: &SelectorQuotaInput) -> BurnDownAcco
         .collect::<Vec<_>>();
 
     BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
+        .with_provider(input.provider())
         .with_account_enabled(input.account_status() == AccountStatus::Enabled)
         .with_active_credential(input.active_credential_generation().is_some())
+}
+
+fn filter_selector_accounts_for_provider(
+    accounts: Vec<BurnDownAccountInput>,
+    provider: Provider,
+) -> Vec<BurnDownAccountInput> {
+    accounts
+        .into_iter()
+        .filter(|account| account.provider() == provider)
+        .collect()
 }
 
 fn active_reservation_book_for_route_band(
@@ -2334,6 +2432,13 @@ fn route_kind_for_request(
     }
 }
 
+fn route_profile_for_kind(route_kind: RouteKind) -> RouteProfile {
+    match route_kind {
+        RouteKind::ResponsesWebSocket => RESPONSES_WEBSOCKET,
+        _ => RESPONSES_HTTP,
+    }
+}
+
 const fn transport_label_for_request(request: &HttpProxyRequest) -> &'static str {
     if request.websocket_upgrade() {
         "websocket"
@@ -2576,6 +2681,160 @@ mod tests {
         assert_eq!(
             super::session_affinity_lookup_session_id(Some("session-id"), true),
             None
+        );
+    }
+
+    fn claude_quota_account(
+        account_label: &str,
+        five_hour_remaining: u32,
+        weekly_remaining: u32,
+    ) -> codex_router_selection::burn_down::BurnDownAccountInput {
+        use codex_router_selection::burn_down::BurnDownAccountInput;
+        use codex_router_selection::burn_down::QuotaWindowFact;
+        use codex_router_selection::burn_down::QuotaWindowStatus;
+        use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
+        use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
+
+        let now_unix_seconds = 1_000_000;
+        let account_id = AccountId::new(format!("acct_{account_label}"))
+            .unwrap_or_else(|error| panic!("test account id should be valid: {error}"));
+        BurnDownAccountInput::new(
+            account_id,
+            account_label,
+            vec![
+                QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
+                    .with_remaining_headroom(five_hour_remaining)
+                    .with_reset_unix_seconds(now_unix_seconds + V1_SHORT_WINDOW_SECONDS)
+                    .with_observed_unix_seconds(now_unix_seconds),
+                QuotaWindowFact::new(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
+                    .with_remaining_headroom(weekly_remaining)
+                    .with_reset_unix_seconds(now_unix_seconds + V1_WEEKLY_WINDOW_SECONDS)
+                    .with_observed_unix_seconds(now_unix_seconds),
+            ],
+        )
+        .with_provider(Provider::Claude)
+    }
+
+    #[test]
+    fn route_profile_provider_filter_removes_other_accounts_before_derived_delays() {
+        let openai_account = codex_router_selection::burn_down::BurnDownAccountInput::new(
+            account_id("acct_openai_short_reset"),
+            "openai-short-reset",
+            Vec::new(),
+        );
+        let claude_account = claude_quota_account("claude_short_reset", 80, 80);
+
+        let claude_accounts = super::filter_selector_accounts_for_provider(
+            vec![openai_account, claude_account],
+            Provider::Claude,
+        );
+
+        assert_eq!(claude_accounts.len(), 1);
+        assert_eq!(claude_accounts[0].provider(), Provider::Claude);
+        assert_eq!(
+            claude_accounts[0].account_id().as_str(),
+            "acct_claude_short_reset"
+        );
+    }
+
+    #[test]
+    fn claude_reserve_pin_yields_only_when_a_preferred_account_exists() {
+        use codex_router_core::route_profile::CLAUDE_MESSAGES;
+        use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
+        use codex_router_selection::burn_down::SelectedPool;
+        use codex_router_selection::burn_down::assess_route_band;
+
+        let reserve = claude_quota_account("reserve", 5, 80);
+        let reserve_id = reserve.account_id().clone();
+        let preferred = claude_quota_account("preferred", 6, 80);
+        let preferred_assessment = assess_route_band(
+            BurnDownRouteBandAssessmentInput::new(
+                RouteBand::Responses,
+                1_000_000,
+                vec![reserve, preferred],
+            )
+            .with_route_profile(CLAUDE_MESSAGES),
+        );
+
+        assert_eq!(preferred_assessment.selected_pool(), SelectedPool::Usable);
+        assert!(super::assessment_account_must_yield(
+            &preferred_assessment,
+            &reserve_id,
+            CLAUDE_MESSAGES,
+        ));
+
+        let lone_reserve = claude_quota_account("lone_reserve", 5, 80);
+        let lone_reserve_id = lone_reserve.account_id().clone();
+        let reserve_assessment = assess_route_band(
+            BurnDownRouteBandAssessmentInput::new(
+                RouteBand::Responses,
+                1_000_000,
+                vec![lone_reserve],
+            )
+            .with_route_profile(CLAUDE_MESSAGES),
+        );
+
+        assert_eq!(reserve_assessment.selected_pool(), SelectedPool::Reserve);
+        assert!(!super::assessment_account_must_yield(
+            &reserve_assessment,
+            &lone_reserve_id,
+            CLAUDE_MESSAGES,
+        ));
+    }
+
+    #[test]
+    fn claude_cooldown_does_not_replace_an_openai_hold_on_the_same_route_band() {
+        use codex_router_core::route_profile::CLAUDE_MESSAGES;
+        use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
+        use codex_router_selection::burn_down::assess_route_band;
+
+        let openai_account_id = account_id("acct_openai_cooldown");
+        let claude_account = claude_quota_account("claude_cooldown", 80, 80);
+        let assessment = assess_route_band(
+            BurnDownRouteBandAssessmentInput::new(
+                RouteBand::Responses,
+                1_000_000,
+                vec![claude_account],
+            )
+            .with_route_profile(CLAUDE_MESSAGES),
+        );
+        let mut holds = HashMap::from([(
+            super::ProviderRouteBand::new(Provider::Openai, RouteBand::Responses),
+            super::AccountHold::new(openai_account_id.clone(), 999_990),
+        )]);
+        let mut weighted_selector =
+            codex_router_selection::weighted_deficit::WeightedDeficitSelector::default();
+
+        let selected = super::select_from_burn_down_assessment(
+            "responses",
+            Provider::Claude,
+            &assessment,
+            &mut weighted_selector,
+            &mut holds,
+            120,
+            1_000_000,
+        )
+        .unwrap_or_else(|error| panic!("Claude selection should succeed: {error}"));
+
+        assert_eq!(selected.account_id().as_str(), "acct_claude_cooldown");
+        assert_eq!(
+            holds
+                .get(&super::ProviderRouteBand::new(
+                    Provider::Openai,
+                    RouteBand::Responses,
+                ))
+                .map(|hold| hold.account_id.as_str()),
+            Some(openai_account_id.as_str()),
+            "selecting Claude must not erase the OpenAI cooldown entry"
+        );
+        assert_eq!(
+            holds
+                .get(&super::ProviderRouteBand::new(
+                    Provider::Claude,
+                    RouteBand::Responses,
+                ))
+                .map(|hold| hold.account_id.as_str()),
+            Some("acct_claude_cooldown")
         );
     }
 
@@ -3534,7 +3793,7 @@ mod tests {
             ),
         );
         let mut holds = HashMap::from([(
-            "responses".to_owned(),
+            super::ProviderRouteBand::new(Provider::Openai, RouteBand::Responses),
             super::AccountHold::new(weak_account_id.clone(), 9_990),
         )]);
         let mut weighted_selector =
@@ -3542,6 +3801,7 @@ mod tests {
 
         let selected = super::select_from_burn_down_assessment(
             "responses",
+            Provider::Openai,
             &assessment,
             &mut weighted_selector,
             &mut holds,
@@ -3553,7 +3813,12 @@ mod tests {
         assert_eq!(selected.account_id(), &strong_account_id);
         assert_ne!(selected.account_id(), &weak_account_id);
         assert_eq!(
-            holds.get("responses").map(|hold| hold.account_id.as_str()),
+            holds
+                .get(&super::ProviderRouteBand::new(
+                    Provider::Openai,
+                    RouteBand::Responses,
+                ))
+                .map(|hold| hold.account_id.as_str()),
             Some(strong_account_id.as_str())
         );
     }
@@ -3567,6 +3832,7 @@ mod tests {
 
         let selected = super::select_from_burn_down_assessment(
             "responses",
+            Provider::Openai,
             &assessment,
             &mut weighted_selector,
             &mut holds,

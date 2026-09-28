@@ -1,9 +1,11 @@
 //! Command vocabulary, option validation and native argument preservation.
+#[path = "cli_argument_parsing/serve_command.rs"]
+mod serve_command;
+pub(super) use serve_command::ServeCommand;
+
 use super::{
-    AccountCommand, CliError, DEFAULT_CHATGPT_BACKEND_BASE_URL, DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
-    DEFAULT_PROFILE_PORT, DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
-    DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS, HostCommand, LiveCommand, QuotaCommand, Shell,
-    default_router_root, router_secret_root_or_default,
+    AccountCommand, CliError, DEFAULT_PROFILE_PORT, HostCommand, LiveCommand, QuotaCommand, Shell,
+    router_secret_root_or_default,
 };
 use std::ffi::OsString;
 use std::num::NonZeroU64;
@@ -74,181 +76,6 @@ fn is_binary_name(command: &str) -> bool {
         .file_name()
         .and_then(|file_name| file_name.to_str())
         == Some("codex-router")
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ServeCommand {
-    pub(super) listen_host: String,
-    pub(super) port: u16,
-    pub(super) state_db: PathBuf,
-    pub(super) secret_root: PathBuf,
-    pub(super) upstream_base_url: String,
-    pub(super) now_unix_seconds: Option<u64>,
-    pub(super) max_snapshot_age_seconds: u64,
-    pub(super) session_pin_idle_ttl_seconds: u64,
-    pub(super) quota_refresh_interval_seconds: u64,
-    pub(super) background_quota_refresh_enabled: bool,
-    pub(super) require_local_token: bool,
-    pub(super) max_connections: usize,
-    pub(super) audit_file: Option<PathBuf>,
-    pub(super) websocket_registry_report_file: Option<PathBuf>,
-}
-
-impl ServeCommand {
-    fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
-        let options = ServeCommandOptions::parse(parser)?;
-        let listen_host = options
-            .listen_host
-            .unwrap_or_else(|| "127.0.0.1".to_owned());
-        let port = options.port.unwrap_or(DEFAULT_PROFILE_PORT);
-        let router_root = default_router_root()?;
-        let state_db = options
-            .state_db
-            .unwrap_or_else(|| router_root.join("state.sqlite"));
-        let secret_root = options
-            .secret_root
-            .unwrap_or_else(|| router_root.join("secrets"));
-        let upstream_base_url = options
-            .upstream_base_url
-            .unwrap_or_else(|| DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned());
-
-        Ok(Self {
-            listen_host,
-            port,
-            state_db,
-            secret_root,
-            upstream_base_url,
-            now_unix_seconds: options.now_unix_seconds,
-            max_snapshot_age_seconds: options
-                .max_snapshot_age_seconds
-                .unwrap_or(DEFAULT_MAX_SNAPSHOT_AGE_SECONDS),
-            session_pin_idle_ttl_seconds: options
-                .session_pin_idle_ttl_seconds
-                .map(NonZeroU64::get)
-                .unwrap_or(DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS),
-            quota_refresh_interval_seconds: options
-                .quota_refresh_interval_seconds
-                .unwrap_or(DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS),
-            background_quota_refresh_enabled: !options.disable_background_quota_refresh,
-            require_local_token: options.require_local_token,
-            max_connections: options.max_connections.unwrap_or(usize::MAX),
-            audit_file: options.audit_file,
-            websocket_registry_report_file: options.websocket_registry_report_file,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ServeCommandOptions {
-    listen_host: Option<String>,
-    port: Option<u16>,
-    state_db: Option<PathBuf>,
-    secret_root: Option<PathBuf>,
-    upstream_base_url: Option<String>,
-    now_unix_seconds: Option<u64>,
-    max_snapshot_age_seconds: Option<u64>,
-    session_pin_idle_ttl_seconds: Option<NonZeroU64>,
-    quota_refresh_interval_seconds: Option<u64>,
-    disable_background_quota_refresh: bool,
-    require_local_token: bool,
-    max_connections: Option<usize>,
-    audit_file: Option<PathBuf>,
-    websocket_registry_report_file: Option<PathBuf>,
-}
-
-impl ServeCommandOptions {
-    fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
-        let mut options = Self {
-            listen_host: None,
-            port: None,
-            state_db: None,
-            secret_root: None,
-            upstream_base_url: None,
-            now_unix_seconds: None,
-            max_snapshot_age_seconds: None,
-            session_pin_idle_ttl_seconds: None,
-            quota_refresh_interval_seconds: None,
-            disable_background_quota_refresh: false,
-            require_local_token: false,
-            max_connections: None,
-            audit_file: None,
-            websocket_registry_report_file: None,
-        };
-
-        while let Some(argument) = parser.next_string()? {
-            match argument.as_str() {
-                "--listen-host" => {
-                    options.listen_host = Some(parser.next_required_value("--listen-host")?);
-                }
-                "--port" => {
-                    let value = parser.next_required_value("--port")?;
-                    options.port = Some(parse_port(&value)?);
-                }
-                "--state-db" => {
-                    let value = parser.next_required_value("--state-db")?;
-                    options.state_db = Some(PathBuf::from(value));
-                }
-                "--secret-root" => {
-                    let value = parser.next_required_value("--secret-root")?;
-                    options.secret_root = Some(PathBuf::from(value));
-                }
-                "--upstream-base-url" => {
-                    options.upstream_base_url =
-                        Some(parser.next_required_value("--upstream-base-url")?);
-                }
-                "--now-unix-seconds" => {
-                    let value = parser.next_required_value("--now-unix-seconds")?;
-                    options.now_unix_seconds =
-                        Some(parse_u64_option("--now-unix-seconds", &value)?);
-                }
-                "--max-snapshot-age-seconds" => {
-                    let value = parser.next_required_value("--max-snapshot-age-seconds")?;
-                    options.max_snapshot_age_seconds =
-                        Some(parse_u64_option("--max-snapshot-age-seconds", &value)?);
-                }
-                "--session-pin-idle-ttl-seconds" => {
-                    let value = parser.next_required_value("--session-pin-idle-ttl-seconds")?;
-                    options.session_pin_idle_ttl_seconds = Some(parse_nonzero_u64_option(
-                        "--session-pin-idle-ttl-seconds",
-                        &value,
-                    )?);
-                }
-                "--quota-refresh-interval-seconds" => {
-                    let value = parser.next_required_value("--quota-refresh-interval-seconds")?;
-                    options.quota_refresh_interval_seconds = Some(parse_u64_option(
-                        "--quota-refresh-interval-seconds",
-                        &value,
-                    )?);
-                }
-                "--disable-background-quota-refresh" => {
-                    options.disable_background_quota_refresh = true;
-                }
-                "--require-local-token" => {
-                    options.require_local_token = true;
-                }
-                "--max-connections" => {
-                    let value = parser.next_required_value("--max-connections")?;
-                    options.max_connections =
-                        Some(parse_usize_option("--max-connections", &value)?);
-                }
-                "--audit-file" => {
-                    let value = parser.next_required_value("--audit-file")?;
-                    options.audit_file = Some(PathBuf::from(value));
-                }
-                "--websocket-registry-report-file" => {
-                    let value = parser.next_required_value("--websocket-registry-report-file")?;
-                    options.websocket_registry_report_file = Some(PathBuf::from(value));
-                }
-                unknown => {
-                    return Err(CliError::UnknownOption {
-                        option: unknown.to_owned(),
-                    });
-                }
-            }
-        }
-
-        Ok(options)
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -573,6 +400,24 @@ fn parse_usize_option(option: &'static str, value: &str) -> Result<usize, CliErr
         })
 }
 
+fn parse_percent_option(option: &'static str, value: &str) -> Result<u8, CliError> {
+    let percent = value
+        .parse::<u8>()
+        .map_err(|_| CliError::InvalidNumericOption {
+            option,
+            value: value.to_owned(),
+        })?;
+    if percent > 100 {
+        return Err(CliError::NumericOptionOutOfRange {
+            option,
+            value: value.to_owned(),
+            minimum: 0,
+            maximum: 100,
+        });
+    }
+    Ok(percent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::ArgumentParser;
@@ -612,6 +457,46 @@ mod tests {
                 option: "--session-pin-idle-ttl-seconds",
                 value
             } if value == "0"
+        ));
+    }
+
+    #[test]
+    fn serve_claude_five_hour_reserve_percent_defaults_and_accepts_bounds() {
+        let mut default_parser = ArgumentParser::new(Vec::new());
+        let default_command = ServeCommand::parse(&mut default_parser)
+            .unwrap_or_else(|error| panic!("default serve command should parse: {error}"));
+        assert_eq!(default_command.claude_five_hour_reserve_percent, 95);
+
+        for (value, expected) in [("0", 0), ("100", 100), ("90", 90)] {
+            let arguments = [
+                OsString::from("--claude-five-hour-reserve-percent"),
+                OsString::from(value),
+            ];
+            let mut parser = ArgumentParser::new(arguments.into());
+            let command = ServeCommand::parse(&mut parser)
+                .unwrap_or_else(|error| panic!("serve percent should parse: {error}"));
+            assert_eq!(command.claude_five_hour_reserve_percent, expected);
+        }
+    }
+
+    #[test]
+    fn serve_claude_five_hour_reserve_percent_rejects_values_above_one_hundred() {
+        let arguments = [
+            OsString::from("--claude-five-hour-reserve-percent"),
+            OsString::from("101"),
+        ];
+        let mut parser = ArgumentParser::new(arguments.into());
+        let error = ServeCommand::parse(&mut parser)
+            .expect_err("Claude reserve percent must not exceed 100");
+
+        assert!(matches!(
+            error,
+            super::CliError::NumericOptionOutOfRange {
+                option: "--claude-five-hour-reserve-percent",
+                value,
+                minimum: 0,
+                maximum: 100,
+            } if value == "101"
         ));
     }
 }

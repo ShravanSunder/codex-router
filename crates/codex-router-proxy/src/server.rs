@@ -58,6 +58,9 @@ use codex_router_core::audit::TransportKind;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
+use codex_router_core::route_profile::CLAUDE_WINDOW_POLICIES;
+use codex_router_core::route_profile::WindowPolicy;
+use codex_router_core::route_profile::claude_window_policies_for_percent;
 use codex_router_core::router_compatibility::RouterCompatibility;
 use codex_router_core::routes::RouteBand;
 use codex_router_state::account::AccountRecord;
@@ -346,6 +349,7 @@ pub struct LoopbackRouterRuntimeConfig {
     fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
     session_pin_idle_ttl: Duration,
+    claude_window_policies: [WindowPolicy; 2],
     audit_file_path: Option<PathBuf>,
     websocket_registry_report_file: Option<PathBuf>,
 }
@@ -411,6 +415,7 @@ impl LoopbackRouterRuntimeConfig {
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
             session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
+            claude_window_policies: CLAUDE_WINDOW_POLICIES,
             audit_file_path: None,
             websocket_registry_report_file: None,
         }
@@ -433,6 +438,7 @@ impl LoopbackRouterRuntimeConfig {
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
             session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
+            claude_window_policies: CLAUDE_WINDOW_POLICIES,
             audit_file_path: None,
             websocket_registry_report_file: None,
         }
@@ -461,6 +467,13 @@ impl LoopbackRouterRuntimeConfig {
     #[must_use]
     pub const fn with_session_pin_idle_ttl(mut self, idle_ttl: Duration) -> Self {
         self.session_pin_idle_ttl = idle_ttl;
+        self
+    }
+
+    /// Sets the Claude five-hour reserve threshold through its window policy.
+    #[must_use]
+    pub const fn with_claude_five_hour_reserve_percent(mut self, percent: u8) -> Self {
+        self.claude_window_policies = claude_window_policies_for_percent(percent);
         self
     }
 
@@ -504,6 +517,7 @@ pub struct LoopbackRouterRuntime {
     active_reservations: RouteBandReservationBooks,
     selection_reservation_lock: SelectionReservationLock,
     session_affinity_cache: SharedSessionAccountAffinityCache,
+    claude_window_policies: [WindowPolicy; 2],
     runtime_exhaustions: RouteBandRuntimeExhaustions,
     route_band_queue_health: RouteBandQueueHealth,
     db_write_actor: DbWriteActor,
@@ -615,6 +629,7 @@ impl LoopbackRouterRuntime {
             active_reservations: Default::default(),
             selection_reservation_lock,
             session_affinity_cache,
+            claude_window_policies: config.claude_window_policies,
             runtime_exhaustions: Default::default(),
             route_band_queue_health,
             db_write_actor,
@@ -867,6 +882,7 @@ impl LoopbackRouterRuntime {
             active_reservations: Arc::clone(&self.active_reservations),
             selection_reservation_lock: Arc::clone(&self.selection_reservation_lock),
             session_affinity_cache: Arc::clone(&self.session_affinity_cache),
+            claude_window_policies: self.claude_window_policies,
             runtime_exhaustions: Arc::clone(&self.runtime_exhaustions),
             route_band_queue_health: Arc::clone(&self.route_band_queue_health),
             db_write_actor: self.db_write_actor.clone(),
@@ -1145,6 +1161,7 @@ struct LoopbackProtocolConnectionHandler {
     active_reservations: RouteBandReservationBooks,
     selection_reservation_lock: SelectionReservationLock,
     session_affinity_cache: SharedSessionAccountAffinityCache,
+    claude_window_policies: [WindowPolicy; 2],
     runtime_exhaustions: RouteBandRuntimeExhaustions,
     route_band_queue_health: RouteBandQueueHealth,
     db_write_actor: DbWriteActor,
@@ -1285,6 +1302,7 @@ impl LoopbackProtocolConnectionHandler {
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
         )
+        .with_window_policies(self.claude_window_policies)
         .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
             self.db_write_actor.clone(),
             self.runtime_clock(),
@@ -1521,6 +1539,7 @@ impl LoopbackProtocolConnectionHandler {
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
         )
+        .with_window_policies(self.claude_window_policies)
         .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
             self.db_write_actor.clone(),
             self.runtime_clock(),

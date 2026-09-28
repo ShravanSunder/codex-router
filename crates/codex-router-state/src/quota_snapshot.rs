@@ -1,6 +1,7 @@
 //! SQLite quota snapshot DTOs.
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 
 use crate::account::AccountStatus;
 
@@ -524,6 +525,7 @@ impl PersistedSelectorQuotaWindow {
 pub struct SelectorQuotaInput {
     account_id: AccountId,
     account_label: String,
+    provider: Provider,
     account_status: AccountStatus,
     active_credential_generation: Option<u64>,
     route_band: String,
@@ -544,11 +546,19 @@ impl SelectorQuotaInput {
         Self {
             account_id,
             account_label: account_label.into(),
+            provider: Provider::Openai,
             account_status,
             active_credential_generation,
             route_band: route_band.into(),
             windows,
         }
+    }
+
+    /// Sets the account's provider for route-profile filtering.
+    #[must_use]
+    pub const fn with_provider(mut self, provider: Provider) -> Self {
+        self.provider = provider;
+        self
     }
 
     /// Returns account id.
@@ -561,6 +571,12 @@ impl SelectorQuotaInput {
     #[must_use]
     pub fn account_label(&self) -> &str {
         &self.account_label
+    }
+
+    /// Returns the immutable provider for this account.
+    #[must_use]
+    pub const fn provider(&self) -> Provider {
+        self.provider
     }
 
     /// Returns account status.

@@ -2,7 +2,13 @@
 
 use crate::run_rate::QuotaRunRateConfidence;
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 use codex_router_core::redaction::safe_account_label;
+use codex_router_core::route_profile::RESPONSES_HTTP;
+use codex_router_core::route_profile::RouteProfile;
+use codex_router_core::route_profile::WindowKind;
+use codex_router_core::route_profile::WindowPolicy;
+use codex_router_core::route_profile::WindowRule;
 use codex_router_core::routes::RouteBand;
 
 /// Fixed v1 short quota window in seconds.
@@ -46,6 +52,25 @@ pub fn weekly_quota_switch_at_basis_points(configured_floor: Option<u32>) -> Opt
     })
 }
 
+fn weekly_floor_switch_at_basis_points(
+    configured_floor: u32,
+    window_policies: &[WindowPolicy],
+) -> Option<u32> {
+    let weekly_rule = window_policies
+        .iter()
+        .find(|window_policy| window_policy.kind == WindowKind::Weekly)?
+        .rule;
+    match weekly_rule {
+        WindowRule::LegacyOpenAi => weekly_quota_switch_at_basis_points(Some(configured_floor)),
+        WindowRule::WeeklyFloor { early_switch_bps } => Some(
+            configured_floor
+                .saturating_add(u32::from(early_switch_bps))
+                .min(10_000),
+        ),
+        WindowRule::NearFullReserve { .. } => None,
+    }
+}
+
 const DEFAULT_SHORT_WINDOW_CUTOFF_SECONDS: u64 = 86_400;
 const DEFAULT_LONG_NEAR_RESET_MAX_SECONDS: u64 = 43_200;
 const DEFAULT_RESERVE_PRESSURE_THRESHOLD: u32 = 25;
@@ -65,6 +90,8 @@ pub struct BurnDownRouteBandAssessmentInput {
     now_unix_seconds: u64,
     accounts: Vec<BurnDownAccountInput>,
     policy: BurnDownRouteBandPolicy,
+    route_profile: RouteProfile,
+    window_policies: Vec<WindowPolicy>,
 }
 
 impl BurnDownRouteBandAssessmentInput {
@@ -80,7 +107,24 @@ impl BurnDownRouteBandAssessmentInput {
             now_unix_seconds,
             accounts,
             policy: policy_for_route_band(route_band),
+            route_profile: RESPONSES_HTTP,
+            window_policies: RESPONSES_HTTP.windows.to_vec(),
         }
+    }
+
+    /// Uses one route's provider and quota-window policies for assessment.
+    #[must_use]
+    pub fn with_route_profile(mut self, route_profile: RouteProfile) -> Self {
+        self.route_profile = route_profile;
+        self.window_policies = route_profile.windows.to_vec();
+        self
+    }
+
+    /// Replaces static profile windows with the route's configured policy inputs.
+    #[must_use]
+    pub fn with_window_policies(mut self, window_policies: Vec<WindowPolicy>) -> Self {
+        self.window_policies = window_policies;
+        self
     }
 
     /// Returns the route band.
@@ -95,6 +139,7 @@ impl BurnDownRouteBandAssessmentInput {
 pub struct BurnDownAccountInput {
     account_id: AccountId,
     account_label: String,
+    provider: Provider,
     windows: Vec<QuotaWindowFact>,
     account_enabled: bool,
     has_active_credential: bool,
@@ -114,6 +159,7 @@ impl BurnDownAccountInput {
         Self {
             account_id,
             account_label: account_label.into(),
+            provider: Provider::Openai,
             windows,
             account_enabled: true,
             has_active_credential: true,
@@ -121,6 +167,13 @@ impl BurnDownAccountInput {
             current_active_sessions: 0,
             weekly_quota_floor_basis_points: None,
         }
+    }
+
+    /// Sets the provider that owns this account.
+    #[must_use]
+    pub const fn with_provider(mut self, provider: Provider) -> Self {
+        self.provider = provider;
+        self
     }
 
     /// Sets whether the account is enabled.
@@ -169,6 +222,12 @@ impl BurnDownAccountInput {
     #[must_use]
     pub const fn account_id(&self) -> &AccountId {
         &self.account_id
+    }
+
+    /// Returns the provider that owns this account.
+    #[must_use]
+    pub const fn provider(&self) -> Provider {
+        self.provider
     }
 
     /// Returns the account windows.
@@ -970,11 +1029,20 @@ struct AccountDisplayMetrics {
 pub fn assess_route_band(
     input: BurnDownRouteBandAssessmentInput,
 ) -> BurnDownRouteBandAssessmentResult {
+    let legacy_openai_profile =
+        is_legacy_openai_profile(input.route_profile, &input.window_policies);
     let mut accounts = input
         .accounts
         .iter()
+        .filter(|account| account.provider == input.route_profile.provider)
         .map(|account| {
-            let mut assessment = assess_account(account, input.now_unix_seconds, input.policy);
+            let mut assessment = assess_account(
+                account,
+                input.now_unix_seconds,
+                input.policy,
+                input.route_profile,
+                &input.window_policies,
+            );
             assessment.weekly_floor_switch_band = account
                 .weekly_quota_floor_basis_points
                 .zip(assessment.weekly_remaining_headroom)
@@ -987,9 +1055,17 @@ pub fn assess_route_band(
                             AccountAvailability::Usable | AccountAvailability::Reserve
                         )
                         && remaining_percent.saturating_mul(100) > floor
-                        && remaining_percent.saturating_mul(100)
-                            <= weekly_quota_switch_at_basis_points(Some(floor)).unwrap_or(10_000)
+                        && weekly_floor_switch_at_basis_points(floor, &input.window_policies)
+                            .is_some_and(|switch_at| {
+                                remaining_percent.saturating_mul(100) <= switch_at
+                            })
                 });
+            if input.route_profile.provider == Provider::Claude
+                && assessment.weekly_floor_switch_band
+                && assessment.availability == AccountAvailability::Usable
+            {
+                assessment.availability = AccountAvailability::Reserve;
+            }
             assessment
         })
         .collect::<Vec<_>>();
@@ -1008,12 +1084,14 @@ pub fn assess_route_band(
         .iter()
         .map(|account| (account.account_id.clone(), account.routing_weight))
         .collect::<Vec<_>>();
-    apply_initial_admission(
-        &mut accounts,
-        &ordinary_routing_weights,
-        input.now_unix_seconds,
-    );
-    apply_far_idle_priority(&mut accounts, input.now_unix_seconds);
+    if legacy_openai_profile {
+        apply_initial_admission(
+            &mut accounts,
+            &ordinary_routing_weights,
+            input.now_unix_seconds,
+        );
+        apply_far_idle_priority(&mut accounts, input.now_unix_seconds);
+    }
 
     let selected_pool = if accounts
         .iter()
@@ -1030,9 +1108,10 @@ pub fn assess_route_band(
         .any(|account| account.availability == AccountAvailability::Unknown)
     {
         SelectedPool::Unknown
-    } else if accounts
-        .iter()
-        .any(|account| account.quota_evidence_reason == QuotaEvidenceReason::ShortWindowGuard)
+    } else if legacy_openai_profile
+        && accounts
+            .iter()
+            .any(|account| account.quota_evidence_reason == QuotaEvidenceReason::ShortWindowGuard)
     {
         SelectedPool::LastResort
     } else {
@@ -1122,6 +1201,8 @@ fn assess_account(
     input: &BurnDownAccountInput,
     now_unix_seconds: u64,
     policy: BurnDownRouteBandPolicy,
+    route_profile: RouteProfile,
+    window_policies: &[WindowPolicy],
 ) -> BurnDownAccountAssessment {
     let base = BurnDownAccountAssessment {
         account_id: input.account_id.clone(),
@@ -1185,6 +1266,19 @@ fn assess_account(
         .iter()
         .map(|window| assess_window(window, now_unix_seconds, policy))
         .collect::<Vec<_>>();
+    if input.provider == Provider::Claude
+        && (missing_profile_window(&windows, route_profile.windows)
+            || missing_profile_window(&windows, window_policies))
+    {
+        return with_display_metrics(
+            BurnDownAccountAssessment {
+                limiting_window: limiting_window(&windows),
+                quota_evidence_reason: QuotaEvidenceReason::MissingExpectedWindow,
+                ..base
+            },
+            account_display_metrics(input, &windows, policy),
+        );
+    }
     if (windows.is_empty() || missing_required_weekly_window(&windows))
         && input.weekly_quota_floor_basis_points.is_some()
     {
@@ -1255,6 +1349,23 @@ fn assess_account(
             display_metrics,
         );
     }
+    if input.provider == Provider::Claude
+        && windows
+            .iter()
+            .any(|window| window.status == QuotaWindowStatus::Stale)
+    {
+        return with_display_metrics(
+            BurnDownAccountAssessment {
+                freshness: QuotaEvidenceFreshness::Stale,
+                limiting_window: limiting_window(&windows),
+                quota_evidence_reason: QuotaEvidenceReason::UnknownQuotaWindow,
+                routing_reason: RoutingReason::UnknownFallbackAvailable,
+                routing_weight: Some(DEFAULT_UNKNOWN_FALLBACK_WEIGHT),
+                ..base
+            },
+            display_metrics,
+        );
+    }
     if windows.iter().any(|window| window.remaining_headroom == 0) {
         return with_display_metrics(
             BurnDownAccountAssessment {
@@ -1302,12 +1413,14 @@ fn assess_account(
         policy.selectable_weight_min,
         policy.selectable_weight_max,
     );
-    let availability = if long_window_requires_reserve(&windows, policy) {
+    let availability = if claude_near_full_reserve(input.provider, &windows, window_policies)
+        || (input.provider == Provider::Openai && long_window_requires_reserve(&windows, policy))
+    {
         AccountAvailability::Reserve
     } else {
         AccountAvailability::Usable
     };
-    if short_window_fails_guard(&windows, policy) {
+    if input.provider == Provider::Openai && short_window_fails_guard(&windows, policy) {
         return with_display_metrics(
             BurnDownAccountAssessment {
                 availability: AccountAvailability::Blocked,
@@ -1647,6 +1760,48 @@ fn assess_window(
         burn_rate_confidence: window.burn_rate_confidence,
         survival_margin_basis_points,
     }
+}
+
+fn missing_profile_window(windows: &[WindowAssessment], policies: &[WindowPolicy]) -> bool {
+    policies.iter().any(|window_policy| {
+        !matches!(window_policy.rule, WindowRule::LegacyOpenAi)
+            && !windows.iter().any(|window| {
+                window_kind_for_seconds(window.window_seconds) == Some(window_policy.kind)
+            })
+    })
+}
+
+fn window_kind_for_seconds(window_seconds: u64) -> Option<WindowKind> {
+    match window_seconds {
+        V1_SHORT_WINDOW_SECONDS => Some(WindowKind::FiveHour),
+        V1_WEEKLY_WINDOW_SECONDS => Some(WindowKind::Weekly),
+        _ => None,
+    }
+}
+
+fn claude_near_full_reserve(
+    provider: Provider,
+    windows: &[WindowAssessment],
+    policies: &[WindowPolicy],
+) -> bool {
+    if provider != Provider::Claude {
+        return false;
+    }
+
+    policies.iter().any(|window_policy| {
+        let WindowRule::NearFullReserve { percent } = window_policy.rule else {
+            return false;
+        };
+        windows
+            .iter()
+            .find(|window| {
+                window_kind_for_seconds(window.window_seconds) == Some(window_policy.kind)
+            })
+            .is_some_and(|window| {
+                window.status == QuotaWindowStatus::Eligible
+                    && (100_u32.saturating_sub(window.remaining_headroom)) >= u32::from(percent)
+            })
+    })
 }
 
 fn missing_required_weekly_window(windows: &[WindowAssessment]) -> bool {
@@ -2412,6 +2567,14 @@ const fn policy_for_route_band(_route_band: RouteBand) -> BurnDownRouteBandPolic
         selectable_weight_min: DEFAULT_SELECTABLE_WEIGHT_MIN,
         selectable_weight_max: DEFAULT_SELECTABLE_WEIGHT_MAX,
     }
+}
+
+fn is_legacy_openai_profile(route_profile: RouteProfile, window_policies: &[WindowPolicy]) -> bool {
+    route_profile.provider == Provider::Openai
+        && !window_policies.is_empty()
+        && window_policies
+            .iter()
+            .all(|window_policy| window_policy.rule == WindowRule::LegacyOpenAi)
 }
 
 #[cfg(test)]
