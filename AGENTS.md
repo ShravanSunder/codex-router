@@ -51,8 +51,9 @@
 - This removes rebuildable workspace debug artifacts, not account data or
   credentials. Subsequent builds may take longer. Do not clean after every
   build or stop production processes to make cleanup possible.
-- Prefer focused `cargo check -p <package>` and tests during development;
-  preserve all required full-workspace validation gates.
+- During development, default to `cargo check -p <package>` and the narrowest
+  relevant `cargo test -p <package> <test>`. Reserve workspace-wide builds and
+  tests for the required completion gate; preserve every required gate.
 
 ## Terminal UI Layout
 
