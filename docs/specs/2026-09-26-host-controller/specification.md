@@ -201,6 +201,17 @@ reports E11 like any other child (R10). Basis: U9, U6.
 **R18.** E11 is stopped by R8's group stop and restarted after a crash like R3.
 Its crash ends live provider turns as `lost`. Basis: U5, U9.
 
+### The desktop app uses the owner's app-server
+
+**R19.** When E3 starts fresh, after its first E2 is `current`, if the Codex
+desktop app is running with its own app-server (it started before E1 was
+routable), E3 MUST relaunch it gracefully. That is the same as the user
+quitting it: the app may save state, and it is then reopened, so that at
+startup it finds E1 and uses the owner's app-server. E3 MUST NOT relaunch it on
+updates, E2 swaps or E4/E5/E11 replacements, because E1 stays routable through
+those (R4). Turns in progress in the desktop's own app-server MAY be lost. The
+relaunch and its outcome are recorded and shown by `host status`. Basis: U8.
+
 ### Agent Studio has a stable surface
 
 **R12.** While E3 is `running`, E10 MUST be `available` across every E2 swap and
@@ -281,6 +292,7 @@ and no PID discovery or signalling. Basis: U5 (then), U6 (then).
 | U5 | E3 E4 E10 | One process, every change restarts everything | Keeper survives service churn and crashes | R1, R3, R13, R15 | V1, V6, V7 |
 | U6 | E5 E6 E7 | Proxy restarts on unrelated changes | Proxy replaced only on fingerprint change | R9, R10 | V3, V7 |
 | U7 | E10 | No surface outlives a restart | Control surface stays available | R12 | V9 |
+| U8 | E1 E2 E3 | The desktop app hosts Remote Control on its own app-server when it started before the owner's | Relaunched once the owner's app-server is up | R19 | V12 |
 | U9 | E4 E11 E6 | Claude and Cursor turns are lost on every update | Provider host survives collaboration restarts; replaced only on its own fingerprint change | R16, R17, R18 | V11 |
 
 Proof obligations. All runtime evidence uses an isolated debug keeper, state
@@ -323,6 +335,11 @@ root and Codex home. Production processes are never touched.
     terminal status.
 
   Then change the `provider` fingerprint and observe the replacement and `lost`.
+- **V12, desktop relaunch:** start a fixture desktop stand-in (a process
+  matching the desktop's app-server signature) before a fresh keeper, and
+  observe one graceful relaunch after generation 1 is current, and none on a
+  later update. Then run once, owner-authorized, with the real desktop app:
+  observe that the iPhone reaches the owner's app-server.
 - **V9, control surface:** E10 answers throughout V1, V2 and V6 and reports the
   generation and fingerprint changes.
 

@@ -369,6 +369,7 @@ pub struct KeeperStatus {
     pub last_update: Option<UpdateOutcome>,
     pub last_stops: Vec<StopRecord>,     // bounded ring, newest first (R8 observability)
     pub last_handovers: Vec<HandoverRecord>, // bounded ring (R7 observability)
+    pub desktop_reconcile: Option<DesktopReconcile>, // R19: NotRunning | AlreadyOnSharedServer | Relaunched | QuitRefused | ReopenFailed
 }
 pub struct GenerationStatus {
     pub current: Option<GenerationSummary>,
@@ -1135,6 +1136,29 @@ stateDiagram-v2
   are the component's responsibility on graceful termination (Specification
   R8). Providers also see stdio EOF when services exits; V5 observes that.
 
+### 6.9a Desktop reconcile at fresh keeper start (R19, U8)
+
+A keeper-owned startup step, `DesktopReconciler`, lives in
+`codex-native-integration` next to the existing `desktop_launch_policy.rs`,
+which already runs at Host startup.
+
+- **When it runs:** once, after generation 1 is `current` on a fresh keeper start.
+  It never runs on self-exec re-adoption, updates, E2 swaps or child
+  replacements, because E1 stays routable through those (R4).
+- **Detection:** the desktop app process
+  (`/Applications/ChatGPT.app/Contents/MacOS/ChatGPT`, bundle `com.openai.codex`)
+  is running and has a child `…/codex-cli/CodexCLI.app/Contents/MacOS/codex …
+  app-server`. That child is its own app-server, which it made because E1 was not
+  routable when it started (W12, owner-confirmed model).
+- **Action:** a graceful quit through macOS (an Apple Event `quit` to the bundle
+  id, so the app can save), then wait ≤ `DESKTOP_QUIT_BOUND` (10 s), then reopen
+  it with `open -b com.openai.codex`. If the app does not quit, the keeper does
+  not force-kill it. It records `DesktopReconcile::QuitRefused` and status tells
+  the owner to relaunch it by hand.
+- **Result:** `DesktopReconcile = NotRunning | AlreadyOnSharedServer | Relaunched
+  | QuitRefused | ReopenFailed`, a closed enum shown in `KeeperStatus` and in
+  telemetry.
+
 ### 6.9 Startup, full restart, and cutover (R13, R15)
 
 ```text
@@ -1146,6 +1170,7 @@ codex-router host
   → GenerationController: generation 1 (6.3 without predecessor)
   → services Prepare (its generation-1 payload plus a standby attach to E11) and proxy Prepare, in parallel
   → publish E1 · services and proxy Activate
+  → DesktopReconciler (6.9a): relaunch the desktop app if it started first with its own app-server (R19)
   → OperatorService accepts on host.sock
 ```
 
