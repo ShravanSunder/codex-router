@@ -330,7 +330,7 @@ pub enum OperatorTerminal {
     Status(KeeperStatus),
     UpdateCompleted(UpdateOutcome),
     UpdateResultUnknown { update_id: UpdateId },
-    GenerationRestarted { generation: GenerationId, services_commit: ServicesCommit },
+    GenerationRestarted { generation: GenerationId, services_commit: ServicesCommit, remote_control: RemoteControlCondition }, // PR3: existing classification, observed ≤ 10 s after enable; the transition releases once N is gone
     GenerationRestartFailed { reason: GenerationFailure, current: Option<GenerationId> },
     CodexUpdated { generation: GenerationId, from_version: String, to_version: String, services_commit: ServicesCommit },
     CodexUnchanged { version: String },
@@ -369,7 +369,7 @@ pub struct KeeperStatus {
     pub last_update: Option<UpdateOutcome>,
     pub last_stops: Vec<StopRecord>,     // bounded ring, newest first (R8 observability)
     pub last_handovers: Vec<HandoverRecord>, // bounded ring (R7 observability)
-    pub desktop_reconcile: Option<DesktopReconcile>, // R19: NotRunning | AlreadyOnSharedServer | Relaunched | QuitRefused | ReopenFailed
+    pub desktop_reconcile: Option<DesktopReconcile>, // R19: NotRunning | StartedAfterServer | Relaunched | QuitRefused | ReopenFailed | Inconclusive{reason} | SkippedIsolated
 }
 pub struct GenerationStatus {
     pub current: Option<GenerationSummary>,
@@ -882,7 +882,7 @@ sequenceDiagram
   OPS->>GC: restart (update: official updater first, existing)
   GC->>GC: require transition == None, else Busy · hold ActiveMutation::GenerationTransition [added]
   GC->>GC: schema export for the candidate executable → GenerationEvidence
-  GC->>GM: spawn --listen unix://…/gen-‹epoch›-‹N+1›.sock with Remote Control disabled (internal marker, no --remote-control) · probe ≤ GENERATION_READY_DEADLINE [changed]
+  GC->>GM: spawn --listen unix://…/gen-‹epoch›-‹N+1›.sock with Remote Control disabled (internal marker, no --remote-control) · local readiness probe ≤ GENERATION_READY_DEADLINE [changed]
   alt schema digest changed
     GC->>SVC: prepare an incoming services child with the N+1 payload (6.1 Prepare only · the active child stays on N)
   else unchanged
@@ -900,13 +900,12 @@ sequenceDiagram
     else no ack (channel loss or stuck) · or the prepared child died
       GC->>SVC: services replacement via 6.2 with the N+1 payload (forced predicate if unresponsive) [C4]
     end
-    GC->>GN: remoteControl/disable {ephemeral: true} · N stops being the Remote Control host [W14]
-    GC->>GM: remoteControl/enable {ephemeral: true} · wait for Connected · never two hosts at once (a short iPhone reconnect gap instead)
     alt services committed on N+1 (ack, or the replacement Active)
       OPS-->>OPS: Terminal GenerationRestarted{N+1, services_commit: Committed | ServicesReplaced} · admission stays held
       Note over GN: Settling for GENERATION_SETTLE
       GC->>SVC: RetireGeneration{N} · retires only admissions of N (generation-targeted) · clients reconnect to N+1
-      GC->>GN: group stop (6.8)
+      GC->>GN: group stop (6.8) · N's Remote Control transport ends with the process [PR2 fence]
+      GC->>GM: remoteControl/enable {ephemeral: true} · observe ≤ REMOTE_CONTROL_OBSERVE_DEADLINE (10 s, existing) → Connected | LocalReadyRemoteDegraded [PR3]
       GC->>GC: remove alias gen-…-N.sock · sweep its physical socket if refused · release GenerationTransition [added]
     else recovery Prepare failed (services may still be on N) [CC3]
       OPS-->>OPS: Terminal GenerationRestarted{N+1, services_commit: ServicesReplacementFailed{reason}}
@@ -1139,25 +1138,38 @@ stateDiagram-v2
 ### 6.9a Desktop reconcile at fresh keeper start (R19, U8)
 
 A keeper-owned startup step, `DesktopReconciler`, lives in
-`codex-native-integration` next to the existing `desktop_launch_policy.rs`,
-which already runs at Host startup.
+`codex-native-integration` next to the existing `desktop_launch_policy.rs`.
 
-- **When it runs:** once, after generation 1 is `current` on a fresh keeper start.
-  It never runs on self-exec re-adoption, updates, E2 swaps or child
-  replacements, because E1 stays routable through those (R4).
-- **Detection:** the desktop app process
-  (`/Applications/ChatGPT.app/Contents/MacOS/ChatGPT`, bundle `com.openai.codex`)
-  is running and has a child `…/codex-cli/CodexCLI.app/Contents/MacOS/codex …
-  app-server`. That child is its own app-server, which it made because E1 was not
-  routable when it started (W12, owner-confirmed model).
+- **Effect gate (PR5).** It runs only in `OwnerProduction` launch mode, the same
+  gate that already scopes desktop launch policy
+  (`codex-router-cli/src/host_command/foreground_launch.rs:201-227,331-342`). In
+  `IsolatedDebug` its target is a fixture-provided application identity, never
+  the real bundle; that case records `SkippedIsolated`.
+- **When it runs:** once, after generation 1 is `current` on a fresh keeper
+  start. It never runs on self-exec re-adoption, updates, E2 swaps or child
+  replacements.
+- **Detection (PR4).** It finds the running application by bundle id
+  `com.openai.codex` through macOS's running-application registry (launch
+  services), not a path pattern. The trigger is **launch order**, which is
+  exactly the owner's model: the app's launch time is compared with the moment
+  generation 1 became current. It does not inspect which executable the desktop
+  uses for its own app-server, since `CODEX_CLI_PATH` and bundle layouts vary.
 - **Action:** a graceful quit through macOS (an Apple Event `quit` to the bundle
   id, so the app can save), then wait ≤ `DESKTOP_QUIT_BOUND` (10 s), then reopen
-  it with `open -b com.openai.codex`. If the app does not quit, the keeper does
-  not force-kill it. It records `DesktopReconcile::QuitRefused` and status tells
-  the owner to relaunch it by hand.
-- **Result:** `DesktopReconcile = NotRunning | AlreadyOnSharedServer | Relaunched
-  | QuitRefused | ReopenFailed`, a closed enum shown in `KeeperStatus` and in
-  telemetry.
+  it with `open -b com.openai.codex`. It never force-kills the app.
+- **Result:** a closed enum shown in `KeeperStatus` and in telemetry. It records
+  **what happened, not a claim about attachment**:
+  - `NotRunning`;
+  - `StartedAfterServer` (no action needed);
+  - `Relaunched`;
+  - `QuitRefused` (status tells the owner to relaunch by hand);
+  - `ReopenFailed`;
+  - `Inconclusive { reason }` (the registry was unavailable or the launch time
+    unreadable; no action taken);
+  - `SkippedIsolated`.
+
+  Whether the iPhone then reaches the owner's app-server is verified by V12's
+  real-app run (R19 rests on owner-observed behavior).
 
 ### 6.9 Startup, full restart, and cutover (R13, R15)
 
@@ -1170,7 +1182,7 @@ codex-router host
   → GenerationController: generation 1 (6.3 without predecessor)
   → services Prepare (its generation-1 payload plus a standby attach to E11) and proxy Prepare, in parallel
   → publish E1 · services and proxy Activate
-  → DesktopReconciler (6.9a): relaunch the desktop app if it started first with its own app-server (R19)
+  → DesktopReconciler (6.9a, OwnerProduction only): relaunch the desktop app if it launched before generation 1 became current (R19)
   → OperatorService accepts on host.sock
 ```
 
@@ -1379,7 +1391,7 @@ Payer: one unnecessary restart.
 | Unresponsive old proxy SIGKILLed mid-renewal | forced path | account may become `reauth_required` (existing recovery, `credential_renewal.rs:389-436`); recorded residual | operator |
 | Ring overflow during a long E4 outage | `retained_from` greater than what the front door last saw | `ReplayComplete{TruncatedBefore}` → the front door gets `historyUnavailable` for the gap (RSP code) | `ProviderHostRuntime` |
 | Provider stdout EOF while unlinked | E11's client retires the provider (#82 semantics) | `ProviderRetired` is sent on the next Attach snapshot as `Retired{reason}`; sessions are `lost` | `ProviderHostRuntime` |
-| Remote Control with two live generations | prevented by construction (W14) | Every generation shares `installation_id` and the cached enrollment, and upstream has no duplicate-host arbitration. So a candidate is launched with Remote Control **disabled**: no `--remote-control`, plus `CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED=1`, which selects `DisabledEphemeral`. Omitting the flag alone does not work, because `ResolvePersisted` would re-enable it. At promotion the keeper first calls `remoteControl/disable {ephemeral: true}` on N, then `remoteControl/enable {ephemeral: true}` on N+1, and waits for `Connected`. There are never two Remote Control hosts; the cost is a brief iPhone reconnect gap. If N+1's enable fails, N is re-enabled ephemerally and the swap reports failure. The persisted preference is never written. The marker is upstream-internal; the repo already uses it in debug launches (`app_server_launch.rs:36-53`). It is pinned to the verified Codex version and checked by V2, with Remote Control enabled in an isolated non-production setup. | `GenerationController` |
+| Remote Control with two live generations | prevented by a process-lifetime fence (PR2) | Every generation shares `installation_id` and the cached enrollment, and upstream has no duplicate-host arbitration (W14). A `Disabled` reply does not prove the transport has stopped (`remote_control/mod.rs:373-398`). So the candidate is launched with Remote Control **disabled** (no `--remote-control`, plus `CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED=1`; repo precedent `app_server_launch.rs:36-53`). Remote Control is enabled on N+1 only **after N's process group is empty**, at the end of the settle and group stop. Only one Remote Control transport can exist, and the cost is an iPhone gap of about the settle plus the stop. Enable is observed for the existing 10 s deadline (`host_configuration.rs:197-206`). If it doesn't connect, the result is the existing `LocalReadyRemoteDegraded` classification (`lifecycle_state.rs:248-257`), shown in status, while the upstream transport keeps retrying. There is **no** rollback to N after publication (PR3). The same rule applies to fresh generation 1, crash recovery and R11 adoption fallback. The internal marker is pinned to the verified Codex version and checked by V2. | `GenerationController` |
 
 ## 10. Cross-cutting
 
@@ -1442,7 +1454,7 @@ Payer: one unnecessary restart.
 | U9 | R16: collaboration restart keeps provider turns; front doors see the same RSP Turn; pending interactions stay answerable; decisions apply at most once | E4, E11; RSP Session/Turn | `ProviderHostRuntime` + `ProviderLinkClient` | 6.11 standby Attach, `AttachSnapshot` cut, Promote, ledger, `InteractionDecisionResult` | `ServicesToProvider`, `ProviderToServices`, `AttachSnapshot`, `OperationRecord` · provider-link-protocol; `SessionEvent` · RSP session-event-model | link `Standby → Active`; broker `HeldForSnapshot → Live`; ledger `Accepted → Running → Ended → settled` | link drop → `linkInterrupted` (not lost); lost only on different incarnation, `ProviderRetired` or `ProviderHostExited`; ring truncation → per-session `historyUnavailable` | V11 |
 | U9, U6 | R17: provider host replaced only when its fingerprint changed; replacement may end turns | E6, E7, E11 | `UpdateCoordinator`, `ChildSupervisor` | §7; 6.2 (E11 first); 6.11 replacement | `ComponentFingerprints.agent_provider_services`, `ChildUpdateOutcome` · keeper-protocol | slot handover | `session/cancel` then the runtime's group shutdown within `PROVIDER_HOST_DEACTIVATE_DEADLINE`; turns end `ended{cancelled}` or `lost{providerRetired}` | V11, V3 |
 | U5, U9 | R18: provider host group stop and crash respawn | E11 | `ChildSupervisor` | 6.7, 6.8 | `StopRecord`, `ChildState` · keeper-protocol | `Active → Crashed → Starting` | sessions `lost`; E4 re-attaches | V5, V11 |
-| U8 | R19: fresh keeper start relaunches a desktop app that made its own app-server | E1, E2, E3 | `DesktopReconciler` (keeper startup step) | 6.9a | `DesktopReconcile` · keeper-protocol; macOS Apple Event quit + `open -b` | runs once after generation 1 is current | quit refused → no force-kill, `QuitRefused` in status | V12 |
+| U8 | R19: a fresh keeper start in production mode relaunches a desktop app that launched before generation 1 | E1, E2, E3 | `DesktopReconciler` (keeper startup step) | 6.9a | `DesktopReconcile` · keeper-protocol; launch-services lookup by bundle id; Apple Event quit + `open -b` | runs once after generation 1 is current; `OwnerProduction` gate | quit refused → no force-kill; `Inconclusive` → no action; isolated → `SkippedIsolated` | V12 |
 | then U5, then U6 | R15: one-time cutover; removals | E1, E3 | `KeeperEventLoop` startup | 6.9 | filesystem; CLI | none: startup | live foreign E1 refused; v1 handoff rejected | V7 |
 
 **Accepted identities beyond obligation rows:**
@@ -1451,7 +1463,7 @@ Payer: one unnecessary restart.
 - V1–V10: cited above.
 - Non-goals held: no drain, no launchd, no upstream change, no automatic
   rollback, no production touch, no new store.
-- U8: open, with no obligation.
+- U8: realized by R19; V12.
 - Accepted debts, each owner-confirmed or recorded with its payer:
   - orphans after a post-exec crash or an invalid handoff: operator;
   - test-edit fingerprint moves: one unnecessary restart;

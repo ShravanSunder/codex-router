@@ -17,7 +17,7 @@ flowchart LR
   sys(["codex-router<br/>(opaque)"]) -- "model requests via agent proxy services (E5)" --> up["Upstream model provider"]
   exe["Installed codex-router executable"] -- "update input" --> sys
   codex["Managed Codex runtime"] -- "app-server executable" --> sys
-  desk["Codex desktop app"] -. "not a contract of this spec (U8 open)" .- sys
+  desk["Codex desktop app"] -. "relaunched at fresh keeper start if it started first (R19)" .- sys
 ```
 
 ## Entities
@@ -203,14 +203,20 @@ Its crash ends live provider turns as `lost`. Basis: U5, U9.
 
 ### The desktop app uses the owner's app-server
 
-**R19.** When E3 starts fresh, after its first E2 is `current`, if the Codex
-desktop app is running with its own app-server (it started before E1 was
-routable), E3 MUST relaunch it gracefully. That is the same as the user
-quitting it: the app may save state, and it is then reopened, so that at
-startup it finds E1 and uses the owner's app-server. E3 MUST NOT relaunch it on
-updates, E2 swaps or E4/E5/E11 replacements, because E1 stays routable through
-those (R4). Turns in progress in the desktop's own app-server MAY be lost. The
-relaunch and its outcome are recorded and shown by `host status`. Basis: U8.
+**R19.** On a fresh E3 start, in the owner's production mode only, after its
+first E2 is `current`: if the Codex desktop app is running and was launched
+before that generation became current, E3 MUST relaunch it gracefully. That is
+the same as the user quitting it: the app may save state, and it is then
+reopened. E3 MUST NOT relaunch it on updates, E2 swaps or E4/E5/E11
+replacements, because E1 stays routable through those (R4). Turns in progress in
+the desktop's own app-server MAY be lost. The relaunch and its outcome are
+recorded and shown by `host status`.
+
+The obligation rests on the owner's observed behavior (2026-09-28): a desktop
+app started while the owner's app-server is up leaves the iPhone's Remote
+Control on the owner's app-server. The desktop's local chat connection always
+uses its own app-server (W12), so R19 does not claim that the desktop attaches
+to E1. V12 verifies the Remote Control outcome with the real app. Basis: U8.
 
 ### Agent Studio has a stable surface
 
@@ -335,14 +341,15 @@ root and Codex home. Production processes are never touched.
     terminal status.
 
   Then change the `provider` fingerprint and observe the replacement and `lost`.
-- **V12, desktop relaunch:** start a fixture desktop stand-in (a process
-  matching the desktop's app-server signature) before a fresh keeper, and
-  observe one graceful relaunch after generation 1 is current, and none on a
-  later update. Then run once, owner-authorized, with the real desktop app:
-  observe that the iPhone reaches the owner's app-server.
+- **V12, desktop relaunch:** in isolated mode, the reconcile targets only a
+  fixture stand-in: exactly one quit and reopen after generation 1 when the
+  stand-in launched first, none when it launched after, none on a later update,
+  and zero effects on the real app bundle. Then run once, owner-authorized, with
+  the real desktop app in production mode: launch the desktop before the keeper,
+  start the keeper, and observe the iPhone's Remote Control reaching the owner's
+  app-server after the relaunch.
 - **V9, control surface:** E10 answers throughout V1, V2 and V6 and reports the
   generation and fingerprint changes.
 
 ## Open decisions
 
-- **U8, desktop app.** No obligation until the owner's observation is known.
