@@ -1450,6 +1450,7 @@ mod async_forwarding_tests {
     use codex_router_core::affinity::RouterAffinityHashSecret;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::TokenGeneration as LocalTokenGeneration;
+    use codex_router_core::provider::Provider;
     use codex_router_core::redaction::SecretString;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
@@ -1501,11 +1502,14 @@ mod async_forwarding_tests {
             WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
         let mut upstream_websocket =
             WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
-        let cache = SessionAccountAffinityCache::shared();
+        let cache = SessionAccountAffinityCache::shared(
+            crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL,
+        );
         let account_id = AccountId::new("acct-affinity-activity")
             .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
         let published = publish_session_account_affinity(
             &cache,
+            Provider::Openai,
             "session-activity",
             &account_id,
             codex_router_core::routes::RouteBand::Responses,
@@ -1561,6 +1565,7 @@ mod async_forwarding_tests {
             assert!(
                 lookup_session_account_affinity(
                     &cache,
+                    Provider::Openai,
                     "session-activity",
                     codex_router_core::routes::RouteBand::Responses,
                     None,
@@ -1588,6 +1593,7 @@ mod async_forwarding_tests {
             assert!(
                 lookup_session_account_affinity(
                     &cache,
+                    Provider::Openai,
                     "session-activity",
                     codex_router_core::routes::RouteBand::Responses,
                     None,
@@ -1650,11 +1656,14 @@ mod async_forwarding_tests {
             WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
         let mut upstream_websocket =
             WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
-        let cache = SessionAccountAffinityCache::shared();
+        let cache = SessionAccountAffinityCache::shared(
+            crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL,
+        );
         let account_id = AccountId::new(account_id)
             .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
         let published = publish_session_account_affinity(
             &cache,
+            Provider::Openai,
             session_id,
             &account_id,
             codex_router_core::routes::RouteBand::Responses,
@@ -1711,6 +1720,7 @@ mod async_forwarding_tests {
             assert!(
                 lookup_session_account_affinity(
                     &cache,
+                    Provider::Openai,
                     session_id,
                     codex_router_core::routes::RouteBand::Responses,
                     None,
@@ -1749,11 +1759,14 @@ mod async_forwarding_tests {
         let (_local_write, local_read) = router_local_websocket.split();
         drop(upstream_websocket);
 
-        let cache = SessionAccountAffinityCache::shared();
+        let cache = SessionAccountAffinityCache::shared(
+            crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL,
+        );
         let account_id = AccountId::new("acct-failed-forward")
             .unwrap_or_else(|error| panic!("test account id should parse: {error}"));
         let published = publish_session_account_affinity(
             &cache,
+            Provider::Openai,
             "session-failed-forward",
             &account_id,
             codex_router_core::routes::RouteBand::Responses,
@@ -1801,6 +1814,7 @@ mod async_forwarding_tests {
         assert!(
             lookup_session_account_affinity(
                 &cache,
+                Provider::Openai,
                 "session-failed-forward",
                 codex_router_core::routes::RouteBand::Responses,
                 None,

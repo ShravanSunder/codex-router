@@ -61,6 +61,7 @@ use cli_argument_parsing::{CliCommand, ProfileCommand, TokenCommand};
 const DEFAULT_PROFILE_PORT: u16 = 8787;
 const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS: u64 = 300;
 const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 180;
+const DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS: u64 = 75 * 60;
 const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 #[cfg(all(debug_assertions, not(test)))]
@@ -238,7 +239,8 @@ fn run_serve_command_with_upkeep_start(
         upstream_endpoint,
         command.state_db,
         command.secret_root,
-    );
+    )
+    .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds));
     if let Some(audit_file) = command.audit_file {
         runtime_config = runtime_config.with_audit_file(audit_file);
     }

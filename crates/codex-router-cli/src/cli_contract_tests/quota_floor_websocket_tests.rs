@@ -79,6 +79,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         9,
         "floor-socket-access-canary",
     );
+    migrate_test_state_database(&state_path);
 
     let initial_status = run_cli(
         [

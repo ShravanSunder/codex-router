@@ -129,6 +129,7 @@ mod tests {
     use codex_router_core::local_auth::LocalAuthError;
     use codex_router_core::local_auth::LocalRouterAuth;
     use codex_router_core::local_auth::LocalRouterTokenRecord;
+    use codex_router_core::provider::Provider;
     use codex_router_core::redaction::SecretString;
     use codex_router_core::routes::RouteBand;
     use codex_router_quota::snapshot::SnapshotFreshness;
@@ -2579,7 +2580,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if async_state
-                    .load_session_account_affinity("session-first-selection")
+                    .load_session_account_affinity(Provider::Openai, "session-first-selection")
                     .await
                     .expect("session affinity should load")
                     == Some(SessionAccountAffinity::new(
@@ -2674,11 +2675,11 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let affinity = async_state
-                    .load_session_account_affinity("session-rebound")
+                    .load_session_account_affinity(Provider::Openai, "session-rebound")
                     .await
                     .expect("session affinity should load")
                     .expect("session affinity should exist");
-                if affinity.account_id() == response_owner.account_id()
+                if affinity.account_id() == Some(response_owner.account_id())
                     && affinity.last_seen_unix_seconds() == 10_100
                 {
                     return;
@@ -6351,7 +6352,7 @@ mod tests {
             .expect("upstream thread should not panic");
         let persisted = observation_runtime.block_on(async {
             observation_state
-                .load_session_account_affinity("assembled-http-session")
+                .load_session_account_affinity(Provider::Openai, "assembled-http-session")
                 .await
                 .expect("session affinity should load")
         });
@@ -6970,7 +6971,9 @@ mod tests {
             .expect("established websocket should report ready");
         let initial_affinity =
             wait_for_session_affinity(&database_path, "assembled-websocket-session", |affinity| {
-                affinity.account_id().as_str() == "acct_ws_runtime"
+                affinity
+                    .account_id()
+                    .is_some_and(|account_id| account_id.as_str() == "acct_ws_runtime")
             });
         let advance_deadline = std::time::Instant::now() + Duration::from_secs(2);
         while test_unix_seconds() <= initial_affinity.last_seen_unix_seconds() {
@@ -7025,7 +7028,12 @@ mod tests {
             wait_for_session_affinity(&database_path, "assembled-websocket-session", |affinity| {
                 affinity.last_seen_unix_seconds() > initial_affinity.last_seen_unix_seconds()
             });
-        assert_eq!(renewed_affinity.account_id().as_str(), "acct_ws_runtime");
+        assert_eq!(
+            renewed_affinity
+                .account_id()
+                .map(|account_id| account_id.as_str()),
+            Some("acct_ws_runtime")
+        );
 
         let audit_contents = match fs::read_to_string(&audit_path) {
             Ok(contents) => contents,
@@ -8902,7 +8910,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
                     if let Some(affinity) = state
-                        .load_session_account_affinity(session_id)
+                        .load_session_account_affinity(Provider::Openai, session_id)
                         .await
                         .expect("session affinity should load")
                         && predicate(&affinity)
@@ -10913,7 +10921,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let affinity = async_state
-                    .load_session_account_affinity("websocket-session")
+                    .load_session_account_affinity(Provider::Openai, "websocket-session")
                     .await
                     .expect("session affinity should load")
                     .expect("session affinity should exist");

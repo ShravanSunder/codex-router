@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT account_id, label, status, active_credential_generation\n               FROM accounts\n              WHERE account_id = ?1",
+  "query": "SELECT account_id, label, status, active_credential_generation, provider\n               FROM accounts\n              WHERE account_id = ?1",
   "describe": {
     "columns": [
       {
@@ -46,6 +46,17 @@
             "name": "active_credential_generation"
           }
         }
+      },
+      {
+        "name": "provider",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "provider"
+          }
+        }
       }
     ],
     "parameters": {
@@ -55,8 +66,9 @@
       false,
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "315abab7ce6e60ab24191873cb4cdf625522fd1db048243f13030bf6a6f84721"
+  "hash": "708fa8157df8a05cd8b4295bb591bf62d5b0f59c768fa491fd1660abb86b346b"
 }

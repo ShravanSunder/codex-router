@@ -1,6 +1,7 @@
 //! Account registry metadata stored outside secret material.
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 
 /// Router account lifecycle state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +38,7 @@ impl AccountStatus {
 pub struct AccountRecord {
     account_id: AccountId,
     label: String,
+    provider: Provider,
     status: AccountStatus,
     active_credential_generation: Option<u64>,
 }
@@ -48,9 +50,17 @@ impl AccountRecord {
         Self {
             account_id,
             label: label.into(),
+            provider: Provider::Openai,
             status,
             active_credential_generation: None,
         }
+    }
+
+    /// Sets the provider for this account.
+    #[must_use]
+    pub const fn with_provider(mut self, provider: Provider) -> Self {
+        self.provider = provider;
+        self
     }
 
     /// Sets the active credential generation.
@@ -73,6 +83,12 @@ impl AccountRecord {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// Returns the account's immutable upstream provider.
+    #[must_use]
+    pub const fn provider(&self) -> Provider {
+        self.provider
     }
 
     /// Returns the lifecycle status.

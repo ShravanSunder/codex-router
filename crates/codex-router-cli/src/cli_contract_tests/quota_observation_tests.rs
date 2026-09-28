@@ -51,6 +51,8 @@ fn quota_status_projects_held_switch_and_distinct_saved_floor_thresholds() {
             ),
         );
     }
+    drop(state);
+    migrate_test_state_database(&state_path);
     let mutation = must_ok(
         test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
     );

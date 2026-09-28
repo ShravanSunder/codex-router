@@ -34,6 +34,7 @@ mod tests {
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::AffinityKey;
     use codex_router_core::ids::ReservationId;
+    use codex_router_core::provider::Provider;
     use codex_router_core::routes::RouteBand;
     use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
     use codex_router_selection::run_rate::QuotaRunRateConfidence;
@@ -323,6 +324,7 @@ mod tests {
                  PRAGMA user_version = 10;",
             )
             .unwrap_or_else(|error| panic!("fixture should convert to v10: {error}"));
+        remove_account_provider_column_for_legacy_fixture(&connection);
     }
 
     fn convert_current_fixture_to_v11(database_path: &Path) {
@@ -348,6 +350,7 @@ mod tests {
                  PRAGMA user_version = 11;",
             )
             .unwrap_or_else(|error| panic!("fixture should convert to v11: {error}"));
+        remove_account_provider_column_for_legacy_fixture(&connection);
     }
 
     fn convert_current_fixture_to_v12(database_path: &Path) {
@@ -361,6 +364,28 @@ mod tests {
                  PRAGMA user_version = 12;",
             )
             .unwrap_or_else(|error| panic!("fixture should convert to v12: {error}"));
+        remove_account_provider_column_for_legacy_fixture(&connection);
+    }
+
+    fn remove_account_provider_column_for_legacy_fixture(connection: &Connection) {
+        connection
+            .execute_batch(
+                "ALTER TABLE accounts RENAME TO accounts_with_provider;
+                 CREATE TABLE accounts (
+                    account_id TEXT PRIMARY KEY NOT NULL,
+                    label TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    active_credential_generation INTEGER
+                 );
+                 INSERT INTO accounts (
+                    account_id, label, status, active_credential_generation
+                 )
+                 SELECT
+                    account_id, label, status, active_credential_generation
+                   FROM accounts_with_provider;
+                 DROP TABLE accounts_with_provider;",
+            )
+            .unwrap_or_else(|error| panic!("legacy account fixture should downgrade: {error}"));
     }
 
     fn assert_intact_v11_policy_database(
@@ -414,7 +439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_account_affinity_v12_migrates_to_v13() {
+    async fn session_account_affinity_v12_migrates_to_provider_scoped_rows() {
         let temp_dir = TestTempDir::new("session_account_affinity_v12_to_v13");
         let database_path = temp_dir.path().join("state.sqlite");
         let store = AsyncSqliteStateStore::open(&database_path)
@@ -440,7 +465,13 @@ mod tests {
             .expect("session affinity columns should load");
         assert_eq!(
             columns,
-            vec!["session_id", "account_id", "last_seen_unix_seconds"]
+            vec![
+                "provider",
+                "session_id",
+                "account_id",
+                "last_seen_unix_seconds",
+                "pin_version"
+            ]
         );
     }
 
@@ -468,11 +499,82 @@ mod tests {
         assert_eq!(
             AsyncSessionAccountAffinityRepository::load_session_account_affinity(
                 &store,
+                Provider::Openai,
                 "session-123",
             )
             .await,
             Ok(Some(replacement))
         );
+    }
+
+    #[tokio::test]
+    async fn session_account_affinities_are_provider_scoped_and_retain_released_rows() {
+        let temp_dir = TestTempDir::new("provider_scoped_session_affinity");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state store should open");
+        let openai_affinity =
+            SessionAccountAffinity::new("same-session", account_id("acct_openai"), 1_000);
+        let claude_affinity = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "same-session",
+            Some(account_id("acct_claude")),
+            7,
+            2_000,
+        );
+        let released_affinity = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "released-session",
+            None,
+            8,
+            3_000,
+        );
+        for affinity in [&openai_affinity, &claude_affinity, &released_affinity] {
+            AsyncSessionAccountAffinityRepository::upsert_session_account_affinity(
+                &store, affinity,
+            )
+            .await
+            .expect("provider-scoped affinity should persist");
+        }
+
+        let loaded_openai = AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+            &store,
+            Provider::Openai,
+            "same-session",
+        )
+        .await
+        .expect("OpenAI affinity should load")
+        .expect("OpenAI pin should exist");
+        let loaded_claude = AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+            &store,
+            Provider::Claude,
+            "same-session",
+        )
+        .await
+        .expect("Claude affinity should load")
+        .expect("Claude pin should exist");
+        let loaded_release = AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+            &store,
+            Provider::Claude,
+            "released-session",
+        )
+        .await
+        .expect("released affinity should load")
+        .expect("released pin row should persist");
+
+        assert_eq!(
+            loaded_openai.account_id().map(AccountId::as_str),
+            Some("acct_openai")
+        );
+        assert_eq!(
+            loaded_claude.account_id().map(AccountId::as_str),
+            Some("acct_claude")
+        );
+        assert_eq!(loaded_claude.pin_version(), 7);
+        assert_eq!(loaded_release.account_id(), None);
+        assert_eq!(loaded_release.pin_version(), 8);
+        store.close().await.expect("state store should close");
     }
 
     #[tokio::test]
@@ -502,6 +604,7 @@ mod tests {
         assert_eq!(
             AsyncSessionAccountAffinityRepository::load_session_account_affinity(
                 &store,
+                Provider::Openai,
                 "session-old",
             )
             .await,
@@ -511,6 +614,7 @@ mod tests {
             assert!(
                 AsyncSessionAccountAffinityRepository::load_session_account_affinity(
                     &store,
+                    Provider::Openai,
                     retained_session_id,
                 )
                 .await
@@ -532,6 +636,36 @@ mod tests {
             )
             .expect("session affinity indexes should query");
         assert_eq!(index_count, 1);
+    }
+
+    #[tokio::test]
+    async fn account_provider_is_immutable_after_insert() {
+        let temp_dir = TestTempDir::new("account_provider_immutable");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state store should open");
+        let account_id = account_id("acct_immutable_provider");
+        let openai_account =
+            AccountRecord::new(account_id.clone(), "shared-label", AccountStatus::Enabled);
+        store
+            .upsert_account(&openai_account)
+            .await
+            .expect("OpenAI account should persist");
+
+        let claude_account = openai_account.clone().with_provider(Provider::Claude);
+        assert_eq!(
+            store.upsert_account(&claude_account).await,
+            Err(StateStoreError::AccountProviderImmutable)
+        );
+
+        let persisted_account = store
+            .load_account(&account_id)
+            .await
+            .expect("account should load")
+            .expect("account should remain");
+        assert_eq!(persisted_account.provider(), Provider::Openai);
+        store.close().await.expect("state store should close");
     }
 
     #[tokio::test]
@@ -1820,6 +1954,13 @@ mod tests {
         }
         drop(sync_store);
 
+        let migrated_store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("sync-seeded legacy state should migrate to provider schema");
+        migrated_store
+            .close()
+            .await
+            .expect("migrated sync-seeded state should close");
         let read_only_store = match AsyncSqliteStateStore::open_read_only(&database_path).await {
             Ok(store) => store,
             Err(error) => {
@@ -4044,6 +4185,7 @@ mod tests {
         if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &enabled_account) {
             panic!("enabled account should persist: {error}");
         }
+        drop(sync_store);
         let async_store = match AsyncSqliteStateStore::open(&database_path).await {
             Ok(store) => store,
             Err(error) => panic!("async state store should open and migrate: {error}"),
@@ -4051,7 +4193,7 @@ mod tests {
         let disabled_account =
             AccountRecord::new(account_id.clone(), "race", AccountStatus::Disabled)
                 .with_active_credential_generation(1);
-        if let Err(error) = AccountStateRepository::upsert_account(&sync_store, &disabled_account) {
+        if let Err(error) = async_store.upsert_account(&disabled_account).await {
             panic!("disabled account should persist: {error}");
         }
 
@@ -4074,11 +4216,11 @@ mod tests {
                 account_id: account_id.as_str().to_owned()
             }
         );
-        let loaded_account = match AccountStateRepository::load_account(&sync_store, &account_id) {
-            Ok(Some(account)) => account,
-            Ok(None) => panic!("account should still exist"),
-            Err(error) => panic!("account should load after failed activation: {error}"),
-        };
+        let loaded_account = async_store
+            .load_account(&account_id)
+            .await
+            .unwrap_or_else(|error| panic!("account should load after failed activation: {error}"))
+            .unwrap_or_else(|| panic!("account should still exist"));
         assert_eq!(loaded_account.status(), AccountStatus::Disabled);
         assert_eq!(loaded_account.active_credential_generation(), Some(1));
     }

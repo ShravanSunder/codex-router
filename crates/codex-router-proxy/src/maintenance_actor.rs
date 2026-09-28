@@ -549,6 +549,7 @@ mod tests {
 
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::ReservationId;
+    use codex_router_core::provider::Provider;
     use codex_router_core::routes::RouteBand;
     use codex_router_state::session_account_affinity::SessionAccountAffinity;
     use codex_router_state::sqlite::AsyncSessionAccountAffinityRepository;
@@ -722,6 +723,7 @@ mod tests {
             loop {
                 let old = AsyncSessionAccountAffinityRepository::load_session_account_affinity(
                     &store,
+                    Provider::Openai,
                     old_affinity.session_id(),
                 )
                 .await
@@ -738,6 +740,7 @@ mod tests {
         assert_eq!(
             AsyncSessionAccountAffinityRepository::load_session_account_affinity(
                 &store,
+                Provider::Openai,
                 cutoff_affinity.session_id(),
             )
             .await,

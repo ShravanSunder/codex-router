@@ -146,15 +146,31 @@ async fn validate_legacy_base_presence(
 pub(crate) async fn validate_target_schema(
     connection: &mut SqliteConnection,
 ) -> Result<(), StateStoreError> {
-    validate_baseline_schema(connection).await?;
+    validate_baseline_schema_shape(connection, true).await?;
+    validate_table(connection, "accounts", CURRENT_ACCOUNTS).await?;
+    validate_table(
+        connection,
+        "session_account_affinities",
+        CURRENT_SESSION_ACCOUNT_AFFINITIES,
+    )
+    .await?;
     validate_table(connection, "credential_maintenance", CREDENTIAL_MAINTENANCE).await
 }
 
 pub(crate) async fn validate_baseline_schema(
     connection: &mut SqliteConnection,
 ) -> Result<(), StateStoreError> {
+    validate_baseline_schema_shape(connection, false).await
+}
+
+async fn validate_baseline_schema_shape(
+    connection: &mut SqliteConnection,
+    provider_identity_migrated: bool,
+) -> Result<(), StateStoreError> {
     for (table_name, columns) in BASE_TABLES {
-        validate_table(connection, table_name, columns).await?;
+        if !provider_identity_migrated || *table_name != "accounts" {
+            validate_table(connection, table_name, columns).await?;
+        }
     }
     for (table_name, columns) in [
         ("quota_history_observations", QUOTA_HISTORY_OBSERVATIONS),
@@ -165,7 +181,9 @@ pub(crate) async fn validate_baseline_schema(
         ("account_routing_policies", ACCOUNT_ROUTING_POLICIES),
         ("session_account_affinities", SESSION_ACCOUNT_AFFINITIES),
     ] {
-        validate_table(connection, table_name, columns).await?;
+        if !provider_identity_migrated || table_name != "session_account_affinities" {
+            validate_table(connection, table_name, columns).await?;
+        }
     }
     validate_policy_constraint(connection, false).await?;
     validate_all_required_indexes(connection).await
@@ -208,9 +226,12 @@ pub(crate) async fn validate_required_read_only_objects(
             "account_routing_policies",
             "weekly_quota_floor_basis_points",
         ),
+        ("accounts", "provider"),
         ("session_account_affinities", "session_id"),
+        ("session_account_affinities", "provider"),
         ("session_account_affinities", "account_id"),
         ("session_account_affinities", "last_seen_unix_seconds"),
+        ("session_account_affinities", "pin_version"),
     ] {
         if !load_columns(connection, table_name)
             .await?

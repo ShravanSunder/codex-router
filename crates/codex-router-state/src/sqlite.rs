@@ -13,6 +13,7 @@ use codex_router_core::ids::AccountId;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use codex_router_core::ids::AffinityKey;
 use codex_router_core::ids::ReservationId;
+use codex_router_core::provider::Provider;
 use codex_router_core::routes::RouteBand;
 use futures_util::future::BoxFuture;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
@@ -557,6 +558,9 @@ pub enum StateStoreError {
     /// Account-status mutation matched more than one configured display label.
     #[error("account status target label is ambiguous")]
     AccountStatusAccountLabelAmbiguous,
+    /// An account's persisted provider cannot be changed by an upsert.
+    #[error("account provider is immutable")]
+    AccountProviderImmutable,
     /// Persisted weekly-floor policy is outside the supported integer-percent range.
     #[error("stored weekly quota floor policy is invalid")]
     CorruptAccountRoutingPolicy,
@@ -900,25 +904,33 @@ impl AsyncSqliteStateStore {
         let account_id = account.account_id().as_str();
         let account_label = account.label();
         let account_status = account.status().as_str();
+        let provider = account.provider().as_str();
         let active_credential_generation = account
             .active_credential_generation()
             .map(u64_to_i64)
             .transpose()?;
-        sqlx::query!(
-            "INSERT INTO accounts (account_id, label, status, active_credential_generation)
-             VALUES (?1, ?2, ?3, ?4)
+        let result = sqlx::query!(
+            "INSERT INTO accounts (
+                account_id, label, status, active_credential_generation, provider
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(account_id) DO UPDATE SET
                label = excluded.label,
                status = excluded.status,
-               active_credential_generation = excluded.active_credential_generation",
+               active_credential_generation = excluded.active_credential_generation
+             WHERE accounts.provider = excluded.provider",
             account_id,
             account_label,
             account_status,
             active_credential_generation,
+            provider,
         )
         .execute(&self.pool)
         .await
         .map_err(sqlx_error)?;
+        if result.rows_affected() == 0 {
+            return Err(StateStoreError::AccountProviderImmutable);
+        }
 
         Ok(())
     }
@@ -926,7 +938,7 @@ impl AsyncSqliteStateStore {
     /// Lists account metadata in deterministic selector order through the async state pool.
     pub async fn list_accounts(&self) -> Result<Vec<AccountRecord>, StateStoreError> {
         let rows = sqlx::query!(
-            "SELECT account_id, label, status, active_credential_generation
+            "SELECT account_id, label, status, active_credential_generation, provider
                FROM accounts
               ORDER BY account_id",
         )
@@ -941,6 +953,7 @@ impl AsyncSqliteStateStore {
                 row.label,
                 row.status,
                 row.active_credential_generation,
+                row.provider,
             )?);
         }
 
@@ -1082,7 +1095,7 @@ impl AsyncSqliteStateStore {
     ) -> Result<Option<AccountRecord>, StateStoreError> {
         let account_id_value = account_id.as_str();
         let row = sqlx::query!(
-            "SELECT account_id, label, status, active_credential_generation
+            "SELECT account_id, label, status, active_credential_generation, provider
                FROM accounts
               WHERE account_id = ?1",
             account_id_value,
@@ -1100,6 +1113,7 @@ impl AsyncSqliteStateStore {
             row.label,
             row.status,
             row.active_credential_generation,
+            row.provider,
         )
         .map(Some)
     }
@@ -1300,15 +1314,18 @@ impl AsyncSqliteStateStore {
     ) -> Result<(), StateStoreError> {
         sqlx::query(
             "INSERT INTO session_account_affinities (
-               session_id, account_id, last_seen_unix_seconds
-             ) VALUES (?1, ?2, ?3)
-             ON CONFLICT(session_id) DO UPDATE SET
+               provider, session_id, account_id, last_seen_unix_seconds, pin_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(provider, session_id) DO UPDATE SET
                account_id = excluded.account_id,
-               last_seen_unix_seconds = excluded.last_seen_unix_seconds",
+               last_seen_unix_seconds = excluded.last_seen_unix_seconds,
+               pin_version = excluded.pin_version",
         )
+        .bind(affinity.provider().as_str())
         .bind(affinity.session_id())
-        .bind(affinity.account_id().as_str())
+        .bind(affinity.account_id().map(AccountId::as_str))
         .bind(u64_to_i64(affinity.last_seen_unix_seconds())?)
+        .bind(u64_to_i64(affinity.pin_version())?)
         .execute(&self.pool)
         .await
         .map_err(sqlx_error)?;
@@ -1318,13 +1335,15 @@ impl AsyncSqliteStateStore {
     /// Loads the account affinity for one Codex session.
     pub async fn load_session_account_affinity(
         &self,
+        provider: Provider,
         session_id: &str,
     ) -> Result<Option<SessionAccountAffinity>, StateStoreError> {
         let row = sqlx::query(
-            "SELECT session_id, account_id, last_seen_unix_seconds
+            "SELECT provider, session_id, account_id, last_seen_unix_seconds, pin_version
                FROM session_account_affinities
-              WHERE session_id = ?1",
+              WHERE provider = ?1 AND session_id = ?2",
         )
+        .bind(provider.as_str())
         .bind(session_id)
         .fetch_optional(&self.pool)
         .await
@@ -1334,7 +1353,9 @@ impl AsyncSqliteStateStore {
             parse_session_account_affinity_row(
                 row.get::<String, _>(0),
                 row.get::<String, _>(1),
-                row.get::<i64, _>(2),
+                row.get::<Option<String>, _>(2),
+                row.get::<i64, _>(3),
+                row.get::<i64, _>(4),
             )
         })
         .transpose()
@@ -2818,6 +2839,7 @@ pub trait AsyncSessionAccountAffinityRepository {
     /// Loads one session account affinity.
     fn load_session_account_affinity<'a>(
         &'a self,
+        provider: Provider,
         session_id: &'a str,
     ) -> BoxFuture<'a, Result<Option<SessionAccountAffinity>, StateStoreError>>;
 }
@@ -2832,9 +2854,13 @@ impl AsyncSessionAccountAffinityRepository for AsyncSqliteStateStore {
 
     fn load_session_account_affinity<'a>(
         &'a self,
+        provider: Provider,
         session_id: &'a str,
     ) -> BoxFuture<'a, Result<Option<SessionAccountAffinity>, StateStoreError>> {
-        Box::pin(async move { self.load_session_account_affinity(session_id).await })
+        Box::pin(async move {
+            self.load_session_account_affinity(provider, session_id)
+                .await
+        })
     }
 }
 
@@ -2903,25 +2929,55 @@ impl SqliteStateStore {
 
     /// Inserts or updates account metadata.
     pub fn upsert_account(&self, account: &AccountRecord) -> Result<(), StateStoreError> {
-        self.connection
-            .execute(
-                "INSERT INTO accounts (account_id, label, status, active_credential_generation)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(account_id) DO UPDATE SET
-                   label = excluded.label,
-                   status = excluded.status,
-                   active_credential_generation = excluded.active_credential_generation",
-                params![
-                    account.account_id().as_str(),
-                    account.label(),
-                    account.status().as_str(),
-                    account
-                        .active_credential_generation()
-                        .map(u64_to_i64)
-                        .transpose()?
-                ],
-            )
-            .map_err(sqlite_error)?;
+        let rows_affected = if self.table_has_column("accounts", "provider")? {
+            self.connection
+                .execute(
+                    "INSERT INTO accounts (
+                        account_id, label, status, active_credential_generation, provider
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(account_id) DO UPDATE SET
+                       label = excluded.label,
+                       status = excluded.status,
+                       active_credential_generation = excluded.active_credential_generation
+                     WHERE accounts.provider = excluded.provider",
+                    params![
+                        account.account_id().as_str(),
+                        account.label(),
+                        account.status().as_str(),
+                        account
+                            .active_credential_generation()
+                            .map(u64_to_i64)
+                            .transpose()?,
+                        account.provider().as_str(),
+                    ],
+                )
+                .map_err(sqlite_error)?
+        } else if account.provider() == Provider::Openai {
+            self.connection
+                .execute(
+                    "INSERT INTO accounts (account_id, label, status, active_credential_generation)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(account_id) DO UPDATE SET
+                       label = excluded.label,
+                       status = excluded.status,
+                       active_credential_generation = excluded.active_credential_generation",
+                    params![
+                        account.account_id().as_str(),
+                        account.label(),
+                        account.status().as_str(),
+                        account
+                            .active_credential_generation()
+                            .map(u64_to_i64)
+                            .transpose()?
+                    ],
+                )
+                .map_err(sqlite_error)?
+        } else {
+            return Err(StateStoreError::AccountProviderImmutable);
+        };
+        if rows_affected == 0 {
+            return Err(StateStoreError::AccountProviderImmutable);
+        }
 
         Ok(())
     }
@@ -2931,26 +2987,37 @@ impl SqliteStateStore {
         &self,
         account_id: &AccountId,
     ) -> Result<Option<AccountRecord>, StateStoreError> {
+        let provider_column = if self.table_has_column("accounts", "provider")? {
+            "provider"
+        } else {
+            "'openai'"
+        };
+        let query = format!(
+            "SELECT account_id, label, status, active_credential_generation, {provider_column}
+               FROM accounts
+              WHERE account_id = ?1"
+        );
         let row = self
             .connection
-            .query_row(
-                "SELECT account_id, label, status, active_credential_generation
-                   FROM accounts
-                  WHERE account_id = ?1",
-                params![account_id.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                    ))
-                },
-            )
+            .query_row(&query, params![account_id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
             .optional()
             .map_err(sqlite_error)?;
 
-        let Some((account_id_value, label, status_value, active_credential_generation)) = row
+        let Some((
+            account_id_value,
+            label,
+            status_value,
+            active_credential_generation,
+            provider_value,
+        )) = row
         else {
             return Ok(None);
         };
@@ -2960,20 +3027,24 @@ impl SqliteStateStore {
             label,
             status_value,
             active_credential_generation,
+            provider_value,
         )
         .map(Some)
     }
 
     /// Lists account metadata in deterministic selector order.
     pub fn list_accounts(&self) -> Result<Vec<AccountRecord>, StateStoreError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT account_id, label, status, active_credential_generation
-                   FROM accounts
-                  ORDER BY account_id",
-            )
-            .map_err(sqlite_error)?;
+        let provider_column = if self.table_has_column("accounts", "provider")? {
+            "provider"
+        } else {
+            "'openai'"
+        };
+        let query = format!(
+            "SELECT account_id, label, status, active_credential_generation, {provider_column}
+               FROM accounts
+              ORDER BY account_id"
+        );
+        let mut statement = self.connection.prepare(&query).map_err(sqlite_error)?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -2981,19 +3052,26 @@ impl SqliteStateStore {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(sqlite_error)?;
 
         let mut accounts = Vec::new();
         for row in rows {
-            let (account_id_value, label, status_value, active_credential_generation) =
-                row.map_err(sqlite_error)?;
+            let (
+                account_id_value,
+                label,
+                status_value,
+                active_credential_generation,
+                provider_value,
+            ) = row.map_err(sqlite_error)?;
             accounts.push(parse_account_row(
                 account_id_value,
                 label,
                 status_value,
                 active_credential_generation,
+                provider_value,
             )?);
         }
 
@@ -5303,23 +5381,39 @@ fn max_concurrent_sessions(segments: &[(u64, u64)]) -> u32 {
 }
 
 fn parse_session_account_affinity_row(
+    provider_value: String,
     session_id: String,
-    account_id_value: String,
+    account_id_value: Option<String>,
     last_seen_unix_seconds: i64,
+    pin_version: i64,
 ) -> Result<SessionAccountAffinity, StateStoreError> {
-    let account_id =
-        AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
-            account_id: account_id_value.clone(),
-            field: "account_id",
-        })?;
+    let diagnostic_id = account_id_value
+        .as_deref()
+        .unwrap_or(&session_id)
+        .to_owned();
+    let provider = Provider::parse(&provider_value).ok_or(StateStoreError::CorruptAccount {
+        account_id: diagnostic_id.clone(),
+        field: "provider",
+    })?;
+    let account_id = account_id_value
+        .map(|account_id_value| {
+            AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
+                account_id: account_id_value,
+                field: "account_id",
+            })
+        })
+        .transpose()?;
     let last_seen_unix_seconds = i64_to_u64(
         last_seen_unix_seconds,
-        &account_id_value,
+        &diagnostic_id,
         "last_seen_unix_seconds",
     )?;
-    Ok(SessionAccountAffinity::new(
+    let pin_version = i64_to_u64(pin_version, &diagnostic_id, "pin_version")?;
+    Ok(SessionAccountAffinity::with_pin_state(
+        provider,
         session_id,
         account_id,
+        pin_version,
         last_seen_unix_seconds,
     ))
 }
@@ -5381,6 +5475,7 @@ fn parse_account_row(
     label: String,
     status_value: String,
     active_credential_generation: Option<i64>,
+    provider_value: String,
 ) -> Result<AccountRecord, StateStoreError> {
     let parsed_account_id =
         AccountId::new(account_id_value.clone()).map_err(|_| StateStoreError::CorruptAccount {
@@ -5388,8 +5483,12 @@ fn parse_account_row(
             field: "account_id",
         })?;
     let status = AccountStatus::parse(&status_value).ok_or(StateStoreError::CorruptAccount {
-        account_id: account_id_value,
+        account_id: account_id_value.clone(),
         field: "status",
+    })?;
+    let provider = Provider::parse(&provider_value).ok_or(StateStoreError::CorruptAccount {
+        account_id: account_id_value,
+        field: "provider",
     })?;
     let active_credential_generation = active_credential_generation
         .map(|value| {
@@ -5401,7 +5500,7 @@ fn parse_account_row(
         })
         .transpose()?;
 
-    let mut account = AccountRecord::new(parsed_account_id, label, status);
+    let mut account = AccountRecord::new(parsed_account_id, label, status).with_provider(provider);
     if let Some(generation) = active_credential_generation {
         account = account.with_active_credential_generation(generation);
     }

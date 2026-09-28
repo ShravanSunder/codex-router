@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::ReservationId;
+use codex_router_core::provider::Provider;
 use codex_router_core::routes::RouteBand;
 use futures_util::future::BoxFuture;
 use thiserror::Error;
@@ -413,10 +414,16 @@ struct DbWriteActorRuntime {
 
 #[derive(Clone, Debug)]
 struct ScheduledSessionAffinity {
-    account_id: AccountId,
+    account_id: Option<AccountId>,
     pending_command: Option<QueuedDbWriteCommand>,
     first_pending_at: Option<Instant>,
     latest_requested_at: Instant,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SessionAffinityScheduleKey {
+    provider: Provider,
+    session_id: String,
 }
 
 impl ScheduledSessionAffinity {
@@ -704,7 +711,7 @@ async fn run_session_affinity_scheduler(
     schedule_capacity: usize,
     last_queue_lag_event: Arc<Mutex<Option<QueueLagEvent>>>,
 ) {
-    let mut schedules = HashMap::<String, ScheduledSessionAffinity>::new();
+    let mut schedules = HashMap::<SessionAffinityScheduleKey, ScheduledSessionAffinity>::new();
     loop {
         let next_deadline = schedules
             .values()
@@ -762,17 +769,20 @@ async fn run_session_affinity_scheduler(
 async fn process_session_affinity_trigger(
     repository: &dyn DbWriteRepository,
     command: QueuedDbWriteCommand,
-    schedules: &mut HashMap<String, ScheduledSessionAffinity>,
+    schedules: &mut HashMap<SessionAffinityScheduleKey, ScheduledSessionAffinity>,
     schedule_capacity: usize,
     last_queue_lag_event: &Arc<Mutex<Option<QueueLagEvent>>>,
 ) {
     let DbWriteCommand::SessionAccountAffinity { affinity, .. } = &command.command else {
         return;
     };
-    let session_id = affinity.session_id().to_owned();
-    let account_id = affinity.account_id().clone();
+    let session_key = SessionAffinityScheduleKey {
+        provider: affinity.provider(),
+        session_id: affinity.session_id().to_owned(),
+    };
+    let account_id = affinity.account_id().cloned();
     let requested_at = command.enqueued_at;
-    if let Some(schedule) = schedules.get_mut(&session_id) {
+    if let Some(schedule) = schedules.get_mut(&session_key) {
         schedule.latest_requested_at = requested_at;
         if schedule.account_id == account_id {
             schedule.pending_command = Some(command);
@@ -787,17 +797,17 @@ async fn process_session_affinity_trigger(
     }
 
     if schedules.len() >= schedule_capacity
-        && let Some(oldest_session_id) = schedules
+        && let Some(oldest_session_key) = schedules
             .iter()
             .min_by_key(|(_session_id, schedule)| schedule.latest_requested_at)
-            .map(|(session_id, _schedule)| session_id.clone())
-        && let Some(evicted_schedule) = schedules.remove(&oldest_session_id)
+            .map(|(session_key, _schedule)| session_key.clone())
+        && let Some(evicted_schedule) = schedules.remove(&oldest_session_key)
         && let Some(pending_command) = evicted_schedule.pending_command
     {
         persist_scheduled_session_affinity(repository, pending_command, last_queue_lag_event).await;
     }
     schedules.insert(
-        session_id,
+        session_key,
         ScheduledSessionAffinity {
             account_id,
             pending_command: None,
@@ -810,25 +820,25 @@ async fn process_session_affinity_trigger(
 
 async fn flush_due_session_affinities(
     repository: &dyn DbWriteRepository,
-    schedules: &mut HashMap<String, ScheduledSessionAffinity>,
+    schedules: &mut HashMap<SessionAffinityScheduleKey, ScheduledSessionAffinity>,
     last_queue_lag_event: &Arc<Mutex<Option<QueueLagEvent>>>,
 ) {
     let now = Instant::now();
-    let due_session_ids = schedules
+    let due_session_keys = schedules
         .iter()
         .filter(|(_session_id, schedule)| now >= schedule.next_deadline())
-        .map(|(session_id, _schedule)| session_id.clone())
+        .map(|(session_key, _schedule)| session_key.clone())
         .collect::<Vec<_>>();
     let mut pending_commands = Vec::new();
-    for session_id in due_session_ids {
-        let Some(schedule) = schedules.get_mut(&session_id) else {
+    for session_key in due_session_keys {
+        let Some(schedule) = schedules.get_mut(&session_key) else {
             continue;
         };
         if let Some(command) = schedule.pending_command.take() {
             schedule.first_pending_at = None;
             pending_commands.push(command);
         } else {
-            schedules.remove(&session_id);
+            schedules.remove(&session_key);
         }
     }
     for command in pending_commands {
@@ -838,12 +848,12 @@ async fn flush_due_session_affinities(
 
 async fn flush_all_pending_session_affinities(
     repository: &dyn DbWriteRepository,
-    schedules: &mut HashMap<String, ScheduledSessionAffinity>,
+    schedules: &mut HashMap<SessionAffinityScheduleKey, ScheduledSessionAffinity>,
     last_queue_lag_event: &Arc<Mutex<Option<QueueLagEvent>>>,
 ) {
     let pending_commands = schedules
         .drain()
-        .filter_map(|(_session_id, schedule)| schedule.pending_command)
+        .filter_map(|(_session_key, schedule)| schedule.pending_command)
         .collect::<Vec<_>>();
     for command in pending_commands {
         persist_scheduled_session_affinity(repository, command, last_queue_lag_event).await;

@@ -13,6 +13,7 @@ use codex_router_core::affinity::RouterAffinityHashSecret;
 use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::TokenGeneration;
+use codex_router_core::provider::Provider;
 use codex_router_core::routes::RouteBand;
 use codex_router_quota::snapshot::SnapshotFreshness;
 use codex_router_selection::burn_down::AccountAvailability;
@@ -62,6 +63,7 @@ use crate::http_sse::HttpProxyError;
 use crate::http_sse::HttpProxyRequest;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
+use crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
 use crate::session_account_affinity_cache::SessionAccountAffinityCache;
 use crate::session_account_affinity_cache::SessionAffinityActivityHandle;
 use crate::session_account_affinity_cache::SharedSessionAccountAffinityCache;
@@ -137,7 +139,9 @@ impl AsyncAccountSelectorRuntimeState {
             runtime_exhaustions,
             route_band_queue_health,
             selection_reservation_lock,
-            session_affinity_cache: SessionAccountAffinityCache::shared(),
+            session_affinity_cache: SessionAccountAffinityCache::shared(
+                DEFAULT_SESSION_PIN_IDLE_TTL,
+            ),
         }
     }
 
@@ -170,7 +174,7 @@ const ROUTING_METADATA_SCAN_MAX_TOP_LEVEL_KEYS: usize = 64;
 /// Default v1 minimum account reuse period for adjacent normal requests.
 pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 /// Idle time after which a Codex session may move to another account.
-pub const PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS: u64 = 7_200;
+pub const PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS: u64 = 75 * 60;
 const ACTIVE_SESSION_RESERVATION_UNITS: u32 = 1;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 const RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS: u64 = 300;
@@ -821,7 +825,9 @@ where
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             session_affinity_writer: None,
-            session_affinity_cache: SessionAccountAffinityCache::shared(),
+            session_affinity_cache: SessionAccountAffinityCache::shared(
+                DEFAULT_SESSION_PIN_IDLE_TTL,
+            ),
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
@@ -844,7 +850,9 @@ where
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             session_affinity_writer: None,
-            session_affinity_cache: SessionAccountAffinityCache::shared(),
+            session_affinity_cache: SessionAccountAffinityCache::shared(
+                DEFAULT_SESSION_PIN_IDLE_TTL,
+            ),
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
@@ -869,7 +877,9 @@ where
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             session_affinity_writer: None,
-            session_affinity_cache: SessionAccountAffinityCache::shared(),
+            session_affinity_cache: SessionAccountAffinityCache::shared(
+                DEFAULT_SESSION_PIN_IDLE_TTL,
+            ),
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
@@ -895,7 +905,9 @@ where
             route_band_queue_health: Arc::new(Mutex::new(HashMap::new())),
             active_client_leases: None,
             session_affinity_writer: None,
-            session_affinity_cache: SessionAccountAffinityCache::shared(),
+            session_affinity_cache: SessionAccountAffinityCache::shared(
+                DEFAULT_SESSION_PIN_IDLE_TTL,
+            ),
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
@@ -1198,6 +1210,7 @@ where
                 Some(session_id) => {
                     if let Some(cached) = lookup_session_account_affinity(
                         &self.session_affinity_cache,
+                        Provider::Openai,
                         session_id,
                         route_band,
                         self.session_affinity_writer.as_ref(),
@@ -1211,6 +1224,7 @@ where
                         let persisted =
                             AsyncSessionAccountAffinityRepository::load_session_account_affinity(
                                 self.state_repository,
+                                Provider::Openai,
                                 session_id,
                             )
                             .await
@@ -1221,6 +1235,7 @@ where
                             })?;
                         reconcile_persisted_session_account_affinity(
                             &self.session_affinity_cache,
+                            Provider::Openai,
                             session_id,
                             persisted.as_ref(),
                             route_band,
@@ -1434,6 +1449,7 @@ fn publish_selected_session_affinity(
 
     let published = publish_session_account_affinity(
         cache,
+        Provider::Openai,
         session_id,
         selected.account_id(),
         route_band,
@@ -2529,6 +2545,7 @@ mod tests {
     use super::SqliteActiveClientLeaseReporter;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::TokenGeneration;
+    use codex_router_core::provider::Provider;
     use codex_router_core::routes::RouteBand;
     use codex_router_quota::snapshot::SnapshotFreshness;
     use codex_router_selection::reservation::ReservationBook;
@@ -2548,6 +2565,7 @@ mod tests {
     use crate::db_write_actor::DbWriteRepositoryError;
     use crate::db_write_actor::SqliteDbWriteRepository;
     use crate::provider_error::ProviderErrorClassification;
+    use crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
     use crate::test_log_capture::capture_log_output;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -3180,7 +3198,9 @@ mod tests {
         let route_band_queue_health = super::RouteBandQueueHealth::default();
         let selection_reservation_lock = Arc::new(tokio::sync::Mutex::new(()));
         let session_affinity_cache =
-            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared();
+            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared(
+                DEFAULT_SESSION_PIN_IDLE_TTL,
+            );
         let write_repository = Arc::new(ControlledFailingAffinityWriteRepository::default());
         let writer = DbWriteActor::start(write_repository.clone(), 4);
         let request =
@@ -3263,7 +3283,9 @@ mod tests {
         );
         let active_reservations = super::RouteBandReservationBooks::default();
         let session_affinity_cache =
-            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared();
+            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared(
+                DEFAULT_SESSION_PIN_IDLE_TTL,
+            );
         let write_repository = Arc::new(ControlledFailingAffinityWriteRepository::default());
         let writer = DbWriteActor::start(write_repository.clone(), 4);
         writer.shutdown().await;
@@ -3313,6 +3335,7 @@ mod tests {
         ));
         let seeded = crate::session_account_affinity_cache::lookup_session_account_affinity(
             &session_affinity_cache,
+            Provider::Openai,
             "session-failed-reservation",
             RouteBand::Responses,
             Some(&writer),
@@ -3342,7 +3365,9 @@ mod tests {
         let route_band_queue_health = super::RouteBandQueueHealth::default();
         let selection_reservation_lock = Arc::new(tokio::sync::Mutex::new(()));
         let session_affinity_cache =
-            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared();
+            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared(
+                DEFAULT_SESSION_PIN_IDLE_TTL,
+            );
         let build_selector = || {
             super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
                 &repository,
@@ -3400,10 +3425,13 @@ mod tests {
             ),
         );
         let session_affinity_cache =
-            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared();
+            crate::session_account_affinity_cache::SessionAccountAffinityCache::shared(
+                DEFAULT_SESSION_PIN_IDLE_TTL,
+            );
         let original_live_owner =
             crate::session_account_affinity_cache::publish_session_account_affinity(
                 &session_affinity_cache,
+                Provider::Openai,
                 "session-post-await",
                 &account_id("acct_a"),
                 RouteBand::Responses,
@@ -4278,6 +4306,7 @@ mod tests {
 
         fn load_session_account_affinity<'a>(
             &'a self,
+            _provider: Provider,
             _session_id: &'a str,
         ) -> futures_util::future::BoxFuture<
             'a,

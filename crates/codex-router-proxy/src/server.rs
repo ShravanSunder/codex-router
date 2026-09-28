@@ -124,6 +124,7 @@ use crate::provider_error::record_provider_error_observation;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
+use crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
 use crate::session_account_affinity_cache::SessionAccountAffinityCache;
 use crate::session_account_affinity_cache::SharedSessionAccountAffinityCache;
 use crate::upstream::HyperHttpUpstreamTransport;
@@ -344,6 +345,7 @@ pub struct LoopbackRouterRuntimeConfig {
     local_token: Option<LocalRouterTokenRecord>,
     fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
+    session_pin_idle_ttl: Duration,
     audit_file_path: Option<PathBuf>,
     websocket_registry_report_file: Option<PathBuf>,
 }
@@ -408,6 +410,7 @@ impl LoopbackRouterRuntimeConfig {
             local_token: Some(local_token),
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
+            session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
             audit_file_path: None,
             websocket_registry_report_file: None,
         }
@@ -429,6 +432,7 @@ impl LoopbackRouterRuntimeConfig {
             local_token: None,
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
+            session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
             audit_file_path: None,
             websocket_registry_report_file: None,
         }
@@ -450,6 +454,13 @@ impl LoopbackRouterRuntimeConfig {
     ) -> Self {
         self.fixed_now_unix_seconds = Some(now_unix_seconds);
         self.max_snapshot_age_seconds = max_snapshot_age_seconds;
+        self
+    }
+
+    /// Sets the shared provider session-pin idle lifetime.
+    #[must_use]
+    pub const fn with_session_pin_idle_ttl(mut self, idle_ttl: Duration) -> Self {
+        self.session_pin_idle_ttl = idle_ttl;
         self
     }
 
@@ -560,7 +571,8 @@ impl LoopbackRouterRuntime {
         let websocket_revocations = WebSocketRevocationRegistry::new();
         let route_band_queue_health = RouteBandQueueHealth::default();
         let selection_reservation_lock = SelectionReservationLock::default();
-        let session_affinity_cache = SessionAccountAffinityCache::shared();
+        let session_affinity_cache =
+            SessionAccountAffinityCache::shared(config.session_pin_idle_ttl);
         let db_write_actor = DbWriteActor::start_on_handle(
             runtime.handle(),
             Arc::new(SqliteDbWriteRepository::new(

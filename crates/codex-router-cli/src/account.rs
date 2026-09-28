@@ -217,6 +217,12 @@ pub enum AccountCommandError {
     /// Display label was empty.
     #[error("account label must not be empty")]
     EmptyLabel,
+    /// Another provider or account already owns this globally unique label.
+    #[error("account label already exists: {label}")]
+    DuplicateAccountLabel {
+        /// Existing display label.
+        label: String,
+    },
     /// A setter option was supplied more than once.
     #[error("weekly floor option supplied more than once: {option}")]
     DuplicateWeeklyFloorOption {
@@ -374,6 +380,7 @@ fn import_codex_auth_text(
     let state = runtime.block_on(AsyncSqliteStateStore::open(
         &router_root.join("state.sqlite"),
     ))?;
+    ensure_account_label_unused(&state, &trimmed_label, &runtime)?;
     let secrets = FileSecretStore::open(router_root.join("secrets"))?;
 
     let mut request = AccountImportRequest::new(
@@ -408,6 +415,8 @@ fn login_with_codex_device_auth(
     codex_bin: PathBuf,
     allow_plaintext_file_secrets: bool,
 ) -> Result<(), AccountCommandError> {
+    let label = normalize_label(&label)?;
+    ensure_account_label_unused_at_router_root(&router_root, &label)?;
     if !allow_plaintext_file_secrets {
         return Err(AccountCommandError::PlaintextFileSecretsNotAllowed);
     }
@@ -594,7 +603,7 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
     let policies = runtime.block_on(state.list_account_routing_policies())?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header(["account", "status", "weekly floor", "OAuth"]);
+    table.set_header(["provider", "account", "status", "weekly floor", "OAuth"]);
     for account in accounts {
         let weekly_floor = policies
             .iter()
@@ -618,6 +627,7 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
             _ => "unknown",
         };
         table.add_row([
+            account.provider().as_str(),
             account.label(),
             account.status().as_str(),
             &weekly_floor,
@@ -626,6 +636,40 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
     }
     writeln!(stdout, "{table}").map_err(AccountCommandError::Stdout)?;
 
+    Ok(())
+}
+
+fn ensure_account_label_unused_at_router_root(
+    router_root: &Path,
+    label: &str,
+) -> Result<(), AccountCommandError> {
+    let state_database_path = router_root.join("state.sqlite");
+    if !state_database_path.exists() {
+        return Ok(());
+    }
+
+    let runtime = account_command_runtime()?;
+    let state = runtime.block_on(AsyncSqliteStateStore::open(&state_database_path))?;
+    ensure_account_label_unused(&state, label, &runtime)?;
+    runtime.block_on(state.close())?;
+    Ok(())
+}
+
+fn ensure_account_label_unused(
+    state: &AsyncSqliteStateStore,
+    label: &str,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<(), AccountCommandError> {
+    let accounts = runtime.block_on(state.list_accounts())?;
+    let account_id = account_id_from_label(label)?;
+    if accounts
+        .iter()
+        .any(|account| account.label() == label || account.account_id() == &account_id)
+    {
+        return Err(AccountCommandError::DuplicateAccountLabel {
+            label: label.to_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -746,6 +790,84 @@ mod account_status_error_tests {
         for canary in ["sensitive-label", "acct_internal", "/private/state.sqlite"] {
             assert!(!rendered.contains(canary));
         }
+    }
+}
+
+#[cfg(test)]
+mod account_provider_cli_tests {
+    use super::*;
+    use codex_router_core::provider::Provider;
+
+    #[test]
+    fn login_refuses_a_label_owned_by_another_provider_before_launching_codex() {
+        let temporary_root = tempfile::tempdir().expect("temporary router root should exist");
+        let runtime = account_command_runtime().expect("test runtime should initialize");
+        let state = runtime
+            .block_on(AsyncSqliteStateStore::open(
+                &temporary_root.path().join("state.sqlite"),
+            ))
+            .expect("test state should open");
+        let existing_account = AccountRecord::new(
+            account_id_from_label("shared-label").expect("test account id should parse"),
+            "shared-label",
+            AccountStatus::Enabled,
+        )
+        .with_provider(Provider::Claude);
+        runtime
+            .block_on(state.upsert_account(&existing_account))
+            .expect("Claude account should persist");
+        runtime
+            .block_on(state.close())
+            .expect("test state should close");
+
+        let error = login_with_codex_device_auth(
+            &mut Vec::new(),
+            temporary_root.path().to_path_buf(),
+            " shared-label ".to_owned(),
+            PathBuf::from("codex-that-must-not-launch"),
+            true,
+        )
+        .expect_err("duplicate labels must be refused before device auth");
+        assert!(matches!(
+            error,
+            AccountCommandError::DuplicateAccountLabel { label } if label == "shared-label"
+        ));
+    }
+
+    #[test]
+    fn account_list_displays_each_provider() {
+        let temporary_root = tempfile::tempdir().expect("temporary router root should exist");
+        let runtime = account_command_runtime().expect("test runtime should initialize");
+        let state = runtime
+            .block_on(AsyncSqliteStateStore::open(
+                &temporary_root.path().join("state.sqlite"),
+            ))
+            .expect("test state should open");
+        for (label, provider) in [
+            ("openai-label", Provider::Openai),
+            ("claude-label", Provider::Claude),
+        ] {
+            let account = AccountRecord::new(
+                account_id_from_label(label).expect("test account id should parse"),
+                label,
+                AccountStatus::Enabled,
+            )
+            .with_provider(provider);
+            runtime
+                .block_on(state.upsert_account(&account))
+                .expect("test account should persist");
+        }
+        runtime
+            .block_on(state.close())
+            .expect("test state should close");
+
+        let mut output = Vec::new();
+        list_accounts(&mut output, temporary_root.path().to_path_buf())
+            .expect("account list should render");
+        let output = String::from_utf8(output).expect("account list output should be UTF-8");
+        assert!(output.contains("provider"));
+        assert!(output.contains("openai"));
+        assert!(output.contains("claude"));
     }
 }
 
