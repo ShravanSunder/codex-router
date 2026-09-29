@@ -130,7 +130,6 @@ fn incomplete_migration_blocks_credentials_but_keeps_router_secrets_available() 
         "legacy-token-canary",
     )
     .expect("legacy credential fixture");
-    let file_store = file_store;
     file_store
         .write_secret(&local_token_key, &local_token)
         .expect("local token stays in file store");
