@@ -7,7 +7,9 @@ fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let account_id = account_id("acct_cli_serve");
     let account = AccountRecord::new(
         codex_router_core::provider::Provider::Openai,
@@ -23,7 +25,7 @@ fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
             .with_route_band("responses", 100);
     must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
     persist_effective_selector_window(&state, &account_id, "responses", 100);
-    let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let upstream_token_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let upstream_credential_bundle = must_ok(
         AccountCredentialBundle::imported_codex_auth(
             "cli-upstream-token",
@@ -183,7 +185,9 @@ fn serve_command_dispatches_websocket_upgrade_through_runtime() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let account_id = account_id("acct_cli_ws");
     let account = AccountRecord::new(
         codex_router_core::provider::Provider::Openai,
@@ -199,7 +203,7 @@ fn serve_command_dispatches_websocket_upgrade_through_runtime() {
             .with_route_band("responses", 100);
     must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
     persist_effective_selector_window(&state, &account_id, "responses", 100);
-    let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let upstream_token_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let upstream_credential_bundle = must_ok(
         AccountCredentialBundle::imported_codex_auth(
             "cli-ws-upstream-token",
@@ -377,7 +381,9 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let enabled_id = account_id("serve-upkeep-enabled");
     let disabled_id = account_id("serve-upkeep-disabled");
     for (account_id, status, refresh_token) in [
@@ -402,7 +408,7 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
             )
             .with_active_credential_generation(1),
         ));
-        let key = must_ok(account_credential_bundle_key(account_id, 1));
+        let key = must_ok(openai_account_credential_bundle_key(account_id, 1));
         must_ok(
             secrets.write_secret(
                 &key,
@@ -500,16 +506,20 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
     let oauth_client = LoopbackUpkeepOAuthClient {
         token_endpoint: format!("http://{oauth_address}/oauth/token"),
     };
+    let credential_store = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let serve_thread = thread::spawn(move || {
         let mut stdout = Vec::new();
         let result = run_serve_command_with_upkeep_start(
             &mut stdout,
             command,
-            move |state_path, secret_root| {
+            credential_store,
+            move |state_path, credential_store| {
                 let clock = Arc::clone(&worker_clock);
                 let worker = start_background_credential_upkeep_worker_with_client_and_clock(
                     state_path,
-                    secret_root,
+                    credential_store,
                     oauth_client,
                     move || clock.load(Ordering::SeqCst),
                 )?;

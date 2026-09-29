@@ -6,7 +6,7 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::credential_maintenance::CredentialFailureClass;
 use codex_router_state::credential_maintenance::CredentialMaintenanceState;
@@ -47,7 +47,10 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let state = AsyncSqliteStateStore::open(&root.join("state.sqlite"))
         .await
         .expect("fixture state");
-    let secrets = FileSecretStore::open(root.join("secrets")).expect("fixture secrets");
+    let secrets = codex_router_secret_store::test_support::open_encrypted_credential_store(
+        root.join("secrets"),
+    )
+    .expect("fixture secrets");
     let terminal_id = AccountId::new("upkeep-terminal").expect("terminal id");
     state
         .upsert_account(
@@ -61,7 +64,7 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         )
         .await
         .expect("terminal account");
-    let terminal_key = account_credential_bundle_key(&terminal_id, 1).expect("terminal key");
+    let terminal_key = openai_account_credential_bundle_key(&terminal_id, 1).expect("terminal key");
     secrets
         .write_secret(
             &terminal_key,
@@ -98,7 +101,7 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         )
         .await
         .expect("cooldown account");
-    let cooldown_key = account_credential_bundle_key(&cooldown_id, 1).expect("cooldown key");
+    let cooldown_key = openai_account_credential_bundle_key(&cooldown_id, 1).expect("cooldown key");
     secrets
         .write_secret(
             &cooldown_key,
@@ -130,7 +133,7 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         )
         .await
         .expect("reauth account");
-    let reauth_key = account_credential_bundle_key(&reauth_id, 1).expect("reauth key");
+    let reauth_key = openai_account_credential_bundle_key(&reauth_id, 1).expect("reauth key");
     secrets
         .write_secret(
             &reauth_key,
@@ -145,7 +148,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         .expect("reauth secret");
     assert!(
         state
-            .claim_credential_refresh(&reauth_id, 1, 2)
+            .claim_credential_refresh(
+                &reauth_id,
+                codex_router_core::provider::Provider::Openai,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                2
+            )
             .await
             .expect("reauth claim")
     );
@@ -239,7 +248,7 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         )
         .await
         .expect("claimed account");
-    let active_key = account_credential_bundle_key(&claimed_id, 1).expect("active key");
+    let active_key = openai_account_credential_bundle_key(&claimed_id, 1).expect("active key");
     secrets
         .write_secret(
             &active_key,
@@ -254,11 +263,17 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         .expect("active secret");
     assert!(
         claim_state
-            .claim_credential_refresh(&claimed_id, 1, 2)
+            .claim_credential_refresh(
+                &claimed_id,
+                codex_router_core::provider::Provider::Openai,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                2
+            )
             .await
             .expect("unresolved claim")
     );
-    let staged_key = account_credential_bundle_key(&claimed_id, 2).expect("staged key");
+    let staged_key = openai_account_credential_bundle_key(&claimed_id, 2).expect("staged key");
     secrets
         .write_secret(
             &staged_key,

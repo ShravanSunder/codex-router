@@ -14,6 +14,7 @@ use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
 use codex_router_proxy::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
 use codex_router_proxy::upstream::UpstreamEndpoint;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::file_backend::FileSecretStore;
 
 pub mod account;
@@ -223,9 +224,10 @@ where
 fn run_serve_command_with_upkeep_start(
     stdout: &mut impl Write,
     command: cli_argument_parsing::ServeCommand,
+    credential_store: EncryptedCredentialStore,
     upkeep_start: impl FnOnce(
         &Path,
-        &Path,
+        EncryptedCredentialStore,
     ) -> Result<
         credential_upkeep_worker::CredentialUpkeepWorker,
         credential_upkeep_worker::CredentialUpkeepStartError,
@@ -256,7 +258,7 @@ fn run_serve_command_with_upkeep_start(
         runtime_config =
             runtime_config.with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
     }
-    let runtime = LoopbackRouterRuntime::start(runtime_config)?;
+    let runtime = LoopbackRouterRuntime::start(runtime_config, credential_store.clone())?;
     let _token_reload_watcher =
         token_reload_watcher.map(|(secret_store, initial_token_generation)| {
             LocalTokenReloadWatcher::start(
@@ -272,11 +274,12 @@ fn run_serve_command_with_upkeep_start(
     )
     .map_err(CliError::Stdout)?;
     writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
-    let _credential_upkeep_worker = upkeep_start(&state_db, &secret_root)?;
+    let _credential_upkeep_worker = upkeep_start(&state_db, credential_store.clone())?;
     let _quota_refresh_worker = if command.background_quota_refresh_enabled {
         Some(quota::start_background_quota_refresh_worker(
             state_db,
             secret_root,
+            credential_store,
             DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
             Duration::from_secs(command.quota_refresh_interval_seconds),
             runtime.websocket_quota_floor_notifier(),
@@ -352,9 +355,14 @@ where
     let command = CliCommand::parse(args)?;
     match command {
         CliCommand::Serve(command) => {
+            let credential_store = secret_store_factory::open_cli_secret_store_in_spawn_blocking(
+                command.secret_root.clone(),
+            )
+            .map_err(|_| CliError::CredentialStoreOpen)?;
             run_serve_command_with_upkeep_start(
                 stdout,
                 command,
+                credential_store,
                 credential_upkeep_worker::start_background_credential_upkeep_worker,
             )?;
         }

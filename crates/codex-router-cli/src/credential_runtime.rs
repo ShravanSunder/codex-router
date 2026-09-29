@@ -67,10 +67,10 @@ pub(crate) trait AsyncProviderCredentialResolver {
 }
 
 impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
-    /// Opens CLI credential resolver dependencies.
-    pub fn open(
+    /// Opens resolver state while reusing the serving process's encrypted-store handle.
+    pub(crate) fn open_with_secret_store(
         state_db_path: &Path,
-        secret_root: &Path,
+        secret_store: CliRuntimeSecretStore,
     ) -> Result<Self, CliCredentialResolverOpenError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -80,7 +80,7 @@ impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
             runtime,
             state_db_path: state_db_path.to_path_buf(),
             state_store,
-            secret_store: open_cli_secret_store(secret_root)?,
+            secret_store,
             refresh_client: OpenAiOAuthRefreshClient::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
@@ -101,11 +101,13 @@ where
             .enable_all()
             .build()?;
         let state_store = runtime.block_on(AsyncSqliteStateStore::open(state_db_path))?;
+        let secret_store =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)?;
         Ok(Self {
             runtime,
             state_db_path: state_db_path.to_path_buf(),
             state_store,
-            secret_store: open_cli_secret_store(secret_root)?,
+            secret_store,
             refresh_client,
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })

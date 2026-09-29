@@ -49,6 +49,7 @@ mod tests {
     use crate::affinity_owner::AffinitySourceTransport;
     use crate::affinity_owner::PreviousResponseAffinityOwnerLookup;
     use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
+    use crate::credential_maintenance::ClaimPurpose;
     use crate::credential_maintenance::CredentialMaintenanceState;
     use crate::quota_snapshot::PersistedQuotaHistoryObservation;
     use crate::quota_snapshot::PersistedQuotaSnapshot;
@@ -105,7 +106,13 @@ mod tests {
             .expect("account should save");
         assert!(
             store
-                .claim_credential_refresh(&account_id, 1, 3)
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    3
+                )
                 .await
                 .expect("claim should save")
         );
@@ -123,19 +130,39 @@ mod tests {
         assert_eq!(claim.claimed_successor_generation, Some(3));
         assert!(
             !reopened
-                .claim_credential_refresh(&account_id, 1, 4)
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    4
+                )
                 .await
                 .expect("second claim should evaluate")
         );
         assert!(
             !reopened
-                .activate_claimed_credential_generation(&account_id, 1, 2, 100)
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    100
+                )
                 .await
                 .expect("wrong slot should evaluate")
         );
         assert!(
             reopened
-                .activate_claimed_credential_generation(&account_id, 1, 3, 100)
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    3,
+                    100
+                )
                 .await
                 .expect("claimed slot should activate")
         );
@@ -152,6 +179,121 @@ mod tests {
             .expect("health should exist");
         assert_eq!(health.state, CredentialMaintenanceState::Healthy);
         assert_eq!(health.last_success_unix_seconds, Some(100));
+    }
+
+    #[tokio::test]
+    async fn login_claim_accepts_a_new_disabled_account_and_removes_its_claim_on_activation() {
+        let temp_dir = TestTempDir::new("credential_login_claim_first_generation");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let account_id = account_id("login-claim-first-generation");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        store
+            .upsert_account(&AccountRecord::new(
+                Provider::Claude,
+                account_id.clone(),
+                "first login",
+                AccountStatus::Disabled,
+            ))
+            .await
+            .expect("new account metadata should save");
+
+        assert!(
+            store
+                .claim_credential_refresh(&account_id, Provider::Claude, ClaimPurpose::Login, 0, 1,)
+                .await
+                .expect("login claim should evaluate")
+        );
+        assert!(
+            store
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Login,
+                    0,
+                    1,
+                    100,
+                )
+                .await
+                .expect("login claim should activate")
+        );
+
+        let active_account = store
+            .load_account(&account_id)
+            .await
+            .expect("account should load")
+            .expect("account should exist");
+        assert_eq!(active_account.provider(), Provider::Claude);
+        assert_eq!(active_account.status(), AccountStatus::Enabled);
+        assert_eq!(active_account.active_credential_generation(), Some(1));
+        assert!(
+            store
+                .load_credential_maintenance(&account_id)
+                .await
+                .expect("maintenance should load")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_claim_rejects_a_provider_mismatch_for_both_purposes() {
+        let temp_dir = TestTempDir::new("credential_claim_provider_guard");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        let claude_account_id = account_id("claim-provider-claude");
+        store
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    claude_account_id.clone(),
+                    "claude",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await
+            .expect("Claude account should save");
+        let openai_account_id = account_id("claim-provider-openai");
+        store
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Openai,
+                    openai_account_id.clone(),
+                    "openai",
+                    AccountStatus::Disabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await
+            .expect("OpenAI account should save");
+
+        assert!(
+            !store
+                .claim_credential_refresh(
+                    &claude_account_id,
+                    Provider::Openai,
+                    ClaimPurpose::Refresh,
+                    1,
+                    2,
+                )
+                .await
+                .expect("refresh provider guard should evaluate")
+        );
+        assert!(
+            !store
+                .claim_credential_refresh(
+                    &openai_account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Login,
+                    1,
+                    2,
+                )
+                .await
+                .expect("login provider guard should evaluate")
+        );
     }
 
     #[tokio::test]
@@ -176,7 +318,13 @@ mod tests {
             .expect("old account should save");
         assert!(
             store
-                .claim_credential_refresh(&account_id, 1, 2)
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    2
+                )
                 .await
                 .expect("old claim")
         );
@@ -195,13 +343,26 @@ mod tests {
 
         assert!(
             store
-                .claim_credential_refresh(&account_id, 3, 4)
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    3,
+                    4
+                )
                 .await
                 .expect("new claim")
         );
         assert!(
             !store
-                .activate_claimed_credential_generation(&account_id, 1, 2, 100)
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    100
+                )
                 .await
                 .expect("old claim cannot activate")
         );
@@ -214,7 +375,14 @@ mod tests {
         assert_eq!(claim.claimed_successor_generation, Some(4));
         assert!(
             store
-                .activate_claimed_credential_generation(&account_id, 3, 4, 100)
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    3,
+                    4,
+                    100
+                )
                 .await
                 .expect("new claim activates")
         );
@@ -244,20 +412,39 @@ mod tests {
             .expect("initial account");
         assert!(
             state
-                .claim_credential_refresh(&account_id, 1, 2)
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    2
+                )
                 .await
                 .expect("initial claim")
         );
         assert!(
             state
-                .activate_claimed_credential_generation(&account_id, 1, 2, 100)
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    100
+                )
                 .await
                 .expect("initial activation")
         );
 
         assert!(
             state
-                .claim_credential_refresh(&account_id, 2, 3)
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    2,
+                    3
+                )
                 .await
                 .expect("same-generation claim")
         );
@@ -317,7 +504,13 @@ mod tests {
             .expect("second replacement account");
         assert!(
             state
-                .claim_credential_refresh(&account_id, 6, 7)
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Openai,
+                    crate::credential_maintenance::ClaimPurpose::Refresh,
+                    6,
+                    7
+                )
                 .await
                 .expect("replacement claim")
         );

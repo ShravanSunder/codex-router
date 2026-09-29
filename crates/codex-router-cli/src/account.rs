@@ -10,15 +10,16 @@ use std::time::UNIX_EPOCH;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use codex_router_auth::credential_activation::CredentialActivation;
+use codex_router_auth::credential_activation::CredentialActivationError;
+use codex_router_auth::credential_activation::CredentialActivationRequest;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_secret_store::SecretStore;
-use codex_router_secret_store::account_credential_lock::AccountCredentialLock;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-use codex_router_secret_store::account_tokens::first_unused_account_credential_generation;
-use codex_router_secret_store::file_backend::FileSecretStore;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus;
 use codex_router_secret_store::model::SecretStoreError;
+#[cfg(test)]
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::account_routing_policy::WeeklyQuotaFloorBasisPoints;
@@ -179,6 +180,9 @@ pub enum AccountCommandError {
     /// API-key auth cannot be imported as quota-compatible OAuth state.
     #[error("device login requires Codex OAuth credentials, not API-key auth")]
     ApiKeyAuth,
+    /// An account id already belongs to another provider.
+    #[error("account provider does not match OpenAI credential import")]
+    AccountProviderMismatch,
     /// Device-auth process failed to start.
     #[error("failed to start codex device-auth login {path}: {source}")]
     DeviceAuthLaunch {
@@ -275,6 +279,12 @@ pub enum AccountCommandError {
     /// Cross-process credential authority could not be established.
     #[error("account credential lock unavailable")]
     CredentialLockUnavailable,
+    /// Process-scoped encrypted credential storage could not be initialized.
+    #[error("encrypted credential store could not be initialized")]
+    CredentialStoreInitialization,
+    /// Auth-owned credential activation failed.
+    #[error(transparent)]
+    CredentialActivation(CredentialActivationError),
     /// State-store operation failed.
     #[error(transparent)]
     StateStore(#[from] StateStoreError),
@@ -382,7 +392,10 @@ fn import_codex_auth_text(
         &router_root.join("state.sqlite"),
     ))?;
     ensure_account_label_available(&state, &trimmed_label, Provider::Openai, &runtime)?;
-    let secrets = FileSecretStore::open(router_root.join("secrets"))?;
+    let secrets = crate::secret_store_factory::open_cli_secret_store_in_spawn_blocking(
+        router_root.join("secrets"),
+    )
+    .map_err(|_| AccountCommandError::CredentialStoreInitialization)?;
 
     let mut request = AccountImportRequest::new(
         account_id.clone(),
@@ -544,59 +557,39 @@ impl AccountImportRequest {
 }
 
 /// Imports an already-parsed Codex OAuth auth record into router-owned SQLx state.
-pub async fn import_codex_auth_from_request_async(
+pub async fn import_codex_auth_from_request_async<S>(
     state: &AsyncSqliteStateStore,
-    secrets: &impl SecretStore,
+    secrets: &S,
     request: AccountImportRequest,
-) -> Result<(), AccountCommandError> {
-    let database_path = state.database_path().to_path_buf();
-    let account_for_lock = request.account_id.clone();
-    let _account_lock = tokio::task::spawn_blocking(move || {
-        AccountCredentialLock::acquire(&database_path, &account_for_lock)
-    })
-    .await
-    .map_err(|_| AccountCommandError::CredentialLockUnavailable)?
-    .map_err(|_| AccountCommandError::CredentialLockUnavailable)?;
-    let existing_account = state.load_account(&request.account_id).await?;
-    let current_generation = existing_account
-        .as_ref()
-        .and_then(AccountRecord::active_credential_generation)
-        .unwrap_or(0);
-    let active_credential_generation = first_unused_account_credential_generation(
-        secrets,
-        &request.account_id,
-        current_generation,
-    )?;
-    if existing_account.is_none() {
-        state
-            .upsert_account(&AccountRecord::new(
-                codex_router_core::provider::Provider::Openai,
-                request.account_id.clone(),
-                request.label.clone(),
-                AccountStatus::Disabled,
-            ))
-            .await?;
-    }
-    let bundle_key =
-        account_credential_bundle_key(&request.account_id, active_credential_generation)?;
+) -> Result<(), AccountCommandError>
+where
+    S: SecretStore + Clone + Send + Sync + 'static,
+{
     let mut bundle =
         AccountCredentialBundle::imported_codex_auth(request.access_token, request.refresh_token);
     if let Some(chatgpt_account_id) = request.chatgpt_account_id {
         bundle = bundle.with_chatgpt_account_id(chatgpt_account_id);
     }
-    secrets.write_secret(&bundle_key, &bundle.to_secret_string()?)?;
-    state
-        .activate_account_credential_generation_and_invalidate_quota(
-            &request.account_id,
-            active_credential_generation,
-            AccountStatus::Enabled,
-        )
-        .await?;
+    let activation_request = CredentialActivationRequest::new(
+        Provider::Openai,
+        request.account_id,
+        request.label,
+        bundle,
+    );
+    CredentialActivation::activate_login(state, secrets, activation_request)
+        .await
+        .map_err(|error| match error {
+            CredentialActivationError::AccountProviderMismatch => {
+                AccountCommandError::AccountProviderMismatch
+            }
+            other => AccountCommandError::CredentialActivation(other),
+        })?;
 
     Ok(())
 }
 
 fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), AccountCommandError> {
+    let credential_store = open_account_list_credential_store(&router_root.join("secrets"))?;
     let runtime = account_command_runtime()?;
     let state = runtime.block_on(AsyncSqliteStateStore::open_read_only(
         &router_root.join("state.sqlite"),
@@ -616,29 +609,52 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
             );
         let maintenance =
             runtime.block_on(state.load_credential_maintenance(account.account_id()))?;
-        let oauth_status = match maintenance
-            .as_ref()
-            .filter(|record| {
-                Some(record.credential_generation) == account.active_credential_generation()
-            })
-            .map(|record| record.state.as_str())
-        {
-            Some("healthy") => "healthy",
-            Some("retrying") => "retrying",
-            Some("reauth_required" | "unrefreshable") => "re-login required",
-            _ => "unknown",
+        let oauth_status = match credential_store.status() {
+            EncryptedCredentialStoreStatus::KeyUnavailable => "keychain_locked".to_owned(),
+            EncryptedCredentialStoreStatus::MigrationIncomplete { accounts } => {
+                format!("migration incomplete: {}", accounts.join(", "))
+            }
+            EncryptedCredentialStoreStatus::Ready => match maintenance
+                .as_ref()
+                .filter(|record| {
+                    Some(record.credential_generation) == account.active_credential_generation()
+                })
+                .map(|record| record.state.as_str())
+            {
+                Some("healthy") => "healthy".to_owned(),
+                Some("retrying") => "retrying".to_owned(),
+                Some("reauth_required" | "unrefreshable") => "re-login required".to_owned(),
+                _ => "unknown".to_owned(),
+            },
         };
         table.add_row([
             account.provider().as_str(),
             account.label(),
             account.status().as_str(),
             &weekly_floor,
-            oauth_status,
+            &oauth_status,
         ]);
     }
     writeln!(stdout, "{table}").map_err(AccountCommandError::Stdout)?;
 
     Ok(())
+}
+
+fn open_account_list_credential_store(
+    secret_root: &Path,
+) -> Result<
+    codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
+    AccountCommandError,
+> {
+    #[cfg(any(test, feature = "keychain-test-support"))]
+    let credential_store =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+            .map_err(AccountCommandError::SecretStore)?;
+    #[cfg(not(any(test, feature = "keychain-test-support")))]
+    let credential_store =
+        crate::secret_store_factory::open_cli_secret_store_in_spawn_blocking(secret_root)
+            .map_err(|_| AccountCommandError::CredentialStoreInitialization)?;
+    Ok(credential_store)
 }
 
 fn ensure_account_label_available_at_router_root(

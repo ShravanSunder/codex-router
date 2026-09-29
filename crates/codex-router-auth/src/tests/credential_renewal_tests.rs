@@ -4,7 +4,11 @@ use super::*;
 async fn token_expiring_during_secret_read_cannot_be_emitted() {
     let temp_dir = AuthTestTempDir::new("expires-during-secret-read");
     let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
-    let file_secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let file_secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("expires-during-read-account");
     must_ok(
         state
@@ -20,7 +24,7 @@ async fn token_expiring_during_secret_read_cannot_be_emitted() {
             .await,
     );
     let expiry = must_ok(crate::resolver::current_unix_seconds()).saturating_add(3);
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         file_secrets.write_secret(
             &active_key,
@@ -77,7 +81,11 @@ async fn token_expiring_during_secret_read_cannot_be_emitted() {
 async fn replacement_expiring_during_held_refresh_cannot_be_emitted() {
     let temp_dir = AuthTestTempDir::new("expires-during-refresh");
     let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
-    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("expires-during-refresh-account");
     must_ok(
         state
@@ -94,7 +102,7 @@ async fn replacement_expiring_during_held_refresh_cannot_be_emitted() {
     );
     let now = must_ok(crate::resolver::current_unix_seconds());
     let replacement_expiry = now.saturating_add(3);
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,
@@ -159,7 +167,7 @@ async fn replacement_expiring_during_held_refresh_cannot_be_emitted() {
 
 #[derive(Clone)]
 struct HeldActiveSecretReadStore {
-    inner: FileSecretStore,
+    inner: EncryptedCredentialStore,
     entered_sender: std::sync::mpsc::Sender<()>,
     release_receiver: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
     held_once: Arc<AtomicBool>,
@@ -190,7 +198,11 @@ async fn cancelled_waiter_does_not_cancel_provider_rotation_or_release_account_l
     let temp_dir = AuthTestTempDir::new("cancelled-refresh-waiter");
     let database_path = temp_dir.path().join("state.sqlite");
     let state = must_ok(AsyncSqliteStateStore::open(&database_path).await);
-    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("cancelled-waiter-account");
     must_ok(
         state
@@ -205,7 +217,7 @@ async fn cancelled_waiter_does_not_cancel_provider_rotation_or_release_account_l
             )
             .await,
     );
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,
@@ -287,7 +299,11 @@ async fn separate_process_resolvers_use_one_rotating_refresh() {
             thread::yield_now();
         }
         let state = must_ok(AsyncSqliteStateStore::open(&root.join("state.sqlite")).await);
-        let secrets = must_ok(FileSecretStore::open(root.join("secrets")));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                root.join("secrets"),
+            ),
+        );
         let resolver = AsyncRouterCredentialResolver::new(
             state,
             secrets,
@@ -306,7 +322,11 @@ async fn separate_process_resolvers_use_one_rotating_refresh() {
     let temp_dir = AuthTestTempDir::new("cross-process-refresh");
     let root = temp_dir.path();
     let state = must_ok(AsyncSqliteStateStore::open(&root.join("state.sqlite")).await);
-    let secrets = must_ok(FileSecretStore::open(root.join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            root.join("secrets"),
+        ),
+    );
     let account_id = account_id("cross-process-account");
     must_ok(
         state
@@ -321,7 +341,7 @@ async fn separate_process_resolvers_use_one_rotating_refresh() {
             )
             .await,
     );
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,
@@ -383,7 +403,11 @@ async fn cancelled_waiter_keeps_lock_until_blocking_secret_write_and_activation_
     let temp_dir = AuthTestTempDir::new("held-secret-write");
     let database_path = temp_dir.path().join("state.sqlite");
     let state = must_ok(AsyncSqliteStateStore::open(&database_path).await);
-    let file_secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let file_secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("held-secret-write-account");
     must_ok(
         state
@@ -398,7 +422,7 @@ async fn cancelled_waiter_keeps_lock_until_blocking_secret_write_and_activation_
             )
             .await,
     );
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         file_secrets.write_secret(
             &active_key,
@@ -478,7 +502,11 @@ async fn transient_secret_write_failure_retries_commit_without_second_provider_u
     let temp_dir = AuthTestTempDir::new("transient-secret-write");
     let database_path = temp_dir.path().join("state.sqlite");
     let state = must_ok(AsyncSqliteStateStore::open(&database_path).await);
-    let file_secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let file_secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("transient-write-account");
     must_ok(
         state
@@ -493,7 +521,7 @@ async fn transient_secret_write_failure_retries_commit_without_second_provider_u
             )
             .await,
     );
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         file_secrets.write_secret(
             &active_key,
@@ -539,7 +567,7 @@ async fn transient_secret_write_failure_retries_commit_without_second_provider_u
     assert_eq!(refresh_client.calls(), 1);
     let active = must_ok(state.load_account(&account_id).await).expect("account");
     assert_eq!(active.active_credential_generation(), Some(2));
-    let successor_key = must_ok(account_credential_bundle_key(&account_id, 2));
+    let successor_key = must_ok(openai_account_credential_bundle_key(&account_id, 2));
     assert!(file_secrets.read_secret(&successor_key).is_ok());
 }
 
@@ -549,7 +577,11 @@ async fn inaccessible_successor_slot_records_local_retry_without_provider_use() 
 
     let temp_dir = AuthTestTempDir::new("inaccessible-successor-slot");
     let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
-    let file_secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let file_secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("inaccessible-successor-account");
     must_ok(
         state
@@ -564,7 +596,7 @@ async fn inaccessible_successor_slot_records_local_retry_without_provider_use() 
             )
             .await,
     );
-    let key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         file_secrets.write_secret(
             &key,
@@ -631,7 +663,7 @@ async fn inaccessible_successor_slot_records_local_retry_without_provider_use() 
 
 #[derive(Clone)]
 struct UnreadableSuccessorSlotStore {
-    inner: FileSecretStore,
+    inner: EncryptedCredentialStore,
 }
 
 impl SecretStore for UnreadableSuccessorSlotStore {
@@ -652,7 +684,7 @@ impl SecretStore for UnreadableSuccessorSlotStore {
 
 #[derive(Clone)]
 struct FailOnceSecretWriteStore {
-    inner: FileSecretStore,
+    inner: EncryptedCredentialStore,
     failed_once: Arc<AtomicBool>,
 }
 
@@ -674,7 +706,7 @@ impl SecretStore for FailOnceSecretWriteStore {
 
 #[derive(Clone)]
 struct HeldSecretWriteStore {
-    inner: FileSecretStore,
+    inner: EncryptedCredentialStore,
     entered_sender: std::sync::mpsc::Sender<()>,
     release_receiver: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
 }

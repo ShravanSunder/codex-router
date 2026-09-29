@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE accounts SET status = ?5, active_credential_generation = ?3\n                      WHERE account_id = ?1 AND provider = ?4\n                        AND status IN ('enabled', 'disabled')\n                        AND (active_credential_generation = ?2\n                            OR (?2 = 0 AND active_credential_generation IS NULL))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "0c3087a49cbf994217b8460e2f0c5493b29cfb495f9f5ca831cfffe75e586e74"
+}

@@ -1,9 +1,11 @@
 //! Durable, generation-scoped credential renewal transitions.
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 use sqlx::Row;
 
 use crate::account::AccountStatus;
+use crate::credential_maintenance::ClaimPurpose;
 use crate::credential_maintenance::CredentialFailureClass;
 use crate::credential_maintenance::CredentialMaintenanceRecord;
 use crate::credential_maintenance::CredentialMaintenanceState;
@@ -37,6 +39,7 @@ impl AsyncSqliteStateStore {
              SELECT account_id, ?2, 'retrying', 'local_persistence', NULL, ?3, NULL, 1
                FROM accounts
               WHERE account_id = ?1 AND status = ?4 AND active_credential_generation = ?2
+                AND provider = ?6
              ON CONFLICT(account_id) DO UPDATE SET
                 credential_generation = excluded.credential_generation,
                 state = 'retrying', failure_class = 'local_persistence',
@@ -59,6 +62,7 @@ impl AsyncSqliteStateStore {
         .bind(u64_to_i64(retry_at)?)
         .bind(AccountStatus::Enabled.as_str())
         .bind(u64_to_i64(now_unix_seconds)?)
+        .bind(Provider::Openai.as_str())
         .execute(&self.pool)
         .await
         .map_err(sqlx_error)?;
@@ -85,9 +89,12 @@ impl AsyncSqliteStateStore {
             "SELECT credential_generation, state, failure_class,
                     last_success_unix_seconds, next_attempt_unix_seconds,
                     claimed_successor_generation, consecutive_failures
-               FROM credential_maintenance WHERE account_id = ?1",
+               FROM credential_maintenance
+               JOIN accounts USING (account_id)
+              WHERE credential_maintenance.account_id = ?1 AND accounts.provider = ?2",
         )
         .bind(account_id.as_str())
+        .bind(Provider::Openai.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(sqlx_error)?;
@@ -95,10 +102,12 @@ impl AsyncSqliteStateStore {
             .transpose()
     }
 
-    /// Claims the current generation before provider egress.
+    /// Claims a successor generation in the existing maintenance row.
     pub async fn claim_credential_refresh(
         &self,
         account_id: &AccountId,
+        provider: Provider,
+        purpose: ClaimPurpose,
         current_generation: u64,
         successor_generation: u64,
     ) -> Result<bool, StateStoreError> {
@@ -108,7 +117,8 @@ impl AsyncSqliteStateStore {
                 "claimed_successor_generation",
             ));
         }
-        let updated = sqlx::query(
+        let login_claim = purpose == ClaimPurpose::Login;
+        let updated = sqlx::query!(
             "INSERT INTO credential_maintenance (
                 account_id, credential_generation, state, failure_class,
                 last_success_unix_seconds, next_attempt_unix_seconds,
@@ -116,8 +126,14 @@ impl AsyncSqliteStateStore {
              )
              SELECT account_id, ?2, 'in_progress', NULL, NULL, NULL, ?3, 0
                FROM accounts
-              WHERE account_id = ?1 AND status = ?4
-                AND active_credential_generation = ?2
+              WHERE account_id = ?1 AND provider = ?4
+                AND (
+                    (?5 = 0 AND status = 'enabled'
+                        AND active_credential_generation = ?2)
+                    OR (?5 = 1 AND status IN ('enabled', 'disabled')
+                        AND (active_credential_generation = ?2
+                            OR (?2 = 0 AND active_credential_generation IS NULL)))
+                )
              ON CONFLICT(account_id) DO UPDATE SET
                 credential_generation = excluded.credential_generation,
                 state = 'in_progress', failure_class = NULL,
@@ -131,12 +147,15 @@ impl AsyncSqliteStateStore {
                     THEN 0 ELSE credential_maintenance.consecutive_failures END
               WHERE credential_maintenance.credential_generation < excluded.credential_generation
                  OR (credential_maintenance.credential_generation = excluded.credential_generation
-                     AND credential_maintenance.state != 'in_progress')",
+                     AND credential_maintenance.state != 'in_progress')
+                 OR (?5 = 1
+                     AND credential_maintenance.credential_generation = excluded.credential_generation)",
+            account_id.as_str(),
+            u64_to_i64(current_generation)?,
+            u64_to_i64(successor_generation)?,
+            provider.as_str(),
+            login_claim,
         )
-        .bind(account_id.as_str())
-        .bind(u64_to_i64(current_generation)?)
-        .bind(u64_to_i64(successor_generation)?)
-        .bind(AccountStatus::Enabled.as_str())
         .execute(&self.pool)
         .await
         .map_err(sqlx_error)?;
@@ -168,7 +187,12 @@ impl AsyncSqliteStateStore {
                     claimed_successor_generation = NULL,
                     consecutive_failures = consecutive_failures + CASE WHEN ?4 = 'retrying' THEN 1 ELSE 0 END
               WHERE account_id = ?1 AND credential_generation = ?2
-                AND claimed_successor_generation = ?3 AND state = 'in_progress'",
+                AND claimed_successor_generation = ?3 AND state = 'in_progress'
+                AND EXISTS (
+                    SELECT 1 FROM accounts
+                     WHERE accounts.account_id = credential_maintenance.account_id
+                       AND accounts.provider = ?7
+                )",
         )
         .bind(account_id.as_str())
         .bind(u64_to_i64(current_generation)?)
@@ -176,6 +200,7 @@ impl AsyncSqliteStateStore {
         .bind(state.as_str())
         .bind(failure_class.as_str())
         .bind(next_attempt_unix_seconds.map(u64_to_i64).transpose()?)
+        .bind(Provider::Openai.as_str())
         .execute(&self.pool)
         .await
         .map_err(sqlx_error)?;
@@ -186,43 +211,104 @@ impl AsyncSqliteStateStore {
     pub async fn activate_claimed_credential_generation(
         &self,
         account_id: &AccountId,
+        provider: Provider,
+        purpose: ClaimPurpose,
         current_generation: u64,
         successor_generation: u64,
         now_unix_seconds: u64,
     ) -> Result<bool, StateStoreError> {
         let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
-        let claim_update = sqlx::query(
-            "UPDATE credential_maintenance
-                SET credential_generation = ?3, state = 'healthy', failure_class = NULL,
-                    last_success_unix_seconds = ?4, next_attempt_unix_seconds = NULL,
-                    claimed_successor_generation = NULL, consecutive_failures = 0
-              WHERE account_id = ?1 AND credential_generation = ?2
-                AND claimed_successor_generation = ?3 AND state = 'in_progress'",
-        )
-        .bind(account_id.as_str())
-        .bind(u64_to_i64(current_generation)?)
-        .bind(u64_to_i64(successor_generation)?)
-        .bind(u64_to_i64(now_unix_seconds)?)
-        .execute(&mut *transaction)
-        .await
-        .map_err(sqlx_error)?;
-        if claim_update.rows_affected() != 1 {
+        let claim_consumed = match purpose {
+            ClaimPurpose::Refresh => {
+                sqlx::query!(
+                    "UPDATE credential_maintenance
+                        SET credential_generation = ?3, state = 'healthy', failure_class = NULL,
+                            last_success_unix_seconds = ?4, next_attempt_unix_seconds = NULL,
+                            claimed_successor_generation = NULL, consecutive_failures = 0
+                      WHERE account_id = ?1 AND credential_generation = ?2
+                        AND claimed_successor_generation = ?3 AND state = 'in_progress'
+                        AND EXISTS (
+                            SELECT 1 FROM accounts
+                             WHERE accounts.account_id = credential_maintenance.account_id
+                               AND accounts.provider = ?5
+                        )",
+                    account_id.as_str(),
+                    u64_to_i64(current_generation)?,
+                    u64_to_i64(successor_generation)?,
+                    u64_to_i64(now_unix_seconds)?,
+                    provider.as_str(),
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(sqlx_error)?
+                .rows_affected()
+                    == 1
+            }
+            ClaimPurpose::Login => {
+                sqlx::query!(
+                    "DELETE FROM credential_maintenance
+                      WHERE account_id = ?1 AND credential_generation = ?2
+                        AND claimed_successor_generation = ?3 AND state = 'in_progress'
+                        AND EXISTS (
+                            SELECT 1 FROM accounts
+                             WHERE accounts.account_id = credential_maintenance.account_id
+                               AND accounts.provider = ?4
+                        )",
+                    account_id.as_str(),
+                    u64_to_i64(current_generation)?,
+                    u64_to_i64(successor_generation)?,
+                    provider.as_str(),
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(sqlx_error)?
+                .rows_affected()
+                    == 1
+            }
+        };
+        if !claim_consumed {
             transaction.rollback().await.map_err(sqlx_error)?;
             return Ok(false);
         }
-        let account_update = sqlx::query(
-            "UPDATE accounts SET active_credential_generation = ?3
-              WHERE account_id = ?1 AND active_credential_generation = ?2
-                AND status = ?4",
-        )
-        .bind(account_id.as_str())
-        .bind(u64_to_i64(current_generation)?)
-        .bind(u64_to_i64(successor_generation)?)
-        .bind(AccountStatus::Enabled.as_str())
-        .execute(&mut *transaction)
-        .await
-        .map_err(sqlx_error)?;
-        if account_update.rows_affected() != 1 {
+        let account_activated = match purpose {
+            ClaimPurpose::Refresh => {
+                sqlx::query!(
+                    "UPDATE accounts SET active_credential_generation = ?3
+                      WHERE account_id = ?1 AND active_credential_generation = ?2
+                        AND status = ?4 AND provider = ?5",
+                    account_id.as_str(),
+                    u64_to_i64(current_generation)?,
+                    u64_to_i64(successor_generation)?,
+                    AccountStatus::Enabled.as_str(),
+                    provider.as_str(),
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(sqlx_error)?
+                .rows_affected()
+                    == 1
+            }
+            ClaimPurpose::Login => {
+                sqlx::query!(
+                    "UPDATE accounts SET status = ?5, active_credential_generation = ?3
+                      WHERE account_id = ?1 AND provider = ?4
+                        AND status IN ('enabled', 'disabled')
+                        AND (active_credential_generation = ?2
+                            OR (?2 = 0 AND active_credential_generation IS NULL))",
+                    account_id.as_str(),
+                    u64_to_i64(current_generation)?,
+                    u64_to_i64(successor_generation)?,
+                    provider.as_str(),
+                    AccountStatus::Enabled.as_str(),
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(sqlx_error)?
+                .rows_affected()
+                    == 1
+            }
+        };
+        if !account_activated {
             transaction.rollback().await.map_err(sqlx_error)?;
             return Ok(false);
         }
@@ -245,7 +331,7 @@ impl AsyncSqliteStateStore {
              )
              SELECT account_id, ?2, 'unrefreshable', NULL, NULL, NULL, NULL, 0
                FROM accounts
-              WHERE account_id = ?1 AND active_credential_generation = ?2
+              WHERE account_id = ?1 AND active_credential_generation = ?2 AND provider = ?3
              ON CONFLICT(account_id) DO UPDATE SET
                 state = 'unrefreshable', failure_class = NULL,
                 next_attempt_unix_seconds = NULL
@@ -254,6 +340,7 @@ impl AsyncSqliteStateStore {
         )
         .bind(account_id.as_str())
         .bind(u64_to_i64(current_generation)?)
+        .bind(Provider::Openai.as_str())
         .execute(&self.pool)
         .await
         .map_err(sqlx_error)?;

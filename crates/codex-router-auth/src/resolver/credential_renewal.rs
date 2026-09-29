@@ -1,5 +1,7 @@
 //! Async generation-scoped credential renewal and shutdown supervision.
 
+use codex_router_secret_store::account_tokens::first_unused_account_credential_generation;
+
 use super::*;
 
 /// Async resolver for provider credentials through router-owned state and secret stores.
@@ -284,11 +286,15 @@ where
         if account.status() != AccountStatus::Enabled {
             return Err(CredentialResolverError::AccountIneligible);
         }
+        if account.provider() != Provider::Openai {
+            return Err(CredentialResolverError::AccountIneligible);
+        }
         let active_generation = account
             .active_credential_generation()
             .ok_or(CredentialResolverError::AccountIneligible)?;
-        let bundle_key = account_credential_bundle_key(account_id, active_generation)
-            .map_err(map_secret_error)?;
+        let bundle_key =
+            provider_credential_bundle_key(account.provider(), account_id, active_generation)
+                .map_err(map_secret_error)?;
         let secret_store = self.secret_store.clone();
         let bundle_join = tokio::task::spawn_blocking(move || {
             let secret = secret_store
@@ -393,8 +399,9 @@ where
                 let successor = record
                     .claimed_successor_generation
                     .ok_or(CredentialResolverError::RefreshUnavailable)?;
-                let claimed_key = account_credential_bundle_key(account_id, successor)
-                    .map_err(map_secret_error)?;
+                let claimed_key =
+                    provider_credential_bundle_key(Provider::Openai, account_id, successor)
+                        .map_err(map_secret_error)?;
                 let secret_store = self.secret_store.clone();
                 let claimed_secret =
                     tokio::task::spawn_blocking(move || secret_store.read_secret(&claimed_key))
@@ -408,6 +415,8 @@ where
                             .state_store
                             .activate_claimed_credential_generation(
                                 account_id,
+                                Provider::Openai,
+                                ClaimPurpose::Refresh,
                                 current_generation,
                                 successor,
                                 now_unix_seconds,
@@ -478,6 +487,7 @@ where
         let successor_result = tokio::task::spawn_blocking(move || {
             first_unused_account_credential_generation(
                 &secret_store,
+                Provider::Openai,
                 &account_for_slot,
                 current_generation,
             )
@@ -498,7 +508,13 @@ where
         };
         let claim_result = self
             .state_store
-            .claim_credential_refresh(account_id, current_generation, successor_generation)
+            .claim_credential_refresh(
+                account_id,
+                Provider::Openai,
+                ClaimPurpose::Refresh,
+                current_generation,
+                successor_generation,
+            )
             .await;
         let claimed = match claim_result {
             Ok(claimed) => claimed,
@@ -573,8 +589,9 @@ where
         {
             refreshed = refreshed.with_chatgpt_account_id(chatgpt_account_id);
         }
-        let refreshed_key = account_credential_bundle_key(account_id, successor_generation)
-            .map_err(map_secret_error)?;
+        let refreshed_key =
+            provider_credential_bundle_key(Provider::Openai, account_id, successor_generation)
+                .map_err(map_secret_error)?;
         let refreshed_secret = refreshed.to_secret_string().map_err(map_secret_error)?;
         let commit_started = std::time::Instant::now();
         let mut secret_saved = false;
@@ -584,7 +601,7 @@ where
                 let key_for_write = refreshed_key.clone();
                 let secret_for_write = refreshed_secret.clone();
                 let (returned_lock, write_result) = tokio::task::spawn_blocking(move || {
-                    let result = secret_store.write_secret(&key_for_write, &secret_for_write);
+                    let result = secret_store.write_staged(&key_for_write, &secret_for_write);
                     (file_lock, result)
                 })
                 .await
@@ -597,6 +614,8 @@ where
                     .state_store
                     .activate_claimed_credential_generation(
                         account_id,
+                        Provider::Openai,
+                        ClaimPurpose::Refresh,
                         current_generation,
                         successor_generation,
                         now_unix_seconds,

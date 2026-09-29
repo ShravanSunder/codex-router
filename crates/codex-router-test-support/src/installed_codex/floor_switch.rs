@@ -18,7 +18,6 @@ use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
 use codex_router_proxy::upstream::UpstreamEndpoint;
 use codex_router_proxy::websocket::WebSocketQuotaFloorNotifier;
-use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_state::account_routing_policy::WeeklyQuotaFloorBasisPoints;
 use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
 use codex_router_state::sqlite::AsyncWeeklyQuotaFloorMutationStore;
@@ -83,12 +82,18 @@ impl FloorRouter {
             .map_err(|error| format!("invalid floor fixture bind address: {error}"))?;
         let endpoint = UpstreamEndpoint::new(format!("http://{upstream_address}/v1"))
             .map_err(|error| format!("invalid floor fixture upstream: {error}"))?;
-        let runtime = LoopbackRouterRuntime::start(LoopbackRouterRuntimeConfig::new_tokenless(
-            bind_address,
-            endpoint,
-            state_path.to_path_buf(),
-            secret_root.to_path_buf(),
-        ))
+        let credential_store =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+                .map_err(|error| format!("floor fixture credential store failed to open: {error}"))?;
+        let runtime = LoopbackRouterRuntime::start(
+            LoopbackRouterRuntimeConfig::new_tokenless(
+                bind_address,
+                endpoint,
+                state_path.to_path_buf(),
+                secret_root.to_path_buf(),
+            ),
+            credential_store,
+        )
         .map_err(|error| format!("floor fixture router failed to start: {error}"))?;
         let port = runtime.local_addr().port();
         let notifier = runtime.websocket_quota_floor_notifier();
@@ -135,8 +140,9 @@ impl Drop for FloorRouter {
 fn seed_floor_fixture(state_path: &Path, secret_root: &Path) -> Result<(), String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("floor fixture state open failed: {error}"))?;
-    let secrets = FileSecretStore::open(secret_root)
-        .map_err(|error| format!("floor fixture secret store open failed: {error}"))?;
+    let secrets =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+            .map_err(|error| format!("floor fixture secret store open failed: {error}"))?;
     reset_fixture_route_band_state(
         state_path,
         &[
@@ -174,8 +180,9 @@ fn save_floor_observation(
 ) -> Result<(), String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("floor observation state open failed: {error}"))?;
-    let secrets = FileSecretStore::open(secret_root)
-        .map_err(|error| format!("floor observation secret store open failed: {error}"))?;
+    let secrets =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+            .map_err(|error| format!("floor observation secret store open failed: {error}"))?;
     let primary = SmokeAccountFixture {
         weekly_remaining: journey.new_remaining(),
         ..QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION

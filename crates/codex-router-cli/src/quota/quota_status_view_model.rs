@@ -7,12 +7,58 @@ pub(super) struct QuotaStatusReport {
     pub(super) preferred_next_account_id: Option<AccountId>,
     pub(super) selection_projection_source: SelectionProjectionSource,
     pub(super) now_unix_seconds: u64,
+    pub(super) credential_store_availability: CredentialStoreAvailability,
     pub(super) rows: Vec<QuotaStatusRow>,
 }
 
 impl QuotaStatusReport {
     pub(super) fn rows(&self) -> &[QuotaStatusRow] {
         &self.rows
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum CredentialStoreAvailability {
+    Ready,
+    KeychainLocked,
+    MigrationIncomplete { accounts: Vec<String> },
+    Unavailable,
+}
+
+impl CredentialStoreAvailability {
+    pub(super) const fn as_json_status(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::KeychainLocked => "keychain_locked",
+            Self::MigrationIncomplete { .. } => "migration_incomplete",
+            Self::Unavailable => "credential_store_unavailable",
+        }
+    }
+
+    pub(super) fn unavailable_accounts(&self) -> &[String] {
+        match self {
+            Self::MigrationIncomplete { accounts } => accounts,
+            _ => &[],
+        }
+    }
+
+    pub(super) const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub(super) fn status_label(&self) -> String {
+        match self {
+            Self::Ready => "ready".to_owned(),
+            Self::KeychainLocked => "keychain_locked".to_owned(),
+            Self::MigrationIncomplete { accounts } => {
+                if accounts.is_empty() {
+                    "migration_incomplete".to_owned()
+                } else {
+                    format!("migration_incomplete: {}", accounts.join(", "))
+                }
+            }
+            Self::Unavailable => "credential_store_unavailable".to_owned(),
+        }
     }
 }
 

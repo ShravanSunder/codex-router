@@ -60,6 +60,7 @@ use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_core::router_compatibility::RouterCompatibility;
 use codex_router_core::routes::RouteBand;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
@@ -523,21 +524,47 @@ impl Drop for LoopbackRouterRuntime {
 }
 
 impl LoopbackRouterRuntime {
-    /// Opens router-owned state/secrets and binds the loopback listener.
-    pub fn start(config: LoopbackRouterRuntimeConfig) -> Result<Self, LoopbackRouterRuntimeError> {
-        Self::start_with_test_maintenance_completion_sender(config, None)
+    /// Opens router-owned state and binds using the process-owned encrypted credential handle.
+    pub fn start(
+        config: LoopbackRouterRuntimeConfig,
+        credential_store: EncryptedCredentialStore,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
+        Self::start_with_test_maintenance_completion_sender(config, credential_store, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_for_test(
+        config: LoopbackRouterRuntimeConfig,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
+        let credential_store = test_credential_store_for_config(&config)?;
+        Self::start(config, credential_store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_for_test_with_maintenance_completion_sender(
+        config: LoopbackRouterRuntimeConfig,
+        completion_sender: std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
+        let credential_store = test_credential_store_for_config(&config)?;
+        Self::start_with_maintenance_completion_sender(config, credential_store, completion_sender)
     }
 
     #[cfg(test)]
     pub(crate) fn start_with_maintenance_completion_sender(
         config: LoopbackRouterRuntimeConfig,
+        credential_store: EncryptedCredentialStore,
         completion_sender: std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
     ) -> Result<Self, LoopbackRouterRuntimeError> {
-        Self::start_with_test_maintenance_completion_sender(config, Some(completion_sender))
+        Self::start_with_test_maintenance_completion_sender(
+            config,
+            credential_store,
+            Some(completion_sender),
+        )
     }
 
     fn start_with_test_maintenance_completion_sender(
         config: LoopbackRouterRuntimeConfig,
+        credential_store: EncryptedCredentialStore,
         #[cfg(test)] completion_sender: Option<
             std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
         >,
@@ -549,10 +576,8 @@ impl LoopbackRouterRuntime {
             .build()
             .map_err(LoopbackRouterRuntimeError::TokioRuntime)?;
         let fixed_now_unix_seconds = config.fixed_now_unix_seconds;
-        let credential_resources = ProxyRuntimeCredentialResources::open(
-            &config.secret_store_root,
-            fixed_now_unix_seconds,
-        )?;
+        let credential_resources =
+            ProxyRuntimeCredentialResources::open(credential_store, fixed_now_unix_seconds)?;
         let affinity_secret_provider = credential_resources.affinity_secret_provider();
         let credential_factory = credential_resources.credential_factory();
         let writable_state_stores = runtime.block_on(open_runtime_writable_state_stores(
@@ -934,6 +959,20 @@ impl LoopbackRouterRuntime {
                     });
         }
     }
+}
+
+#[cfg(test)]
+fn test_credential_store_for_config(
+    config: &LoopbackRouterRuntimeConfig,
+) -> Result<EncryptedCredentialStore, LoopbackRouterRuntimeError> {
+    codex_router_secret_store::test_support::open_encrypted_credential_store(
+        &config.secret_store_root,
+    )
+    .map_err(|error| {
+        LoopbackRouterRuntimeError::CredentialResources(
+            ProxyRuntimeCredentialResourcesOpenError::SecretStore(error),
+        )
+    })
 }
 
 fn active_session_event_compaction_before(now_unix_seconds: u64) -> u64 {
@@ -2531,8 +2570,8 @@ mod tests {
     use codex_router_core::redaction::SecretString;
     use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-    use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
+    use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
     use codex_router_secret_store::model::SecretKey;
     use codex_router_secret_store::model::SecretStoreError;
     use codex_router_state::credential_maintenance::CredentialMaintenanceState;
@@ -2580,7 +2619,12 @@ mod tests {
     fn proxy_refresh_fixture(
         case: &str,
         drain_limit: Duration,
-    ) -> (LoopbackRouterRuntime, AccountId, PathBuf, FileSecretStore) {
+    ) -> (
+        LoopbackRouterRuntime,
+        AccountId,
+        PathBuf,
+        EncryptedCredentialStore,
+    ) {
         let database_path = test_database_path(case);
         let secret_root = database_path.with_extension("secrets");
         let account_id = AccountId::new("proxy-shutdown-account").expect("account id");
@@ -2596,8 +2640,10 @@ mod tests {
             .with_active_credential_generation(1),
         )
         .expect("fixture account");
-        let secrets = FileSecretStore::open(&secret_root).expect("fixture secrets");
-        let active_key = account_credential_bundle_key(&account_id, 1).expect("active key");
+        let secrets =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root)
+                .expect("fixture secrets");
+        let active_key = openai_account_credential_bundle_key(&account_id, 1).expect("active key");
         let active_bundle = AccountCredentialBundle::imported_codex_auth(
             "expired-access-canary",
             Some("old-refresh-canary".to_owned()),
@@ -2616,7 +2662,7 @@ mod tests {
             secret_root,
         )
         .with_quota_clock(1_000, 300);
-        let router = LoopbackRouterRuntime::start(config)
+        let router = LoopbackRouterRuntime::start(config, secrets.clone())
             .expect("fixture router should start")
             .with_credential_refresh_shutdown_drain(drain_limit);
         (router, account_id, database_path, secrets)
@@ -2794,7 +2840,7 @@ mod tests {
 
     #[derive(Clone)]
     struct HeldProxySecretWriteStore {
-        inner: FileSecretStore,
+        inner: EncryptedCredentialStore,
         entered_sender: mpsc::Sender<()>,
         release_receiver: Arc<Mutex<mpsc::Receiver<()>>>,
     }

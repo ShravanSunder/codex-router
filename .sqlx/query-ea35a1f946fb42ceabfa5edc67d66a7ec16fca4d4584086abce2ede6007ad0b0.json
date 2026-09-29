@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO credential_maintenance (\n                account_id, credential_generation, state, failure_class,\n                last_success_unix_seconds, next_attempt_unix_seconds,\n                claimed_successor_generation, consecutive_failures\n             )\n             SELECT account_id, ?2, 'in_progress', NULL, NULL, NULL, ?3, 0\n               FROM accounts\n              WHERE account_id = ?1 AND provider = ?4\n                AND (\n                    (?5 = 0 AND status = 'enabled'\n                        AND active_credential_generation = ?2)\n                    OR (?5 = 1 AND status IN ('enabled', 'disabled')\n                        AND (active_credential_generation = ?2\n                            OR (?2 = 0 AND active_credential_generation IS NULL)))\n                )\n             ON CONFLICT(account_id) DO UPDATE SET\n                credential_generation = excluded.credential_generation,\n                state = 'in_progress', failure_class = NULL,\n                last_success_unix_seconds = CASE\n                    WHEN credential_maintenance.credential_generation < excluded.credential_generation\n                    THEN NULL ELSE credential_maintenance.last_success_unix_seconds END,\n                next_attempt_unix_seconds = NULL,\n                claimed_successor_generation = excluded.claimed_successor_generation,\n                consecutive_failures = CASE\n                    WHEN credential_maintenance.credential_generation < excluded.credential_generation\n                    THEN 0 ELSE credential_maintenance.consecutive_failures END\n              WHERE credential_maintenance.credential_generation < excluded.credential_generation\n                 OR (credential_maintenance.credential_generation = excluded.credential_generation\n                     AND credential_maintenance.state != 'in_progress')\n                 OR (?5 = 1\n                     AND credential_maintenance.credential_generation = excluded.credential_generation)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "ea35a1f946fb42ceabfa5edc67d66a7ec16fca4d4584086abce2ede6007ad0b0"
+}

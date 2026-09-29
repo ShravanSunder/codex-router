@@ -17,6 +17,9 @@ pub enum CliError {
     /// Background OAuth upkeep could not start.
     #[error(transparent)]
     CredentialUpkeep(#[from] CredentialUpkeepStartError),
+    /// Encrypted credential store could not be opened for this process.
+    #[error("encrypted credential store could not be opened")]
+    CredentialStoreOpen,
     /// Command name is unknown.
     #[error("unknown command: {command}")]
     UnknownCommand {

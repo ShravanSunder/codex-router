@@ -10,7 +10,9 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let floor_account_id = account_id("acct_a_floor_socket");
     let healthy_account_id = account_id("acct_b_healthy_socket");
     let seed_account =
@@ -25,7 +27,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
                 )
                 .with_active_credential_generation(1),
             ));
-            let key = must_ok(account_credential_bundle_key(account_id, 1));
+            let key = must_ok(openai_account_credential_bundle_key(account_id, 1));
             must_ok(
                 secrets.write_secret(
                     &key,
@@ -180,7 +182,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         secret_root.clone(),
     )
     .with_quota_clock(1_100, 300);
-    let router = must_ok(LoopbackRouterRuntime::start(config));
+    let router = must_ok(LoopbackRouterRuntime::start(config, secrets.clone()));
     let router_port = router.local_addr().port();
     let floor_notifier = router.websocket_quota_floor_notifier();
     let router_thread = thread::spawn(move || router.serve_protocol_connections(2));

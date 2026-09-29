@@ -135,9 +135,9 @@ mod tests {
     use codex_router_quota::snapshot::SnapshotFreshness;
     use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+    use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
     use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
-    use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
     use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
     use codex_router_selection::burn_down::assess_route_band;
     use codex_router_selection::reservation::ReservationBook;
@@ -1378,7 +1378,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -1428,7 +1430,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -1523,7 +1527,7 @@ mod tests {
         {
             panic!("models weekly selector window should persist: {error}");
         }
-        let token_key = match account_credential_bundle_key(account.account_id(), 1) {
+        let token_key = match openai_account_credential_bundle_key(account.account_id(), 1) {
             Ok(token_key) => token_key,
             Err(error) => panic!("token key should build: {error}"),
         };
@@ -5078,7 +5082,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -5148,7 +5154,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -5208,7 +5214,9 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
         let state = SqliteStateStore::open(&database_path).expect("state should open");
-        let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
+        let secrets =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_path)
+                .expect("secrets should open");
         let protected = AccountRecord::new(
             codex_router_core::provider::Provider::Openai,
             account_id("acct_served_http_protected"),
@@ -5265,7 +5273,7 @@ mod tests {
             secret_path,
         )
         .with_quota_clock(NOW, 60);
-        let runtime = LoopbackRouterRuntime::start(config).expect("runtime should start");
+        let runtime = LoopbackRouterRuntime::start_for_test(config).expect("runtime should start");
         let router_address = runtime.local_addr();
         let client_thread = thread::spawn(move || {
             send_loopback_request(
@@ -5295,7 +5303,9 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
         let state = SqliteStateStore::open(&database_path).expect("state should open");
-        let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
+        let secrets =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_path)
+                .expect("secrets should open");
         let protected = AccountRecord::new(
             codex_router_core::provider::Provider::Openai,
             account_id("acct_served_http_floor_forecast"),
@@ -5348,7 +5358,7 @@ mod tests {
             secret_path,
         )
         .with_quota_clock(NOW, 60);
-        let runtime = LoopbackRouterRuntime::start(config).expect("runtime should start");
+        let runtime = LoopbackRouterRuntime::start_for_test(config).expect("runtime should start");
         let router_address = runtime.local_addr();
         let client_thread = thread::spawn(move || {
             send_loopback_request(
@@ -5381,7 +5391,9 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
         let state = SqliteStateStore::open(&database_path).expect("state should open");
-        let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
+        let secrets =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_path)
+                .expect("secrets should open");
         let first = AccountRecord::new(
             codex_router_core::provider::Provider::Openai,
             account_id("acct_all_floor_first"),
@@ -5437,7 +5449,7 @@ mod tests {
             secret_path,
         )
         .with_quota_clock(1_030, 60);
-        let runtime = LoopbackRouterRuntime::start(config).expect("runtime should start");
+        let runtime = LoopbackRouterRuntime::start_for_test(config).expect("runtime should start");
         let router_address = runtime.local_addr();
         let client_thread = thread::spawn(move || {
             send_loopback_request(
@@ -5477,7 +5489,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -5558,7 +5572,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -5624,7 +5638,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -5709,7 +5725,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -5810,7 +5826,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -5885,7 +5903,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -5962,7 +5980,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -6056,7 +6076,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -6135,7 +6155,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -6216,7 +6238,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -6277,7 +6299,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -6361,7 +6385,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -6424,7 +6448,9 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
         let state = SqliteStateStore::open(&database_path).expect("state store should open");
-        let secrets = FileSecretStore::open(&secret_path).expect("secret store should open");
+        let secrets =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_path)
+                .expect("secret store should open");
         let alpha = AccountRecord::new(
             codex_router_core::provider::Provider::Openai,
             account_id("acct_http_alpha"),
@@ -6513,7 +6539,7 @@ mod tests {
         )
         .with_quota_clock(RETENTION_NOW, 60);
         let (maintenance_completion_sender, maintenance_completion_receiver) = mpsc::channel();
-        let runtime = LoopbackRouterRuntime::start_with_maintenance_completion_sender(
+        let runtime = LoopbackRouterRuntime::start_for_test_with_maintenance_completion_sender(
             config,
             maintenance_completion_sender,
         )
@@ -6639,7 +6665,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -6699,7 +6727,7 @@ mod tests {
         )
         .with_quota_clock(1_030, 60)
         .with_audit_file(audit_path.clone());
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -6820,7 +6848,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -6885,7 +6915,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -6949,7 +6979,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -7026,7 +7058,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -7095,7 +7127,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -7190,7 +7224,7 @@ mod tests {
             ),
         )
         .with_audit_file(audit_path.clone());
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -7340,7 +7374,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -7422,7 +7458,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -7498,7 +7534,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -7566,7 +7604,7 @@ mod tests {
             LocalRouterTokenRecord::new(SecretString::new("token-a"), TokenGeneration::new(1)),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -7634,7 +7672,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -7708,7 +7748,7 @@ mod tests {
             secret_path,
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -7786,7 +7826,9 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
         let state = SqliteStateStore::open(&database_path).expect("state should open");
-        let secrets = FileSecretStore::open(&secret_path).expect("secrets should open");
+        let secrets =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_path)
+                .expect("secrets should open");
         let protected = AccountRecord::new(
             codex_router_core::provider::Provider::Openai,
             account_id("acct_served_ws_protected"),
@@ -7849,7 +7891,7 @@ mod tests {
             secret_path,
         )
         .with_quota_clock(NOW, 60);
-        let runtime = LoopbackRouterRuntime::start(config).expect("runtime should start");
+        let runtime = LoopbackRouterRuntime::start_for_test(config).expect("runtime should start");
         let router_address = runtime.local_addr();
         let client_thread = thread::spawn(move || {
             let mut websocket =
@@ -7895,7 +7937,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -8005,7 +8049,7 @@ mod tests {
             secret_path,
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -8174,7 +8218,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -8291,7 +8337,7 @@ mod tests {
             secret_path,
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -8382,7 +8428,7 @@ mod tests {
                 TokenGeneration::new(1),
             ),
         );
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -8437,7 +8483,7 @@ mod tests {
                 TokenGeneration::new(1),
             ),
         );
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -8501,7 +8547,7 @@ mod tests {
                 TokenGeneration::new(1),
             ),
         );
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -8560,7 +8606,7 @@ mod tests {
                 TokenGeneration::new(1),
             ),
         );
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -8619,7 +8665,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -8695,7 +8743,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime.with_affinity_owner_recorder(recorder.clone()),
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -8796,7 +8844,7 @@ mod tests {
                 TokenGeneration::new(1),
             ),
         );
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -8841,7 +8889,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -8909,7 +8959,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -8970,7 +9020,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -9048,7 +9100,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = match LoopbackRouterRuntime::start(config) {
+        let runtime = match LoopbackRouterRuntime::start_for_test(config) {
             Ok(runtime) => runtime,
             Err(error) => panic!("router runtime should start: {error}"),
         };
@@ -9640,7 +9692,7 @@ mod tests {
 
     fn persist_account_with_snapshot_and_token(
         state: &SqliteStateStore,
-        secrets: &FileSecretStore,
+        secrets: &EncryptedCredentialStore,
         account: &AccountRecord,
         remaining_headroom: u32,
         upstream_token: &str,
@@ -9697,7 +9749,7 @@ mod tests {
         {
             panic!("weekly selector quota window should persist: {error}");
         }
-        let token_key = match account_credential_bundle_key(account.account_id(), 1) {
+        let token_key = match openai_account_credential_bundle_key(account.account_id(), 1) {
             Ok(token_key) => token_key,
             Err(error) => panic!("token key should build: {error}"),
         };
@@ -11564,7 +11616,11 @@ mod tests {
         let state = must_ok(SqliteStateStore::open(
             &temp_dir.path().join("state.sqlite"),
         ));
-        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                temp_dir.path().join("secrets"),
+            ),
+        );
         let account_id = account_id("acct_selected");
         let account = AccountRecord::new(
             codex_router_core::provider::Provider::Openai,
@@ -11574,7 +11630,7 @@ mod tests {
         )
         .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
-        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &expired_key,
@@ -11634,7 +11690,11 @@ mod tests {
         let state_database_path = temp_dir.path().join("state.sqlite");
         let secret_store_root = temp_dir.path().join("secrets");
         let state = must_ok(SqliteStateStore::open(&state_database_path));
-        let secrets = must_ok(FileSecretStore::open(&secret_store_root));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                &secret_store_root,
+            ),
+        );
         let account_id = account_id("acct_proxy_runtime_refresh");
         let account = AccountRecord::new(
             codex_router_core::provider::Provider::Openai,
@@ -11644,7 +11704,7 @@ mod tests {
         )
         .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
-        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &expired_key,
@@ -11692,7 +11752,11 @@ mod tests {
         let state = must_ok(SqliteStateStore::open(
             &temp_dir.path().join("state.sqlite"),
         ));
-        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                temp_dir.path().join("secrets"),
+            ),
+        );
         let account_id = account_id("acct_selected");
         let account = AccountRecord::new(
             codex_router_core::provider::Provider::Openai,
@@ -11702,7 +11766,7 @@ mod tests {
         )
         .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
-        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &expired_key,
