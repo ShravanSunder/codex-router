@@ -604,6 +604,26 @@ pub enum StateStoreError {
         /// Affected account id.
         account_id: String,
     },
+    /// A Claude window observation or rejection contains an invalid input value.
+    #[error("invalid Claude account window state: {field}")]
+    InvalidAccountWindowState {
+        /// Invalid field.
+        field: &'static str,
+    },
+    /// Persisted Claude window state is corrupt; selection must fail closed.
+    #[error("corrupt Claude account window state for {account_id}: {field}")]
+    CorruptAccountWindowState {
+        /// Affected account id.
+        account_id: String,
+        /// Corrupt field.
+        field: &'static str,
+    },
+    /// Claude window state was requested for an account that does not exist.
+    #[error("Claude window state account was not found")]
+    AccountWindowStateAccountNotFound,
+    /// Claude quota windows may only be stored for Claude accounts.
+    #[error("Claude window state requires a Claude account")]
+    AccountWindowStateRequiresClaudeAccount,
 }
 
 /// SQLite-backed metadata repository.
@@ -813,14 +833,29 @@ impl AsyncSqliteStateStore {
                     mark_selector_windows_stale(&mut windows);
                 }
             }
-            inputs.push(SelectorQuotaInput::new(
-                account.account_id().clone(),
-                account.label(),
-                account.status(),
-                account.active_credential_generation(),
-                route_band,
-                windows,
-            ));
+            let (window_observations, window_rejections) = if account.provider() == Provider::Claude
+            {
+                (
+                    self.window_observations_for_account(account.account_id())
+                        .await?,
+                    self.window_rejections_for_account(account.account_id())
+                        .await?,
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            inputs.push(
+                SelectorQuotaInput::new(
+                    account.account_id().clone(),
+                    account.label(),
+                    account.provider(),
+                    account.status(),
+                    account.active_credential_generation(),
+                    route_band,
+                    windows,
+                )
+                .with_window_state(window_observations, window_rejections),
+            );
         }
 
         Ok(inputs)
@@ -3572,6 +3607,7 @@ impl SqliteStateStore {
             inputs.push(SelectorQuotaInput::new(
                 account.account_id().clone(),
                 account.label(),
+                account.provider(),
                 account.status(),
                 account.active_credential_generation(),
                 route_band,
@@ -5672,6 +5708,17 @@ fn selector_route_band(route_band: &str) -> bool {
 pub(crate) fn u64_to_i64(value: u64) -> Result<i64, StateStoreError> {
     i64::try_from(value).map_err(|_| StateStoreError::Sqlite {
         message: "u64 value does not fit sqlite integer".to_owned(),
+    })
+}
+
+pub(crate) fn i64_to_u64_window_state(
+    value: i64,
+    account_id: &str,
+    field: &'static str,
+) -> Result<u64, StateStoreError> {
+    u64::try_from(value).map_err(|_| StateStoreError::CorruptAccountWindowState {
+        account_id: account_id.to_owned(),
+        field,
     })
 }
 

@@ -172,10 +172,13 @@ mod quota_reset_pty_test {
             Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
 
-        stage(
-            terminal.wait_for_text("ctrl-r reset credits", SEMANTIC_WAIT),
-            "committed path initial browse",
-        )?;
+        if let Err(error) = terminal.wait_for_text("ctrl-r reset credits", SEMANTIC_WAIT) {
+            let diagnostics = terminal.safe_semantic_diagnostics(0);
+            return Err(std::io::Error::other(format!(
+                "committed path initial browse: {error}; {diagnostics}"
+            ))
+            .into());
+        }
         terminal.send(b"\x1b[B")?;
         terminal.send(&[0x12])?;
         stage(

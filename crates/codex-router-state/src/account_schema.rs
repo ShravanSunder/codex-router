@@ -154,7 +154,19 @@ pub(crate) async fn validate_target_schema(
         CURRENT_SESSION_ACCOUNT_AFFINITIES,
     )
     .await?;
-    validate_table(connection, "credential_maintenance", CREDENTIAL_MAINTENANCE).await
+    validate_table(connection, "credential_maintenance", CREDENTIAL_MAINTENANCE).await?;
+    validate_table(
+        connection,
+        "account_window_observations",
+        ACCOUNT_WINDOW_OBSERVATIONS,
+    )
+    .await?;
+    validate_table(
+        connection,
+        "account_window_rejections",
+        ACCOUNT_WINDOW_REJECTIONS,
+    )
+    .await
 }
 
 pub(crate) async fn validate_baseline_schema(
@@ -240,6 +252,27 @@ pub(crate) async fn validate_required_read_only_objects(
             return Err(StateStoreError::MissingReadOnlySchemaObject {
                 object_kind: "column",
                 object_name: column_name,
+            });
+        }
+    }
+    for (table_name, columns) in [
+        ("account_window_observations", ACCOUNT_WINDOW_OBSERVATIONS),
+        ("account_window_rejections", ACCOUNT_WINDOW_REJECTIONS),
+    ] {
+        if !table_exists(connection, table_name).await? {
+            return Err(StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "table",
+                object_name: table_name,
+            });
+        }
+        let actual_columns = load_columns(connection, table_name).await?;
+        if let Some(missing_column) = columns
+            .iter()
+            .find(|column| !actual_columns.contains_key(column.name))
+        {
+            return Err(StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "column",
+                object_name: missing_column.name,
             });
         }
     }

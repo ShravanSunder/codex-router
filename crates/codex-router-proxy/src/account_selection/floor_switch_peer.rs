@@ -95,21 +95,16 @@ impl LiveFloorSwitchPeerAssessor for RuntimeFloorSwitchPeerAssessor {
                     .cloned()
                     .unwrap_or_default()
             };
-            let peer_inputs = projection
-                .accounts()
-                .iter()
-                .filter(|account| account.account_id() != source_account_id)
-                .filter(|account| {
-                    !runtime_exhaustions.iter().any(|exhaustion| {
-                        exhaustion.account_id == *account.account_id()
-                            && now_unix_seconds < exhaustion.expires_unix_seconds
-                    })
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let peer_inputs = floor_switch_peer_inputs(
+                projection.accounts(),
+                source_account_id,
+                &runtime_exhaustions,
+                now_unix_seconds,
+            );
             let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
                 route_band,
                 now_unix_seconds,
+                RESPONSES_WEBSOCKET.clone(),
                 peer_inputs,
             ));
             if assessment
@@ -122,5 +117,72 @@ impl LiveFloorSwitchPeerAssessor for RuntimeFloorSwitchPeerAssessor {
                 FloorSwitchPeerAssessment::NoPeer
             }
         })
+    }
+}
+
+fn floor_switch_peer_inputs(
+    projected_accounts: &[BurnDownAccountInput],
+    source_account_id: &AccountId,
+    runtime_exhaustions: &[RuntimeQuotaExhaustion],
+    now_unix_seconds: u64,
+) -> Vec<BurnDownAccountInput> {
+    projected_accounts
+        .iter()
+        .filter(|account| account.provider() == RESPONSES_WEBSOCKET.provider)
+        .filter(|account| account.account_id() != source_account_id)
+        .filter(|account| {
+            !runtime_exhaustions.iter().any(|exhaustion| {
+                exhaustion.account_id == *account.account_id()
+                    && now_unix_seconds < exhaustion.expires_unix_seconds
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::RuntimeQuotaExhaustion;
+    use super::floor_switch_peer_inputs;
+    use codex_router_core::ids::AccountId;
+    use codex_router_core::provider::Provider;
+    use codex_router_selection::burn_down::BurnDownAccountInput;
+
+    fn account(label: &str, provider: Provider) -> BurnDownAccountInput {
+        BurnDownAccountInput::new(
+            AccountId::new(format!("acct_{label}"))
+                .unwrap_or_else(|error| panic!("test account id should parse: {error}")),
+            label,
+            provider,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn floor_switch_peer_candidates_are_filtered_by_openai_profile_before_exhaustion() {
+        let source = account("source", Provider::Openai);
+        let source_id = source.account_id().clone();
+        let openai_peer = account("openai_peer", Provider::Openai);
+        let openai_peer_id = openai_peer.account_id().clone();
+        let claude_peer = account("claude_peer", Provider::Claude);
+        let claude_peer_id = claude_peer.account_id().clone();
+        let exhausted_openai_peer = account("exhausted_openai_peer", Provider::Openai);
+        let exhausted_peer_id = exhausted_openai_peer.account_id().clone();
+        let accounts = vec![source, openai_peer, claude_peer, exhausted_openai_peer];
+        let runtime_exhaustions = vec![RuntimeQuotaExhaustion::new(exhausted_peer_id.clone(), 900)];
+
+        let peer_inputs =
+            floor_switch_peer_inputs(&accounts, &source_id, &runtime_exhaustions, 1_000);
+
+        assert_eq!(peer_inputs.len(), 1);
+        assert_eq!(peer_inputs[0].account_id(), &openai_peer_id);
+        assert!(
+            peer_inputs
+                .iter()
+                .all(|account| account.provider() == Provider::Openai)
+        );
+        assert!(!peer_inputs.iter().any(|account| {
+            account.account_id() == &claude_peer_id || account.account_id() == &exhausted_peer_id
+        }));
     }
 }
