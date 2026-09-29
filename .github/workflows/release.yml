@@ -97,9 +97,9 @@ jobs:
         working-directory: release-source
         run: |
           set -euo pipefail
-          dependency_features="$(cargo tree --locked -p codex-router-cli -e normal,features)"
-          if grep -q 'keychain-test-support' <<<"${dependency_features}"; then
-            echo "release dependency graph includes keychain-test-support" >&2
+          dependency_features="$(cargo tree --locked -p codex-router-cli -p agent-collaboration -e normal,build,features -i codex-router-secret-store)"
+          if grep -q 'keychain-test-guard' <<<"${dependency_features}"; then
+            echo "release dependency graph includes keychain-test-guard" >&2
             exit 1
           fi
 

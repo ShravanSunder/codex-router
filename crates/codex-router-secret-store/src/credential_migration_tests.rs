@@ -430,7 +430,7 @@ fn invalid_store_id_still_opens_a_key_unavailable_store() {
 }
 
 #[test]
-fn invalid_format_marker_still_opens_a_key_unavailable_store() {
+fn invalid_format_marker_opens_an_incomplete_migration_store() {
     let directory = TempDir::new().expect("temporary root");
     std::fs::write(directory.path().join("format-v2.marker"), "unsupported")
         .expect("invalid format marker");
@@ -443,7 +443,10 @@ fn invalid_format_marker_still_opens_a_key_unavailable_store() {
 
     assert_eq!(
         opened.status(),
-        EncryptedCredentialStoreStatus::KeyUnavailable
+        EncryptedCredentialStoreStatus::MigrationIncomplete {
+            accounts: Vec::new(),
+            failure: CredentialMigrationFailure::InvalidStoreData,
+        }
     );
 }
 

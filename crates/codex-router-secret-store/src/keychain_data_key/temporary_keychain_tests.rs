@@ -390,7 +390,12 @@ fn run_keychain_decrypt_probe(
 }
 
 #[test]
+#[ignore = "requires the opt-in temporary-Keychain test command"]
 fn temporary_keychain_probe_builds_differently_marked_binaries() {
+    assert!(matches!(
+        std::env::var("CODEX_ROUTER_KEYCHAIN_TESTS").as_deref(),
+        Ok("1")
+    ));
     let build_directory =
         TempDir::new_in("/private/tmp").expect("temporary build directory should create");
     let first_build = compile_keychain_acl_probe(build_directory.path(), "a")

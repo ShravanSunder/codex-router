@@ -110,7 +110,11 @@ impl EncryptedCredentialStore {
             Ok(marker_is_complete) => marker_is_complete,
             Err(error @ SecretStoreError::InvalidCredentialStoreMarker { .. }) => {
                 tracing::error!(reason = %error, "pooled credential store marker is invalid");
-                return Ok(Self::key_unavailable(file_store));
+                return Ok(Self::migration_incomplete(
+                    file_store,
+                    migration_accounts,
+                    CredentialMigrationFailure::InvalidStoreData,
+                ));
             }
             Err(error) => {
                 tracing::error!(reason = %error, "pooled credential migration marker could not be read");
