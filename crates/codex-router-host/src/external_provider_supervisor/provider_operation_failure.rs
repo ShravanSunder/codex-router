@@ -5,7 +5,7 @@ use crate::ExternalProviderRuntimeError;
 use collaboration_protocol::{
     ConversationOperationFailure, ConversationOperationFailureKind,
     ConversationOperationFailureStage, InvalidProviderSetting, InvalidSettingSessionDisposition,
-    OperationId, ProviderOperationEffect, SessionRef,
+    NonEmptyText, OperationId, ProviderOperationEffect, SessionRef,
 };
 
 pub(super) fn invalid_setting_failure(
@@ -16,24 +16,36 @@ pub(super) fn invalid_setting_failure(
     advertised: Vec<String>,
     disposition: acp_client_runtime::InvalidSettingSessionDisposition,
 ) -> ConversationOperationFailure {
-    let (message, disposition) = match disposition {
+    let (session_status, disposition) = match disposition {
         acp_client_runtime::InvalidSettingSessionDisposition::Closed => (
-            "invalid provider setting; see advertised values; new Session was closed",
+            "new Session was closed",
             InvalidSettingSessionDisposition::Closed,
         ),
         acp_client_runtime::InvalidSettingSessionDisposition::RemainsCreated => (
-            "invalid provider setting; see advertised values; new Session remains created and idle",
+            "new Session remains created and idle",
             InvalidSettingSessionDisposition::RemainsCreated,
         ),
     };
+    let advertised_values = if advertised.is_empty() {
+        "none".to_owned()
+    } else {
+        advertised.join(", ")
+    };
+    let message = format!(
+        "invalid provider setting {}={value:?}; advertised: {advertised_values}; {session_status}",
+        setting.as_str()
+    );
     let mut result = failure(
         ConversationOperationFailureKind::InvalidSetting,
         ConversationOperationFailureStage::Settlement,
         ProviderOperationEffect::Applied,
-        message,
+        "invalid provider setting; see advertised values",
         operation_id,
         target,
     );
+    if let Ok(message) = NonEmptyText::try_from(message) {
+        result.message = message;
+    }
     result.invalid_setting = Some(InvalidProviderSetting {
         setting: crate::provider_operation_settlement::provider_setting_name(setting),
         value,
@@ -219,5 +231,52 @@ pub(super) fn runtime_failure(
             operation_id,
             target,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acp_client_runtime::ProviderSettingKind;
+    use collaboration_protocol::ProviderSettingName;
+
+    #[test]
+    fn invalid_setting_failure_names_each_setting_and_advertised_values() {
+        for (setting, name, expected_setting) in [
+            (ProviderSettingKind::Mode, "mode", ProviderSettingName::Mode),
+            (
+                ProviderSettingKind::Model,
+                "model",
+                ProviderSettingName::Model,
+            ),
+            (
+                ProviderSettingKind::Effort,
+                "effort",
+                ProviderSettingName::Effort,
+            ),
+        ] {
+            let failure = invalid_setting_failure(
+                OperationId::generate(),
+                None,
+                setting,
+                "requested".to_owned(),
+                vec!["first".to_owned(), "second".to_owned()],
+                acp_client_runtime::InvalidSettingSessionDisposition::Closed,
+            );
+
+            assert_eq!(
+                String::from(failure.message.clone()),
+                format!(
+                    "invalid provider setting {name}=\"requested\"; advertised: first, second; new Session was closed"
+                )
+            );
+            let invalid_setting = failure.invalid_setting.expect("invalid-setting detail");
+            assert_eq!(invalid_setting.setting, expected_setting);
+            assert_eq!(invalid_setting.value, "requested");
+            assert_eq!(
+                invalid_setting.advertised,
+                vec!["first".to_owned(), "second".to_owned()]
+            );
+        }
     }
 }
