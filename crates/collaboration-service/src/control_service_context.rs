@@ -155,13 +155,7 @@ impl ServiceIdentity {
         mut self,
         delivery: std::sync::Arc<dyn crate::SessionMessageDelivery>,
     ) -> Self {
-        self.session_delivery = Some(std::sync::Arc::new(
-            crate::latest_sender_recording_delivery::LatestSenderRecordingDelivery::new(
-                delivery,
-                self.automation.clone(),
-                std::sync::Arc::clone(&self.latest_sender_unknown),
-            ),
-        ));
+        self.session_delivery = Some(delivery);
         self
     }
 

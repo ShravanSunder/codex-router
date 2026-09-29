@@ -4,9 +4,9 @@ use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
 use collaboration_protocol::{
-    AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageDelivery,
+    AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageContent, MessageDelivery,
     MessageHeaderContext, NativeInputDisposition, NativeInputOperation, NativeSendAcceptance,
-    NativeSendParams, NativeSendReceipt, NonEmptyText, UuidIdentity,
+    NativeSendParams, NativeSendReceipt, NonEmptyText, SessionRef, UuidIdentity,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -19,6 +19,7 @@ pub(crate) struct NativeMessageRequest<'a> {
     pub backend: &'a NativeControlBackend,
     pub endpoints: &'a [EndpointDescription],
     pub header_context: MessageHeaderContext,
+    pub display_names: &'a crate::SessionDisplayNameCache,
     pub held_connection: Option<&'a mut NativeProtocolConnection>,
 }
 
@@ -119,7 +120,10 @@ pub(crate) async fn dispatch_message(
         .deliver(
             &target_id,
             params.delivery,
-            &rendered.text,
+            &params.target,
+            &params.message,
+            &request.header_context,
+            request.display_names,
             &correlation,
             held,
         )
@@ -264,7 +268,10 @@ impl MessageSession<'_> {
         &mut self,
         id: &str,
         delivery: MessageDelivery,
-        text: &str,
+        target: &SessionRef,
+        message: &MessageContent,
+        header_context: &MessageHeaderContext,
+        display_names: &crate::SessionDisplayNameCache,
         correlation: &str,
         held_unmaterialized: bool,
     ) -> Result<NativeSendAcceptance, Value> {
@@ -273,6 +280,18 @@ impl MessageSession<'_> {
         } else {
             Some(self.read_thread_metadata(id).await?)
         };
+        if let Some(thread) = thread.as_ref() {
+            cache_thread_display_name(display_names, target, thread);
+        }
+        let current_header_context =
+            MessageHeaderContext::resolve(target, message, display_names, header_context.origin);
+        let rendered = collaboration_protocol::render_message_with_context(
+            target,
+            message,
+            &current_header_context,
+        )
+        .map_err(|_| self.effects.failure("overloaded", "inspect"))?;
+        let text = rendered.text;
         let status = match thread.as_ref() {
             None => "idle",
             Some(thread) => thread
@@ -347,5 +366,26 @@ impl MessageSession<'_> {
             .and_then(Value::as_str)
             .and_then(|id| NonEmptyText::try_from(id.to_owned()).ok())
             .ok_or_else(|| self.effects.failure("outcomeUnknown", stage))
+    }
+}
+
+fn cache_thread_display_name(
+    display_names: &crate::SessionDisplayNameCache,
+    target: &SessionRef,
+    thread: &Value,
+) {
+    let name = thread
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            thread
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        });
+    match name {
+        Some(name) => display_names.remember(target.clone(), name),
+        None => display_names.forget(target.clone()),
     }
 }

@@ -20,6 +20,18 @@ const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 #[derive(Default)]
 struct RecordingDelivery {
     requests: Mutex<Vec<DeliveryRequest>>,
+    fail_next: Mutex<bool>,
+    unknown_next: Mutex<bool>,
+}
+
+impl RecordingDelivery {
+    fn fail_next_delivery(&self) {
+        *self.fail_next.lock().expect("failure switch") = true;
+    }
+
+    fn return_unknown_next_delivery(&self) {
+        *self.unknown_next.lock().expect("unknown switch") = true;
+    }
 }
 
 impl SessionMessageDelivery for RecordingDelivery {
@@ -33,6 +45,30 @@ impl SessionMessageDelivery for RecordingDelivery {
                 .lock()
                 .map_err(|_| DeliveryContractError::ClientOperation)?
                 .push(request);
+            let fail = {
+                let mut fail_next = self
+                    .fail_next
+                    .lock()
+                    .map_err(|_| DeliveryContractError::ClientOperation)?;
+                std::mem::take(&mut *fail_next)
+            };
+            if fail {
+                return Err(DeliveryContractError::ClientOperation);
+            }
+            let unknown = {
+                let mut unknown_next = self
+                    .unknown_next
+                    .lock()
+                    .map_err(|_| DeliveryContractError::ClientOperation)?;
+                std::mem::take(&mut *unknown_next)
+            };
+            if unknown {
+                return Ok(DeliveryReceipt {
+                    outcome: DeliveryOutcome::Unknown,
+                    reachability: None,
+                    client: None,
+                });
+            }
             Ok(DeliveryReceipt {
                 outcome: DeliveryOutcome::PeerMessageWritten,
                 reachability: Some(collaboration_protocol::SessionReachability::ClaudeCodePeer),
@@ -130,11 +166,18 @@ async fn reply_after_multiple_agent_deliveries_targets_the_latest_sender() {
     let reply = client
         .reply_to_latest_agent_sender(MessageReplyRequest {
             caller: caller.clone(),
+            expect_sender: Some(latest_sender.clone()),
             text: MessageText::try_from("thanks".to_owned()).expect("reply text"),
         })
         .await
         .expect("reply routes to latest sender");
-    assert_eq!(reply.outcome, DeliveryOutcome::PeerMessageWritten);
+    assert_eq!(reply.target, latest_sender);
+    assert_eq!(reply.receipt.outcome, DeliveryOutcome::PeerMessageWritten);
+    assert!(
+        reply
+            .target_identity
+            .starts_with("▶️ cursor-local/latest-s")
+    );
     client.close().await.expect("close control client");
     service.await.expect("service join").expect("service close");
 
@@ -159,6 +202,57 @@ async fn reply_after_multiple_agent_deliveries_targets_the_latest_sender() {
 }
 
 #[tokio::test]
+async fn expect_sender_refuses_when_the_latest_sender_changed_before_reply() {
+    let temporary = tempfile::tempdir().expect("isolated reply store");
+    let store = Arc::new(TokioMutex::new(
+        AutomationStore::open(&temporary.path().join("automation.sqlite"))
+            .await
+            .expect("automation store"),
+    ));
+    let delivery = Arc::new(RecordingDelivery::default());
+    let (mut client, service) = client_with_store(Arc::clone(&store), Arc::clone(&delivery)).await;
+    let caller = session("codex-local", "changing-sender");
+    let expected_sender = session("claude-local", "earlier-sender");
+    let latest_sender = session("cursor-local", "newer-sender");
+
+    for sender in [expected_sender.clone(), latest_sender] {
+        client
+            .send_agent_message(SessionMessageSendParams {
+                target: caller.clone(),
+                message: MessageContent::Agent {
+                    sender,
+                    text: MessageText::try_from("message".to_owned()).expect("message text"),
+                },
+                mode: MessageDelivery::Auto,
+                generation_guard: None,
+                correlation: None,
+            })
+            .await
+            .expect("accepted Agent message");
+    }
+
+    let error = client
+        .reply_to_latest_agent_sender(MessageReplyRequest {
+            caller,
+            expect_sender: Some(expected_sender),
+            text: MessageText::try_from("reply".to_owned()).expect("reply text"),
+        })
+        .await
+        .expect_err("stale sender guard must refuse the reply");
+    assert!(matches!(
+        &error,
+        MessageReplyError::Preparation(source)
+            if matches!(source.as_ref(), ClientError::Rejected {
+                data: Some(data), ..
+            } if data["kind"] == "latestSenderMismatch")
+    ));
+
+    client.close().await.expect("close control client");
+    service.await.expect("service join").expect("service close");
+    assert_eq!(delivery.requests.lock().expect("recorded calls").len(), 2);
+}
+
+#[tokio::test]
 async fn reply_without_an_agent_sender_returns_a_clear_error_and_sends_nothing() {
     let temporary = tempfile::tempdir().expect("isolated reply store");
     let store = Arc::new(TokioMutex::new(
@@ -173,6 +267,7 @@ async fn reply_without_an_agent_sender_returns_a_clear_error_and_sends_nothing()
     let error = client
         .reply_to_latest_agent_sender(MessageReplyRequest {
             caller,
+            expect_sender: None,
             text: MessageText::try_from("hello".to_owned()).expect("reply text"),
         })
         .await
@@ -220,6 +315,7 @@ async fn missing_reply_store_does_not_change_an_accepted_send_outcome() {
     let error = client
         .reply_to_latest_agent_sender(MessageReplyRequest {
             caller,
+            expect_sender: None,
             text: MessageText::try_from("reply".to_owned()).expect("reply text"),
         })
         .await
@@ -313,6 +409,7 @@ async fn failed_reply_record_write_keeps_send_accepted_and_invalidates_stale_sen
     let error = client
         .reply_to_latest_agent_sender(MessageReplyRequest {
             caller,
+            expect_sender: None,
             text: MessageText::try_from("reply".to_owned()).expect("reply text"),
         })
         .await
@@ -331,4 +428,124 @@ async fn failed_reply_record_write_keeps_send_accepted_and_invalidates_stale_sen
     client.close().await.expect("close control client");
     service.await.expect("service join").expect("service close");
     assert_eq!(delivery.requests.lock().expect("recorded calls").len(), 2);
+}
+
+#[tokio::test]
+async fn unknown_agent_delivery_invalidates_the_previous_reply_target() {
+    let temporary = tempfile::tempdir().expect("isolated reply store");
+    let store = Arc::new(TokioMutex::new(
+        AutomationStore::open(&temporary.path().join("automation.sqlite"))
+            .await
+            .expect("automation store"),
+    ));
+    let delivery = Arc::new(RecordingDelivery::default());
+    let (mut client, service) = client_with_store(Arc::clone(&store), Arc::clone(&delivery)).await;
+    let caller = session("codex-local", "uncertain-recipient");
+    let old_sender = session("claude-local", "old-sender");
+    let new_sender = session("cursor-local", "uncertain-sender");
+
+    client
+        .send_agent_message(SessionMessageSendParams {
+            target: caller.clone(),
+            message: MessageContent::Agent {
+                sender: old_sender,
+                text: MessageText::try_from("accepted".to_owned()).expect("message text"),
+            },
+            mode: MessageDelivery::Auto,
+            generation_guard: None,
+            correlation: None,
+        })
+        .await
+        .expect("seed prior accepted sender");
+    delivery.fail_next_delivery();
+
+    let error = client
+        .send_agent_message(SessionMessageSendParams {
+            target: caller.clone(),
+            message: MessageContent::Agent {
+                sender: new_sender,
+                text: MessageText::try_from("uncertain".to_owned()).expect("message text"),
+            },
+            mode: MessageDelivery::Auto,
+            generation_guard: None,
+            correlation: None,
+        })
+        .await
+        .expect_err("lost delivery outcome remains uncertain");
+    assert!(matches!(
+        error,
+        ClientError::Rejected {
+            data: Some(data), ..
+        } if data["kind"] == "outcomeUnknown"
+    ));
+    assert!(
+        store
+            .lock()
+            .await
+            .latest_agent_sender_for(&caller, chrono::Utc::now())
+            .await
+            .expect("reply address query")
+            .is_none(),
+        "an unknown latest delivery must remove the stale reply address"
+    );
+    client.close().await.expect("close control client");
+    service.await.expect("service join").expect("service close");
+}
+
+#[tokio::test]
+async fn unknown_receipt_agent_delivery_invalidates_the_previous_reply_target() {
+    let temporary = tempfile::tempdir().expect("isolated reply store");
+    let store = Arc::new(TokioMutex::new(
+        AutomationStore::open(&temporary.path().join("automation.sqlite"))
+            .await
+            .expect("automation store"),
+    ));
+    let delivery = Arc::new(RecordingDelivery::default());
+    let (mut client, service) = client_with_store(Arc::clone(&store), Arc::clone(&delivery)).await;
+    let caller = session("codex-local", "unknown-receipt-recipient");
+    let old_sender = session("claude-local", "old-sender");
+    let uncertain_sender = session("cursor-local", "uncertain-sender");
+
+    client
+        .send_agent_message(SessionMessageSendParams {
+            target: caller.clone(),
+            message: MessageContent::Agent {
+                sender: old_sender,
+                text: MessageText::try_from("accepted".to_owned()).expect("message text"),
+            },
+            mode: MessageDelivery::Auto,
+            generation_guard: None,
+            correlation: None,
+        })
+        .await
+        .expect("seed prior accepted sender");
+    delivery.return_unknown_next_delivery();
+
+    let receipt = client
+        .send_agent_message(SessionMessageSendParams {
+            target: caller.clone(),
+            message: MessageContent::Agent {
+                sender: uncertain_sender,
+                text: MessageText::try_from("unknown outcome".to_owned()).expect("message text"),
+            },
+            mode: MessageDelivery::Auto,
+            generation_guard: None,
+            correlation: None,
+        })
+        .await
+        .expect("unknown receipt preserves the protocol outcome");
+    assert_eq!(receipt.outcome, DeliveryOutcome::Unknown);
+    assert!(
+        store
+            .lock()
+            .await
+            .latest_agent_sender_for(&caller, chrono::Utc::now())
+            .await
+            .expect("reply address query")
+            .is_none(),
+        "an unknown receipt must remove the stale reply address"
+    );
+
+    client.close().await.expect("close control client");
+    service.await.expect("service join").expect("service close");
 }

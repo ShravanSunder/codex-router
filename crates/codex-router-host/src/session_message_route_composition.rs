@@ -39,13 +39,15 @@ pub(crate) fn compose_session_message_routes(
         display_names,
     } = inputs;
     let service_id = native_backend.endpoint.service_id.clone();
-    let codex_route: Arc<dyn SessionDeliveryRoute> =
-        Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(
+    let codex_route: Arc<dyn SessionDeliveryRoute> = Arc::new(
+        collaboration_service::CodexAppServerDeliveryRoute::new(
             service_id.clone(),
             directory.clone(),
             native_backend,
             unmaterialized_threads,
-        ));
+        )
+        .with_display_names(display_names.clone()),
+    );
     let peer_route = Arc::new(
         ClaudeCodePeerDeliveryRoute::new(
             EndpointRef {

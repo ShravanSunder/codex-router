@@ -150,7 +150,7 @@ impl ControlClient {
     pub async fn message_reply(
         &mut self,
         params: collaboration_protocol::SessionMessageReplyParams,
-    ) -> Result<collaboration_protocol::DeliveryReceipt, ClientError> {
+    ) -> Result<collaboration_protocol::SessionMessageReplyResult, ClientError> {
         if params.caller.endpoint.service_id != self.identity().service_id {
             return Err(ClientError::InvalidRequest(
                 "reply caller belongs to another service",
@@ -159,7 +159,7 @@ impl ControlClient {
         let value = self.connection.call("message/reply", json!(params)).await?;
         serde_json::from_value(value).map_err(|_| {
             self.connection.failed = true;
-            ClientError::Protocol("invalid message reply receipt; acceptance unknown")
+            ClientError::Protocol("invalid message reply result; acceptance unknown")
         })
     }
     async fn submit_message(

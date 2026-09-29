@@ -233,6 +233,8 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
                 }
                 if let Some(name) = session.name.as_deref() {
                     identity.display_names.remember(target.clone(), name);
+                } else {
+                    identity.display_names.forget(target.clone());
                 }
                 rows.push((
                     session.updated_at.saturating_mul(1_000),

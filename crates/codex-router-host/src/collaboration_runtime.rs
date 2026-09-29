@@ -393,6 +393,7 @@ impl CollaborationRuntime {
         > = message_routes.router;
         let provider_delivery_route = message_routes.provider_route;
         if let Some(supervisor) = &external_provider_supervisor {
+            supervisor.install_display_names(identity.session_display_name_cache());
             supervisor
                 .install_approval_broker(std::sync::Arc::clone(&approval_broker))
                 .await;

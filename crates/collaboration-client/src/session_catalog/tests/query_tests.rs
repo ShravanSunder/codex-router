@@ -173,6 +173,136 @@ fn qualified_search_handles_unicode_literals_unknown_prefixes_and_empty_qualifie
     assert!(!SessionSearchExpression::parse("b:").matches(&document));
 }
 
+#[tokio::test]
+async fn stored_picker_treats_upstream_empty_string_first_message_as_empty() {
+    let home = tempfile::tempdir().expect("temporary Codex home");
+    let database = home.path().join("state_5.sqlite");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("Codex state database");
+    sqlx::raw_sql(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT,
+            model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT,
+            git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT,
+            first_user_message TEXT NOT NULL DEFAULT '', created_at_ms INTEGER,
+            updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER
+        );
+        CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);
+        INSERT INTO threads (id,cwd,model,title,created_at_ms,updated_at_ms,recency_at_ms,archived)
+            VALUES ('empty-live','/repo','gpt-5.6-sol','Empty live session',2,2,2,0);
+        INSERT INTO threads (id,cwd,model,title,preview,first_user_message,created_at_ms,updated_at_ms,recency_at_ms,archived)
+            VALUES ('real-session','/repo','gpt-5.6-sol','First message','hello','hello',1,1,1,0);",
+    )
+    .execute(&pool)
+    .await
+    .expect("upstream-shaped session rows");
+    pool.close().await;
+
+    let query = SessionCatalogQuery {
+        codex_home: home.path().to_owned(),
+        current_dir: home.path().to_owned(),
+        root: SessionCatalogRoot::Any,
+        provider: SessionCatalogProvider::Any,
+        source: SessionCatalogSource::All,
+        sort: SessionCatalogSort::Updated,
+        last: false,
+        include_empty_sessions: false,
+        limit: 10,
+        search: String::new(),
+        repository_identity: None,
+    };
+
+    let visible = load_stored_sessions(query.clone())
+        .await
+        .expect("default stored inventory");
+    assert_eq!(
+        visible
+            .iter()
+            .map(|record| record.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["real-session"]
+    );
+    let all = load_stored_sessions(SessionCatalogQuery {
+        include_empty_sessions: true,
+        ..query
+    })
+    .await
+    .expect("explicit empty-session inventory");
+    assert_eq!(all.len(), 2);
+}
+
+#[tokio::test]
+async fn stored_picker_hides_upstream_empty_string_rows_by_default() {
+    let directory = tempfile::tempdir().expect("temporary Codex home");
+    let database = directory.path().join("state_5.sqlite");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("Codex state database");
+    sqlx::raw_sql(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT,
+            model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT,
+            git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT,
+            first_user_message TEXT NOT NULL DEFAULT '', created_at_ms INTEGER,
+            updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER
+        );
+        CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);
+        INSERT INTO threads (id,cwd,model,title,created_at_ms,updated_at_ms,recency_at_ms,archived)
+            VALUES ('empty-live','/repo','gpt-5.6-sol','Empty live session',2,2,2,0);
+        INSERT INTO threads (id,cwd,model,title,preview,first_user_message,created_at_ms,updated_at_ms,recency_at_ms,archived)
+            VALUES ('real-session','/repo','gpt-5.6-sol','First message','hello','hello',1,1,1,0);",
+    )
+    .execute(&pool)
+    .await
+    .expect("upstream-shaped session rows");
+    pool.close().await;
+
+    let query = SessionCatalogQuery {
+        codex_home: directory.path().to_owned(),
+        current_dir: directory.path().to_owned(),
+        root: SessionCatalogRoot::Any,
+        provider: SessionCatalogProvider::Any,
+        source: SessionCatalogSource::All,
+        sort: SessionCatalogSort::Updated,
+        last: false,
+        include_empty_sessions: false,
+        limit: 10,
+        search: String::new(),
+        repository_identity: None,
+    };
+
+    let visible = load_stored_sessions(query.clone())
+        .await
+        .expect("default stored inventory");
+    assert_eq!(
+        visible
+            .iter()
+            .map(|record| record.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["real-session"]
+    );
+    let all = load_stored_sessions(SessionCatalogQuery {
+        include_empty_sessions: true,
+        ..query
+    })
+    .await
+    .expect("explicit empty-session inventory");
+    assert_eq!(all.len(), 2);
+}
+
 #[test]
 fn current_provider_prefers_router_profile_config() {
     let root = std::env::temp_dir().join(format!(

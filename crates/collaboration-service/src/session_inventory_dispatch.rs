@@ -2,9 +2,9 @@
 use crate::native_control_request::NativeControlRequest;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use codex_native_integration::{
-    NativeOperation, NativeProtocolConnection, StoredThreadCatalog, StoredThreadCursor,
-    StoredThreadProvider, StoredThreadQuery, StoredThreadRoot, StoredThreadSort,
-    StoredThreadSource,
+    NativeConnectionError, NativeOperation, NativeProtocolConnection, StoredThreadCatalog,
+    StoredThreadCursor, StoredThreadProvider, StoredThreadQuery, StoredThreadRoot,
+    StoredThreadSort, StoredThreadSource,
 };
 use collaboration_protocol::{
     CodexGeneration, NativeSessionListParams, NativeSessionScope, NativeSessionSource,
@@ -13,16 +13,12 @@ use collaboration_protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::Row;
-use std::collections::HashSet;
-
-const THREAD_TURN_PAGE_SIZE: u32 = 100;
-const MAX_THREAD_TURN_PAGES: usize = 64;
+const THREAD_TURN_PAGE_SIZE: u32 = 1;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadTurnsPage {
     data: Vec<ThreadTurn>,
-    next_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -357,6 +353,8 @@ async fn stored_page(
             .or_else(|| title.as_deref().filter(|value| !value.trim().is_empty()));
         if let Some(cached_name) = cached_name {
             display_names.remember(session_ref, cached_name);
+        } else {
+            display_names.forget(session_ref);
         }
         let git_branch: Option<String> = row.try_get("git_branch").map_err(|_| ())?;
         let source_value: Option<String> = row.try_get("source").map_err(|_| ())?;
@@ -378,7 +376,8 @@ async fn stored_page(
             source: params.source,
             query: params.query.clone(),
         };
-        if !params.include_empty_sessions && first_user_message.is_none() {
+        if !params.include_empty_sessions && first_user_message.as_deref().is_none_or(str::is_empty)
+        {
             last = Some(scope_cursor);
             continue;
         }
@@ -443,7 +442,7 @@ async fn runtime_page(
         .and_then(Value::as_array)
         .filter(|ids| ids.len() <= params.page_size as usize)
         .ok_or(())?;
-    let mut sessions = Vec::new();
+    let mut loaded_threads = Vec::new();
     for id in ids {
         let id = id.as_str().ok_or(())?;
         let read = native
@@ -481,6 +480,8 @@ async fn runtime_page(
             .or_else(|| (!title.trim().is_empty()).then_some(title));
         if let Some(cached_name) = cached_name {
             display_names.remember(session_ref, cached_name);
+        } else {
+            display_names.forget(session_ref);
         }
         let source = classify_source(
             thread.get("source").and_then(Value::as_str),
@@ -497,14 +498,44 @@ async fn runtime_page(
         {
             continue;
         }
-        if !params.include_empty_sessions
-            && !thread_has_user_message(&mut native, schemas, id)
-                .await
-                .map_err(|_| ())?
-        {
+        let session = json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title,"source":source,"gitBranch":thread.pointer("/gitInfo/branch").and_then(Value::as_str),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":active_turn_id(status)},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":idle_seconds_from_thread(thread)});
+        loaded_threads.push((id.to_owned(), thread.clone(), session));
+    }
+    let mut sessions = Vec::new();
+    let mut turns_query_available = true;
+    for (thread_id, thread, session) in loaded_threads {
+        if params.include_empty_sessions {
+            sessions.push(session);
             continue;
         }
-        sessions.push(json!({"target":{"endpoint":params.endpoint,"sessionId":id},"name":name,"title":title,"source":source,"gitBranch":thread.pointer("/gitInfo/branch").and_then(Value::as_str),"workingDirectory":thread.get("cwd").ok_or(())?,"observation":{"kind":"runtime","status":status,"turnId":active_turn_id(status)},"model":thread.get("model").and_then(Value::as_str),"reasoningEffort":thread.get("reasoningEffort").and_then(Value::as_str),"idleSeconds":idle_seconds_from_thread(thread)}));
+        if thread
+            .get("preview")
+            .and_then(Value::as_str)
+            .is_some_and(|preview| !preview.is_empty())
+        {
+            sessions.push(session);
+            continue;
+        }
+        if !turns_query_available {
+            sessions.push(session);
+            continue;
+        }
+        match thread_has_user_message(&mut native, schemas, &thread_id).await {
+            Ok(true) => sessions.push(session),
+            Ok(false) => {}
+            Err(NativeConnectionError::Rejected { .. }) => {
+                let rejection = native.take_last_rejection();
+                if !is_unmaterialized_thread_rejection(rejection.as_ref(), &thread_id) {
+                    sessions.push(session);
+                }
+            }
+            Err(_) => {
+                // A connection-level error cannot safely answer for the remaining
+                // loaded rows. Preserve them instead of failing or hiding the page.
+                turns_query_available = false;
+                sessions.push(session);
+            }
+        }
     }
     let next = result
         .get("nextCursor")
@@ -538,47 +569,40 @@ async fn thread_has_user_message(
     schemas: &codex_native_integration::NativePayloadSchemas,
     thread_id: &str,
 ) -> Result<bool, codex_native_integration::NativeConnectionError> {
-    if !schemas.supports_operation(NativeOperation::ListTurns) {
-        return Err(codex_native_integration::NativeConnectionError::InvalidInput);
-    }
-    let mut cursor = None;
-    let mut seen_cursors = HashSet::new();
-    for _ in 0..MAX_THREAD_TURN_PAGES {
-        let result = connection
-            .request_validated(
-                schemas,
-                NativeOperation::ListTurns,
-                json!({
-                    "threadId":thread_id,
-                    "cursor":cursor,
-                    "limit":THREAD_TURN_PAGE_SIZE,
-                    "sortDirection":"asc",
-                    "itemsView":"full"
-                }),
-            )
-            .await?;
-        let page: ThreadTurnsPage = serde_json::from_value(result)
-            .map_err(|_| codex_native_integration::NativeConnectionError::Protocol)?;
-        if page
-            .data
-            .iter()
-            .flat_map(|turn| turn.items.iter())
-            .any(|item| matches!(item, ThreadTurnItem::UserMessage))
-        {
-            return Ok(true);
-        }
-        let Some(next_cursor) = page.next_cursor else {
-            return Ok(false);
-        };
-        if next_cursor.is_empty()
-            || !seen_cursors.insert(next_cursor.clone())
-            || seen_cursors.len() > MAX_THREAD_TURN_PAGES
-        {
-            return Err(codex_native_integration::NativeConnectionError::Protocol);
-        }
-        cursor = Some(next_cursor);
-    }
-    Err(codex_native_integration::NativeConnectionError::Protocol)
+    let result = connection
+        .request_validated(
+            schemas,
+            NativeOperation::ListTurns,
+            json!({
+                "threadId":thread_id,
+                "limit":THREAD_TURN_PAGE_SIZE,
+                "sortDirection":"asc",
+                "itemsView":"summary"
+            }),
+        )
+        .await?;
+    let Ok(page) = serde_json::from_value::<ThreadTurnsPage>(result) else {
+        return Ok(true);
+    };
+    Ok(page
+        .data
+        .iter()
+        .flat_map(|turn| turn.items.iter())
+        .any(|item| matches!(item, ThreadTurnItem::UserMessage)))
+}
+
+fn is_unmaterialized_thread_rejection(error: Option<&Value>, thread_id: &str) -> bool {
+    let expected_message = format!(
+        "thread {thread_id} is not materialized yet; thread/turns/list is unavailable before first user message"
+    );
+    error
+        .and_then(|rejection| rejection.get("message"))
+        .and_then(Value::as_str)
+        == Some(expected_message.as_str())
+        && error
+            .and_then(|rejection| rejection.get("code"))
+            .and_then(Value::as_i64)
+            == Some(-32600)
 }
 fn page(
     params: &NativeSessionListParams,

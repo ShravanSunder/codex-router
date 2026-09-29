@@ -66,10 +66,12 @@ impl ClaudeCodePeerDeliveryRoute {
                 reason: format!("Claude Code registry lookup task failed: {error}"),
             },
         };
-        if let PeerSessionLookup::Writable(peer) = &lookup
-            && let Some(name) = peer.name.as_deref()
-        {
-            self.display_names.remember(target.clone(), name);
+        if let PeerSessionLookup::Writable(peer) = &lookup {
+            if let Some(name) = peer.name.as_deref() {
+                self.display_names.remember(target.clone(), name);
+            } else {
+                self.display_names.forget(target.clone());
+            }
         }
         lookup
     }
@@ -102,11 +104,11 @@ impl ClaudeCodePeerDeliveryRoute {
                 rendered.text,
             )),
             MessageContent::HumanUser { .. } => Ok(format!(
-                "Origin: human user\n\n{}\n\nFor replies, use `agent-collaboration message reply --text <TEXT>` as this Claude session.",
+                "Origin: human user\n\n{}\n\nFor follow-up messages, use `agent-collaboration message send --human-user --to <SessionRef> --text <TEXT>` as this Claude session.",
                 rendered.text,
             )),
             MessageContent::Router { .. } => Ok(format!(
-                "{}\n\nFor replies, use `agent-collaboration message reply --text <TEXT>` as this Claude session.",
+                "{}\n\nFor follow-up messages, use `agent-collaboration message send --to <SessionRef> --from <SessionRef> --text <TEXT>` as this Claude session.",
                 rendered.text,
             )),
         }
@@ -137,6 +139,60 @@ impl ClaudeCodePeerDeliveryRoute {
         message: &str,
     ) -> PeerSocketWriteOutcome {
         self.socket.write_user_message(peer, message).await
+    }
+}
+
+#[cfg(test)]
+mod peer_reply_guidance_tests {
+    use super::ClaudeCodePeerDeliveryRoute;
+    use collaboration_protocol::{
+        EndpointId, EndpointRef, MessageContent, MessageHeaderContext, MessageText, SessionId,
+        SessionRef, UuidIdentity,
+    };
+
+    fn target() -> SessionRef {
+        SessionRef {
+            endpoint: EndpointRef {
+                service_id: UuidIdentity::try_from(
+                    "018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned(),
+                )
+                .expect("service id"),
+                endpoint_id: EndpointId::try_from("claude-local".to_owned()).expect("endpoint id"),
+            },
+            session_id: SessionId::try_from("peer-session".to_owned()).expect("session id"),
+        }
+    }
+
+    #[test]
+    fn reply_shortcut_is_suggested_only_for_agent_messages() {
+        let target = target();
+        let agent = MessageContent::Agent {
+            sender: target.clone(),
+            text: MessageText::try_from("Agent message".to_owned()).expect("message text"),
+        };
+        let human = MessageContent::HumanUser {
+            text: MessageText::try_from("Human message".to_owned()).expect("message text"),
+        };
+        let router = MessageContent::Router {
+            text: MessageText::try_from("Router notice".to_owned()).expect("message text"),
+        };
+        let context = MessageHeaderContext::default();
+
+        let agent_text =
+            ClaudeCodePeerDeliveryRoute::render_peer_message(&target, &agent, &context)
+                .expect("Agent peer message");
+        let human_text =
+            ClaudeCodePeerDeliveryRoute::render_peer_message(&target, &human, &context)
+                .expect("human peer message");
+        let router_text =
+            ClaudeCodePeerDeliveryRoute::render_peer_message(&target, &router, &context)
+                .expect("Router peer message");
+
+        assert!(agent_text.contains("message reply --text <TEXT>"));
+        assert!(human_text.contains("message send --human-user"));
+        assert!(!human_text.contains("message reply"));
+        assert!(router_text.contains("message send --to <SessionRef>"));
+        assert!(!router_text.contains("message reply"));
     }
 }
 

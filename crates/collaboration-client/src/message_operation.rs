@@ -5,7 +5,8 @@ use crate::{
 };
 use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryReceipt, MessageContent, MessageDelivery,
-    MessageText, SessionMessageReplyParams, SessionMessageSendParams, SessionRef,
+    MessageText, SessionMessageReplyParams, SessionMessageReplyResult, SessionMessageSendParams,
+    SessionRef,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,7 @@ pub struct MessageSendRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MessageReplyRequest {
     pub caller: SessionRef,
+    pub expect_sender: Option<SessionRef>,
     pub text: MessageText,
 }
 
@@ -140,26 +142,33 @@ impl ControlClient {
         if is_agent {
             self.send_agent_message(params)
                 .await
-                .map_err(|source| message_send_error(target.clone(), source))
+                .map_err(|source| MessageSendError::Submission {
+                    target: target.clone(),
+                    source: Box::new(source),
+                })
         } else {
             self.send_human_input(params)
                 .await
-                .map_err(|source| message_send_error(target, source))
+                .map_err(|source| MessageSendError::Submission {
+                    target,
+                    source: Box::new(source),
+                })
         }
     }
 
     pub async fn reply_to_latest_agent_sender(
         &mut self,
         request: MessageReplyRequest,
-    ) -> Result<DeliveryReceipt, MessageReplyError> {
+    ) -> Result<SessionMessageReplyResult, MessageReplyError> {
         let caller = request.caller.clone();
         let params = SessionMessageReplyParams {
             caller: request.caller,
+            expect_sender: request.expect_sender,
             text: request.text,
         };
         match self.message_reply(params).await {
             Ok(receipt) => Ok(receipt),
-            Err(error) if is_pre_dispatch_rejection(&error) => {
+            Err(error) if is_reply_pre_dispatch_rejection(&error) => {
                 Err(MessageReplyError::Preparation(Box::new(error)))
             }
             Err(error) => Err(MessageReplyError::Submission {
@@ -170,18 +179,7 @@ impl ControlClient {
     }
 }
 
-fn message_send_error(target: SessionRef, source: ClientError) -> MessageSendError {
-    if is_pre_dispatch_rejection(&source) {
-        MessageSendError::Preparation(Box::new(source))
-    } else {
-        MessageSendError::Submission {
-            target,
-            source: Box::new(source),
-        }
-    }
-}
-
-fn is_pre_dispatch_rejection(error: &ClientError) -> bool {
+fn is_reply_pre_dispatch_rejection(error: &ClientError) -> bool {
     match error {
         ClientError::InvalidRequest(_) => true,
         ClientError::Rejected {
@@ -192,8 +190,8 @@ fn is_pre_dispatch_rejection(error: &ClientError) -> bool {
                 "wrongService"
                     | "replyUnavailable"
                     | "latestSenderUnknown"
+                    | "latestSenderMismatch"
                     | "invalidField"
-                    | "unavailable"
             )
         ),
         ClientError::Rejected { data: None, .. } => false,
@@ -399,6 +397,67 @@ mod tests {
                 client: None
             })
         ));
+        peer.await.expect("join peer");
+    }
+
+    #[tokio::test]
+    async fn unavailable_after_message_submission_keeps_outcome_unknown() {
+        let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
+        let peer = tokio::spawn(async move {
+            let (read, mut write) = server_stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let initialize: Value = serde_json::from_str(
+                &lines
+                    .next_line()
+                    .await
+                    .expect("read init")
+                    .expect("init frame"),
+            )
+            .expect("init JSON");
+            let response = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
+                "version":{"major":1,"minor":0},"serviceId":"00000000-0000-4000-8000-000000000001",
+                "serviceEpoch":"00000000-0000-4000-8000-000000000002","controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
+            }});
+            write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .expect("write init");
+            let sent: Value = serde_json::from_str(
+                &lines
+                    .next_line()
+                    .await
+                    .expect("read message")
+                    .expect("message frame"),
+            )
+            .expect("message JSON");
+            assert_eq!(sent["method"], "message/send");
+            let response = json!({"jsonrpc":"2.0","id":sent["id"],"error":{
+                "code":-32050,"message":"Native backend unavailable",
+                "data":{"kind":"unavailable","stage":"start","message":"Native backend unavailable"}
+            }});
+            write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .expect("write unavailable response");
+            assert!(lines.next_line().await.expect("read close").is_none());
+        });
+        let mut client = ControlClient::initialize(client_stream, "message-test", "1")
+            .await
+            .expect("initialize");
+        let request = fixture_request(None);
+        let expected_target = request.target.clone();
+        let error = client
+            .send_message(request)
+            .await
+            .expect_err("post-submission unavailable may hide an accepted delivery");
+        assert!(matches!(
+            error,
+            MessageSendError::Submission { target, source }
+                if target == expected_target
+                    && matches!(source.as_ref(), ClientError::Rejected { data: Some(data), .. }
+                        if data["kind"] == "unavailable")
+        ));
+        client.close().await.expect("close client");
         peer.await.expect("join peer");
     }
 

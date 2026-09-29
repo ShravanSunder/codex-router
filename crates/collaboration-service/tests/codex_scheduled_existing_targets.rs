@@ -1,6 +1,9 @@
 //! Existing scheduled Codex targets preserve and verify the declared workspace.
 use agent_automation::RouteEffectEvidence;
-use collaboration_protocol::{CodexGeneration, SessionRef};
+use collaboration_protocol::{
+    CodexGeneration, MessageHeaderContext, MessageHeaderOrigin, RouterNoticeKind,
+    SessionDisplayName, SessionRef,
+};
 use collaboration_service::{
     DeliveryFuture, DeliveryPrecondition, NativeControlBackend, NativeGenerationGate,
 };
@@ -93,6 +96,17 @@ async fn scheduled_run_to_materialized_thread_preserves_declared_workspace()
                 {
                     return Err("scheduled turn lost run ID".into());
                 }
+                if expected == "turn/start"
+                    && !request["params"]["input"][0]["text"]
+                        .as_str()
+                        .is_some_and(|text| {
+                            text.starts_with(
+                                "🤖 Codex Main ← ⏰ Router schedule\nRouter delivery\n",
+                            ) && text.ends_with("\n\nmaterialized scheduled input")
+                        })
+                {
+                    return Err("scheduled turn omitted its Router identity header".into());
+                }
                 let result = if expected == "thread/read" {
                     json!({"thread":{"id":"materialized-thread","cwd":"/work","status":{"type":"idle"}}})
                 } else if expected == "turn/start" {
@@ -154,7 +168,13 @@ async fn scheduled_run_to_materialized_thread_preserves_declared_workspace()
                 run_id,
                 target,
                 message: "materialized scheduled input".to_owned().try_into()?,
-                header_context: collaboration_protocol::MessageHeaderContext::default(),
+                header_context: MessageHeaderContext {
+                    sender_display_name: None,
+                    recipient_display_name: Some(SessionDisplayName::try_from(
+                        "🤖 Codex Main".to_owned(),
+                    )?),
+                    origin: MessageHeaderOrigin::RouterNotice(RouterNoticeKind::Schedule),
+                },
                 precondition: DeliveryPrecondition::Unpinned,
                 inputs,
                 recorded: prepared.evidence,

@@ -45,7 +45,6 @@ pub enum DeliveryPrecondition {
 pub struct AttemptReconciliationContext {
     pub target: SessionRef,
     pub message: MessageContent,
-    pub header_context: MessageHeaderContext,
     pub mode: MessageDelivery,
     pub recorded: RouteEffectEvidence<SessionRef, CodexGeneration>,
 }

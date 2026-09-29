@@ -1,6 +1,6 @@
 //! Public message Control call delegates one attempt to the injected delivery seam.
 use crate::{
-    DeliveryPrecondition, DeliveryRequest, ServiceIdentity, SessionMessageDelivery,
+    DeliveryPrecondition, DeliveryRequest, ServiceIdentity, latest_agent_sender_tracking,
     session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
 use collaboration_protocol::{
@@ -20,19 +20,23 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
     let Some(delivery) = identity.session_delivery.as_ref() else {
         return failure(id, -32050, "unavailable");
     };
-    deliver(id, params, delivery.as_ref(), &identity.display_names).await
+    deliver(id, params, identity, delivery.as_ref()).await
 }
 
 async fn deliver(
     id: Value,
     params: SessionMessageSendParams,
-    delivery: &dyn SessionMessageDelivery,
-    display_names: &crate::SessionDisplayNameCache,
+    identity: &ServiceIdentity,
+    delivery: &dyn crate::SessionMessageDelivery,
 ) -> Value {
+    let latest_sender = match &params.message {
+        MessageContent::Agent { sender, .. } => Some((params.target.clone(), sender.clone())),
+        MessageContent::HumanUser { .. } | MessageContent::Router { .. } => None,
+    };
     let header_context = MessageHeaderContext::resolve(
         &params.target,
         &params.message,
-        display_names,
+        &identity.display_names,
         MessageHeaderOrigin::Agent,
     );
     let request = DeliveryRequest {
@@ -50,12 +54,48 @@ async fn deliver(
             .unwrap_or_else(collaboration_protocol::DeliveryCorrelationId::generate),
         attempt: agent_automation::AttemptId::generate(),
     };
-    match delivery
+    let result = delivery
         .deliver(request, &UnstoredAttemptEvidenceSink)
-        .await
-    {
-        Ok(receipt) => json!({"jsonrpc":"2.0","id":id,"result":receipt}),
-        Err(_) => failure(id, -32050, "outcomeUnknown"),
+        .await;
+    match result {
+        Ok(receipt) => {
+            match latest_sender {
+                Some((recipient, sender))
+                    if latest_agent_sender_tracking::is_accepted(&receipt.outcome) =>
+                {
+                    latest_agent_sender_tracking::record_after_acceptance(
+                        identity.automation.as_ref(),
+                        &identity.latest_sender_unknown,
+                        &recipient,
+                        &sender,
+                    )
+                    .await;
+                }
+                Some((recipient, _))
+                    if latest_agent_sender_tracking::is_unknown(&receipt.outcome) =>
+                {
+                    latest_agent_sender_tracking::invalidate_after_unknown(
+                        identity.automation.as_ref(),
+                        &identity.latest_sender_unknown,
+                        &recipient,
+                    )
+                    .await;
+                }
+                _ => {}
+            }
+            json!({"jsonrpc":"2.0","id":id,"result":receipt})
+        }
+        Err(_) => {
+            if let Some((recipient, _)) = latest_sender {
+                latest_agent_sender_tracking::invalidate_after_unknown(
+                    identity.automation.as_ref(),
+                    &identity.latest_sender_unknown,
+                    &recipient,
+                )
+                .await;
+            }
+            failure(id, -32050, "outcomeUnknown")
+        }
     }
 }
 

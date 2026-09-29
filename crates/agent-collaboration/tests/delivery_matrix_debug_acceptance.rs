@@ -344,7 +344,7 @@ fn recipient_observer_finds_composite_approval_request_id_in_user_text() {
     ]}]})];
     assert!(turns_contain_input(&turns, request_id));
     let peer_message = format!(
-        "{}\n\nFor replies, use `agent-collaboration message reply --text <TEXT>` as this Claude session.",
+        "{}\n\nFor follow-up messages, use `agent-collaboration message send --to <SessionRef> --from <SessionRef> --text <TEXT>` as this Claude session.",
         json!({"kind":"externalProviderPermission","requestId":request_id})
     );
     assert!(user_text_contains_marker(&peer_message, request_id));

@@ -383,12 +383,13 @@ pub fn control_schema_document(
             "noActiveTurn",
         ],
     )?;
-    assembly.add_method::<SessionMessageReplyParams, DeliveryReceipt>(
+    assembly.add_method::<SessionMessageReplyParams, SessionMessageReplyResult>(
         "message/reply",
         &[
             "wrongService",
             "replyUnavailable",
             "latestSenderUnknown",
+            "latestSenderMismatch",
             "outcomeUnknown",
             "overloaded",
         ],

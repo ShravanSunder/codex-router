@@ -1,7 +1,7 @@
 use crate::proof_context::{ProofContext, ProofResult, agent_text};
 use collaboration_client::protocol::{
     MessageContent, MessageText, NativeSendReceipt, SessionRef, parse_agent_message_envelope,
-    render_message,
+    render_message, session_identity,
 };
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -224,6 +224,12 @@ mod tests {
         )
         .expect("render agent envelope")
         .text;
+        let expected_identity_line = format!(
+            "{} ← {}\nAgent communication\n",
+            session_identity(&recipient, None),
+            session_identity(&sender, None),
+        );
+        assert!(incoming.starts_with(&expected_identity_line));
         let turns = vec![json!({
             "status":"completed",
             "items":[

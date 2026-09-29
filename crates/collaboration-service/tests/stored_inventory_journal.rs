@@ -32,13 +32,15 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
+        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT NOT NULL DEFAULT '', created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
             .execute(&pool).await.unwrap();
         let title = "PRIVATE_TITLE".repeat(60_000);
         for (id, time) in [("stored-b", 2000_i64), ("stored-a", 1000_i64)] {
             sqlx::query("INSERT INTO threads (id,cwd,model,reasoning_effort,name,title,preview,first_user_message,updated_at_ms,archived) VALUES (?, '/private-fixture-workspace', 'gpt-5.6-sol', 'medium', ?, 'PRIVATE_TITLE', 'PRIVATE_BODY', 'PRIVATE_BODY', ?, 0)")
                 .bind(id).bind(&title).bind(time).execute(&pool).await.unwrap();
         }
+        sqlx::query("INSERT INTO threads (id,cwd,model,name,title,preview,updated_at_ms,archived) VALUES ('stored-empty', '/private-fixture-workspace', 'gpt-5.6-sol', 'Empty session', 'Empty session', '', 500, 0)")
+            .execute(&pool).await.unwrap();
         pool.close().await;
         let original_catalog = std::fs::read(&database).unwrap();
         let id = "00000000-0000-4000-8000-000000000001";
@@ -160,6 +162,14 @@ mod tests {
             "page must shrink to its frame budget"
         );
         assert_eq!(second.sessions.len(), 1);
+        assert!(
+            first
+                .sessions
+                .iter()
+                .chain(&second.sessions)
+                .all(|session| String::from(session.target.session_id.clone()) != "stored-empty"),
+            "an upstream empty-string first_user_message must be hidden by default"
+        );
         assert_eq!(
             first.sessions.first().unwrap().name.as_deref(),
             Some(title.as_str())
@@ -314,7 +324,7 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
+        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT NOT NULL DEFAULT '', created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
             .execute(&pool).await.unwrap();
         for (id, cwd, origin, effort, thread_source, name, time) in [
             (

@@ -34,11 +34,8 @@ pub(crate) async fn reconcile(
     let Ok(admission) = backend.gate.acquire() else {
         return AttemptReconciliation::StillUnknown;
     };
-    let Ok(rendered) = collaboration_protocol::render_message_with_context(
-        &context.target,
-        &context.message,
-        &context.header_context,
-    ) else {
+    let Ok(rendered) = collaboration_protocol::render_message(&context.target, &context.message)
+    else {
         return AttemptReconciliation::StillUnknown;
     };
     let retirement = admission.retirement();

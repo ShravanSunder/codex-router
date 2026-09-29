@@ -302,7 +302,6 @@ async fn peer_reconciliation_rejects_evidence_for_another_session() {
         .reconcile_attempt(AttemptReconciliationContext {
             target: target(),
             message: delivery(MessageDelivery::Auto).message,
-            header_context: collaboration_protocol::MessageHeaderContext::default(),
             mode: MessageDelivery::Auto,
             recorded,
         })

@@ -38,7 +38,7 @@ pub fn command_help() -> String {
     )
     .replace(
         "  whoami [--json]",
-        "  message reply --text TEXT|--text-file PATH --json (reply to the latest accepted Agent sender delivered here)\n  whoami [--json]",
+        "  message reply --text TEXT|--text-file PATH [--expect-sender SESSIONREF_JSON] --json (reply to the most recent Agent sender delivered here; prints the selected target)\n  whoami [--json]",
     )
 }
 

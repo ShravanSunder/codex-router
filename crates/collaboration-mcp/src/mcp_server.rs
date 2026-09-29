@@ -15,7 +15,7 @@ use collaboration_protocol::{
     ProviderInspectFailure, ProviderSessionInspectRequest, ProviderSessionInspectResult,
     ProviderSessionListParams, ProviderSessionListResult, ProviderSettingsAcceptRequest,
     ProviderSettingsFailure, ProviderSettingsResult, ProviderSettingsSetRequest,
-    RouterExecutableRelation, router_build_warning,
+    RouterExecutableRelation, SessionMessageReplyResult, router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -379,7 +379,7 @@ impl CollaborationMcpServer {
         message_tool_result(result)
     }
 
-    #[tool(name = "message_reply", description = "Replies to the latest accepted Agent communication delivered to the supplied caller session. Router deliveries do not change the reply address. Returns clear guidance when the latest sender is unknown or Router automation storage is unavailable.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<DeliveryReceipt>>())]
+    #[tool(name = "message_reply", description = "Replies to the most recent Agent sender delivered to the supplied caller session. Router deliveries do not change the reply address. Optionally refuses unless expectSender matches the resolved recipient; returns the selected target.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<SessionMessageReplyResult>>())]
     async fn message_reply(
         &self,
         Parameters(request): Parameters<MessageReplyRequest>,
@@ -963,9 +963,41 @@ fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> Cal
     }
 }
 
-fn message_reply_tool_result(result: Result<DeliveryReceipt, MessageReplyError>) -> CallToolResult {
+fn message_reply_tool_result(
+    result: Result<SessionMessageReplyResult, MessageReplyError>,
+) -> CallToolResult {
     match result {
-        Ok(receipt) => message_tool_result(Ok(receipt)),
+        Ok(reply) => {
+            let (kind, message, effect) = match &reply.receipt.outcome {
+                DeliveryOutcome::NotSubmitted { reason, .. } => {
+                    ("notSubmitted", reason.clone(), OperationEffect::None)
+                }
+                DeliveryOutcome::Rejected(rejection) => (
+                    "rejected",
+                    rejection
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| "Reply delivery was rejected".to_owned()),
+                    OperationEffect::None,
+                ),
+                DeliveryOutcome::Unknown => (
+                    "outcomeUnknown",
+                    "Reply delivery acceptance is unknown".to_owned(),
+                    OperationEffect::Unknown,
+                ),
+                _ => return structured_result(Ok(reply), OperationEffect::None),
+            };
+            serde_json::to_value(reply)
+                .map(|mut value| {
+                    if let Some(fields) = value.as_object_mut() {
+                        fields.insert("kind".to_owned(), serde_json::json!(kind));
+                        fields.insert("message".to_owned(), serde_json::json!(message));
+                        fields.insert("effect".to_owned(), serde_json::json!(effect));
+                    }
+                    structured_tool_error(value)
+                })
+                .unwrap_or_else(|_| validation_failure("reply result encoding failed"))
+        }
         Err(error) => {
             let (failure, caller) = error.into_operation_failure_and_caller();
             serde_json::to_value(failure)

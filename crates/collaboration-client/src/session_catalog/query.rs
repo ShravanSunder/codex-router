@@ -139,7 +139,11 @@ pub async fn load_stored_sessions(
                 updated_at_ms: row.get("updated_at_ms"),
                 recency_at_ms: row.get("recency_at_ms"),
             };
-            if (!query.include_empty_sessions && record.first_user_message.is_none())
+            if (!query.include_empty_sessions
+                && record
+                    .first_user_message
+                    .as_deref()
+                    .is_none_or(str::is_empty))
                 || !session_record_matches_root(&record, &root_filter)
                 || !record.matches_search(&search_expression)
             {

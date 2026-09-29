@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
-async fn empty_loaded_thread_is_hidden_by_default_and_visible_with_explicit_opt_in() {
+async fn runtime_inventory_filters_unmaterialized_threads_and_keeps_rows_on_turn_errors() {
     let temporary = tempfile::tempdir().expect("isolated inventory directory");
     let backend_path = temporary.path().join("backend.sock");
     let listener = tokio::net::UnixListener::bind(&backend_path).expect("backend socket");
@@ -91,18 +91,22 @@ async fn empty_loaded_thread_is_hidden_by_default_and_visible_with_explicit_opt_
     .expect("register native backend");
     let (client_stream, service_stream) = tokio::net::UnixStream::pair().expect("control pair");
     let service = tokio::spawn(serve_control_connection(service_stream, identity));
+    let thread_ids = ["empty-thread", "error-thread", "preview-thread"];
     let backend = tokio::spawn(async move {
+        let mut turns_list_params = Vec::new();
         for expected_include_empty_sessions in [false, true, false, true] {
             let (stream, _) = listener.accept().await.expect("app-server accept");
             let mut socket = tokio_tungstenite::accept_async(stream)
                 .await
                 .expect("app-server websocket");
-            let mut expected_methods = vec!["initialize", "thread/loaded/list", "thread/read"];
-            if !expected_include_empty_sessions {
-                expected_methods.push("thread/turns/list");
-            }
-            let last_expected_method = *expected_methods.last().expect("expected operations");
-            for expected_method in expected_methods {
+            let expected_turn_requests = if expected_include_empty_sessions {
+                0
+            } else {
+                2
+            };
+            let mut read_count = 0;
+            let mut turn_request_count = 0;
+            while read_count < thread_ids.len() || turn_request_count < expected_turn_requests {
                 let request = loop {
                     let frame =
                         tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
@@ -119,43 +123,86 @@ async fn empty_loaded_thread_is_hidden_by_default_and_visible_with_explicit_opt_
                     }
                 };
                 let method = request["method"].as_str().expect("request method");
-                assert_eq!(method, expected_method);
                 let id = &request["id"];
-                let result = match method {
-                    "initialize" => json!({}),
-                    "thread/loaded/list" => {
-                        json!({"data":["empty-thread"],"nextCursor":null})
+                match method {
+                    "initialize" => {
+                        socket
+                            .send(Message::Text(
+                                json!({"id":id,"result":{}}).to_string().into(),
+                            ))
+                            .await
+                            .expect("initialize response");
                     }
-                    "thread/read" => json!({"thread":{
-                        "id":"empty-thread",
-                        "title":"empty-thread",
-                        "cwd":"/repo",
-                        "status":{"type":"active","activeFlags":[]},
-                        "createdAt":1_700_000_000,
-                        "updatedAt":1_700_000_000
-                    }}),
+                    "thread/loaded/list" => {
+                        socket
+                            .send(Message::Text(
+                                json!({"id":id,"result":{"data":thread_ids,"nextCursor":null}})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .expect("loaded-thread response");
+                    }
+                    "thread/read" => {
+                        let thread_id = request["params"]["threadId"]
+                            .as_str()
+                            .expect("thread read id");
+                        assert!(thread_ids.contains(&thread_id));
+                        read_count += 1;
+                        let preview = if thread_id == "preview-thread" {
+                            "A real first user message"
+                        } else {
+                            ""
+                        };
+                        let result = json!({"thread":{
+                            "id":thread_id,
+                            "title":thread_id,
+                            "preview":preview,
+                            "cwd":"/repo",
+                            "status":{"type":"active","activeFlags":[]},
+                            "createdAt":1_700_000_000,
+                            "updatedAt":1_700_000_000
+                        }});
+                        socket
+                            .send(Message::Text(
+                                json!({"id":id,"result":result}).to_string().into(),
+                            ))
+                            .await
+                            .expect("thread read response");
+                    }
                     "thread/turns/list" => {
                         assert!(!expected_include_empty_sessions);
-                        assert_eq!(request["params"]["sortDirection"], "asc");
-                        assert_eq!(request["params"]["itemsView"], "full");
-                        json!({"data":[],"nextCursor":null,"backwardsCursor":null})
+                        turns_list_params.push(request["params"].clone());
+                        let thread_id = request["params"]["threadId"]
+                            .as_str()
+                            .expect("turns list thread id");
+                        assert!(matches!(thread_id, "empty-thread" | "error-thread"));
+                        turn_request_count += 1;
+                        let message = if thread_id == "empty-thread" {
+                            format!(
+                                "thread {thread_id} is not materialized yet; thread/turns/list is unavailable before first user message"
+                            )
+                        } else {
+                            "a different per-thread turns error".to_owned()
+                        };
+                        socket
+                            .send(Message::Text(
+                                json!({"id":id,"error":{"code":-32600,"message":message}})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .expect("turns-list rejection response");
                     }
                     unexpected => panic!("unexpected app-server method: {unexpected}"),
-                };
-                socket
-                    .send(Message::Text(
-                        json!({"id":id,"result":result}).to_string().into(),
-                    ))
-                    .await
-                    .expect("app-server response");
-                if method == last_expected_method {
-                    socket
-                        .send(Message::Close(None))
-                        .await
-                        .expect("app-server close frame");
                 }
             }
+            socket
+                .send(Message::Close(None))
+                .await
+                .expect("app-server close frame");
         }
+        turns_list_params
     });
     let mut client = ControlClient::initialize(client_stream, "empty-session-inventory", "1")
         .await
@@ -175,40 +222,55 @@ async fn empty_loaded_thread_is_hidden_by_default_and_visible_with_explicit_opt_
         .list_sessions(request(NativeSessionView::Loaded, false))
         .await
         .expect("default inventory");
-    assert!(
-        hidden.sessions.is_empty(),
-        "empty live thread must be hidden by default"
-    );
+    let loaded_ids = hidden
+        .sessions
+        .iter()
+        .map(|session| String::from(session.target.session_id.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(loaded_ids, ["error-thread", "preview-thread"]);
 
     let visible = client
         .list_sessions(request(NativeSessionView::Loaded, true))
         .await
         .expect("explicit empty-session inventory");
-    assert_eq!(visible.sessions.len(), 1);
-    assert!(matches!(
-        visible.sessions[0].observation,
+    assert_eq!(visible.sessions.len(), 3);
+    assert!(visible.sessions.iter().all(|session| matches!(
+        session.observation,
         NativeSessionObservation::Runtime { .. }
-    ));
+    )));
 
     let hidden_active = client
         .list_sessions(request(NativeSessionView::Active, false))
         .await
         .expect("default active inventory");
-    assert!(
-        hidden_active.sessions.is_empty(),
-        "empty active thread must be hidden"
-    );
+    let active_ids = hidden_active
+        .sessions
+        .iter()
+        .map(|session| String::from(session.target.session_id.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(active_ids, ["error-thread", "preview-thread"]);
 
     let visible_active = client
         .list_sessions(request(NativeSessionView::Active, true))
         .await
         .expect("explicit empty active inventory");
-    assert_eq!(visible_active.sessions.len(), 1);
+    assert_eq!(visible_active.sessions.len(), 3);
+
+    let turns_list_params = backend.await.expect("app-server task");
+    assert_eq!(turns_list_params.len(), 4);
+    assert!(turns_list_params.iter().all(|params| {
+        params["limit"] == 1
+            && params["sortDirection"] == "asc"
+            && params["itemsView"] == "summary"
+            && matches!(
+                params["threadId"].as_str(),
+                Some("empty-thread" | "error-thread")
+            )
+    }));
 
     client.close().await.expect("close Control client");
     service
         .await
         .expect("service task")
         .expect("service result");
-    backend.await.expect("app-server task");
 }

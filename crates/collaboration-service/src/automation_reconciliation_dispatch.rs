@@ -31,13 +31,8 @@ pub(crate) async fn delivery(id: Value, params: Value, identity: &ServiceIdentit
     let Some(session_delivery) = identity.session_delivery.as_ref() else {
         return failure::response(id, failure::unavailable());
     };
-    if let Err(error) = crate::delivery_reconciliation::reconcile(
-        store,
-        session_delivery.as_ref(),
-        record,
-        &identity.display_names,
-    )
-    .await
+    if let Err(error) =
+        crate::delivery_reconciliation::reconcile(store, session_delivery.as_ref(), record).await
     {
         return failure::response(id, failure::storage(error));
     }

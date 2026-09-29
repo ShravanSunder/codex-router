@@ -9,8 +9,7 @@ use automation_storage::{
 };
 use collaboration_protocol::{
     CodexGeneration, DeliveryClientReceipt, DeliveryOutcome, MessageContent, MessageDelivery,
-    MessageHeaderContext, MessageHeaderOrigin, NativeSendAcceptance, RouterNoticeKind,
-    SessionReachability, SessionRef,
+    NativeSendAcceptance, SessionReachability, SessionRef,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -19,7 +18,6 @@ pub(crate) async fn reconcile(
     store: &Arc<Mutex<AutomationStore>>,
     delivery: &dyn SessionMessageDelivery,
     record: DeliveryRecord<SessionRef, CodexGeneration, StoredDeliveryReceipt>,
-    display_names: &crate::SessionDisplayNameCache,
 ) -> Result<(), StorageError> {
     if record.status != DeliveryStatus::Uncertain {
         return Ok(());
@@ -41,16 +39,9 @@ pub(crate) async fn reconcile(
         .await
         .read_delivery_content::<MessageContent>(&record.delivery_id)
         .await?;
-    let header_context = MessageHeaderContext::resolve(
-        &record.target,
-        &content,
-        display_names,
-        MessageHeaderOrigin::RouterNotice(RouterNoticeKind::Wake),
-    );
     let context = AttemptReconciliationContext {
         target: record.target,
         message: content,
-        header_context,
         mode,
         recorded: effects.clone(),
     };

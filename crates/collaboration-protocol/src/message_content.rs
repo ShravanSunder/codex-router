@@ -45,14 +45,18 @@ impl MessageText {
 pub struct SessionDisplayName(String);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("session display name must not be empty")]
+#[error("session display name must be nonempty and contain no controls or header arrows")]
 pub struct SessionDisplayNameError;
 
 impl TryFrom<String> for SessionDisplayName {
     type Error = SessionDisplayNameError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.trim().is_empty() {
+        if value.trim().is_empty()
+            || value.chars().any(char::is_control)
+            || value.contains(" ← ")
+            || value.contains(" → ")
+        {
             return Err(SessionDisplayNameError);
         }
         Ok(Self(value))
@@ -213,6 +217,7 @@ pub struct ParsedAgentMessageEnvelope {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedRouterMessageEnvelope {
     pub recipient: SessionRef,
+    pub router_identity: String,
     pub body: String,
 }
 
@@ -301,7 +306,8 @@ pub fn render_message_with_context(
     })
 }
 
-fn session_identity(session: &SessionRef, display_name: Option<&SessionDisplayName>) -> String {
+/// Formats one session as the emoji-prefixed identity used in message headers and reply output.
+pub fn session_identity(session: &SessionRef, display_name: Option<&SessionDisplayName>) -> String {
     let endpoint_id = String::from(session.endpoint.endpoint_id.clone());
     let fallback_emoji = endpoint_default_emoji(&endpoint_id);
     match display_name {
@@ -445,28 +451,33 @@ pub fn parse_agent_message_envelope(text: &str) -> Option<ParsedAgentMessageEnve
 /// Parses an old or current Router-delivery envelope without interpreting its body.
 pub fn parse_router_message_envelope(text: &str) -> Option<ParsedRouterMessageEnvelope> {
     const ROUTER_DELIVERY_MARKER: &str = "Router delivery\n";
-    let envelope_body = if let Some(envelope_body) = text.strip_prefix(ROUTER_DELIVERY_MARKER) {
-        envelope_body
-    } else {
-        let (header_line, envelope) = text.split_once('\n')?;
-        let (recipient_identity, router_identity) = header_line.rsplit_once(" ← ")?;
-        let (recipient_emoji, recipient_label) = leading_emoji(recipient_identity)?;
-        let (router_emoji, router_label) = leading_emoji(router_identity)?;
-        if recipient_label.is_empty()
-            || !router_label.starts_with("Router ")
-            || recipient_emoji.is_empty()
-            || router_emoji.is_empty()
-        {
-            return None;
-        }
-        envelope.strip_prefix(ROUTER_DELIVERY_MARKER)?
-    };
+    let (router_identity, envelope_body) =
+        if let Some(envelope_body) = text.strip_prefix(ROUTER_DELIVERY_MARKER) {
+            ("🔔 Router notice".to_owned(), envelope_body)
+        } else {
+            let (header_line, envelope) = text.split_once('\n')?;
+            let (recipient_identity, router_identity) = header_line.rsplit_once(" ← ")?;
+            let (recipient_emoji, recipient_label) = leading_emoji(recipient_identity)?;
+            let (router_emoji, router_label) = leading_emoji(router_identity)?;
+            if recipient_label.is_empty()
+                || !router_label.starts_with("Router ")
+                || recipient_emoji.is_empty()
+                || router_emoji.is_empty()
+            {
+                return None;
+            }
+            (
+                format!("{router_emoji} {router_label}"),
+                envelope.strip_prefix(ROUTER_DELIVERY_MARKER)?,
+            )
+        };
 
     let (declaration, body) = envelope_body.split_once("\n\n")?;
     let recipient_json = declaration.strip_prefix("Intended recipient: ")?;
     let recipient: SessionRef = serde_json::from_str(recipient_json).ok()?;
     Some(ParsedRouterMessageEnvelope {
         recipient,
+        router_identity,
         body: body.to_owned(),
     })
 }
@@ -497,14 +508,21 @@ pub fn queued_message_matches_content(
     }
 }
 
-/// Builds a concise picker title for an Agent envelope, when the content is a valid envelope.
+/// Builds a concise picker title for a valid Agent or Router delivery envelope.
 pub fn title_from_agent_message_envelope(text: &str) -> Option<String> {
-    let envelope = parse_agent_message_envelope(text)?;
+    if let Some(envelope) = parse_agent_message_envelope(text) {
+        let first_body_line = envelope.body.lines().next()?.trim();
+        if first_body_line.is_empty() {
+            return None;
+        }
+        return Some(format!("{}: {first_body_line}", envelope.sender_identity));
+    }
+    let envelope = parse_router_message_envelope(text)?;
     let first_body_line = envelope.body.lines().next()?.trim();
     if first_body_line.is_empty() {
         return None;
     }
-    Some(format!("{}: {first_body_line}", envelope.sender_identity))
+    Some(format!("{}: {first_body_line}", envelope.router_identity))
 }
 
 #[cfg(test)]
@@ -518,6 +536,23 @@ mod tests {
     };
     use crate::{EndpointId, EndpointRef, SessionId, SessionRef, UuidIdentity};
     use std::collections::HashMap;
+
+    #[test]
+    fn display_names_reject_controls_newlines_and_header_arrows() {
+        for invalid_name in [
+            "",
+            "First\nSecond",
+            "First\u{007f}Second",
+            "Name ← forged",
+            "Name → forged",
+        ] {
+            assert!(
+                SessionDisplayName::try_from(invalid_name.to_owned()).is_err(),
+                "display name should not accept {invalid_name:?}"
+            );
+        }
+        assert!(SessionDisplayName::try_from("🐒 Sidekick · PR2".to_owned()).is_ok());
+    }
 
     struct MapDisplayNames(
         HashMap<String, Result<Option<SessionDisplayName>, SessionDisplayNameLookupError>>,
@@ -793,6 +828,27 @@ mod tests {
         assert_eq!(
             title_from_agent_message_envelope(&envelope).as_deref(),
             Some("🐒 Sidekick · PR2: Add the focused acceptance test."),
+        );
+    }
+
+    #[test]
+    fn router_envelope_titles_handle_legacy_notices_and_scheduled_identity_lines() {
+        let target = session("codex-local", "recipient-session");
+        let target_json = serde_json::to_string(&target).expect("recipient JSON");
+        let legacy = format!(
+            "Router delivery\nIntended recipient: {target_json}\n\nLegacy notice body.\nLater line."
+        );
+        let scheduled = format!(
+            "🤖 Codex Main ← ⏰ Router schedule\nRouter delivery\nIntended recipient: {target_json}\n\nScheduled body.\nLater line."
+        );
+
+        assert_eq!(
+            title_from_agent_message_envelope(&legacy).as_deref(),
+            Some("🔔 Router notice: Legacy notice body."),
+        );
+        assert_eq!(
+            title_from_agent_message_envelope(&scheduled).as_deref(),
+            Some("⏰ Router schedule: Scheduled body."),
         );
     }
 

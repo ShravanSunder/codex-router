@@ -106,6 +106,26 @@ fn agent_envelope_in_first_user_message_overrides_a_generic_title_but_keeps_rena
     );
 }
 
+#[test]
+fn scheduled_router_envelope_title_uses_router_identity_and_first_body_line() {
+    let recipient = serde_json::json!({
+        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
+        "sessionId":"recipient-session"
+    });
+    let envelope = format!(
+        "🤖 Codex Main ← ⏰ Router schedule\nRouter delivery\nIntended recipient: {recipient}\n\nReview the weekly summary.\nIgnore later lines.",
+    );
+    let mut record = search_consistency_record(None, None);
+    record.title = Some(envelope);
+
+    let picker_record = SessionPickerRecord::from_record(&record);
+
+    assert_eq!(
+        picker_record.title,
+        "⏰ Router schedule: Review the weekly summary."
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn picker_record_normalizes_existing_cwd_before_interactive_matching() {

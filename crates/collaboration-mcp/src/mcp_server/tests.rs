@@ -106,7 +106,7 @@ fn message_send_route_receipts_match_advertised_output_schema() {
 }
 
 #[test]
-fn message_reply_is_advertised_with_caller_and_text_inputs() {
+fn message_reply_is_advertised_with_caller_text_and_optional_sender_guard() {
     let server = super::CollaborationMcpServer::new(std::env::temp_dir());
     let tool = server
         .resolved_tools()
@@ -120,17 +120,21 @@ fn message_reply_is_advertised_with_caller_and_text_inputs() {
         .expect("reply required fields");
     assert!(required.iter().any(|field| field == "caller"));
     assert!(required.iter().any(|field| field == "text"));
+    assert!(!required.iter().any(|field| field == "expectSender"));
+    assert!(input_schema["properties"].get("expectSender").is_some());
 
     let output_schema = serde_json::Value::Object(
         (**tool.output_schema.as_ref().expect("reply output schema")).clone(),
     );
     let validator = jsonschema::validator_for(&output_schema).expect("reply output schema");
-    let valid_receipt = serde_json::json!({
-        "outcome":{"kind":"peerMessageWritten"},
-        "reachability":"claudeCodePeer",
-        "client":{"kind":"claudeCodePeer"}
+    let valid_reply_result = serde_json::json!({
+        "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},"sessionId":"sender-session"},
+        "targetIdentity":"✳️ claude-local/sender-s",
+        "receipt":{"outcome":{"kind":"peerMessageWritten"},
+            "reachability":"claudeCodePeer",
+            "client":{"kind":"claudeCodePeer"}}
     });
-    assert!(validator.is_valid(&valid_receipt));
+    assert!(validator.is_valid(&valid_reply_result));
 }
 
 #[test]
@@ -1520,7 +1524,7 @@ fn expected_tool_name(method: &str) -> String {
 }
 #[test]
 fn success_schema_branches_match_main_golden_snapshot() {
-    // Main's baseline is extended with message_reply, which shares message_send's receipt schema.
+    // Reply adds a resolved target and optional sender guard while keeping the tool itself stable.
     let expected: std::collections::BTreeMap<String, Value> =
         serde_json::from_str(include_str!("snapshots/main_success_schemas.json"))
             .expect("main success schema snapshot");

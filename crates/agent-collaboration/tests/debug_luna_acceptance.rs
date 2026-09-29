@@ -333,6 +333,14 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
                                     input
                                         .get("text")
                                         .and_then(Value::as_str)
+                                        .filter(|text| {
+                                            let identity_line =
+                                                text.lines().next().unwrap_or_default();
+                                            identity_line.contains(" ← ")
+                                                && text.starts_with(&format!(
+                                                    "{identity_line}\nAgent communication\n"
+                                                ))
+                                        })
                                         .and_then(
                                             collaboration_client::protocol::parse_agent_message_envelope,
                                         )

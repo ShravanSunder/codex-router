@@ -1,4 +1,5 @@
 //! Reply delivery resolves the latest accepted sender for the exact caller session.
+use crate::latest_agent_sender_tracking;
 use crate::{
     DeliveryPrecondition, DeliveryRequest, ServiceIdentity,
     session_delivery_contract::UnstoredAttemptEvidenceSink,
@@ -76,6 +77,18 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
             .insert(params.caller.clone());
         return latest_sender_unknown(id);
     }
+    if params
+        .expect_sender
+        .as_ref()
+        .is_some_and(|expected| expected != &latest_sender)
+    {
+        return failure(
+            id,
+            -32050,
+            "latestSenderMismatch",
+            "latest Agent sender changed; use message send --to <SessionRef>",
+        );
+    }
     let Some(delivery) = identity.session_delivery.as_ref() else {
         return failure(
             id,
@@ -94,8 +107,12 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
         &identity.display_names,
         MessageHeaderOrigin::Agent,
     );
+    let target_identity = collaboration_protocol::session_identity(
+        &latest_sender,
+        header_context.recipient_display_name.as_ref(),
+    );
     let request = DeliveryRequest {
-        target: latest_sender,
+        target: latest_sender.clone(),
         message,
         header_context,
         mode: MessageDelivery::Auto,
@@ -103,17 +120,48 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
         correlation: DeliveryCorrelationId::generate(),
         attempt: agent_automation::AttemptId::generate(),
     };
-    match delivery
+    let result = delivery
         .deliver(request, &UnstoredAttemptEvidenceSink)
-        .await
-    {
-        Ok(receipt) => json!({"jsonrpc":"2.0","id":id,"result":receipt}),
-        Err(_) => failure(
-            id,
-            -32050,
-            "outcomeUnknown",
-            "Reply delivery outcome is unknown; inspect the recipient before retrying",
-        ),
+        .await;
+    match result {
+        Ok(receipt) => {
+            if latest_agent_sender_tracking::is_accepted(&receipt.outcome) {
+                latest_agent_sender_tracking::record_after_acceptance(
+                    identity.automation.as_ref(),
+                    &identity.latest_sender_unknown,
+                    &latest_sender,
+                    &params.caller,
+                )
+                .await;
+            } else if latest_agent_sender_tracking::is_unknown(&receipt.outcome) {
+                latest_agent_sender_tracking::invalidate_after_unknown(
+                    identity.automation.as_ref(),
+                    &identity.latest_sender_unknown,
+                    &latest_sender,
+                )
+                .await;
+            }
+            let result = collaboration_protocol::SessionMessageReplyResult {
+                target: latest_sender,
+                target_identity,
+                receipt,
+            };
+            json!({"jsonrpc":"2.0","id":id,"result":result})
+        }
+        Err(_) => {
+            latest_agent_sender_tracking::invalidate_after_unknown(
+                identity.automation.as_ref(),
+                &identity.latest_sender_unknown,
+                &latest_sender,
+            )
+            .await;
+            failure(
+                id,
+                -32050,
+                "outcomeUnknown",
+                "Reply delivery outcome is unknown; inspect the recipient before retrying",
+            )
+        }
     }
 }
 

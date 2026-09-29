@@ -15,16 +15,21 @@ pub struct SessionDisplayNameCache {
 }
 
 impl SessionDisplayNameCache {
-    /// Remembers a display name if a short, nonblocking cache write is available.
+    /// Remembers a display name, or removes a stale one when the name was cleared/invalid.
     ///
-    /// Cache contention or invalid display names are ignored; they never change the
-    /// outcome of the operation that learned the name.
+    /// Cache contention is logged and never changes the outcome of the operation that
+    /// learned the name.
     pub fn remember(&self, session: SessionRef, name: &str) {
         let Ok(name) = SessionDisplayName::try_from(name.to_owned()) else {
+            self.forget(session);
             return;
         };
-        let Ok(mut names) = self.names.try_write() else {
-            return;
+        let mut names = match self.names.try_write() {
+            Ok(names) => names,
+            Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => {
+                tracing::warn!(session = ?session, "session display name cache write was contended");
+                return;
+            }
         };
         if names.len() >= MAX_CACHED_SESSION_DISPLAY_NAMES
             && !names.contains_key(&session)
@@ -33,6 +38,18 @@ impl SessionDisplayNameCache {
             names.remove(&evicted_session);
         }
         names.insert(session, name);
+    }
+
+    /// Removes a cached label after the Router observes that its name was cleared.
+    pub fn forget(&self, session: SessionRef) {
+        match self.names.try_write() {
+            Ok(mut names) => {
+                names.remove(&session);
+            }
+            Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => {
+                tracing::warn!(session = ?session, "session display name cache clear was contended");
+            }
+        }
     }
 }
 
@@ -94,5 +111,15 @@ mod tests {
             Some("Renamed session")
         );
         assert_eq!(cache.display_name_for(&other_endpoint), Ok(None));
+    }
+
+    #[test]
+    fn a_cleared_or_invalid_name_removes_the_previous_cached_name() {
+        let cache = SessionDisplayNameCache::default();
+        let session_ref = session("codex-local", "named-session");
+        cache.remember(session_ref.clone(), "Codex Main");
+        cache.remember(session_ref.clone(), "Name → forged header");
+
+        assert_eq!(cache.display_name_for(&session_ref), Ok(None));
     }
 }

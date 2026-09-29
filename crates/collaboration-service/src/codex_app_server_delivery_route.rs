@@ -22,6 +22,7 @@ pub struct CodexAppServerDeliveryRoute {
     endpoints: EndpointDirectory,
     backend: NativeControlBackend,
     holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
+    display_names: crate::SessionDisplayNameCache,
 }
 
 impl CodexAppServerDeliveryRoute {
@@ -37,7 +38,14 @@ impl CodexAppServerDeliveryRoute {
             endpoints,
             backend,
             holder,
+            display_names: crate::SessionDisplayNameCache::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_display_names(mut self, display_names: crate::SessionDisplayNameCache) -> Self {
+        self.display_names = display_names;
+        self
     }
 
     async fn deliver_native(
@@ -118,6 +126,7 @@ impl CodexAppServerDeliveryRoute {
                         backend: &self.backend,
                         endpoints: &endpoints,
                         header_context: header_context.clone(),
+                        display_names: &self.display_names,
                         held_connection: Some(binding.connection_mut()),
                     },
                 )
@@ -163,6 +172,7 @@ impl CodexAppServerDeliveryRoute {
                         backend: &self.backend,
                         endpoints: &endpoints,
                         header_context,
+                        display_names: &self.display_names,
                         held_connection: None,
                     },
                 )

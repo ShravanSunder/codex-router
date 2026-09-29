@@ -26,7 +26,7 @@ struct MessageArguments {
 enum MessageCommand {
     /// Submit information. Acceptance is not completion or a peer reply.
     Send(SendArguments),
-    /// Reply to the latest accepted Agent communication delivered to this session.
+    /// Reply to the most recent Agent sender delivered to this session.
     Reply(ReplyArguments),
 }
 
@@ -41,6 +41,9 @@ struct ReplyArguments {
     /// Read reply text from a file; '-' reads stdin. Content is never shell-interpolated.
     #[arg(long)]
     text_file: Option<PathBuf>,
+    /// Refuse unless this SessionRef JSON still matches the latest Agent sender.
+    #[arg(long)]
+    expect_sender: Option<String>,
     #[arg(long)]
     service_directory: Option<PathBuf>,
     #[arg(long)]
@@ -109,6 +112,22 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
 
 fn run_message_reply(args: ReplyArguments) -> i32 {
     let machine = args.json;
+    let expect_sender = match args
+        .expect_sender
+        .as_deref()
+        .map(serde_json::from_str::<collaboration_client::protocol::SessionRef>)
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(_) => {
+            return crate::endpoint_commands::report_failure(
+                "invalidField",
+                &crate::message_input_arguments::session_ref_guidance("--expect-sender"),
+                2,
+                machine,
+            );
+        }
+    };
     let reply_text = match read_reply_text(&args) {
         Ok(text) => text,
         Err(message) => {
@@ -161,6 +180,7 @@ fn run_message_reply(args: ReplyArguments) -> i32 {
         let result = client
             .reply_to_latest_agent_sender(MessageReplyRequest {
                 caller,
+                expect_sender,
                 text: reply_text,
             })
             .await;
@@ -195,13 +215,22 @@ fn read_reply_text(args: &ReplyArguments) -> Result<MessageText, String> {
         .map_err(|_| "Invalid or oversized message text".to_owned())
 }
 
-fn report_reply(result: Result<DeliveryReceipt, MessageReplyError>, machine: bool) -> i32 {
-    let (record, exit_code) = match result {
-        Ok(receipt) => {
-            let exit_code = receipt_exit_status(&receipt.outcome);
+fn report_reply(
+    result: Result<collaboration_client::protocol::SessionMessageReplyResult, MessageReplyError>,
+    machine: bool,
+) -> i32 {
+    let (record, exit_code, confirmation) = match result {
+        Ok(reply) => {
+            let exit_code = receipt_exit_status(&reply.receipt.outcome);
+            let target_line = if exit_code == 0 {
+                reply_confirmation_line(&reply)
+            } else {
+                reply_target_line(&reply)
+            };
             (
-                crate::endpoint_commands::result_envelope(serde_json::json!(receipt)),
+                crate::endpoint_commands::result_envelope(serde_json::json!(reply.clone())),
                 exit_code,
+                Some(target_line),
             )
         }
         Err(error) => {
@@ -210,11 +239,14 @@ fn report_reply(result: Result<DeliveryReceipt, MessageReplyError>, machine: boo
             (
                 serde_json::json!({"kind":"error","caller":caller,"error":failure}),
                 exit_code,
+                None,
             )
         }
     };
     let written = if machine {
         writeln!(io::stdout(), "{record}")
+    } else if let Some(confirmation) = confirmation {
+        writeln!(io::stdout(), "{confirmation}")
     } else {
         writeln!(
             io::stdout(),
@@ -224,6 +256,30 @@ fn report_reply(result: Result<DeliveryReceipt, MessageReplyError>, machine: boo
         )
     };
     if written.is_err() { 5 } else { exit_code }
+}
+
+fn reply_confirmation_line(
+    reply: &collaboration_client::protocol::SessionMessageReplyResult,
+) -> String {
+    format!(
+        "replied to {} {}",
+        reply.target_identity,
+        session_ref_text(reply)
+    )
+}
+
+fn reply_target_line(reply: &collaboration_client::protocol::SessionMessageReplyResult) -> String {
+    format!(
+        "reply target: {} {}",
+        reply.target_identity,
+        session_ref_text(reply)
+    )
+}
+
+fn session_ref_text(reply: &collaboration_client::protocol::SessionMessageReplyResult) -> String {
+    let target = serde_json::to_string(&reply.target)
+        .unwrap_or_else(|_| "SessionRef unavailable".to_owned());
+    target
 }
 
 fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i32 {
@@ -325,7 +381,7 @@ fn operation_failure_exit(failure: &OperationFailure) -> i32 {
 
 #[cfg(test)]
 mod reply_argument_tests {
-    use super::{MessageArguments, MessageCommand, ReplyArguments};
+    use super::{MessageArguments, MessageCommand, ReplyArguments, reply_confirmation_line};
     use clap::Parser;
 
     #[test]
@@ -362,8 +418,55 @@ mod reply_argument_tests {
             })
         ));
 
+        let guarded_request = MessageArguments::try_parse_from([
+            "agent-collaboration message",
+            "reply",
+            "--text",
+            "hello",
+            "--expect-sender",
+            "{\"endpoint\":{},\"sessionId\":\"sender\"}",
+        ])
+        .expect("guarded reply arguments parse");
+        assert!(matches!(
+            guarded_request.command,
+            MessageCommand::Reply(ReplyArguments {
+                expect_sender: Some(ref expected),
+                ..
+            }) if expected.contains("sender")
+        ));
+
         assert!(
             MessageArguments::try_parse_from(["agent-collaboration message", "reply"]).is_err()
+        );
+    }
+
+    #[test]
+    fn reply_confirmation_prints_the_resolved_identity_and_session_ref() {
+        let target: collaboration_client::protocol::SessionRef = serde_json::from_value(
+            serde_json::json!({
+                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+                "sessionId":"reply-target"
+            }),
+        )
+        .expect("reply target");
+        let reply = collaboration_client::protocol::SessionMessageReplyResult {
+            target: target.clone(),
+            target_identity: "✳️ Claude Main".to_owned(),
+            receipt: collaboration_client::protocol::DeliveryReceipt {
+                outcome: collaboration_client::protocol::DeliveryOutcome::PeerMessageWritten,
+                reachability: Some(
+                    collaboration_client::protocol::SessionReachability::ClaudeCodePeer,
+                ),
+                client: Some(collaboration_client::protocol::DeliveryClientReceipt::ClaudeCodePeer),
+            },
+        };
+
+        assert_eq!(
+            reply_confirmation_line(&reply),
+            format!(
+                "replied to ✳️ Claude Main {}",
+                serde_json::to_string(&target).expect("target JSON")
+            ),
         );
     }
 }

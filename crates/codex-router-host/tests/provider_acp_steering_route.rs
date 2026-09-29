@@ -629,7 +629,6 @@ async fn dropped_steering_reply_remains_unknown() {
         .reconcile_attempt(AttemptReconciliationContext {
             target: sent.target,
             message: sent.message,
-            header_context: collaboration_protocol::MessageHeaderContext::default(),
             mode: sent.mode,
             recorded,
         })
