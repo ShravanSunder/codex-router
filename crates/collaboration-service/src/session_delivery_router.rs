@@ -1,13 +1,13 @@
 //! Selects one injected client route for an attempt, then keeps that choice fixed.
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryReceipt, DeliveryRequest, RouteClaim,
-    SessionDeliveryRoute, SessionMessageDelivery,
+    DeliveryContractError, DeliveryFuture, DeliveryReceipt, DeliveryRequest, LoadPolicy,
+    RouteClaim, RoutePresence, SessionDeliveryRoute, SessionMessageDelivery, TargetPresence,
 };
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
     DeliveryNextAction, DeliveryOutcome, DeliveryRejection, DeliveryRejectionReason,
-    SessionReachability,
+    SessionReachability, SessionRef,
 };
 use futures_util::future::join_all;
 use std::sync::Arc;
@@ -69,9 +69,11 @@ impl SessionDeliveryRouter {
                 client: None,
             });
         }
-        if let Some(index) = claims
+        let loadable_index = claims
             .iter()
-            .position(|claim| matches!(claim, RouteClaim::CanLoad))
+            .position(|claim| matches!(claim, RouteClaim::CanLoad));
+        if request.load_policy == LoadPolicy::MayLoad
+            && let Some(index) = loadable_index
         {
             return self.deliver_through(index, request, evidence).await;
         }
@@ -86,6 +88,16 @@ impl SessionDeliveryRouter {
                 outcome: DeliveryOutcome::NotSubmitted {
                     retryable: true,
                     reason: reason.reason.clone(),
+                },
+                reachability: None,
+                client: None,
+            });
+        }
+        if request.load_policy == LoadPolicy::LoadedOnly && loadable_index.is_some() {
+            return Ok(DeliveryReceipt {
+                outcome: DeliveryOutcome::NotSubmitted {
+                    retryable: true,
+                    reason: "notLoaded".into(),
                 },
                 reachability: None,
                 client: None,
@@ -168,5 +180,69 @@ impl SessionMessageDelivery for SessionDeliveryRouter {
             };
             route.reconcile_attempt(context).await
         })
+    }
+}
+
+impl SessionDeliveryRouter {
+    pub async fn presence(
+        &self,
+        target: &SessionRef,
+    ) -> Result<TargetPresence, DeliveryContractError> {
+        let presences = join_all(self.routes.iter().map(|route| route.presence(target)))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(aggregate_presence(&presences))
+    }
+}
+
+fn aggregate_presence(presences: &[RoutePresence]) -> TargetPresence {
+    if presences
+        .iter()
+        .any(|presence| matches!(presence, RoutePresence::Running))
+    {
+        return TargetPresence::Running;
+    }
+
+    let live_elsewhere = presences
+        .iter()
+        .filter_map(|presence| match presence {
+            RoutePresence::LiveElsewhere { detail } => Some(detail),
+            _ => None,
+        })
+        .count();
+    let mut unreachable_reasons = presences
+        .iter()
+        .filter_map(|presence| match presence {
+            RoutePresence::Unreachable { reason } => Some(reason.as_str()),
+            _ => None,
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if live_elsewhere > 0 {
+        unreachable_reasons.push("live elsewhere".to_owned());
+        for detail in presences.iter().filter_map(|presence| match presence {
+            RoutePresence::LiveElsewhere { detail } => detail.as_deref(),
+            _ => None,
+        }) {
+            unreachable_reasons.push(detail.to_owned());
+        }
+        return TargetPresence::Unreachable {
+            reason: unreachable_reasons.join("; "),
+        };
+    }
+
+    if presences
+        .iter()
+        .any(|presence| matches!(presence, RoutePresence::Wakeable))
+    {
+        return TargetPresence::Wakeable;
+    }
+
+    if unreachable_reasons.is_empty() {
+        unreachable_reasons.push("no delivery route serves this endpoint".to_owned());
+    }
+    TargetPresence::Unreachable {
+        reason: unreachable_reasons.join("; "),
     }
 }

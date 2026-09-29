@@ -194,6 +194,7 @@ async fn idle_explicit_queue_is_accepted_and_drains_for_both_providers() {
                         text: MessageText::try_from("queued work".to_owned()).expect("message"),
                     },
                     mode: MessageDelivery::Queue,
+                    load_policy: collaboration_service::LoadPolicy::MayLoad,
                     precondition: DeliveryPrecondition::Unpinned,
                     correlation: DeliveryCorrelationId::generate(),
                     attempt: attempt.clone(),

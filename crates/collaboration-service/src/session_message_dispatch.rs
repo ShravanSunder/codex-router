@@ -1,6 +1,6 @@
 //! Public message Control call delegates one attempt to the injected delivery seam.
 use crate::{
-    DeliveryPrecondition, DeliveryRequest, ServiceIdentity, SessionMessageDelivery,
+    DeliveryPrecondition, DeliveryRequest, LoadPolicy, ServiceIdentity, SessionMessageDelivery,
     session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
 use collaboration_protocol::{MessageContent, SessionMessageSendParams};
@@ -30,6 +30,7 @@ async fn deliver(
         target: params.target,
         message: params.message,
         mode: params.mode,
+        load_policy: LoadPolicy::MayLoad,
         precondition: params
             .generation_guard
             .map_or(DeliveryPrecondition::Unpinned, |expected| {

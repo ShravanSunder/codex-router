@@ -1,5 +1,5 @@
 //! Native message composition with explicit delivery and retained partial effects.
-use crate::{NativeControlBackend, message_effect_state::MessageEffects};
+use crate::{LoadPolicy, NativeControlBackend, message_effect_state::MessageEffects};
 use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
@@ -19,6 +19,7 @@ pub(crate) struct NativeMessageRequest<'a> {
     pub backend: &'a NativeControlBackend,
     pub endpoints: &'a [EndpointDescription],
     pub held_connection: Option<&'a mut NativeProtocolConnection>,
+    pub load_policy: LoadPolicy,
 }
 
 pub(crate) enum NativeMessageOutcome {
@@ -31,6 +32,7 @@ pub(crate) async fn dispatch_message(
 ) -> NativeMessageOutcome {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut effects = MessageEffects::new(request.id);
+    let load_policy = request.load_policy;
     let params = request.params;
     if &params.target.endpoint.service_id != request.service_id {
         return NativeMessageOutcome::Failed(effects.failure("wrongService", "inspect"));
@@ -118,6 +120,7 @@ pub(crate) async fn dispatch_message(
             &rendered.text,
             &correlation,
             held,
+            load_policy,
         )
         .await;
     let acceptance = match result {
@@ -263,6 +266,7 @@ impl MessageSession<'_> {
         text: &str,
         correlation: &str,
         held_unmaterialized: bool,
+        load_policy: LoadPolicy,
     ) -> Result<NativeSendAcceptance, Value> {
         let thread = if held_unmaterialized {
             None
@@ -277,6 +281,9 @@ impl MessageSession<'_> {
                 .ok_or_else(|| self.effects.failure("unsupportedCapability", "inspect"))?,
         };
         let input = json!([{"type":"text","text":text}]);
+        if status == "notLoaded" && load_policy == LoadPolicy::LoadedOnly {
+            return Err(self.effects.failure("notLoaded", "start"));
+        }
         if delivery == MessageDelivery::Queue {
             if status == "notLoaded" {
                 return Err(self.effects.failure("threadNotLoaded", "queue"));

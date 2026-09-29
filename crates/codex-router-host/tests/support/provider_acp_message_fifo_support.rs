@@ -245,6 +245,7 @@ pub(super) fn request(target: SessionRef, text: &str) -> DeliveryRequest {
             text: MessageText::try_from(text.to_owned()).expect("message"),
         },
         mode: MessageDelivery::Auto,
+        load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::generate(),
         attempt: AttemptId::generate(),

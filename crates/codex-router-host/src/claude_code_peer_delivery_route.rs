@@ -15,7 +15,7 @@ use collaboration_protocol::{
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, RouteClaim,
-    SessionDeliveryRoute,
+    RoutePresence, SessionDeliveryRoute,
 };
 use std::sync::Arc;
 
@@ -169,6 +169,22 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
                 PeerSessionLookup::Writable(_) => RouteClaim::Holds,
                 PeerSessionLookup::LiveUnsupported { reason } => RouteClaim::LiveElsewhere {
                     writable: false,
+                    detail: Some(reason),
+                },
+            })
+        })
+    }
+
+    fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, RoutePresence> {
+        let target = target.clone();
+        Box::pin(async move {
+            if !self.serves(&target) {
+                return Ok(RoutePresence::NotMine);
+            }
+            Ok(match self.lookup(&target).await {
+                PeerSessionLookup::Absent => RoutePresence::NotMine,
+                PeerSessionLookup::Writable(_) => RoutePresence::Running,
+                PeerSessionLookup::LiveUnsupported { reason } => RoutePresence::LiveElsewhere {
                     detail: Some(reason),
                 },
             })

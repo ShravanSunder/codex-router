@@ -1,6 +1,6 @@
 //! Background Thread Listen delivery through the injected session delivery seam.
 use crate::{
-    DeliveryPrecondition, DeliveryRequest, SessionMessageDelivery,
+    DeliveryPrecondition, DeliveryRequest, LoadPolicy, SessionMessageDelivery,
     session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
 use collaboration_protocol::{DeliveryOutcome, MessageContent, MessageDelivery, SessionRef};
@@ -35,6 +35,7 @@ impl SessionDeliverySink {
             target: self.target.clone(),
             message,
             mode: MessageDelivery::Auto,
+            load_policy: LoadPolicy::MayLoad,
             precondition: DeliveryPrecondition::Unpinned,
             correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
             attempt: agent_automation::AttemptId::generate(),
