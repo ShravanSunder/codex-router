@@ -284,30 +284,37 @@ fn main() -> ExitCode {
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| std::io::Error::other("test executable should have a parent"))?;
-    let framework_library = fs::read_dir(&dependencies)?
+    let mut framework_libraries = fs::read_dir(&dependencies)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| {
+        .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| {
                     name.starts_with("libsecurity_framework-") && name.ends_with(".rlib")
                 })
         })
+        .collect::<Vec<_>>();
+    framework_libraries.sort();
+    let framework_library = framework_libraries
+        .into_iter()
+        .next()
         .ok_or_else(|| std::io::Error::other("security-framework Rust library is missing"))?;
-    let secret_store_library = fs::read_dir(&dependencies)?
+    let mut secret_store_libraries = fs::read_dir(&dependencies)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| {
+        .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| {
                     name.starts_with("libcodex_router_secret_store-") && name.ends_with(".rlib")
                 })
         })
-        .ok_or_else(|| {
-            std::io::Error::other("codex-router-secret-store Rust library is missing")
-        })?;
+        .collect::<Vec<_>>();
+    secret_store_libraries.sort();
+    let secret_store_library = secret_store_libraries.into_iter().next().ok_or_else(|| {
+        std::io::Error::other("codex-router-secret-store Rust library is missing")
+    })?;
     let build_cfg = format!("build_{build_id}");
     let output = Command::new(executable)
         .arg("--edition=2024")

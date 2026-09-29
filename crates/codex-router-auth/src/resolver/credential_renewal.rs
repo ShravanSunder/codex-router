@@ -315,6 +315,9 @@ where
         };
         let bundle = match bundle_result {
             Ok(bundle) => bundle,
+            Err(error @ CredentialResolverError::CredentialStoreUnavailable) => {
+                return Err(error);
+            }
             Err(error) => {
                 if let Ok(now_unix_seconds) = self.observed_now_unix_seconds() {
                     self.record_local_failure(account_id, active_generation, now_unix_seconds)

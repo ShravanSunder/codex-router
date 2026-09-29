@@ -46,6 +46,9 @@ pub enum CredentialResolverError {
     /// Secret material was unavailable or malformed.
     #[error("provider credential secret is unavailable")]
     SecretUnavailable,
+    /// The process credential store could not provide pooled credentials.
+    #[error("provider credential store is unavailable")]
+    CredentialStoreUnavailable,
     /// Refresh is required but cannot be performed.
     #[error("provider credential refresh is unavailable")]
     RefreshUnavailable,
@@ -57,6 +60,7 @@ impl Clone for CredentialResolverError {
             Self::AccountUnavailable => Self::AccountUnavailable,
             Self::AccountIneligible => Self::AccountIneligible,
             Self::SecretUnavailable => Self::SecretUnavailable,
+            Self::CredentialStoreUnavailable => Self::CredentialStoreUnavailable,
             Self::RefreshUnavailable => Self::RefreshUnavailable,
         }
     }
@@ -69,6 +73,10 @@ impl PartialEq for CredentialResolverError {
             (Self::AccountUnavailable, Self::AccountUnavailable)
                 | (Self::AccountIneligible, Self::AccountIneligible)
                 | (Self::SecretUnavailable, Self::SecretUnavailable)
+                | (
+                    Self::CredentialStoreUnavailable,
+                    Self::CredentialStoreUnavailable
+                )
                 | (Self::RefreshUnavailable, Self::RefreshUnavailable)
         )
     }
@@ -668,8 +676,15 @@ fn map_state_error(_error: StateStoreError) -> CredentialResolverError {
     CredentialResolverError::AccountUnavailable
 }
 
-fn map_secret_error(_error: SecretStoreError) -> CredentialResolverError {
-    CredentialResolverError::SecretUnavailable
+fn map_secret_error(error: SecretStoreError) -> CredentialResolverError {
+    match error {
+        SecretStoreError::KeyUnavailable
+        | SecretStoreError::KeyMissing
+        | SecretStoreError::StoreUnavailable(_) => {
+            CredentialResolverError::CredentialStoreUnavailable
+        }
+        _ => CredentialResolverError::SecretUnavailable,
+    }
 }
 
 mod credential_renewal;

@@ -355,10 +355,9 @@ where
     let command = CliCommand::parse(args)?;
     match command {
         CliCommand::Serve(command) => {
-            let credential_store = secret_store_factory::open_cli_secret_store_in_spawn_blocking(
-                command.secret_root.clone(),
-            )
-            .map_err(|_| CliError::CredentialStoreOpen)?;
+            let credential_store =
+                secret_store_factory::open_cli_secret_store(&command.secret_root)
+                    .map_err(|_| CliError::CredentialStoreOpen)?;
             run_serve_command_with_upkeep_start(
                 stdout,
                 command,

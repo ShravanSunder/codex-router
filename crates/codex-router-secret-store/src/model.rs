@@ -90,6 +90,14 @@ pub enum SecretStoreError {
     )]
     TestKeychainAccessForbidden,
 
+    /// A deterministic test credential key was requested for the production root.
+    #[error("test credential key is forbidden for the production router secret root")]
+    TestCredentialKeyOnProductionRoot,
+
+    /// The production home could not be resolved to guard a deterministic test key.
+    #[error("test credential key cannot verify the production router secret root")]
+    TestCredentialKeyRootUnverifiable,
+
     /// Store metadata did not contain a valid identifier or format marker.
     #[error("invalid pooled credential store metadata: {path}")]
     InvalidCredentialStoreMarker {
@@ -159,14 +167,48 @@ pub enum SecretStoreError {
     },
 }
 
+/// Safe reason that prevents a pooled-credential migration from completing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum CredentialMigrationFailure {
+    /// The store marker or credential file names were malformed.
+    #[error("credential store metadata or file names are invalid")]
+    InvalidStoreData,
+    /// Migration metadata could not be enumerated or read.
+    #[error("credential migration metadata could not be read")]
+    MetadataReadFailed,
+    /// The migration marker is absent while pooled credential files remain.
+    #[error("credential migration has not completed")]
+    MigrationNotComplete,
+    /// A legacy credential or encrypted envelope could not be read.
+    #[error("credential file read failed")]
+    CredentialReadFailed,
+    /// An encrypted envelope could not be published.
+    #[error("encrypted credential write failed")]
+    EnvelopeWriteFailed,
+    /// The encrypted envelope did not decrypt to the exact legacy value.
+    #[error("credential read-back did not match its legacy source")]
+    ReadBackMismatch,
+    /// The verified legacy source could not be removed.
+    #[error("verified legacy credential could not be deleted")]
+    LegacyDeleteFailed,
+    /// The completion marker could not be published.
+    #[error("credential migration completion marker write failed")]
+    MarkerWriteFailed,
+    /// An unexpected directory entry or stale temp file could not be handled.
+    #[error("unexpected credential filesystem entry")]
+    UnexpectedEntry,
+}
+
 /// Durable condition that prevents pooled credential access for this process.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum StoreUnavailable {
     /// Legacy plaintext conversion has not completed for the named accounts.
-    #[error("credential migration incomplete for accounts: {accounts:?}")]
+    #[error("credential migration incomplete ({failure}) for accounts: {accounts:?}")]
     MigrationIncomplete {
         /// Accounts with credential files that have not completed conversion.
         accounts: Vec<String>,
+        /// Safe reason that stopped migration.
+        failure: CredentialMigrationFailure,
     },
 }
 

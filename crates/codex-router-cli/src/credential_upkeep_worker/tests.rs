@@ -15,6 +15,111 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+#[tokio::test]
+async fn unavailable_credential_stores_skip_upkeep_without_health_changes() {
+    #[derive(Clone, Copy)]
+    enum UnavailableStoreKind {
+        KeyUnavailable,
+        MigrationIncomplete,
+    }
+
+    for (suffix, store_kind) in [
+        ("key-unavailable", UnavailableStoreKind::KeyUnavailable),
+        (
+            "migration-incomplete",
+            UnavailableStoreKind::MigrationIncomplete,
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("fixture root");
+        let state = AsyncSqliteStateStore::open(&root.path().join("state.sqlite"))
+            .await
+            .expect("fixture state");
+        let account_id = AccountId::new(format!("upkeep-store-{suffix}")).expect("account id");
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    suffix,
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await
+            .expect("account");
+        assert!(
+            state
+                .claim_credential_refresh(
+                    &account_id,
+                    codex_router_core::provider::Provider::Openai,
+                    codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    2,
+                )
+                .await
+                .expect("refresh claim")
+        );
+        assert!(
+            state
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    codex_router_core::provider::Provider::Openai,
+                    codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    1_000,
+                )
+                .await
+                .expect("healthy generation")
+        );
+        let maintenance_before = state
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("maintenance query")
+            .expect("healthy maintenance");
+        let file_store = codex_router_secret_store::file_backend::FileSecretStore::open(
+            root.path().join("secrets"),
+        )
+        .expect("file store");
+        let secrets = match store_kind {
+            UnavailableStoreKind::KeyUnavailable => {
+                EncryptedCredentialStore::key_unavailable(file_store)
+            }
+            UnavailableStoreKind::MigrationIncomplete => {
+                EncryptedCredentialStore::migration_incomplete(
+                    file_store,
+                    vec![account_id.as_str().to_owned()],
+                    codex_router_secret_store::credential_migration::CredentialMigrationFailure::MigrationNotComplete,
+                )
+            }
+        };
+        let resolver = codex_router_auth::resolver::AsyncRouterCredentialResolver::new(
+            state.clone(),
+            secrets.clone(),
+            NoopCredentialRefreshClient,
+            Some(1_100),
+        );
+        let resolution = resolver.resolve_provider_credentials(&account_id).await;
+        assert_eq!(
+            resolution,
+            Err(codex_router_auth::resolver::CredentialResolverError::CredentialStoreUnavailable),
+            "{suffix}"
+        );
+
+        let cycle = run_upkeep_cycle(&state, &secrets, NoopCredentialRefreshClient, 1_100).await;
+        let maintenance_after = state
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("maintenance query")
+            .expect("maintenance remains present");
+
+        assert_eq!(cycle.earliest_due, None, "{suffix}");
+        assert!(!cycle.had_local_error, "{suffix}");
+        assert_eq!(maintenance_after, maintenance_before, "{suffix}");
+        state.close().await.expect("state close");
+    }
+}
+
 #[derive(Clone)]
 struct CountingRefreshClient {
     calls: Arc<AtomicUsize>,

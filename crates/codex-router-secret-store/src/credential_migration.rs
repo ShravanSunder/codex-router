@@ -15,6 +15,7 @@ use crate::keychain_data_key::KeychainAccess;
 use crate::keychain_data_key::PooledCredentialDataKey;
 use crate::keychain_data_key::load_or_create_pooled_credential_data_key;
 use crate::keychain_data_key::with_platform_keychain_for_production;
+pub use crate::model::CredentialMigrationFailure;
 use crate::model::SecretKey;
 use crate::model::SecretStoreError;
 
@@ -32,32 +33,6 @@ pub enum CredentialMigrationOutcome {
     },
     /// The Keychain key could not be read or created for this process.
     KeyUnavailable,
-}
-
-/// Credential migration failure category without secret-bearing values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum CredentialMigrationFailure {
-    /// The store marker or credential file names were malformed.
-    #[error("credential store metadata or file names are invalid")]
-    InvalidStoreData,
-    /// A legacy credential or encrypted envelope could not be read.
-    #[error("credential file read failed")]
-    CredentialReadFailed,
-    /// An encrypted envelope could not be published.
-    #[error("encrypted credential write failed")]
-    EnvelopeWriteFailed,
-    /// The encrypted envelope did not decrypt to the exact legacy value.
-    #[error("credential read-back did not match its legacy source")]
-    ReadBackMismatch,
-    /// The verified legacy source could not be removed.
-    #[error("verified legacy credential could not be deleted")]
-    LegacyDeleteFailed,
-    /// The completion marker could not be published.
-    #[error("credential migration completion marker write failed")]
-    MarkerWriteFailed,
-    /// An unexpected directory entry or stale temp file could not be handled.
-    #[error("unexpected credential filesystem entry")]
-    UnexpectedEntry,
 }
 
 /// Loads the key and migrates pooled credentials while holding the exclusive store lock.

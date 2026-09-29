@@ -392,10 +392,11 @@ fn import_codex_auth_text(
         &router_root.join("state.sqlite"),
     ))?;
     ensure_account_label_available(&state, &trimmed_label, Provider::Openai, &runtime)?;
-    let secrets = crate::secret_store_factory::open_cli_secret_store_in_spawn_blocking(
-        router_root.join("secrets"),
-    )
-    .map_err(|_| AccountCommandError::CredentialStoreInitialization)?;
+    let secrets = runtime
+        .block_on(crate::secret_store_factory::open_cli_secret_store_async(
+            router_root.join("secrets"),
+        ))
+        .map_err(|_| AccountCommandError::CredentialStoreInitialization)?;
 
     let mut request = AccountImportRequest::new(
         account_id.clone(),
@@ -589,8 +590,12 @@ where
 }
 
 fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), AccountCommandError> {
-    let credential_store = open_account_list_credential_store(&router_root.join("secrets"))?;
     let runtime = account_command_runtime()?;
+    let credential_store = runtime
+        .block_on(crate::secret_store_factory::open_cli_secret_store_async(
+            router_root.join("secrets"),
+        ))
+        .map_err(|_| AccountCommandError::CredentialStoreInitialization)?;
     let state = runtime.block_on(AsyncSqliteStateStore::open_read_only(
         &router_root.join("state.sqlite"),
     ))?;
@@ -611,8 +616,12 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
             runtime.block_on(state.load_credential_maintenance(account.account_id()))?;
         let oauth_status = match credential_store.status() {
             EncryptedCredentialStoreStatus::KeyUnavailable => "keychain_locked".to_owned(),
-            EncryptedCredentialStoreStatus::MigrationIncomplete { accounts } => {
-                format!("migration incomplete: {}", accounts.join(", "))
+            EncryptedCredentialStoreStatus::MigrationIncomplete { accounts, failure } => {
+                if accounts.is_empty() {
+                    format!("migration incomplete ({failure})")
+                } else {
+                    format!("migration incomplete ({failure}): {}", accounts.join(", "))
+                }
             }
             EncryptedCredentialStoreStatus::Ready => match maintenance
                 .as_ref()
@@ -638,23 +647,6 @@ fn list_accounts(stdout: &mut impl Write, router_root: PathBuf) -> Result<(), Ac
     writeln!(stdout, "{table}").map_err(AccountCommandError::Stdout)?;
 
     Ok(())
-}
-
-fn open_account_list_credential_store(
-    secret_root: &Path,
-) -> Result<
-    codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
-    AccountCommandError,
-> {
-    #[cfg(any(test, feature = "keychain-test-support"))]
-    let credential_store =
-        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
-            .map_err(AccountCommandError::SecretStore)?;
-    #[cfg(not(any(test, feature = "keychain-test-support")))]
-    let credential_store =
-        crate::secret_store_factory::open_cli_secret_store_in_spawn_blocking(secret_root)
-            .map_err(|_| AccountCommandError::CredentialStoreInitialization)?;
-    Ok(credential_store)
 }
 
 fn ensure_account_label_available_at_router_root(

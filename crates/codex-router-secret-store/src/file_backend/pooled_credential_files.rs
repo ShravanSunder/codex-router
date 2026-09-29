@@ -151,39 +151,6 @@ impl FileSecretStore {
         Ok(false)
     }
 
-    /// Conservatively detects any legacy pooled credential before enabling runtime reads.
-    pub(crate) fn has_any_legacy_credential_files(&self) -> Result<bool, SecretStoreError> {
-        let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {
-            path: self.root.clone(),
-            source,
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| SecretStoreError::Filesystem {
-                path: self.root.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if file_name.ends_with(".secret") && file_name.contains("_credential_bundle") {
-                reject_symlink_path(&path)?;
-                if !entry
-                    .file_type()
-                    .map_err(|source| SecretStoreError::Filesystem {
-                        path: path.clone(),
-                        source,
-                    })?
-                    .is_file()
-                {
-                    return Err(SecretStoreError::UnexpectedCredentialEntry { path });
-                }
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     /// Lists credential account labels leniently for unavailable-store diagnostics.
     pub(crate) fn list_migration_account_names(&self) -> Result<Vec<String>, SecretStoreError> {
         let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {

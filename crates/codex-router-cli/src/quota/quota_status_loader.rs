@@ -92,8 +92,8 @@ fn credential_store_availability(
         codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::KeyUnavailable => {
             CredentialStoreAvailability::KeychainLocked
         }
-        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::MigrationIncomplete { accounts } => {
-            CredentialStoreAvailability::MigrationIncomplete { accounts }
+        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::MigrationIncomplete { accounts, failure } => {
+            CredentialStoreAvailability::MigrationIncomplete { accounts, failure }
         }
     }
 }

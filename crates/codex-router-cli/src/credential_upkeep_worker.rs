@@ -277,6 +277,12 @@ async fn run_upkeep_cycle_until_stop<C>(
 where
     C: CredentialRefreshClient + Clone + Send + Sync + 'static,
 {
+    if !matches!(
+        secrets.status(),
+        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::Ready
+    ) {
+        return UpkeepCycleResult::default();
+    }
     let accounts = match state.list_accounts().await {
         Ok(accounts) => accounts,
         Err(error) => {

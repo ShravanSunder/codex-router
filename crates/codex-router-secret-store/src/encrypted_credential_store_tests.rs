@@ -136,12 +136,14 @@ fn incomplete_migration_blocks_credentials_but_keeps_router_secrets_available() 
     let store = EncryptedCredentialStore::migration_incomplete(
         file_store,
         vec![account_id.as_str().to_owned()],
+        crate::credential_migration::CredentialMigrationFailure::MigrationNotComplete,
     );
 
     assert_eq!(
         store.status(),
         EncryptedCredentialStoreStatus::MigrationIncomplete {
-            accounts: vec![account_id.as_str().to_owned()]
+            accounts: vec![account_id.as_str().to_owned()],
+            failure: crate::credential_migration::CredentialMigrationFailure::MigrationNotComplete,
         }
     );
     assert_eq!(
@@ -154,8 +156,9 @@ fn incomplete_migration_blocks_credentials_but_keeps_router_secrets_available() 
     assert!(matches!(
         store.read_secret(&credential_key),
         Err(SecretStoreError::StoreUnavailable(
-            StoreUnavailable::MigrationIncomplete { accounts }
+            StoreUnavailable::MigrationIncomplete { accounts, failure }
         )) if accounts == vec![account_id.as_str()]
+            && failure == crate::credential_migration::CredentialMigrationFailure::MigrationNotComplete
     ));
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+use codex_router_secret_store::model::CredentialMigrationFailure;
 
 pub(super) struct QuotaStatusReport {
     pub(super) app_version: String,
@@ -21,7 +22,10 @@ impl QuotaStatusReport {
 pub(super) enum CredentialStoreAvailability {
     Ready,
     KeychainLocked,
-    MigrationIncomplete { accounts: Vec<String> },
+    MigrationIncomplete {
+        accounts: Vec<String>,
+        failure: CredentialMigrationFailure,
+    },
     Unavailable,
 }
 
@@ -37,7 +41,7 @@ impl CredentialStoreAvailability {
 
     pub(super) fn unavailable_accounts(&self) -> &[String] {
         match self {
-            Self::MigrationIncomplete { accounts } => accounts,
+            Self::MigrationIncomplete { accounts, .. } => accounts,
             _ => &[],
         }
     }
@@ -50,11 +54,11 @@ impl CredentialStoreAvailability {
         match self {
             Self::Ready => "ready".to_owned(),
             Self::KeychainLocked => "keychain_locked".to_owned(),
-            Self::MigrationIncomplete { accounts } => {
+            Self::MigrationIncomplete { accounts, failure } => {
                 if accounts.is_empty() {
-                    "migration_incomplete".to_owned()
+                    format!("migration_incomplete ({failure})")
                 } else {
-                    format!("migration_incomplete: {}", accounts.join(", "))
+                    format!("migration_incomplete ({failure}): {}", accounts.join(", "))
                 }
             }
             Self::Unavailable => "credential_store_unavailable".to_owned(),
@@ -85,6 +89,24 @@ impl SelectionProjectionSource {
 
     pub(super) const fn is_authoritative(self) -> bool {
         matches!(self, Self::SqlxProjection)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_incomplete_label_names_the_failure_reason() {
+        let availability = CredentialStoreAvailability::MigrationIncomplete {
+            accounts: vec!["acct_unconverted".to_owned()],
+            failure: CredentialMigrationFailure::MetadataReadFailed,
+        };
+
+        assert_eq!(
+            availability.status_label(),
+            "migration_incomplete (credential migration metadata could not be read): acct_unconverted"
+        );
     }
 }
 

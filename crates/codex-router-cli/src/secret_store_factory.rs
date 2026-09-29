@@ -1,6 +1,5 @@
 //! CLI runtime secret-store factory.
 
-use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -39,22 +38,8 @@ pub(crate) async fn open_cli_secret_store_async(
 /// Blocking secret-store construction failures at the CLI edge.
 #[derive(Debug, Error)]
 pub(crate) enum CliSecretStoreOpenError {
-    #[error("credential store blocking runtime failed")]
-    Runtime(#[source] io::Error),
     #[error(transparent)]
     SecretStore(#[from] SecretStoreError),
     #[error("credential store construction task failed")]
     Task(#[source] tokio::task::JoinError),
-}
-
-/// Opens one process handle with Keychain and filesystem work on Tokio's blocking pool.
-pub(crate) fn open_cli_secret_store_in_spawn_blocking(
-    secret_root: impl Into<PathBuf>,
-) -> Result<CliRuntimeSecretStore, CliSecretStoreOpenError> {
-    let secret_root = secret_root.into();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(CliSecretStoreOpenError::Runtime)?;
-    runtime.block_on(open_cli_secret_store_async(secret_root))
 }

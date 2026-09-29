@@ -162,6 +162,86 @@ impl AsyncSqliteStateStore {
         Ok(updated.rows_affected() == 1)
     }
 
+    /// Restores the prior maintenance row after a login's staged credential write fails.
+    pub async fn restore_credential_maintenance_after_login_write_failure(
+        &self,
+        account_id: &AccountId,
+        provider: Provider,
+        current_generation: u64,
+        successor_generation: u64,
+        previous_record: Option<&CredentialMaintenanceRecord>,
+    ) -> Result<bool, StateStoreError> {
+        let current_generation = u64_to_i64(current_generation)?;
+        let successor_generation = u64_to_i64(successor_generation)?;
+        match previous_record {
+            Some(record) => {
+                let updated = sqlx::query(
+                    "UPDATE credential_maintenance
+                        SET credential_generation = ?4, state = ?5, failure_class = ?6,
+                            last_success_unix_seconds = ?7, next_attempt_unix_seconds = ?8,
+                            claimed_successor_generation = ?9, consecutive_failures = ?10
+                      WHERE account_id = ?1 AND credential_generation = ?2
+                        AND claimed_successor_generation = ?3 AND state = 'in_progress'
+                        AND EXISTS (
+                            SELECT 1 FROM accounts
+                             WHERE accounts.account_id = credential_maintenance.account_id
+                               AND accounts.provider = ?11
+                        )",
+                )
+                .bind(account_id.as_str())
+                .bind(current_generation)
+                .bind(successor_generation)
+                .bind(u64_to_i64(record.credential_generation)?)
+                .bind(record.state.as_str())
+                .bind(record.failure_class.map(CredentialFailureClass::as_str))
+                .bind(
+                    record
+                        .last_success_unix_seconds
+                        .map(u64_to_i64)
+                        .transpose()?,
+                )
+                .bind(
+                    record
+                        .next_attempt_unix_seconds
+                        .map(u64_to_i64)
+                        .transpose()?,
+                )
+                .bind(
+                    record
+                        .claimed_successor_generation
+                        .map(u64_to_i64)
+                        .transpose()?,
+                )
+                .bind(i64::from(record.consecutive_failures))
+                .bind(provider.as_str())
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+                Ok(updated.rows_affected() == 1)
+            }
+            None => {
+                let deleted = sqlx::query(
+                    "DELETE FROM credential_maintenance
+                      WHERE account_id = ?1 AND credential_generation = ?2
+                        AND claimed_successor_generation = ?3 AND state = 'in_progress'
+                        AND EXISTS (
+                            SELECT 1 FROM accounts
+                             WHERE accounts.account_id = credential_maintenance.account_id
+                               AND accounts.provider = ?4
+                        )",
+                )
+                .bind(account_id.as_str())
+                .bind(current_generation)
+                .bind(successor_generation)
+                .bind(provider.as_str())
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_error)?;
+                Ok(deleted.rows_affected() == 1)
+            }
+        }
+    }
+
     /// Disposes a claim after a confirmed unspent or terminal provider result.
     pub async fn finish_credential_refresh_claim(
         &self,

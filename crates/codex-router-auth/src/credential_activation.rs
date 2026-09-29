@@ -131,6 +131,10 @@ impl CredentialActivation {
         account_lock = returned_lock;
         let next_generation =
             next_generation.map_err(|_| CredentialActivationError::CredentialStoreUnavailable)?;
+        let previous_maintenance = state_store
+            .load_credential_maintenance(&request.account_id)
+            .await
+            .map_err(map_state_error)?;
 
         let claimed = state_store
             .claim_credential_refresh(
@@ -158,14 +162,52 @@ impl CredentialActivation {
             .to_secret_string()
             .map_err(|_| CredentialActivationError::CredentialStoreUnavailable)?;
         let secret_store_for_write = secret_store.clone();
-        let (returned_lock, write_result) = tokio::task::spawn_blocking(move || {
+        let write_outcome = tokio::task::spawn_blocking(move || {
             let result = secret_store_for_write.write_staged(&secret_key, &serialized_bundle);
             (account_lock, result)
         })
-        .await
-        .map_err(|_| CredentialActivationError::CredentialStoreUnavailable)?;
-        account_lock = returned_lock;
-        write_result.map_err(|_| CredentialActivationError::CredentialStoreUnavailable)?;
+        .await;
+        match write_outcome {
+            Ok((returned_lock, Ok(()))) => {
+                account_lock = returned_lock;
+            }
+            Ok((returned_lock, Err(_))) => {
+                let release_result = release_failed_login_claim(
+                    state_store,
+                    &request.account_id,
+                    request.provider,
+                    current_generation,
+                    next_generation,
+                    previous_maintenance.as_ref(),
+                )
+                .await;
+                drop(returned_lock);
+                release_result?;
+                return Err(CredentialActivationError::CredentialStoreUnavailable);
+            }
+            Err(_) => {
+                let database_path = state_store.database_path().to_path_buf();
+                let lock_account_id = request.account_id.clone();
+                let returned_lock = tokio::task::spawn_blocking(move || {
+                    AccountCredentialLock::acquire(&database_path, &lock_account_id)
+                })
+                .await
+                .map_err(|_| CredentialActivationError::CredentialLockUnavailable)?
+                .map_err(|_| CredentialActivationError::CredentialLockUnavailable)?;
+                let release_result = release_failed_login_claim(
+                    state_store,
+                    &request.account_id,
+                    request.provider,
+                    current_generation,
+                    next_generation,
+                    previous_maintenance.as_ref(),
+                )
+                .await;
+                drop(returned_lock);
+                release_result?;
+                return Err(CredentialActivationError::CredentialStoreUnavailable);
+            }
+        }
 
         let activated = state_store
             .activate_claimed_credential_generation(
@@ -185,6 +227,32 @@ impl CredentialActivation {
         drop(account_lock);
         Ok(next_generation)
     }
+}
+
+async fn release_failed_login_claim(
+    state_store: &AsyncSqliteStateStore,
+    account_id: &AccountId,
+    provider: Provider,
+    current_generation: u64,
+    successor_generation: u64,
+    previous_maintenance: Option<
+        &codex_router_state::credential_maintenance::CredentialMaintenanceRecord,
+    >,
+) -> Result<(), CredentialActivationError> {
+    let claim_released = state_store
+        .restore_credential_maintenance_after_login_write_failure(
+            account_id,
+            provider,
+            current_generation,
+            successor_generation,
+            previous_maintenance,
+        )
+        .await
+        .map_err(map_state_error)?;
+    if !claim_released {
+        return Err(CredentialActivationError::GenerationClaimUnavailable);
+    }
+    Ok(())
 }
 
 fn map_state_error(error: StateStoreError) -> CredentialActivationError {

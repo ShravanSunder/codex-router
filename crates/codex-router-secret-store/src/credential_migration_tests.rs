@@ -21,6 +21,7 @@ use crate::credential_migration::migrate_with_exclusive_lock;
 use crate::credential_store_lock::CredentialStoreLock;
 use crate::credential_store_lock::CredentialStoreLockMode;
 use crate::encrypted_credential_store::EncryptedCredentialStore;
+use crate::encrypted_credential_store::EncryptedCredentialStoreStatus;
 use crate::encrypted_credential_store::decrypt_envelope;
 use crate::encrypted_credential_store::encrypt_envelope;
 use crate::file_backend::FileSecretStore;
@@ -93,6 +94,27 @@ impl KeychainAccess for MemoryKeychainAccess {
         }
         items.insert(item_name, secret.to_vec());
         Ok(())
+    }
+}
+
+struct ServiceRejectedKeychainAccess;
+
+impl KeychainAccess for ServiceRejectedKeychainAccess {
+    fn read_secret(
+        &self,
+        _service: &str,
+        _account: &str,
+    ) -> Result<Option<Vec<u8>>, KeychainAccessError> {
+        Err(KeychainAccessError::ServiceRejected)
+    }
+
+    fn add_secret(
+        &self,
+        _service: &str,
+        _account: &str,
+        _secret: &[u8],
+    ) -> Result<(), KeychainAccessError> {
+        Err(KeychainAccessError::ServiceRejected)
     }
 }
 
@@ -343,6 +365,134 @@ fn missing_key_with_ciphertext_is_key_unavailable_and_never_recreated() {
 }
 
 #[test]
+fn invalid_stored_data_key_still_opens_a_key_unavailable_store() {
+    let directory = TempDir::new().expect("temporary root");
+    let file_store = FileSecretStore::open(directory.path()).expect("file store");
+    let keychain = MemoryKeychainAccess::new();
+    crate::keychain_data_key::load_or_create_pooled_credential_data_key(&file_store, &keychain)
+        .expect("initial test key");
+    let keychain_item = keychain
+        .items
+        .lock()
+        .expect("memory Keychain")
+        .keys()
+        .next()
+        .expect("one test keychain item")
+        .clone();
+    keychain
+        .items
+        .lock()
+        .expect("memory Keychain")
+        .insert(keychain_item, vec![0x54; 31]);
+
+    let opened =
+        EncryptedCredentialStore::open_for_process_with_keychain(directory.path(), &keychain)
+            .expect("serve opener should keep running with unavailable credentials");
+
+    assert_eq!(
+        opened.status(),
+        EncryptedCredentialStoreStatus::KeyUnavailable
+    );
+}
+
+#[test]
+fn rejected_keychain_service_still_opens_a_key_unavailable_store() {
+    let directory = TempDir::new().expect("temporary root");
+
+    let opened = EncryptedCredentialStore::open_for_process_with_keychain(
+        directory.path(),
+        &ServiceRejectedKeychainAccess,
+    )
+    .expect("serve opener should keep running after service rejection");
+
+    assert_eq!(
+        opened.status(),
+        EncryptedCredentialStoreStatus::KeyUnavailable
+    );
+}
+
+#[test]
+fn invalid_store_id_still_opens_a_key_unavailable_store() {
+    let directory = TempDir::new().expect("temporary root");
+    std::fs::write(directory.path().join("store-id"), "not-a-store-id")
+        .expect("invalid store id fixture");
+
+    let opened = EncryptedCredentialStore::open_for_process_with_keychain(
+        directory.path(),
+        &MemoryKeychainAccess::new(),
+    )
+    .expect("serve opener should keep running with invalid store metadata");
+
+    assert_eq!(
+        opened.status(),
+        EncryptedCredentialStoreStatus::KeyUnavailable
+    );
+}
+
+#[test]
+fn invalid_format_marker_still_opens_a_key_unavailable_store() {
+    let directory = TempDir::new().expect("temporary root");
+    std::fs::write(directory.path().join("format-v2.marker"), "unsupported")
+        .expect("invalid format marker");
+
+    let opened = EncryptedCredentialStore::open_for_process_with_keychain(
+        directory.path(),
+        &MemoryKeychainAccess::new(),
+    )
+    .expect("serve opener should keep running with an invalid marker");
+
+    assert_eq!(
+        opened.status(),
+        EncryptedCredentialStoreStatus::KeyUnavailable
+    );
+}
+
+#[test]
+fn unreadable_migration_metadata_preserves_its_failure_reason() {
+    let directory = TempDir::new().expect("temporary root");
+    std::fs::create_dir(
+        directory
+            .path()
+            .join("openai_credential_bundle.acct_metadata.1.v2"),
+    )
+    .expect("unexpected directory entry");
+    let keychain = MemoryKeychainAccess::new();
+
+    let opened =
+        EncryptedCredentialStore::open_for_process_with_keychain(directory.path(), &keychain)
+            .expect("serve opener should keep running with incomplete migration");
+
+    assert_eq!(
+        opened.status(),
+        EncryptedCredentialStoreStatus::MigrationIncomplete {
+            accounts: Vec::new(),
+            failure: CredentialMigrationFailure::InvalidStoreData,
+        }
+    );
+}
+
+#[test]
+fn marker_read_failure_starts_router_with_migration_reason() {
+    let directory = TempDir::new().expect("temporary root");
+    std::fs::create_dir(directory.path().join("format-v2.marker"))
+        .expect("unreadable marker directory");
+
+    let opened = EncryptedCredentialStore::open_for_process_with_keychain(
+        directory.path(),
+        &MemoryKeychainAccess::new(),
+    )
+    .expect("serve opener should keep running when marker metadata cannot be read");
+
+    assert_eq!(
+        opened.status(),
+        EncryptedCredentialStoreStatus::MigrationIncomplete {
+            accounts: Vec::new(),
+            failure: CredentialMigrationFailure::MetadataReadFailed,
+        }
+    );
+}
+
+#[test]
 fn denied_keychain_recovers_after_restart_without_login() {
     let directory = TempDir::new().expect("temporary root");
     let keychain = MemoryKeychainAccess::new();
@@ -382,28 +532,41 @@ fn two_first_openers_publish_one_store_id_and_one_key() {
         let opener_barrier = Arc::clone(&opener_barrier);
         openers.push(thread::spawn(move || {
             opener_barrier.wait();
-            let file_store = FileSecretStore::open(&secret_root).expect("file store");
-            let _store_lock =
-                CredentialStoreLock::acquire(file_store.root(), CredentialStoreLockMode::Exclusive)
-                    .expect("exclusive first-open lock");
-            crate::keychain_data_key::load_or_create_pooled_credential_data_key(
-                &file_store,
+            EncryptedCredentialStore::open_for_process_with_keychain(
+                &secret_root,
                 keychain.as_ref(),
             )
-            .expect("data key")
-            .bytes()
-            .to_owned()
+            .expect("production opener should initialize the store")
         }));
     }
     opener_barrier.wait();
-    let opened_keys = openers
+    let opened_stores = openers
         .into_iter()
         .map(|opener| opener.join().expect("first opener thread"))
         .collect::<Vec<_>>();
 
-    assert_eq!(opened_keys[0], opened_keys[1]);
+    assert_eq!(
+        opened_stores[0].status(),
+        EncryptedCredentialStoreStatus::Ready
+    );
+    assert_eq!(
+        opened_stores[1].status(),
+        EncryptedCredentialStoreStatus::Ready
+    );
     assert_eq!(keychain.items.lock().expect("memory Keychain").len(), 1);
     assert!(directory.path().join("store-id").is_file());
+    assert!(directory.path().join("format-v2.marker").is_file());
+    let key = test_credential_key("acct_two_production_openers");
+    opened_stores[0]
+        .write_secret(&key, &SecretString::new("shared-opener-canary"))
+        .expect("first opener should encrypt a credential");
+    assert_eq!(
+        opened_stores[1]
+            .read_secret(&key)
+            .expect("second opener should read with the shared key")
+            .expose_secret(),
+        "shared-opener-canary"
+    );
 }
 
 #[test]

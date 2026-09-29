@@ -1,4 +1,99 @@
 use super::*;
+use codex_router_core::provider::Provider;
+use codex_router_state::credential_maintenance::ClaimPurpose;
+
+#[tokio::test]
+async fn unavailable_credential_store_does_not_change_healthy_maintenance() {
+    let temp_dir = AuthTestTempDir::new("unavailable-store-preserves-health");
+    let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
+    #[derive(Clone, Copy)]
+    enum UnavailableStoreKind {
+        KeyUnavailable,
+        MigrationIncomplete,
+    }
+
+    for (account_suffix, store_kind) in [
+        ("key-unavailable", UnavailableStoreKind::KeyUnavailable),
+        (
+            "migration-incomplete",
+            UnavailableStoreKind::MigrationIncomplete,
+        ),
+    ] {
+        let account_id = account_id(&format!("unavailable-store-{account_suffix}"));
+        must_ok(
+            state
+                .upsert_account(
+                    &AccountRecord::new(
+                        Provider::Openai,
+                        account_id.clone(),
+                        account_suffix,
+                        AccountStatus::Enabled,
+                    )
+                    .with_active_credential_generation(1),
+                )
+                .await,
+        );
+        assert!(must_ok(
+            state
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Openai,
+                    ClaimPurpose::Refresh,
+                    1,
+                    2,
+                )
+                .await
+        ));
+        assert!(must_ok(
+            state
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    Provider::Openai,
+                    ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    1_000,
+                )
+                .await
+        ));
+        let maintenance_before = must_ok(state.load_credential_maintenance(&account_id).await)
+            .expect("successful activation creates healthy maintenance");
+        let file_store = must_ok(
+            codex_router_secret_store::file_backend::FileSecretStore::open(
+                temp_dir.path().join(format!("secrets-{account_suffix}")),
+            ),
+        );
+        let secrets = match store_kind {
+            UnavailableStoreKind::KeyUnavailable => {
+                EncryptedCredentialStore::key_unavailable(file_store)
+            }
+            UnavailableStoreKind::MigrationIncomplete => {
+                EncryptedCredentialStore::migration_incomplete(
+                    file_store,
+                    vec![account_id.as_str().to_owned()],
+                    codex_router_secret_store::credential_migration::CredentialMigrationFailure::MigrationNotComplete,
+                )
+            }
+        };
+        let resolver = AsyncRouterCredentialResolver::new(
+            state.clone(),
+            secrets,
+            NoopCredentialRefreshClient,
+            Some(1_100),
+        );
+
+        let result = resolver.resolve_provider_credentials(&account_id).await;
+        let maintenance_after = must_ok(state.load_credential_maintenance(&account_id).await)
+            .expect("maintenance remains present");
+
+        assert_eq!(
+            result,
+            Err(CredentialResolverError::CredentialStoreUnavailable),
+            "{account_suffix}"
+        );
+        assert_eq!(maintenance_after, maintenance_before, "{account_suffix}");
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_expiring_during_secret_read_cannot_be_emitted() {

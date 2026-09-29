@@ -93,6 +93,16 @@ jobs:
         working-directory: release-source
         run: cargo build --locked --release -p codex-router-cli -p agent-collaboration --bins
 
+      - name: Reject test Keychain support in the release dependency graph
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+          dependency_features="$(cargo tree --locked -p codex-router-cli -e normal,features)"
+          if grep -q 'keychain-test-support' <<<"${dependency_features}"; then
+            echo "release dependency graph includes keychain-test-support" >&2
+            exit 1
+          fi
+
       # Optimized macOS build only: debug code generation does not reproduce the
       # FuturesUnordered waker-identity bug behind the 0.1.38 idle CPU loop.
       - name: Test optimized idle provider transport
