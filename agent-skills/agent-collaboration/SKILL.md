@@ -22,7 +22,7 @@ The Host reads owner-editable `<router-root>/providers.json` at startup and crea
 - A conversation target is the exact identity returned by discovery or supplied by the caller. Absence from an active-session list is not evidence that the conversation is gone. A fork creates a different conversation with inherited context.
 - `--root-message-id` on `conversation create`, or on `conversation prompt` with `--new` or `--fork`, takes a canonical board root UUID and selects the session's scratch scope: an owner-private `scratch/<root-id>` directory shared by every session created with that root, instead of a per-session `scratch/session-<id>`. It is fixed at creation; a resumed session keeps its association and rejects the flag. It does not join, watch, or link any board thread and grants no identity or authority; joining is `board thread join`. The same flag name on `board thread listen` selects which thread to listen to.
 - When the caller supplies a visible title for a conversation you create or fork (for example `🐒 Sidekick · parser fix`), apply it through the supported rename or display route and verify the saved title. If no route exists, report that capability gap. A title never replaces the SessionRef.
-- A direct message goes to one recipient; a reply goes to the actual sender. Delivery notifications and heartbeats are tool events, not messages from an agent.
+- A direct message goes to one recipient; `message reply` addresses the sender of the latest accepted Agent communication delivered to the calling session. Delivery notifications and heartbeats are tool events, not messages from an agent.
 - A board listener, once armed, delivers selected activity; session-delivered notifications need no additional wait call. Keep one listener per dependency and retain its identity.
 - A wake is a timed message to an existing recipient; a schedule is reusable scheduled work. Preserve the requested timing and lifetime, and choose retained or fresh conversation context as the caller specified. A wake runs a real turn; it does not prove cache savings.
 - CLI `wake send --wait-until-first-fire --json` emits one result with `result.record.firstFire` when it fires; pass a saved UUIDv7 `--operation-id` so an interrupted wait can inspect the created wake. A wait error keeps the durably created wake under `created`. MCP `wake_wait_until_first_fire` is a separate one-result tool call.
@@ -34,7 +34,7 @@ IF taking one of these actions, read the named help or advertised schema and ret
 | Discover or inspect a conversation | `sessions --help`, `session inspect --help`, or `sessions_list` / `session_inspect`; for Claude terminals use CLI `sessions list --endpoint claude-local --view active --source interactive` or MCP `provider_sessions_list` (`stored` is unsupported) | exact target, or gap |
 | Discover a Cursor terminal | Cursor terminals are not discoverable through Router; the caller supplies its SessionRef | exact target, or gap |
 | Continue, create, or fork | `conversation --help`, or `conversation_prompt` / `conversation_create` | SessionRef and strongest observed stage |
-| Send a message or reply | `message send --help`, or `message_send` | delivery receipt and its `outcome` (see "Sending to a session"); not completion or a reply |
+| Send a message or reply | `message send --help` / `message reply --help`, or `message_send` / `message_reply` | delivery receipt and its `outcome` (see "Sending to a session"); not completion or a reply |
 | Wait for board activity | `board thread --help`, or `board_thread_listen` / `board_thread_wait` | armed listener, batch, timeout, or gap |
 | Wake | `wake --help`, or `wake_send` / `wake_show` | saved wake id; saved is not fired or accepted |
 | Schedule | `schedule --help`, `instruction --help`, or `schedule_create` / `schedule_prepare` / `instruction_create` | schedule id and observed run state |
@@ -69,6 +69,12 @@ For a provider Session that does not advertise steering (currently Claude Code a
 | `unknown` | not known | check `delivery show` before sending again |
 
 Messages cap at 1 MiB and board posts at 64 KiB, and pasted terminal colour codes are rejected. Put logs, diffs and reports in a file (the repository's `tmp/`, or `scratch/<root-id>/` for sessions sharing a board root) and send a short summary with its absolute path.
+
+### Reply to the latest Agent message
+
+Use `agent-collaboration message reply --text <TEXT>` or `--text-file <PATH>`. MCP callers use `message_reply` with their `caller` SessionRef (the same address returned by `whoami`) and `text`. Router resolves the sender from its latest accepted Agent-delivery record for that caller session; the shortcut does not parse the message envelope. Wakes, schedules and board-listen notices do not replace that record. If the record is missing or invalid, Router says `latest sender unknown; use message send --to <SessionRef>`. Recording is best-effort and never changes an accepted send's outcome; if recording fails, Router invalidates the previous reply address. If the automation store is not running, reply says `reply unavailable: Router automation store not running`.
+
+Agent message bodies retain the `Agent communication`, `Self-declared sender`, and `Intended recipient` envelope lines. A recipient-first identity line (`<recipient emoji> <recipient label> ← <sender emoji> <sender label>`) appears above them. Router notices use the same recipient identity followed by a typed Router identity. The two JSON declaration lines remain unchanged for parsers.
 
 ## Act on evidence
 

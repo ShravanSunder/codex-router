@@ -405,6 +405,7 @@ fn request(target: SessionRef, mode: MessageDelivery) -> DeliveryRequest {
             sender: non_creator_agent(&target),
             text: MessageText::try_from("follow-up".to_owned()).expect("message"),
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         target,
         mode,
         precondition: DeliveryPrecondition::Unpinned,
@@ -454,6 +455,7 @@ async fn running_claude_auto_and_steer_name_the_running_operation() {
                         sender: non_creator_agent(&target),
                         text: MessageText::try_from("follow-up".to_owned()).expect("message"),
                     },
+                    header_context: collaboration_protocol::MessageHeaderContext::default(),
                     mode,
                     precondition: DeliveryPrecondition::Unpinned,
                     correlation: DeliveryCorrelationId::generate(),
@@ -627,6 +629,7 @@ async fn dropped_steering_reply_remains_unknown() {
         .reconcile_attempt(AttemptReconciliationContext {
             target: sent.target,
             message: sent.message,
+            header_context: collaboration_protocol::MessageHeaderContext::default(),
             mode: sent.mode,
             recorded,
         })

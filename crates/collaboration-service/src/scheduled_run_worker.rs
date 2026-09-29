@@ -10,7 +10,8 @@ use automation_storage::{
     AutomationStore, RunSubmissionOutcome, RunSubmissionResult, RunUncertainty, StorageError,
 };
 use collaboration_protocol::{
-    CodexGeneration, DestinationPreparation, EndpointRef, RunExecution, SessionRef,
+    CodexGeneration, DestinationPreparation, EndpointRef, MessageContent, MessageHeaderContext,
+    MessageHeaderOrigin, RouterNoticeKind, RunExecution, SessionRef,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -43,6 +44,7 @@ pub(crate) struct ScheduledRunWorker {
     pub execution: Arc<dyn ScheduledRunExecution>,
     pub backend: Option<NativeControlBackend>,
     pub configuration: crate::AutomationConfigurationHandle,
+    pub display_names: crate::SessionDisplayNameCache,
 }
 
 impl ScheduledRunWorker {
@@ -246,6 +248,18 @@ impl ScheduledRunWorker {
             record.schedule_id,
             Some(recorded.clone()),
         );
+        let message = MessageContent::Router {
+            text: text
+                .clone()
+                .try_into()
+                .map_err(|_| StorageError::InvalidRecord)?,
+        };
+        let header_context = MessageHeaderContext::resolve(
+            &target,
+            &message,
+            &self.display_names,
+            MessageHeaderOrigin::RouterNotice(RouterNoticeKind::Schedule),
+        );
         let submission = self
             .execution
             .submit_run(
@@ -253,6 +267,7 @@ impl ScheduledRunWorker {
                     run_id: id.clone(),
                     target,
                     message: text.try_into().map_err(|_| StorageError::InvalidRecord)?,
+                    header_context,
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs,
                     recorded: recorded.clone(),

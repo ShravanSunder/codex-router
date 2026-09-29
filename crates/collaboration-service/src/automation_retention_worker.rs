@@ -14,11 +14,14 @@ impl AutomationRetentionWorker {
 
     /// One bounded transaction; return the removed count so the runner can drain an old backlog.
     pub async fn prune_batch(&self, now_ms: i64) -> Result<u64, StorageError> {
-        self.store
-            .lock()
-            .await
-            .prune_automation_events(now_ms, 1000)
-            .await
+        let now = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms)
+            .ok_or(StorageError::InvalidRecord)?;
+        let mut store = self.store.lock().await;
+        let pruned_events = store.prune_automation_events(now_ms, 1000).await?;
+        let pruned_senders = store.prune_latest_agent_senders(now, 1000).await?;
+        pruned_events
+            .checked_add(pruned_senders)
+            .ok_or(StorageError::InvalidRecord)
     }
 
     pub async fn run(self, shutdown: CancellationToken) {
@@ -138,5 +141,69 @@ mod tests {
             .unwrap_or_else(|error| panic!("store should close: {error}"));
         std::fs::remove_file(path)
             .unwrap_or_else(|error| panic!("fixture database should remove: {error}"));
+    }
+
+    #[tokio::test]
+    async fn existing_maintenance_pass_prunes_expired_reply_routes() {
+        let path = std::env::temp_dir().join(format!(
+            "automation-retention-reply-route-{}.sqlite",
+            OperationId::generate().as_str()
+        ));
+        let mut opened = AutomationStore::open(&path)
+            .await
+            .expect("automation store should open");
+        let recipient: collaboration_protocol::SessionRef = serde_json::from_value(
+            serde_json::json!({
+                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+                "sessionId":"old-recipient"
+            }),
+        )
+        .expect("recipient session");
+        let sender: collaboration_protocol::SessionRef = serde_json::from_value(
+            serde_json::json!({
+                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+                "sessionId":"old-sender"
+            }),
+        )
+        .expect("sender session");
+        let now = chrono::Utc::now();
+        let old_record = automation_storage::LatestAgentSenderRecord::new(
+            recipient.clone(),
+            sender,
+            now - chrono::Duration::days(31),
+        )
+        .expect("old sender record");
+        opened
+            .store_latest_agent_sender(&old_record)
+            .await
+            .expect("record reply route");
+        let shared_store = Arc::new(Mutex::new(opened));
+        let worker = AutomationRetentionWorker::new(Arc::clone(&shared_store));
+
+        assert_eq!(
+            worker
+                .prune_batch(now.timestamp_millis())
+                .await
+                .expect("maintenance batch"),
+            1
+        );
+        assert!(
+            shared_store
+                .lock()
+                .await
+                .latest_agent_sender_for(&recipient, now)
+                .await
+                .expect("latest sender query")
+                .is_none()
+        );
+
+        drop(worker);
+        Arc::try_unwrap(shared_store)
+            .unwrap_or_else(|_| panic!("store must be released"))
+            .into_inner()
+            .close()
+            .await
+            .expect("close automation store");
+        std::fs::remove_file(path).expect("remove isolated database");
     }
 }

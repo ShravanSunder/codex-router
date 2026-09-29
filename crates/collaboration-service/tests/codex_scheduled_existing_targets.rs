@@ -154,6 +154,7 @@ async fn scheduled_run_to_materialized_thread_preserves_declared_workspace()
                 run_id,
                 target,
                 message: "materialized scheduled input".to_owned().try_into()?,
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
                 precondition: DeliveryPrecondition::Unpinned,
                 inputs,
                 recorded: prepared.evidence,

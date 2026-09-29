@@ -117,6 +117,7 @@ pub(super) struct CodexStateThreadFixture {
     pub(super) title: Option<String>,
     pub(super) preview: Option<String>,
     pub(super) first_user_message: Option<String>,
+    pub(super) has_user_message: bool,
     pub(super) recency_at_ms: i64,
 }
 
@@ -144,8 +145,15 @@ impl CodexStateThreadFixture {
             title: None,
             preview: None,
             first_user_message: None,
+            has_user_message: true,
             recency_at_ms,
         }
+    }
+
+    pub(super) fn without_user_message(mut self) -> Self {
+        self.has_user_message = false;
+        self.first_user_message = None;
+        self
     }
 
     pub(super) fn with_thread_source(mut self, thread_source: Option<&str>) -> Self {
@@ -454,7 +462,7 @@ pub(super) fn create_codex_state_db_with_thread_rows(
                     reasoning_effort, agent_path, created_at_ms, updated_at_ms,
                     thread_source, preview, recency_at, recency_at_ms
                 ) VALUES (
-                    ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL, 0, 1,
+                    ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL, 0, ?,
                     0, NULL, NULL, ?, ?, NULL,
                     ?, NULL, NULL, NULL, ?, ?, NULL,
                     ?, ?, ?, ?, NULL, ?
@@ -467,9 +475,14 @@ pub(super) fn create_codex_state_db_with_thread_rows(
                 .bind(row.cwd.display().to_string())
                 .bind(&row.name)
                 .bind(row.title.as_deref().unwrap_or(prompt_canary))
+                .bind(i64::from(row.has_user_message))
                 .bind(&row.git_branch)
                 .bind(&row.git_origin_url)
-                .bind(row.first_user_message.as_deref().unwrap_or(prompt_canary))
+                .bind(if row.has_user_message {
+                    Some(row.first_user_message.as_deref().unwrap_or(prompt_canary))
+                } else {
+                    None
+                })
                 .bind(&row.model)
                 .bind(&row.reasoning_effort)
                 .bind(row.recency_at_ms - 100)

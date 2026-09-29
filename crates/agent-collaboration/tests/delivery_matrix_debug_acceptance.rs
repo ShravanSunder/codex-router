@@ -327,16 +327,24 @@ fn user_text_contains_marker(text: &str, marker: &str) -> bool {
 #[test]
 fn recipient_observer_finds_composite_approval_request_id_in_user_text() {
     let request_id = "[\"matrix-provider-codex\",91]";
+    let sender = json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+        "sessionId":"sender"
+    });
+    let recipient = json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"recipient"
+    });
     let notice = format!(
-        "Agent communication\nSelf-declared sender: fixture\n\n{}",
-        json!({"kind":"externalProviderPermission","requestId":request_id})
+        "🤖 codex-local/recipient ← ✳️ claude-local/sender\nAgent communication\nSelf-declared sender: {sender}\nIntended recipient: {recipient}\n\n{}",
+        json!({"kind":"externalProviderPermission","requestId":request_id}),
     );
     let turns = vec![json!({"items":[{"type":"userMessage","content":[
         {"type":"text","text":notice}
     ]}]})];
     assert!(turns_contain_input(&turns, request_id));
     let peer_message = format!(
-        "{}\n\nFor replies, use Router's message_send as this Claude session.",
+        "{}\n\nFor replies, use `agent-collaboration message reply --text <TEXT>` as this Claude session.",
         json!({"kind":"externalProviderPermission","requestId":request_id})
     );
     assert!(user_text_contains_marker(&peer_message, request_id));

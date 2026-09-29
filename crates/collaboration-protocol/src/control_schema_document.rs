@@ -376,10 +376,21 @@ pub fn control_schema_document(
         &[
             "wrongService",
             "unavailable",
+            "replyUnavailable",
             "outcomeUnknown",
             "overloaded",
             "threadNotLoaded",
             "noActiveTurn",
+        ],
+    )?;
+    assembly.add_method::<SessionMessageReplyParams, DeliveryReceipt>(
+        "message/reply",
+        &[
+            "wrongService",
+            "replyUnavailable",
+            "latestSenderUnknown",
+            "outcomeUnknown",
+            "overloaded",
         ],
     )?;
     assembly.add_method::<NativeInterruptParams, NativeInterruptResult>(

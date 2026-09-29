@@ -12,6 +12,10 @@ pub struct ServiceIdentity {
         Option<std::sync::Arc<dyn crate::AutomationConfigurationBackend>>,
     pub(crate) service_epoch: UuidIdentity,
     pub(crate) schema_digest: collaboration_protocol::SchemaDigest,
+    pub(crate) display_names: crate::SessionDisplayNameCache,
+    pub(crate) latest_sender_unknown: std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashSet<collaboration_protocol::SessionRef>>,
+    >,
     pub(crate) directory: EndpointDirectory,
     pub(crate) wake_wait_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
@@ -64,6 +68,7 @@ impl ServiceIdentity {
                     std::sync::Arc::clone(execution),
                     self.native_backend.clone(),
                     self.configuration.clone(),
+                    self.display_names.clone(),
                 )
             })
     }
@@ -78,6 +83,7 @@ impl ServiceIdentity {
                     crate::wakeup_delivery_sender::WakeDeliverySender {
                         delivery: std::sync::Arc::clone(delivery),
                         configuration: self.configuration.clone(),
+                        display_names: self.display_names.clone(),
                     },
                 )
             })
@@ -149,8 +155,26 @@ impl ServiceIdentity {
         mut self,
         delivery: std::sync::Arc<dyn crate::SessionMessageDelivery>,
     ) -> Self {
-        self.session_delivery = Some(delivery);
+        self.session_delivery = Some(std::sync::Arc::new(
+            crate::latest_sender_recording_delivery::LatestSenderRecordingDelivery::new(
+                delivery,
+                self.automation.clone(),
+                std::sync::Arc::clone(&self.latest_sender_unknown),
+            ),
+        ));
         self
+    }
+
+    #[must_use]
+    pub fn session_message_delivery(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::SessionMessageDelivery>> {
+        self.session_delivery.clone()
+    }
+
+    #[must_use]
+    pub fn session_display_name_cache(&self) -> crate::SessionDisplayNameCache {
+        self.display_names.clone()
     }
     #[must_use]
     pub fn with_scheduled_run_execution(
@@ -165,6 +189,7 @@ impl ServiceIdentity {
         mut self,
         broker: std::sync::Arc<crate::ServiceInteractionBroker>,
     ) -> Self {
+        broker.install_display_names(self.display_names.clone());
         self.approval_broker = Some(broker);
         self
     }
@@ -223,6 +248,10 @@ impl ServiceIdentity {
             service_epoch: UuidIdentity::try_from(service_epoch.to_owned())
                 .map_err(|error| error.to_string())?,
             schema_digest: digest,
+            display_names: crate::SessionDisplayNameCache::default(),
+            latest_sender_unknown: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             journal: None,
             native_backend: None,
             session_delivery: None,

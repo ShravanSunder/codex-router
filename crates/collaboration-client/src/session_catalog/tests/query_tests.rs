@@ -120,6 +120,7 @@ fn checkout_scope_with_broken_git_metadata_uses_exact_cwd_filter() {
         source: SessionCatalogSource::All,
         sort: SessionCatalogSort::Updated,
         last: false,
+        include_empty_sessions: false,
         limit: 100,
         search: String::new(),
         repository_identity: None,

@@ -2,7 +2,7 @@
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
     AttemptId, CodexGeneration, DeliveryCorrelationId, DeliveryReceipt, MessageContent,
-    MessageDelivery, SessionReachability, SessionRef,
+    MessageDelivery, MessageHeaderContext, SessionReachability, SessionRef,
 };
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -28,6 +28,7 @@ pub enum DeliveryContractError {
 pub struct DeliveryRequest {
     pub target: SessionRef,
     pub message: MessageContent,
+    pub header_context: MessageHeaderContext,
     pub mode: MessageDelivery,
     pub precondition: DeliveryPrecondition,
     pub correlation: DeliveryCorrelationId,
@@ -44,6 +45,7 @@ pub enum DeliveryPrecondition {
 pub struct AttemptReconciliationContext {
     pub target: SessionRef,
     pub message: MessageContent,
+    pub header_context: MessageHeaderContext,
     pub mode: MessageDelivery,
     pub recorded: RouteEffectEvidence<SessionRef, CodexGeneration>,
 }

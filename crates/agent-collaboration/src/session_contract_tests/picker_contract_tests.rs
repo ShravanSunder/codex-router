@@ -367,6 +367,7 @@ fn sessions_picker_loader_pages_until_full_persisted_search_field_matches() {
         source: crate::sessions::SessionsSource::All,
         sort: crate::sessions::SessionsSort::Updated,
         search: "deep-marker".to_owned(),
+        include_empty_sessions: false,
     };
     let context = CliContext::new(vec![
         ("CODEX_HOME".to_owned(), codex_home.display().to_string()),

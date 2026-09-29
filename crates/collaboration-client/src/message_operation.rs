@@ -5,7 +5,7 @@ use crate::{
 };
 use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryReceipt, MessageContent, MessageDelivery,
-    SessionMessageSendParams, SessionRef,
+    MessageText, SessionMessageReplyParams, SessionMessageSendParams, SessionRef,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,13 @@ pub struct MessageSendRequest {
     pub correlation: Option<DeliveryCorrelationId>,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MessageReplyRequest {
+    pub caller: SessionRef,
+    pub text: MessageText,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MessageSendError {
     #[error(transparent)]
@@ -31,6 +38,34 @@ pub enum MessageSendError {
         #[source]
         source: Box<ClientError>,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MessageReplyError {
+    #[error(transparent)]
+    Preparation(Box<ClientError>),
+    #[error("{source}")]
+    Submission {
+        caller: SessionRef,
+        #[source]
+        source: Box<ClientError>,
+    },
+}
+
+impl MessageReplyError {
+    #[must_use]
+    pub fn into_operation_failure_and_caller(self) -> (OperationFailure, Option<SessionRef>) {
+        match self {
+            Self::Preparation(error) => (
+                operation_failure_from_client_error(*error, OperationEffect::None),
+                None,
+            ),
+            Self::Submission { caller, source } => (
+                operation_failure_from_client_error(*source, OperationEffect::Unknown),
+                Some(caller),
+            ),
+        }
+    }
 }
 
 impl MessageSendError {
@@ -105,18 +140,68 @@ impl ControlClient {
         if is_agent {
             self.send_agent_message(params)
                 .await
-                .map_err(|source| MessageSendError::Submission {
-                    target: target.clone(),
-                    source: Box::new(source),
-                })
+                .map_err(|source| message_send_error(target.clone(), source))
         } else {
             self.send_human_input(params)
                 .await
-                .map_err(|source| MessageSendError::Submission {
-                    target,
-                    source: Box::new(source),
-                })
+                .map_err(|source| message_send_error(target, source))
         }
+    }
+
+    pub async fn reply_to_latest_agent_sender(
+        &mut self,
+        request: MessageReplyRequest,
+    ) -> Result<DeliveryReceipt, MessageReplyError> {
+        let caller = request.caller.clone();
+        let params = SessionMessageReplyParams {
+            caller: request.caller,
+            text: request.text,
+        };
+        match self.message_reply(params).await {
+            Ok(receipt) => Ok(receipt),
+            Err(error) if is_pre_dispatch_rejection(&error) => {
+                Err(MessageReplyError::Preparation(Box::new(error)))
+            }
+            Err(error) => Err(MessageReplyError::Submission {
+                caller,
+                source: Box::new(error),
+            }),
+        }
+    }
+}
+
+fn message_send_error(target: SessionRef, source: ClientError) -> MessageSendError {
+    if is_pre_dispatch_rejection(&source) {
+        MessageSendError::Preparation(Box::new(source))
+    } else {
+        MessageSendError::Submission {
+            target,
+            source: Box::new(source),
+        }
+    }
+}
+
+fn is_pre_dispatch_rejection(error: &ClientError) -> bool {
+    match error {
+        ClientError::InvalidRequest(_) => true,
+        ClientError::Rejected {
+            data: Some(data), ..
+        } => matches!(
+            data.get("kind").and_then(serde_json::Value::as_str),
+            Some(
+                "wrongService"
+                    | "replyUnavailable"
+                    | "latestSenderUnknown"
+                    | "invalidField"
+                    | "unavailable"
+            )
+        ),
+        ClientError::Rejected { data: None, .. } => false,
+        ClientError::Discovery { .. }
+        | ClientError::Transport(_)
+        | ClientError::Protocol(_)
+        | ClientError::Timeout
+        | ClientError::UnsupportedCapability(_) => false,
     }
 }
 

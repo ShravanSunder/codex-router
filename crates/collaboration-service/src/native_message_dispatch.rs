@@ -5,8 +5,8 @@ use codex_native_integration::{
 };
 use collaboration_protocol::{
     AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageDelivery,
-    NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,
-    NativeSendReceipt, NonEmptyText, UuidIdentity,
+    MessageHeaderContext, NativeInputDisposition, NativeInputOperation, NativeSendAcceptance,
+    NativeSendParams, NativeSendReceipt, NonEmptyText, UuidIdentity,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -18,6 +18,7 @@ pub(crate) struct NativeMessageRequest<'a> {
     pub service_id: &'a UuidIdentity,
     pub backend: &'a NativeControlBackend,
     pub endpoints: &'a [EndpointDescription],
+    pub header_context: MessageHeaderContext,
     pub held_connection: Option<&'a mut NativeProtocolConnection>,
 }
 
@@ -64,8 +65,11 @@ pub(crate) async fn dispatch_message(
     {
         return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "queue"));
     }
-    let Ok(rendered) = collaboration_protocol::render_message(&params.target, &params.message)
-    else {
+    let Ok(rendered) = collaboration_protocol::render_message_with_context(
+        &params.target,
+        &params.message,
+        &request.header_context,
+    ) else {
         return NativeMessageOutcome::Failed(effects.failure("overloaded", "inspect"));
     };
     let correlation = match &params.client_user_message_id {

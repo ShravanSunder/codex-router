@@ -99,11 +99,18 @@ pub use session_delivery_outcome::{
 };
 pub use session_delivery_receipt::{DeliveryClientReceipt, DeliveryReceipt};
 pub use session_message_send::SessionMessageSendParams;
+mod session_message_reply;
+pub use session_message_reply::SessionMessageReplyParams;
 mod native_schema_references;
 mod native_session_catalog;
 pub use message_content::{
-    AcceptedResumeEffect, MessageContent, MessageDelivery, MessageInputKind, MessageRepresentation,
-    MessageText, MessageTextError, RenderedMessage, render_message,
+    AcceptedResumeEffect, MessageContent, MessageDelivery, MessageHeaderContext,
+    MessageHeaderOrigin, MessageInputKind, MessageRepresentation, MessageText, MessageTextError,
+    ParsedAgentMessageEnvelope, ParsedRouterMessageEnvelope, RenderedMessage, RouterNoticeKind,
+    SessionDisplayName, SessionDisplayNameError, SessionDisplayNameLookup,
+    SessionDisplayNameLookupError, parse_agent_message_envelope, parse_router_message_envelope,
+    queued_message_matches_content, render_message, render_message_with_context,
+    render_message_with_lookup, title_from_agent_message_envelope,
 };
 pub use native_control_contract::{
     NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,

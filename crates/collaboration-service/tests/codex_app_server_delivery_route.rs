@@ -116,6 +116,7 @@ async fn stale_strict_generation_stops_before_evidence_or_native_io()
         message: MessageContent::Router {
             text: "hello".to_owned().try_into()?,
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode: MessageDelivery::Auto,
         precondition: DeliveryPrecondition::EndpointGeneration { expected: stale },
         correlation: DeliveryCorrelationId::generate(),
@@ -259,6 +260,7 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
                 message: MessageContent::Router {
                     text: "hello".to_owned().try_into()?,
                 },
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
                 mode: MessageDelivery::Auto,
                 precondition: DeliveryPrecondition::Unpinned,
                 correlation: DeliveryCorrelationId::try_from("caller-correlation".to_owned())?,
@@ -619,6 +621,7 @@ async fn exercise_held_empty_thread(
                     run_id,
                     target: target.clone(),
                     message: "scheduled hello".to_owned().try_into()?,
+                    header_context: collaboration_protocol::MessageHeaderContext::default(),
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs,
                     recorded: prepared.evidence,
@@ -684,6 +687,7 @@ async fn exercise_held_empty_thread(
         message: MessageContent::Router {
             text: message_text.clone(),
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::generate(),

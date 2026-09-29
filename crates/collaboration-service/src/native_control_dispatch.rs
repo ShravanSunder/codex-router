@@ -264,6 +264,7 @@ async fn dispatch_rename(request: NativeControlRequest<'_>) -> Value {
     if name != params.name {
         return rename_echo_mismatch(request.id, &params.name, name);
     }
+    request.display_names.remember(params.target.clone(), name);
     let result = collaboration_protocol::NativeRenameResult {
         target: params.target,
         name: name.to_owned(),

@@ -118,9 +118,13 @@ pub use manifest_publication::ManifestPublication;
 mod control_schema_publication;
 mod journal_dispatch;
 pub use control_schema_publication::publish_control_schema;
+mod latest_sender_recording_delivery;
 mod native_control_dispatch;
 mod native_control_request;
+mod session_display_name_cache;
+pub use session_display_name_cache::SessionDisplayNameCache;
 mod session_message_dispatch;
+mod session_message_reply_dispatch;
 pub use native_control_dispatch::NativeControlBackend;
 
 mod codex_app_server_delivery_route;

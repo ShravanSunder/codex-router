@@ -247,6 +247,7 @@ async fn native_delivery_crash_child() -> TestResult<()> {
             .session_delivery
             .ok_or("session delivery missing")?,
         configuration: identity.configuration,
+        display_names: identity.display_names,
     };
     sender.dispatch(store, delivery_id).await?;
     Err("sender did not stop at selected checkpoint".into())

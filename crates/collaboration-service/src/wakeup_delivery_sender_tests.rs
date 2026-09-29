@@ -93,6 +93,7 @@ async fn provider_session_not_found_finishes_wake_after_one_attempt() {
     let sender = WakeDeliverySender {
         delivery: Arc::new(ProviderSessionNotFound),
         configuration: AutomationConfigurationHandle::default(),
+        display_names: crate::SessionDisplayNameCache::default(),
     };
 
     sender

@@ -13,6 +13,31 @@ use collaboration_protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::Row;
+use std::collections::HashSet;
+
+const THREAD_TURN_PAGE_SIZE: u32 = 100;
+const MAX_THREAD_TURN_PAGES: usize = 64;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadTurnsPage {
+    data: Vec<ThreadTurn>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ThreadTurn {
+    #[serde(default)]
+    items: Vec<ThreadTurnItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum ThreadTurnItem {
+    UserMessage,
+    #[serde(other)]
+    Other,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +49,8 @@ struct InventoryCursor {
     native_cursor: Option<String>,
     stored_time: Option<i64>,
     stored_id: Option<String>,
+    #[serde(default)]
+    include_empty_sessions: bool,
     scope: NativeSessionScope,
     source: NativeSessionSource,
     query: Option<String>,
@@ -150,6 +177,7 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
     let Ok(params) = serde_json::from_value::<NativeSessionListParams>(request.params) else {
         return invalid(request.id);
     };
+    let display_names = request.display_names;
     if !(1..=100).contains(&params.page_size) {
         return invalid(request.id);
     }
@@ -186,6 +214,7 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
                     && c.view == view
                     && c.scope == params.scope
                     && c.source == params.source
+                    && c.include_empty_sessions == params.include_empty_sessions
                     && c.query == params.query
             }) else {
                 return invalid(request.id);
@@ -202,7 +231,7 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
         }) {
             return invalid(request.id);
         }
-        stored_page(&backend.codex_home, &params, cursor).await
+        stored_page(&backend.codex_home, &params, cursor, display_names).await
     } else {
         let Ok(admission) = backend.gate.acquire() else {
             return failed(request.id, "unavailable");
@@ -222,7 +251,7 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
         let retired = admission.retirement();
         tokio::select! {
             _=retired.cancelled()=>Err(()),
-            result=runtime_page(&params,cursor,&admission,&schemas)=>result,
+            result=runtime_page(&params,cursor,&admission,&schemas,display_names)=>result,
         }
     };
     match result {
@@ -262,6 +291,7 @@ async fn stored_page(
     home: &std::path::Path,
     params: &NativeSessionListParams,
     cursor: Option<InventoryCursor>,
+    display_names: &crate::SessionDisplayNameCache,
 ) -> Result<Value, ()> {
     let catalog = StoredThreadCatalog::open(home).await.map_err(|_| ())?;
     let query = StoredThreadQuery {
@@ -317,9 +347,22 @@ async fn stored_page(
         let reasoning_effort: Option<String> = row.try_get("reasoning_effort").map_err(|_| ())?;
         let name: Option<String> = row.try_get("name").map_err(|_| ())?;
         let title: Option<String> = row.try_get("title").map_err(|_| ())?;
+        let session_ref = collaboration_protocol::SessionRef {
+            endpoint: params.endpoint.clone(),
+            session_id: id.clone().try_into().map_err(|_| ())?,
+        };
+        let cached_name = name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| title.as_deref().filter(|value| !value.trim().is_empty()));
+        if let Some(cached_name) = cached_name {
+            display_names.remember(session_ref, cached_name);
+        }
         let git_branch: Option<String> = row.try_get("git_branch").map_err(|_| ())?;
         let source_value: Option<String> = row.try_get("source").map_err(|_| ())?;
         let thread_source: Option<String> = row.try_get("thread_source").map_err(|_| ())?;
+        let first_user_message: Option<String> =
+            row.try_get("first_user_message").map_err(|_| ())?;
         let source = classify_source(source_value.as_deref(), thread_source.as_deref());
         let git_origin_url: Option<String> = row.try_get("git_origin_url").map_err(|_| ())?;
         let scope_cursor = InventoryCursor {
@@ -330,10 +373,15 @@ async fn stored_page(
             native_cursor: None,
             stored_time: time,
             stored_id: Some(id.clone()),
+            include_empty_sessions: params.include_empty_sessions,
             scope: params.scope.clone(),
             source: params.source,
             query: params.query.clone(),
         };
+        if !params.include_empty_sessions && first_user_message.is_none() {
+            last = Some(scope_cursor);
+            continue;
+        }
         if let Some(identity) = &repository_identity
             && !codex_native_integration::repository_contains_session(
                 identity,
@@ -377,6 +425,7 @@ async fn runtime_page(
     cursor: Option<InventoryCursor>,
     admission: &crate::NativeAdmission,
     schemas: &codex_native_integration::NativePayloadSchemas,
+    display_names: &crate::SessionDisplayNameCache,
 ) -> Result<Value, ()> {
     let mut native = NativeProtocolConnection::connect(admission.backend_path())
         .await
@@ -423,6 +472,16 @@ async fn runtime_page(
             .get("title")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let session_ref = collaboration_protocol::SessionRef {
+            endpoint: params.endpoint.clone(),
+            session_id: id.to_owned().try_into().map_err(|_| ())?,
+        };
+        let cached_name = name
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| (!title.trim().is_empty()).then_some(title));
+        if let Some(cached_name) = cached_name {
+            display_names.remember(session_ref, cached_name);
+        }
         let source = classify_source(
             thread.get("source").and_then(Value::as_str),
             thread.get("threadSource").and_then(Value::as_str),
@@ -435,6 +494,13 @@ async fn runtime_page(
         if let Some(query) = params.query.as_deref()
             && !name.is_some_and(|value| value.to_lowercase().contains(&query.to_lowercase()))
             && !title.to_lowercase().contains(&query.to_lowercase())
+        {
+            continue;
+        }
+        if !params.include_empty_sessions
+            && !thread_has_user_message(&mut native, schemas, id)
+                .await
+                .map_err(|_| ())?
         {
             continue;
         }
@@ -457,6 +523,7 @@ async fn runtime_page(
                 native_cursor: Some(value.into()),
                 stored_time: None,
                 stored_id: None,
+                include_empty_sessions: params.include_empty_sessions,
                 scope: params.scope.clone(),
                 source: params.source,
                 query: params.query.clone(),
@@ -464,6 +531,54 @@ async fn runtime_page(
         })
         .transpose()?;
     page(params, Some(admission.generation()), sessions, next)
+}
+
+async fn thread_has_user_message(
+    connection: &mut NativeProtocolConnection,
+    schemas: &codex_native_integration::NativePayloadSchemas,
+    thread_id: &str,
+) -> Result<bool, codex_native_integration::NativeConnectionError> {
+    if !schemas.supports_operation(NativeOperation::ListTurns) {
+        return Err(codex_native_integration::NativeConnectionError::InvalidInput);
+    }
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    for _ in 0..MAX_THREAD_TURN_PAGES {
+        let result = connection
+            .request_validated(
+                schemas,
+                NativeOperation::ListTurns,
+                json!({
+                    "threadId":thread_id,
+                    "cursor":cursor,
+                    "limit":THREAD_TURN_PAGE_SIZE,
+                    "sortDirection":"asc",
+                    "itemsView":"full"
+                }),
+            )
+            .await?;
+        let page: ThreadTurnsPage = serde_json::from_value(result)
+            .map_err(|_| codex_native_integration::NativeConnectionError::Protocol)?;
+        if page
+            .data
+            .iter()
+            .flat_map(|turn| turn.items.iter())
+            .any(|item| matches!(item, ThreadTurnItem::UserMessage))
+        {
+            return Ok(true);
+        }
+        let Some(next_cursor) = page.next_cursor else {
+            return Ok(false);
+        };
+        if next_cursor.is_empty()
+            || !seen_cursors.insert(next_cursor.clone())
+            || seen_cursors.len() > MAX_THREAD_TURN_PAGES
+        {
+            return Err(codex_native_integration::NativeConnectionError::Protocol);
+        }
+        cursor = Some(next_cursor);
+    }
+    Err(codex_native_integration::NativeConnectionError::Protocol)
 }
 fn page(
     params: &NativeSessionListParams,

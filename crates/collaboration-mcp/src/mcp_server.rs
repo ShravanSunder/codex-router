@@ -1,8 +1,9 @@
 use collaboration_client::{
     BoundedObservationRequest, BoundedObservationResult, ClientError, ControlClient,
     ConversationCancelInput, ConversationClient, ConversationClientError,
-    ConversationCreatePromptOutcome, ConversationOperationResult, MessageSendError,
-    MessageSendRequest, OperationEffect, operation_failure_from_client_error,
+    ConversationCreatePromptOutcome, ConversationOperationResult, MessageReplyError,
+    MessageReplyRequest, MessageSendError, MessageSendRequest, OperationEffect,
+    operation_failure_from_client_error,
 };
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
@@ -376,6 +377,20 @@ impl CollaborationMcpServer {
         let result = client.send_message(request).await;
         let _closed = client.close().await;
         message_tool_result(result)
+    }
+
+    #[tool(name = "message_reply", description = "Replies to the latest accepted Agent communication delivered to the supplied caller session. Router deliveries do not change the reply address. Returns clear guidance when the latest sender is unknown or Router automation storage is unavailable.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<DeliveryReceipt>>())]
+    async fn message_reply(
+        &self,
+        Parameters(request): Parameters<MessageReplyRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.reply_to_latest_agent_sender(request).await;
+        let _closed = client.close().await;
+        message_reply_tool_result(result)
     }
 
     #[tool(name = "approval_list", description = "Lists approval requests. Set includeOptions for offered choices and persistent effects. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ApprovalListResponse>>())]
@@ -940,6 +955,23 @@ fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> Cal
                 .map(|mut value| {
                     if let Some(fields) = value.as_object_mut() {
                         fields.insert("target".to_owned(), serde_json::json!(target));
+                    }
+                    structured_tool_error(value)
+                })
+                .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))
+        }
+    }
+}
+
+fn message_reply_tool_result(result: Result<DeliveryReceipt, MessageReplyError>) -> CallToolResult {
+    match result {
+        Ok(receipt) => message_tool_result(Ok(receipt)),
+        Err(error) => {
+            let (failure, caller) = error.into_operation_failure_and_caller();
+            serde_json::to_value(failure)
+                .map(|mut value| {
+                    if let Some(fields) = value.as_object_mut() {
+                        fields.insert("caller".to_owned(), serde_json::json!(caller));
                     }
                     structured_tool_error(value)
                 })

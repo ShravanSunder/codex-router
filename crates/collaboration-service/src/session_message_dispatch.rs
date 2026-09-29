@@ -3,7 +3,9 @@ use crate::{
     DeliveryPrecondition, DeliveryRequest, ServiceIdentity, SessionMessageDelivery,
     session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
-use collaboration_protocol::{MessageContent, SessionMessageSendParams};
+use collaboration_protocol::{
+    MessageContent, MessageHeaderContext, MessageHeaderOrigin, SessionMessageSendParams,
+};
 use serde_json::{Value, json};
 
 pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
@@ -18,17 +20,25 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
     let Some(delivery) = identity.session_delivery.as_ref() else {
         return failure(id, -32050, "unavailable");
     };
-    deliver(id, params, delivery.as_ref()).await
+    deliver(id, params, delivery.as_ref(), &identity.display_names).await
 }
 
 async fn deliver(
     id: Value,
     params: SessionMessageSendParams,
     delivery: &dyn SessionMessageDelivery,
+    display_names: &crate::SessionDisplayNameCache,
 ) -> Value {
+    let header_context = MessageHeaderContext::resolve(
+        &params.target,
+        &params.message,
+        display_names,
+        MessageHeaderOrigin::Agent,
+    );
     let request = DeliveryRequest {
         target: params.target,
         message: params.message,
+        header_context,
         mode: params.mode,
         precondition: params
             .generation_guard

@@ -54,6 +54,7 @@ impl CodexAppServerDeliveryRoute {
             return Ok(not_submitted("staleGeneration", false));
         }
         let generation = admission.generation().clone();
+        let header_context = request.header_context.clone();
         let mut effects = NativeEffectEvidence {
             target: Some(request.target.clone()),
             generation: Some(generation.clone()),
@@ -116,6 +117,7 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
+                        header_context: header_context.clone(),
                         held_connection: Some(binding.connection_mut()),
                     },
                 )
@@ -160,6 +162,7 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
+                        header_context,
                         held_connection: None,
                     },
                 )

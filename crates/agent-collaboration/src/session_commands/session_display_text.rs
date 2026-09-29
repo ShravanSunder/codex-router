@@ -69,11 +69,21 @@ pub(super) fn display_title_from_session_fields(
     preview: Option<&str>,
     first_user_message: Option<&str>,
 ) -> Option<String> {
-    let explicit_name = name.and_then(normalize_display_title);
-    let derived_title = [title, preview, first_user_message]
-        .into_iter()
+    let explicit_name = name.and_then(normalize_plain_display_title);
+    let title_sources = [title, preview, first_user_message];
+    let derived_title = title_sources
+        .iter()
         .flatten()
-        .find_map(normalize_display_title);
+        .find_map(|value| {
+            collaboration_client::protocol::title_from_agent_message_envelope(value)
+                .and_then(|title| normalize_plain_display_title(&title))
+        })
+        .or_else(|| {
+            title_sources
+                .into_iter()
+                .flatten()
+                .find_map(normalize_plain_display_title)
+        });
     match (explicit_name, derived_title) {
         (Some(name), Some(derived_title)) => Some(truncate_end(
             &format!("{name} | {derived_title}"),
@@ -84,7 +94,7 @@ pub(super) fn display_title_from_session_fields(
     }
 }
 
-fn normalize_display_title(value: &str) -> Option<String> {
+fn normalize_plain_display_title(value: &str) -> Option<String> {
     let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.is_empty() {
         return None;

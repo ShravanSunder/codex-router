@@ -36,6 +36,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         "ThreadResume",
         "ThreadStart",
         "ThreadLoadedList",
+        "ThreadTurnsList",
         "TurnStart",
         "TurnSteer",
         "TurnInterrupt",
@@ -188,7 +189,13 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             let steps = if matches!(method, "turn/start" | "thread/queue/add") {
                 vec!["initialize", "initialized", "thread/read", method]
             } else if method == "thread/loaded/list" {
-                vec!["initialize", "initialized", method, "thread/read"]
+                vec![
+                    "initialize",
+                    "initialized",
+                    method,
+                    "thread/read",
+                    "thread/turns/list",
+                ]
             } else if method == "thread/name/set" {
                 if expected["name"] == "After send" {
                     vec!["initialize", "initialized", "thread/read", method]
@@ -231,7 +238,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                             "caller-correlation"
                         );
                         let text = request["params"]["input"][0]["text"].as_str().unwrap();
-                        assert!(text.starts_with("Agent communication\nSelf-declared sender: "));
+                        assert!(text.starts_with("🤖 codex-local/proof-th ← 🤖 codex-local/proof-th\nAgent communication\nSelf-declared sender: "));
                         assert!(text.contains("\nIntended recipient: "));
                         assert!(text.ends_with("\n\nA checked finding"));
                     } else {
@@ -260,6 +267,8 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                             json!({"type":"idle"})
                         };
                         json!({"thread":{"id":"proof-thread","name":current_name,"cwd":"/tmp","status":status,"updatedAt":BUSY_THREAD_UPDATED_AT_SECONDS,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
+                    } else if expected_method == "thread/turns/list" {
+                        json!({"data":[{"id":"proof-turn","items":[{"type":"userMessage","id":"proof-user-message","content":[]}]}],"nextCursor":null,"backwardsCursor":null})
                     } else {
                         json!({})
                     };
@@ -350,6 +359,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             view: collaboration_protocol::NativeSessionView::Loaded,
             scope: collaboration_protocol::NativeSessionScope::Any,
             source: collaboration_protocol::NativeSessionSource::All,
+            include_empty_sessions: false,
             query: None,
             page_size: 1,
             cursor: None,
@@ -390,6 +400,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             view: collaboration_protocol::NativeSessionView::Loaded,
             scope: collaboration_protocol::NativeSessionScope::Any,
             source: collaboration_protocol::NativeSessionSource::All,
+            include_empty_sessions: false,
             query: None,
             page_size: 1,
             cursor: None,

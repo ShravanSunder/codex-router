@@ -43,6 +43,17 @@ fn list_sessions_preserves_default_cwd_and_explicit_checkout() {
 }
 
 #[test]
+fn include_empty_sessions_is_an_explicit_picker_and_list_opt_in() {
+    let command = SessionsCommand::parse(vec!["--include-empty-sessions".into()])
+        .expect("empty sessions can be explicitly included in the picker");
+    assert!(command.include_empty_sessions);
+
+    let default_command =
+        SessionsCommand::parse(vec!["--list".into()]).expect("default list command should parse");
+    assert!(!default_command.include_empty_sessions);
+}
+
+#[test]
 fn positional_session_id_after_an_option_is_rejected_instead_of_forwarded() {
     let error = SessionsCommand::parse(vec![
         "--local".into(),

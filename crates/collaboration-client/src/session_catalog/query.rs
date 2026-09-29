@@ -59,6 +59,7 @@ pub struct SessionCatalogQuery {
     pub source: SessionCatalogSource,
     pub sort: SessionCatalogSort,
     pub last: bool,
+    pub include_empty_sessions: bool,
     pub limit: usize,
     pub search: String,
     pub repository_identity: Option<RepositoryIdentity>,
@@ -138,7 +139,8 @@ pub async fn load_stored_sessions(
                 updated_at_ms: row.get("updated_at_ms"),
                 recency_at_ms: row.get("recency_at_ms"),
             };
-            if !session_record_matches_root(&record, &root_filter)
+            if (!query.include_empty_sessions && record.first_user_message.is_none())
+                || !session_record_matches_root(&record, &root_filter)
                 || !record.matches_search(&search_expression)
             {
                 continue;
@@ -337,6 +339,7 @@ pub(super) fn session_record_page_query(
         source,
         sort,
         last: false,
+        include_empty_sessions: false,
         limit: 100,
         search: String::new(),
         repository_identity: None,

@@ -78,6 +78,7 @@ mod tests {
             view: NativeSessionView::Stored,
             scope: collaboration_protocol::NativeSessionScope::Any,
             source: collaboration_protocol::NativeSessionSource::All,
+            include_empty_sessions: false,
             query: None,
             page_size: 100,
             cursor,
@@ -114,6 +115,22 @@ mod tests {
                 URL_SAFE_NO_PAD.encode(serde_json::to_vec(&malformed).unwrap()),
             )))
             .await;
+        let mut changed_filter_client = ControlClient::connect(&root, "stored-journal-test", "1")
+            .await
+            .unwrap();
+        let changed_empty_filter = changed_filter_client
+            .list_sessions(NativeSessionListParams {
+                endpoint: endpoint.clone(),
+                view: NativeSessionView::Stored,
+                scope: collaboration_protocol::NativeSessionScope::Any,
+                source: collaboration_protocol::NativeSessionSource::All,
+                include_empty_sessions: true,
+                query: None,
+                page_size: 100,
+                cursor: first.next_cursor.clone(),
+            })
+            .await;
+        changed_filter_client.close().await.unwrap();
         client.close().await.unwrap();
         stop.cancel();
         server.await.unwrap().unwrap();
@@ -186,6 +203,10 @@ mod tests {
             invalid_cursor,
             Err(ClientError::Rejected { code: -32602, .. })
         ));
+        assert!(matches!(
+            changed_empty_filter,
+            Err(ClientError::Rejected { code: -32602, .. })
+        ));
     }
 
     /// Pages one stored listing to exhaustion through the real Control service.
@@ -241,6 +262,7 @@ mod tests {
                     view: NativeSessionView::Stored,
                     scope: scope.clone(),
                     source,
+                    include_empty_sessions: false,
                     query: query.map(str::to_owned),
                     page_size,
                     cursor: cursor.take(),
@@ -343,8 +365,8 @@ mod tests {
                 250,
             ),
         ] {
-            sqlx::query("INSERT INTO threads (id,cwd,model,reasoning_effort,source,thread_source,git_origin_url,name,title,updated_at_ms,recency_at_ms,archived) VALUES (?, ?, 'gpt-5.6-sol', ?, 'cli', ?, ?, ?, 'derived', ?, ?, 0)")
-                .bind(id).bind(cwd).bind(effort).bind(thread_source).bind(origin).bind(name).bind(time).bind(time)
+            sqlx::query("INSERT INTO threads (id,cwd,model,reasoning_effort,source,thread_source,git_origin_url,name,title,first_user_message,updated_at_ms,recency_at_ms,archived) VALUES (?, ?, 'gpt-5.6-sol', ?, 'cli', ?, ?, ?, 'derived', ?, ?, ?, 0)")
+                .bind(id).bind(cwd).bind(effort).bind(thread_source).bind(origin).bind(name).bind(format!("first user message for {id}")).bind(time).bind(time)
                 .execute(&pool).await.unwrap();
         }
         pool.close().await;

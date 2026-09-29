@@ -79,6 +79,7 @@ fn delivery(mode: MessageDelivery) -> DeliveryRequest {
         message: MessageContent::HumanUser {
             text: MessageText::try_from("hello Claude".to_owned()).expect("message text"),
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::try_from("peer-test-correlation".to_owned())
@@ -135,7 +136,7 @@ async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
         .as_str()
         .expect("peer message content");
     assert!(content.contains(&serde_json::to_string(&sender).expect("sender JSON")));
-    assert!(content.contains("message_send"));
+    assert!(content.contains("message reply --text <TEXT>"));
     let records = evidence.0.lock().await;
     assert_eq!(records.len(), 2);
     assert!(
@@ -301,6 +302,7 @@ async fn peer_reconciliation_rejects_evidence_for_another_session() {
         .reconcile_attempt(AttemptReconciliationContext {
             target: target(),
             message: delivery(MessageDelivery::Auto).message,
+            header_context: collaboration_protocol::MessageHeaderContext::default(),
             mode: MessageDelivery::Auto,
             recorded,
         })

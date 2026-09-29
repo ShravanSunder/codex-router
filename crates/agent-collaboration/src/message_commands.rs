@@ -1,15 +1,16 @@
 //! Descriptive message submission through the public Rust client.
 use crate::message_input_arguments::{SendArguments, prepare};
 use clap::{Parser, Subcommand};
-use collaboration_client::protocol::{DeliveryOutcome, DeliveryReceipt};
+use collaboration_client::protocol::{DeliveryOutcome, DeliveryReceipt, MessageText};
 use collaboration_client::{
-    ClientError, ControlClient, MessageSendError, MessageSendRequest, OperationEffect,
-    OperationFailure, OperationFailureKind,
+    ClientError, ControlClient, MessageReplyError, MessageReplyRequest, MessageSendError,
+    MessageSendRequest, OperationEffect, OperationFailure, OperationFailureKind,
 };
 use serde_json::json;
 use std::{
     ffi::OsString,
-    io::{self, Write},
+    io::{self, Read, Write},
+    path::PathBuf,
 };
 
 #[derive(Parser)]
@@ -25,6 +26,25 @@ struct MessageArguments {
 enum MessageCommand {
     /// Submit information. Acceptance is not completion or a peer reply.
     Send(SendArguments),
+    /// Reply to the latest accepted Agent communication delivered to this session.
+    Reply(ReplyArguments),
+}
+
+#[derive(clap::Args)]
+struct ReplyArguments {
+    #[arg(
+        long,
+        required_unless_present = "text_file",
+        conflicts_with = "text_file"
+    )]
+    text: Option<String>,
+    /// Read reply text from a file; '-' reads stdin. Content is never shell-interpolated.
+    #[arg(long)]
+    text_file: Option<PathBuf>,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
 }
 pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
     let parsed =
@@ -32,7 +52,10 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
             Ok(value) => value,
             Err(code) => return code,
         };
-    let MessageCommand::Send(args) = parsed.command;
+    let args = match parsed.command {
+        MessageCommand::Send(args) => args,
+        MessageCommand::Reply(args) => return run_message_reply(args),
+    };
     let machine = args.json;
     let prepared = prepare(&args);
     let (directory, prepared) = match prepared {
@@ -82,6 +105,125 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
         result
     });
     report(outcome, machine)
+}
+
+fn run_message_reply(args: ReplyArguments) -> i32 {
+    let machine = args.json;
+    let reply_text = match read_reply_text(&args) {
+        Ok(text) => text,
+        Err(message) => {
+            return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
+        }
+    };
+    let harness_identity = match crate::current_session_identity::read_harness_session_identity() {
+        Ok(identity) => identity,
+        Err(error) => {
+            return crate::endpoint_commands::report_failure(
+                "currentSessionUnavailable",
+                &error.to_string(),
+                2,
+                machine,
+            );
+        }
+    };
+    let directory = match crate::endpoint_commands::resolve_directory(args.service_directory) {
+        Ok(directory) => directory,
+        Err(message) => {
+            return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return crate::endpoint_commands::report_failure(
+                "unavailable",
+                "Client runtime unavailable",
+                3,
+                machine,
+            );
+        }
+    };
+    let outcome = runtime.block_on(async {
+        let mut client =
+            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
+                .await
+                .map_err(|error| MessageReplyError::Preparation(Box::new(error)))?;
+        let caller = harness_identity
+            .session_ref(&client.identity().service_id)
+            .map_err(|_| {
+                MessageReplyError::Preparation(Box::new(ClientError::InvalidRequest(
+                    "invalid caller session identity",
+                )))
+            })?;
+        let result = client
+            .reply_to_latest_agent_sender(MessageReplyRequest {
+                caller,
+                text: reply_text,
+            })
+            .await;
+        let _closed = client.close().await;
+        result
+    });
+    report_reply(outcome, machine)
+}
+
+fn read_reply_text(args: &ReplyArguments) -> Result<MessageText, String> {
+    let text = if let Some(text) = &args.text {
+        text.clone()
+    } else {
+        let path = args
+            .text_file
+            .as_ref()
+            .ok_or_else(|| "Message content required".to_owned())?;
+        let mut reader: Box<dyn Read> = if path.as_os_str() == "-" {
+            Box::new(io::stdin())
+        } else {
+            Box::new(std::fs::File::open(path).map_err(|_| "Message file unavailable")?)
+        };
+        let mut text = String::new();
+        reader
+            .by_ref()
+            .take((collaboration_client::protocol::MAX_CONTROL_FRAME_BYTES + 1) as u64)
+            .read_to_string(&mut text)
+            .map_err(|_| "Cannot read UTF-8 message")?;
+        text
+    };
+    text.try_into()
+        .map_err(|_| "Invalid or oversized message text".to_owned())
+}
+
+fn report_reply(result: Result<DeliveryReceipt, MessageReplyError>, machine: bool) -> i32 {
+    let (record, exit_code) = match result {
+        Ok(receipt) => {
+            let exit_code = receipt_exit_status(&receipt.outcome);
+            (
+                crate::endpoint_commands::result_envelope(serde_json::json!(receipt)),
+                exit_code,
+            )
+        }
+        Err(error) => {
+            let (failure, caller) = error.into_operation_failure_and_caller();
+            let exit_code = operation_failure_exit(&failure);
+            (
+                serde_json::json!({"kind":"error","caller":caller,"error":failure}),
+                exit_code,
+            )
+        }
+    };
+    let written = if machine {
+        writeln!(io::stdout(), "{record}")
+    } else {
+        writeln!(
+            io::stdout(),
+            "{}",
+            serde_json::to_string_pretty(&record)
+                .unwrap_or_else(|_| "Output unavailable".to_owned())
+        )
+    };
+    if written.is_err() { 5 } else { exit_code }
 }
 
 fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i32 {
@@ -166,7 +308,10 @@ fn operation_failure_exit(failure: &OperationFailure) -> i32 {
             2
         }
         OperationFailureKind::Rejected
-            if failure.service_kind.as_deref() == Some("unavailable") =>
+            if matches!(
+                failure.service_kind.as_deref(),
+                Some("unavailable" | "replyUnavailable")
+            ) =>
         {
             3
         }
@@ -175,6 +320,51 @@ fn operation_failure_exit(failure: &OperationFailure) -> i32 {
         OperationFailureKind::UnsupportedCapability | OperationFailureKind::ProtocolViolation => 2,
         OperationFailureKind::Unavailable if failure.effect == OperationEffect::None => 3,
         _ => 4,
+    }
+}
+
+#[cfg(test)]
+mod reply_argument_tests {
+    use super::{MessageArguments, MessageCommand, ReplyArguments};
+    use clap::Parser;
+
+    #[test]
+    fn message_reply_requires_text_or_a_text_file() {
+        let text_request = MessageArguments::try_parse_from([
+            "agent-collaboration message",
+            "reply",
+            "--text",
+            "hello",
+        ])
+        .expect("text reply arguments parse");
+        assert!(matches!(
+            text_request.command,
+            MessageCommand::Reply(ReplyArguments {
+                text: Some(ref text),
+                text_file: None,
+                ..
+            }) if text == "hello"
+        ));
+
+        let file_request = MessageArguments::try_parse_from([
+            "agent-collaboration message",
+            "reply",
+            "--text-file",
+            "reply.md",
+        ])
+        .expect("file reply arguments parse");
+        assert!(matches!(
+            file_request.command,
+            MessageCommand::Reply(ReplyArguments {
+                text: None,
+                text_file: Some(_),
+                ..
+            })
+        ));
+
+        assert!(
+            MessageArguments::try_parse_from(["agent-collaboration message", "reply"]).is_err()
+        );
     }
 }
 
