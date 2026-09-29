@@ -174,6 +174,19 @@ pub(super) const ACCOUNT_ROUTING_POLICIES: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 1),
     column!("weekly_quota_floor_basis_points", "INTEGER", true, 0),
 ];
+pub(super) const ACCOUNT_WINDOW_OBSERVATIONS: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("window_kind", "TEXT", true, 2),
+    column!("remaining_basis_points", "INTEGER", true, 0),
+    column!("reset_unix_seconds", "INTEGER", false, 0),
+    column!("observation_started_at", "INTEGER", true, 0),
+];
+pub(super) const ACCOUNT_WINDOW_REJECTIONS: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("window_kind", "TEXT", true, 2),
+    column!("rejected_at", "INTEGER", true, 0),
+    column!("reported_reset", "INTEGER", false, 0),
+];
 pub(super) const SESSION_ACCOUNT_AFFINITIES: &[ColumnSpec] = &[
     column!("session_id", "TEXT", true, 1),
     column!("account_id", "TEXT", true, 0),

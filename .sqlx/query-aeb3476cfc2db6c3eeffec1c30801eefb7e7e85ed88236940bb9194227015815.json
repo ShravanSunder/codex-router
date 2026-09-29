@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO account_window_rejections (\n                account_id, window_kind, rejected_at, reported_reset\n             )\n             VALUES (?1, ?2, ?3, ?4)\n             ON CONFLICT(account_id, window_kind) DO UPDATE SET\n                rejected_at = excluded.rejected_at,\n                reported_reset = excluded.reported_reset\n             WHERE excluded.rejected_at > account_window_rejections.rejected_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "aeb3476cfc2db6c3eeffec1c30801eefb7e7e85ed88236940bb9194227015815"
+}

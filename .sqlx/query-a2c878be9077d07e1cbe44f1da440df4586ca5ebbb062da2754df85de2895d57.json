@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM account_window_rejections\n                      WHERE account_id = ?1\n                        AND window_kind = ?2\n                        AND rejected_at < ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a2c878be9077d07e1cbe44f1da440df4586ca5ebbb062da2754df85de2895d57"
+}
