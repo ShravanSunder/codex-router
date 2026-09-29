@@ -4,10 +4,12 @@ use super::SelectionAccountRestriction;
 use super::SelectionAccountState;
 use super::SelectionHoldReason;
 use super::SelectionOutcome;
+use super::SelectionWindowRejection;
 use super::UnavailableReason;
 use super::classify_unavailable_reason;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::WindowKind;
 
 fn account_id(label: &str) -> AccountId {
     AccountId::new(format!("acct_{label}"))
@@ -15,12 +17,41 @@ fn account_id(label: &str) -> AccountId {
 }
 
 fn exhausted_account(label: &str, resets: Vec<Option<HeadroomTimestamp>>) -> SelectionAccountState {
+    let rejections = resets
+        .into_iter()
+        .enumerate()
+        .map(|(index, reset)| {
+            SelectionWindowRejection::new(
+                if index == 0 {
+                    WindowKind::FiveHour
+                } else {
+                    WindowKind::Weekly
+                },
+                100,
+                reset,
+            )
+        })
+        .collect();
     SelectionAccountState::enabled(
         account_id(label),
         Provider::Claude,
-        SelectionAccountRestriction::Exhausted {
-            reported_resets: resets,
-        },
+        SelectionAccountRestriction::Exhausted,
+        Vec::new(),
+        rejections,
+    )
+}
+
+fn enabled_account_state(
+    label: &str,
+    provider: Provider,
+    restriction: SelectionAccountRestriction,
+) -> SelectionAccountState {
+    SelectionAccountState::enabled(
+        account_id(label),
+        provider,
+        restriction,
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -35,13 +66,13 @@ fn unavailable_reasons_follow_the_r12_order() {
     assert_eq!(no_accounts.r12_order(), 1);
 
     let accounts_needing_login = [
-        SelectionAccountState::enabled(
-            account_id("login_a"),
+        enabled_account_state(
+            "login_a",
             Provider::Claude,
             SelectionAccountRestriction::NeedsLogin,
         ),
-        SelectionAccountState::enabled(
-            account_id("login_b"),
+        enabled_account_state(
+            "login_b",
             Provider::Claude,
             SelectionAccountRestriction::NeedsLogin,
         ),
@@ -71,8 +102,8 @@ fn unavailable_reasons_follow_the_r12_order() {
         Provider::Claude,
         CredentialStoreAvailability::Available,
         &[
-            SelectionAccountState::enabled(
-                account_id("needs_login"),
+            enabled_account_state(
+                "needs_login",
                 Provider::Claude,
                 SelectionAccountRestriction::NeedsLogin,
             ),
@@ -101,15 +132,15 @@ fn unavailable_reasons_follow_the_r12_order() {
         Provider::Claude,
         CredentialStoreAvailability::Available,
         &[
-            SelectionAccountState::enabled(
-                account_id("floor"),
+            enabled_account_state(
+                "floor",
                 Provider::Claude,
                 SelectionAccountRestriction::HeldByFloor {
                     reason: SelectionHoldReason::HardFloor,
                 },
             ),
-            SelectionAccountState::enabled(
-                account_id("stale_week"),
+            enabled_account_state(
+                "stale_week",
                 Provider::Claude,
                 SelectionAccountRestriction::HeldByFloor {
                     reason: SelectionHoldReason::WaitingForFreshWeeklyObservation,
@@ -149,8 +180,8 @@ fn unavailable_classification_filters_other_providers_and_disabled_accounts() {
         Provider::Claude,
         CredentialStoreAvailability::Available,
         &[
-            SelectionAccountState::enabled(
-                account_id("openai"),
+            enabled_account_state(
+                "openai",
                 Provider::Openai,
                 SelectionAccountRestriction::Available,
             ),
@@ -162,12 +193,51 @@ fn unavailable_classification_filters_other_providers_and_disabled_accounts() {
 }
 
 #[test]
+fn reason_five_lists_only_floor_and_missing_weekly_evidence_causes() {
+    let reason = classify_unavailable_reason(
+        Provider::Claude,
+        CredentialStoreAvailability::Available,
+        &[
+            enabled_account_state(
+                "available_unknown_window",
+                Provider::Claude,
+                SelectionAccountRestriction::Available,
+            ),
+            enabled_account_state(
+                "hard_floor",
+                Provider::Claude,
+                SelectionAccountRestriction::HeldByFloor {
+                    reason: SelectionHoldReason::HardFloor,
+                },
+            ),
+            enabled_account_state(
+                "waiting_weekly",
+                Provider::Claude,
+                SelectionAccountRestriction::HeldByFloor {
+                    reason: SelectionHoldReason::WaitingForFreshWeeklyObservation,
+                },
+            ),
+        ],
+    );
+
+    let UnavailableReason::HeldByFloors { accounts } = reason else {
+        panic!("floor-held account reasons should take R12 slot five");
+    };
+    assert_eq!(accounts.len(), 2);
+    assert!(
+        accounts
+            .iter()
+            .all(|account| { account.account_id() != &account_id("available_unknown_window") })
+    );
+}
+
+#[test]
 fn migration_incomplete_uses_the_second_r12_reason_slot() {
     let reason = classify_unavailable_reason(
         Provider::Claude,
         CredentialStoreAvailability::MigrationIncomplete,
-        &[SelectionAccountState::enabled(
-            account_id("ready"),
+        &[enabled_account_state(
+            "ready",
             Provider::Claude,
             SelectionAccountRestriction::Available,
         )],
@@ -201,19 +271,19 @@ fn unavailable_credential_store_overrides_an_assessable_candidate() {
             .with_reset_unix_seconds(now_unix_seconds + V1_WEEKLY_WINDOW_SECONDS)
             .with_observed_unix_seconds(now_unix_seconds),
     ];
-    let assessment = assess_route_band(
-        BurnDownRouteBandAssessmentInput::new(
-            RouteBand::Responses,
-            now_unix_seconds,
-            vec![
-                BurnDownAccountInput::new(account_id.clone(), "ready", windows)
-                    .with_provider(Provider::Claude),
-            ],
-        )
-        .with_route_profile(CLAUDE_MESSAGES),
-    );
-    let account_states = [SelectionAccountState::enabled(
-        account_id.clone(),
+    let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+        RouteBand::Responses,
+        now_unix_seconds,
+        CLAUDE_MESSAGES.clone(),
+        vec![BurnDownAccountInput::new(
+            account_id.clone(),
+            "ready",
+            Provider::Claude,
+            windows,
+        )],
+    ));
+    let account_states = [enabled_account_state(
+        "credential_store_unavailable",
         Provider::Claude,
         SelectionAccountRestriction::Available,
     )];

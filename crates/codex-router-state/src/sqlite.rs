@@ -833,16 +833,28 @@ impl AsyncSqliteStateStore {
                     mark_selector_windows_stale(&mut windows);
                 }
             }
+            let (window_observations, window_rejections) = if account.provider() == Provider::Claude
+            {
+                (
+                    self.window_observations_for_account(account.account_id())
+                        .await?,
+                    self.window_rejections_for_account(account.account_id())
+                        .await?,
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
             inputs.push(
                 SelectorQuotaInput::new(
                     account.account_id().clone(),
                     account.label(),
+                    account.provider(),
                     account.status(),
                     account.active_credential_generation(),
                     route_band,
                     windows,
                 )
-                .with_provider(account.provider()),
+                .with_window_state(window_observations, window_rejections),
             );
         }
 
@@ -3592,17 +3604,15 @@ impl SqliteStateStore {
             if selector_windows_are_stale(&windows, refresh_status.as_ref(), now_unix_seconds) {
                 mark_selector_windows_stale(&mut windows);
             }
-            inputs.push(
-                SelectorQuotaInput::new(
-                    account.account_id().clone(),
-                    account.label(),
-                    account.status(),
-                    account.active_credential_generation(),
-                    route_band,
-                    windows,
-                )
-                .with_provider(account.provider()),
-            );
+            inputs.push(SelectorQuotaInput::new(
+                account.account_id().clone(),
+                account.label(),
+                account.provider(),
+                account.status(),
+                account.active_credential_generation(),
+                route_band,
+                windows,
+            ));
         }
 
         Ok(inputs)

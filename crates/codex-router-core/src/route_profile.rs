@@ -1,5 +1,7 @@
 //! Typed policy properties for one provider route.
 
+use std::borrow::Cow;
+
 use crate::provider::Provider;
 
 /// Identity field that keeps a server-side continuation on its original account.
@@ -83,7 +85,9 @@ pub enum WindowRule {
     /// Preserve the existing OpenAI selection behavior across its quota windows.
     LegacyOpenAi,
     /// Move an account to reserve after its used percentage reaches this threshold.
-    NearFullReserve { percent: u8 },
+    NearFullReserve {
+        percent: ClaudeFiveHourReservePercent,
+    },
     /// Move an account to reserve this many basis points above its weekly floor.
     WeeklyFloor { early_switch_bps: u16 },
 }
@@ -97,8 +101,30 @@ pub struct WindowPolicy {
     pub rule: WindowRule,
 }
 
-/// Typed selection and attempt behavior for one provider route.
+/// Validated Claude five-hour usage percentage at which an account enters Reserve.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClaudeFiveHourReservePercent(u8);
+
+impl ClaudeFiveHourReservePercent {
+    /// Creates a reserve percentage in the supported `1..=99` range.
+    #[must_use]
+    pub const fn new(percent: u8) -> Option<Self> {
+        if percent >= 1 && percent <= 99 {
+            Some(Self(percent))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the configured whole-number percentage.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// Typed selection and attempt behavior for one provider route.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteProfile {
     /// Stable route-profile name.
     pub name: &'static str,
@@ -113,7 +139,21 @@ pub struct RouteProfile {
     /// Attempt strategy for this route.
     pub attempt_policy: AttemptPolicy,
     /// Quota windows considered by this route.
-    pub windows: &'static [WindowPolicy],
+    pub windows: Cow<'static, [WindowPolicy]>,
+}
+
+impl RouteProfile {
+    /// Returns a Claude profile using the supplied validated five-hour Reserve threshold.
+    #[must_use]
+    pub fn with_claude_five_hour_reserve_percent(
+        mut self,
+        percent: ClaudeFiveHourReservePercent,
+    ) -> Self {
+        if self.provider == Provider::Claude {
+            self.windows = Cow::Owned(claude_window_policies_for_percent(percent).to_vec());
+        }
+        self
+    }
 }
 
 const OPENAI_WINDOWS: [WindowPolicy; 1] = [WindowPolicy {
@@ -121,12 +161,15 @@ const OPENAI_WINDOWS: [WindowPolicy; 1] = [WindowPolicy {
     rule: WindowRule::LegacyOpenAi,
 }];
 
-/// Default percentage of five-hour quota use at which a Claude account becomes reserve.
-pub const DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT: u8 = 95;
+/// Default percentage of five-hour quota use at which a Claude account becomes Reserve.
+pub const DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT: ClaudeFiveHourReservePercent =
+    ClaudeFiveHourReservePercent(95);
 
 /// Returns Claude's two selection-window inputs for one configured near-full threshold.
 #[must_use]
-pub const fn claude_window_policies_for_percent(percent: u8) -> [WindowPolicy; 2] {
+pub const fn claude_window_policies_for_percent(
+    percent: ClaudeFiveHourReservePercent,
+) -> [WindowPolicy; 2] {
     [
         WindowPolicy {
             kind: WindowKind::FiveHour,
@@ -154,7 +197,7 @@ pub const RESPONSES_WEBSOCKET: RouteProfile = RouteProfile {
     switch_point: SwitchPoint::TurnBoundary,
     pin_renewal: PinRenewal::OnActivity,
     attempt_policy: AttemptPolicy::Reconnect,
-    windows: &OPENAI_WINDOWS,
+    windows: Cow::Borrowed(&OPENAI_WINDOWS),
 };
 
 /// Current OpenAI Responses HTTP routing behavior.
@@ -167,7 +210,7 @@ pub const RESPONSES_HTTP: RouteProfile = RouteProfile {
     switch_point: SwitchPoint::NextRequest,
     pin_renewal: PinRenewal::OnActivity,
     attempt_policy: AttemptPolicy::ReplayAcrossEnabled,
-    windows: &OPENAI_WINDOWS,
+    windows: Cow::Borrowed(&OPENAI_WINDOWS),
 };
 
 /// Claude Messages routing behavior.
@@ -178,13 +221,14 @@ pub const CLAUDE_MESSAGES: RouteProfile = RouteProfile {
     switch_point: SwitchPoint::NextRequest,
     pin_renewal: PinRenewal::OnSuccess,
     attempt_policy: AttemptPolicy::AtMostTwo,
-    windows: &CLAUDE_WINDOW_POLICIES,
+    windows: Cow::Borrowed(&CLAUDE_WINDOW_POLICIES),
 };
 
 #[cfg(test)]
 mod tests {
     use super::AttemptPolicy;
     use super::CLAUDE_MESSAGES;
+    use super::ClaudeFiveHourReservePercent;
     use super::ContinuationModel;
     use super::HardPinKey;
     use super::PinRenewal;
@@ -250,11 +294,13 @@ mod tests {
         assert_eq!(CLAUDE_MESSAGES.pin_renewal, PinRenewal::OnSuccess);
         assert_eq!(CLAUDE_MESSAGES.attempt_policy, AttemptPolicy::AtMostTwo);
         assert_eq!(
-            CLAUDE_MESSAGES.windows,
+            CLAUDE_MESSAGES.windows.as_ref(),
             &[
                 WindowPolicy {
                     kind: WindowKind::FiveHour,
-                    rule: WindowRule::NearFullReserve { percent: 95 },
+                    rule: WindowRule::NearFullReserve {
+                        percent: super::DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT,
+                    },
                 },
                 WindowPolicy {
                     kind: WindowKind::Weekly,
@@ -273,5 +319,19 @@ mod tests {
         assert_eq!(WindowKind::Weekly.as_str(), "weekly");
         assert_eq!(WindowKind::parse("weekly"), Some(WindowKind::Weekly));
         assert_eq!(WindowKind::parse("future_window"), None);
+    }
+
+    #[test]
+    fn claude_five_hour_reserve_percent_accepts_only_one_through_ninety_nine() {
+        assert_eq!(
+            ClaudeFiveHourReservePercent::new(1).map(ClaudeFiveHourReservePercent::get),
+            Some(1)
+        );
+        assert_eq!(
+            ClaudeFiveHourReservePercent::new(99).map(ClaudeFiveHourReservePercent::get),
+            Some(99)
+        );
+        assert_eq!(ClaudeFiveHourReservePercent::new(0), None);
+        assert_eq!(ClaudeFiveHourReservePercent::new(100), None);
     }
 }

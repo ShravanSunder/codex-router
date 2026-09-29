@@ -2,7 +2,7 @@
 
 ## Unreleased - 2026-09-24
 
-- Add `serve --claude-five-hour-reserve-percent` to configure when Claude's five-hour window enters the reserve tier; defaults to 95 percent and accepts values from 0 to 100.
+- Add `serve --claude-five-hour-reserve-percent` to configure when Claude's five-hour window enters the reserve tier; defaults to 95 percent and accepts values from 1 to 99.
 - Add provider identity to accounts and session pins, and migrate existing rows to OpenAI. The state migration blocks downgrade because older binaries reject its unknown migration version. Restart `serve` after upgrading; an older running process still writes pins with the previous schema and those upserts fail.
 - Let `account login` create a new credential generation for the same account and provider; refuse a label owned by a different account or provider.
 - Set Codex session-pin idle expiry to 75 minutes by default, configurable with `serve --session-pin-idle-ttl-seconds`; show each account's provider in `account list`.

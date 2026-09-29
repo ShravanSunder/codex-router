@@ -3,6 +3,7 @@
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::WindowKind;
+use codex_router_selection::burn_down::QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
 
 use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
@@ -23,19 +24,20 @@ pub struct WindowObservationProps {
 }
 
 impl WindowObservationProps {
-    /// Creates observation properties before optional reset metadata is attached.
+    /// Creates observation properties with the required poll or request start time.
     #[must_use]
     pub fn new(
         account_id: AccountId,
         window_kind: WindowKind,
         remaining_basis_points: u32,
+        observation_started_at: u64,
     ) -> Self {
         Self {
             account_id,
             window_kind,
             remaining_basis_points,
             reset_unix_seconds: None,
-            observation_started_at: 0,
+            observation_started_at,
         }
     }
 
@@ -43,13 +45,6 @@ impl WindowObservationProps {
     #[must_use]
     pub const fn with_reset_unix_seconds(mut self, reset_unix_seconds: u64) -> Self {
         self.reset_unix_seconds = Some(reset_unix_seconds);
-        self
-    }
-
-    /// Sets when the poll or request observation began.
-    #[must_use]
-    pub const fn with_observation_started_at(mut self, observation_started_at: u64) -> Self {
-        self.observation_started_at = observation_started_at;
         self
     }
 }
@@ -194,8 +189,7 @@ impl AsyncSqliteStateStore {
     pub async fn record_window_observation(
         &self,
         observation: &WindowObservation,
-        applied_at_unix_seconds: u64,
-        freshness_interval_seconds: u64,
+        application_clock: impl FnOnce() -> u64,
     ) -> Result<bool, StateStoreError> {
         ensure_claude_account(&self.pool, observation.account_id()).await?;
         let account_id = observation.account_id().as_str();
@@ -230,26 +224,26 @@ impl AsyncSqliteStateStore {
         .map_err(sqlx_error)?;
         let observation_was_newest = write_result.rows_affected() > 0;
 
-        let observation_age_is_fresh = applied_at_unix_seconds
-            >= observation.observation_started_at()
-            && applied_at_unix_seconds.saturating_sub(observation.observation_started_at())
-                <= freshness_interval_seconds;
-        if observation_was_newest
-            && observation.remaining_basis_points() > 0
-            && observation_age_is_fresh
-        {
-            sqlx::query!(
-                "DELETE FROM account_window_rejections
-                  WHERE account_id = ?1
-                    AND window_kind = ?2
-                    AND rejected_at < ?3",
-                account_id,
-                window_kind,
-                observation_started_at,
-            )
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
+        if observation_was_newest && observation.remaining_basis_points() > 0 {
+            let applied_at_unix_seconds = application_clock();
+            let observation_age_is_fresh = applied_at_unix_seconds
+                >= observation.observation_started_at()
+                && applied_at_unix_seconds.saturating_sub(observation.observation_started_at())
+                    <= QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
+            if observation_age_is_fresh {
+                sqlx::query!(
+                    "DELETE FROM account_window_rejections
+                      WHERE account_id = ?1
+                        AND window_kind = ?2
+                        AND rejected_at < ?3",
+                    account_id,
+                    window_kind,
+                    observation_started_at,
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(sqlx_error)?;
+            }
         }
 
         transaction.commit().await.map_err(sqlx_error)?;
@@ -336,9 +330,9 @@ impl AsyncSqliteStateStore {
                     account_id.clone(),
                     window_kind,
                     remaining_basis_points,
+                    observation_started_at,
                 )
-                .with_reset_unix_seconds_option(reset_unix_seconds)
-                .with_observation_started_at(observation_started_at),
+                .with_reset_unix_seconds_option(reset_unix_seconds),
             )?);
         }
         Ok(observations)

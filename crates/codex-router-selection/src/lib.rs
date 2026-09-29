@@ -14,6 +14,10 @@ pub mod weighted_deficit;
 #[path = "window_policy_selection_tests.rs"]
 mod window_policy_selection_tests;
 
+#[cfg(test)]
+#[path = "openai_legacy_oracle_tests.rs"]
+mod openai_legacy_oracle_tests;
+
 /// Returns this crate's package name.
 #[must_use]
 pub const fn package_name() -> &'static str {

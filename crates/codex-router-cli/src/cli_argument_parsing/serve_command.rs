@@ -9,10 +9,11 @@ use super::super::DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS;
 use super::super::default_router_root;
 use super::ArgumentParser;
 use super::parse_nonzero_u64_option;
-use super::parse_percent_option;
 use super::parse_port;
 use super::parse_u64_option;
 use super::parse_usize_option;
+use codex_router_core::route_profile::ClaudeFiveHourReservePercent;
+use codex_router_core::route_profile::DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -27,7 +28,7 @@ pub(crate) struct ServeCommand {
     pub(crate) max_snapshot_age_seconds: u64,
     pub(crate) session_pin_idle_ttl_seconds: u64,
     pub(crate) quota_refresh_interval_seconds: u64,
-    pub(crate) claude_five_hour_reserve_percent: u8,
+    pub(crate) claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
     pub(crate) background_quota_refresh_enabled: bool,
     pub(crate) require_local_token: bool,
     pub(crate) max_connections: usize,
@@ -70,9 +71,9 @@ impl ServeCommand {
             quota_refresh_interval_seconds: options
                 .quota_refresh_interval_seconds
                 .unwrap_or(DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS),
-            claude_five_hour_reserve_percent: options.claude_five_hour_reserve_percent.unwrap_or(
-                codex_router_core::route_profile::DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT,
-            ),
+            claude_five_hour_reserve_percent: options
+                .claude_five_hour_reserve_percent
+                .unwrap_or(DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT),
             background_quota_refresh_enabled: !options.disable_background_quota_refresh,
             require_local_token: options.require_local_token,
             max_connections: options.max_connections.unwrap_or(usize::MAX),
@@ -93,7 +94,7 @@ struct ServeCommandOptions {
     max_snapshot_age_seconds: Option<u64>,
     session_pin_idle_ttl_seconds: Option<NonZeroU64>,
     quota_refresh_interval_seconds: Option<u64>,
-    claude_five_hour_reserve_percent: Option<u8>,
+    claude_five_hour_reserve_percent: Option<ClaudeFiveHourReservePercent>,
     disable_background_quota_refresh: bool,
     require_local_token: bool,
     max_connections: Option<usize>,
@@ -168,10 +169,11 @@ impl ServeCommandOptions {
                 }
                 "--claude-five-hour-reserve-percent" => {
                     let value = parser.next_required_value("--claude-five-hour-reserve-percent")?;
-                    options.claude_five_hour_reserve_percent = Some(parse_percent_option(
-                        "--claude-five-hour-reserve-percent",
-                        &value,
-                    )?);
+                    options.claude_five_hour_reserve_percent =
+                        Some(parse_claude_five_hour_reserve_percent(
+                            "--claude-five-hour-reserve-percent",
+                            &value,
+                        )?);
                 }
                 "--disable-background-quota-refresh" => {
                     options.disable_background_quota_refresh = true;
@@ -202,4 +204,22 @@ impl ServeCommandOptions {
 
         Ok(options)
     }
+}
+
+fn parse_claude_five_hour_reserve_percent(
+    option: &'static str,
+    value: &str,
+) -> Result<ClaudeFiveHourReservePercent, CliError> {
+    let percent = value
+        .parse::<u8>()
+        .map_err(|_| CliError::InvalidNumericOption {
+            option,
+            value: value.to_owned(),
+        })?;
+    ClaudeFiveHourReservePercent::new(percent).ok_or_else(|| CliError::NumericOptionOutOfRange {
+        option,
+        value: value.to_owned(),
+        minimum: 1,
+        maximum: 99,
+    })
 }

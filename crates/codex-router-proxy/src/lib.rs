@@ -131,6 +131,7 @@ mod tests {
     use codex_router_core::local_auth::LocalRouterTokenRecord;
     use codex_router_core::provider::Provider;
     use codex_router_core::redaction::SecretString;
+    use codex_router_core::route_profile::RESPONSES_HTTP;
     use codex_router_core::routes::RouteBand;
     use codex_router_quota::snapshot::SnapshotFreshness;
     use codex_router_secret_store::SecretStore;
@@ -4200,6 +4201,7 @@ mod tests {
             let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
                 RouteBand::Responses,
                 now,
+                RESPONSES_HTTP.clone(),
                 projection.accounts().to_vec(),
             ));
             projection_trace.push(
@@ -9857,6 +9859,7 @@ mod tests {
             let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
                 RouteBand::Responses,
                 now_unix_seconds,
+                RESPONSES_HTTP.clone(),
                 projection.accounts().to_vec(),
             ));
             let account = assessment

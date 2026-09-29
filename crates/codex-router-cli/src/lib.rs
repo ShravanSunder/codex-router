@@ -339,7 +339,7 @@ mod session_pin_idle_ttl_tests {
     }
 
     #[test]
-    fn claude_five_hour_reserve_percent_reaches_runtime_window_policy() {
+    fn claude_five_hour_reserve_percent_reaches_route_profile_configuration() {
         let command = match CliCommand::parse([
             OsString::from("serve"),
             OsString::from("--claude-five-hour-reserve-percent"),
@@ -361,7 +361,7 @@ mod session_pin_idle_ttl_tests {
             command.secret_root,
         )
         .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
-        .with_claude_five_hour_reserve_percent(90);
+        .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
 
         assert_eq!(runtime_config, expected_config);
     }

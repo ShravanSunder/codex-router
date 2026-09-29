@@ -12,11 +12,9 @@ use crate::selection_outcome::Tier;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::CLAUDE_MESSAGES;
+use codex_router_core::route_profile::ClaudeFiveHourReservePercent;
 use codex_router_core::route_profile::RESPONSES_HTTP;
 use codex_router_core::route_profile::RESPONSES_WEBSOCKET;
-use codex_router_core::route_profile::WindowKind;
-use codex_router_core::route_profile::WindowPolicy;
-use codex_router_core::route_profile::WindowRule;
 use codex_router_core::routes::RouteBand;
 
 const NOW_UNIX_SECONDS: u64 = 1_000_000;
@@ -48,6 +46,7 @@ fn claude_account(
     BurnDownAccountInput::new(
         account_id(&format!("acct_{account_label}")),
         account_label,
+        Provider::Claude,
         vec![
             quota_window(
                 V1_SHORT_WINDOW_SECONDS,
@@ -57,14 +56,36 @@ fn claude_account(
             quota_window(V1_WEEKLY_WINDOW_SECONDS, weekly_status, weekly_remaining),
         ],
     )
-    .with_provider(Provider::Claude)
+}
+
+fn claude_account_with_five_hour_remaining_basis_points(
+    account_label: &str,
+    five_hour_remaining_basis_points: u32,
+) -> BurnDownAccountInput {
+    BurnDownAccountInput::new(
+        account_id(&format!("acct_{account_label}")),
+        account_label,
+        Provider::Claude,
+        vec![
+            QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
+                .with_remaining_basis_points(five_hour_remaining_basis_points)
+                .with_reset_unix_seconds(NOW_UNIX_SECONDS + V1_SHORT_WINDOW_SECONDS)
+                .with_observed_unix_seconds(NOW_UNIX_SECONDS)
+                .with_effective(true),
+            quota_window(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Eligible, 80),
+        ],
+    )
 }
 
 fn claude_assessment_input(
     accounts: Vec<BurnDownAccountInput>,
 ) -> BurnDownRouteBandAssessmentInput {
-    BurnDownRouteBandAssessmentInput::new(RouteBand::Responses, NOW_UNIX_SECONDS, accounts)
-        .with_route_profile(CLAUDE_MESSAGES)
+    BurnDownRouteBandAssessmentInput::new(
+        RouteBand::Responses,
+        NOW_UNIX_SECONDS,
+        CLAUDE_MESSAGES,
+        accounts,
+    )
 }
 
 #[test]
@@ -101,6 +122,85 @@ fn claude_five_hour_threshold_releases_reserve_only_when_preferred_peer_exists()
             .map(|account| account.availability()),
         Some(AccountAvailability::Reserve)
     );
+}
+
+#[test]
+fn claude_near_full_reserve_threshold_compares_exact_basis_points() {
+    let at_threshold = claude_account_with_five_hour_remaining_basis_points("at_threshold", 500);
+    let below_threshold =
+        claude_account_with_five_hour_remaining_basis_points("below_threshold", 540);
+    let at_threshold_id = at_threshold.account_id().clone();
+    let below_threshold_id = below_threshold.account_id().clone();
+
+    let assessment =
+        assess_route_band(claude_assessment_input(vec![at_threshold, below_threshold]));
+
+    assert_eq!(assessment.preferred_next(), Some(&below_threshold_id));
+    assert_eq!(assessment.selected_pool(), SelectedPool::Usable);
+    assert_eq!(
+        assessment
+            .accounts()
+            .iter()
+            .find(|account| account.account_id() == &at_threshold_id)
+            .map(|account| account.availability()),
+        Some(AccountAvailability::Reserve)
+    );
+    assert_eq!(
+        assessment
+            .accounts()
+            .iter()
+            .find(|account| account.account_id() == &below_threshold_id)
+            .map(|account| account.availability()),
+        Some(AccountAvailability::Usable)
+    );
+}
+
+#[test]
+fn claude_weekly_floor_excludes_accounts_without_a_weekly_window() {
+    let no_windows = BurnDownAccountInput::new(
+        account_id("acct_claude_no_windows_floor"),
+        "claude_no_windows_floor",
+        Provider::Claude,
+        vec![],
+    )
+    .with_weekly_quota_floor_basis_points(1_000);
+    let five_hour_only = BurnDownAccountInput::new(
+        account_id("acct_claude_five_hour_only_floor"),
+        "claude_five_hour_only_floor",
+        Provider::Claude,
+        vec![quota_window(
+            V1_SHORT_WINDOW_SECONDS,
+            QuotaWindowStatus::Eligible,
+            80,
+        )],
+    )
+    .with_weekly_quota_floor_basis_points(1_000);
+
+    let assessment = assess_route_band(claude_assessment_input(vec![no_windows, five_hour_only]));
+
+    for account_id_value in [
+        "acct_claude_no_windows_floor",
+        "acct_claude_five_hour_only_floor",
+    ] {
+        let account = assessment
+            .accounts()
+            .iter()
+            .find(|account| account.account_id().as_str() == account_id_value)
+            .unwrap_or_else(|| panic!("assessment should include {account_id_value}"));
+        assert_eq!(account.availability(), AccountAvailability::Excluded);
+        assert_eq!(
+            account.routing_exclusion(),
+            crate::burn_down::RoutingExclusion::WeeklyQuotaFloor
+        );
+        assert_eq!(
+            account.quota_evidence_reason(),
+            crate::burn_down::QuotaEvidenceReason::WeeklyQuotaFloor
+        );
+        assert_eq!(
+            account.routing_reason(),
+            crate::burn_down::RoutingReason::ExcludedWeeklyQuotaFloor
+        );
+    }
 }
 
 #[test]
@@ -186,23 +286,18 @@ fn configured_near_full_threshold_and_weekly_floor_switch_are_applied() {
     );
     let near_full_id = near_full_account.account_id().clone();
     let healthy_id = healthy_account.account_id().clone();
-    let configured_policies = vec![
-        WindowPolicy {
-            kind: WindowKind::FiveHour,
-            rule: WindowRule::NearFullReserve { percent: 90 },
-        },
-        WindowPolicy {
-            kind: WindowKind::Weekly,
-            rule: WindowRule::WeeklyFloor {
-                early_switch_bps: 300,
-            },
-        },
-    ];
-
-    let threshold_assessment = assess_route_band(
-        claude_assessment_input(vec![near_full_account, healthy_account])
-            .with_window_policies(configured_policies),
-    );
+    let configured_profile = CLAUDE_MESSAGES
+        .clone()
+        .with_claude_five_hour_reserve_percent(
+            ClaudeFiveHourReservePercent::new(90)
+                .unwrap_or_else(|| panic!("90 percent is in range")),
+        );
+    let threshold_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+        RouteBand::Responses,
+        NOW_UNIX_SECONDS,
+        configured_profile,
+        vec![near_full_account, healthy_account],
+    ));
 
     assert_eq!(threshold_assessment.preferred_next(), Some(&healthy_id));
     assert_eq!(
@@ -239,6 +334,7 @@ fn claude_does_not_use_the_openai_last_resort_pool() {
     let account = BurnDownAccountInput::new(
         account_id("acct_short_guard"),
         "short_guard",
+        Provider::Claude,
         vec![
             QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
                 .with_remaining_headroom(60)
@@ -247,8 +343,7 @@ fn claude_does_not_use_the_openai_last_resort_pool() {
                 .with_projected_exhaustion_unix_seconds(NOW_UNIX_SECONDS + 5_000),
             quota_window(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Eligible, 80),
         ],
-    )
-    .with_provider(Provider::Claude);
+    );
 
     let assessment = assess_route_band(claude_assessment_input(vec![account]));
 
@@ -268,13 +363,13 @@ fn profile_provider_filters_candidates_before_assessment() {
     let openai = BurnDownAccountInput::new(
         account_id("acct_openai"),
         "openai",
+        Provider::Openai,
         vec![quota_window(
             V1_WEEKLY_WINDOW_SECONDS,
             QuotaWindowStatus::Eligible,
             90,
         )],
-    )
-    .with_provider(Provider::Openai);
+    );
 
     let assessment = assess_route_band(claude_assessment_input(vec![claude, openai]));
 
@@ -286,10 +381,11 @@ fn profile_provider_filters_candidates_before_assessment() {
 }
 
 #[test]
-fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
+fn openai_http_and_websocket_profiles_have_equivalent_legacy_outputs() {
     let regular = BurnDownAccountInput::new(
         account_id("acct_regular"),
         "regular",
+        Provider::Openai,
         vec![quota_window(
             V1_WEEKLY_WINDOW_SECONDS,
             QuotaWindowStatus::Eligible,
@@ -299,6 +395,7 @@ fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
     let near_floor = BurnDownAccountInput::new(
         account_id("acct_floor"),
         "floor",
+        Provider::Openai,
         vec![quota_window(
             V1_WEEKLY_WINDOW_SECONDS,
             QuotaWindowStatus::Eligible,
@@ -309,6 +406,7 @@ fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
     let long_window_reserve = BurnDownAccountInput::new(
         account_id("acct_long_reserve"),
         "long_reserve",
+        Provider::Openai,
         vec![
             quota_window(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Eligible, 10)
                 .with_reset_unix_seconds(NOW_UNIX_SECONDS + 500_000),
@@ -317,6 +415,7 @@ fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
     let long_window_at_reserve_threshold = BurnDownAccountInput::new(
         account_id("acct_long_threshold"),
         "long_threshold",
+        Provider::Openai,
         vec![
             quota_window(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Eligible, 25)
                 .with_reset_unix_seconds(NOW_UNIX_SECONDS + 500_000),
@@ -325,6 +424,7 @@ fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
     let long_window_below_reserve_threshold = BurnDownAccountInput::new(
         account_id("acct_long_below_threshold"),
         "long_below_threshold",
+        Provider::Openai,
         vec![
             quota_window(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Eligible, 76)
                 .with_reset_unix_seconds(NOW_UNIX_SECONDS + 500_000),
@@ -333,6 +433,7 @@ fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
     let short_guard = BurnDownAccountInput::new(
         account_id("acct_short"),
         "short",
+        Provider::Openai,
         vec![
             QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
                 .with_remaining_headroom(60)
@@ -345,6 +446,7 @@ fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
     let stale = BurnDownAccountInput::new(
         account_id("acct_stale"),
         "stale",
+        Provider::Openai,
         vec![quota_window(
             V1_WEEKLY_WINDOW_SECONDS,
             QuotaWindowStatus::Stale,
@@ -354,6 +456,7 @@ fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
     let unknown = BurnDownAccountInput::new(
         account_id("acct_unknown"),
         "unknown",
+        Provider::Openai,
         vec![quota_window(
             V1_WEEKLY_WINDOW_SECONDS,
             QuotaWindowStatus::Unknown,
@@ -363,6 +466,7 @@ fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
     let configured_floor_hard_stop = BurnDownAccountInput::new(
         account_id("acct_floor_hard_stop"),
         "floor_hard_stop",
+        Provider::Openai,
         vec![quota_window(
             V1_WEEKLY_WINDOW_SECONDS,
             QuotaWindowStatus::Eligible,
@@ -388,16 +492,21 @@ fn explicit_openai_profile_matches_the_legacy_selector_branch_space() {
     ];
 
     for accounts in examples {
-        let legacy_input =
-            BurnDownRouteBandAssessmentInput::new(RouteBand::Responses, NOW_UNIX_SECONDS, accounts);
-        let legacy_assessment = assess_route_band(legacy_input.clone());
-        for route_profile in [RESPONSES_HTTP, RESPONSES_WEBSOCKET] {
-            let profile_assessment =
-                assess_route_band(legacy_input.clone().with_route_profile(route_profile));
-            assert_eq!(
-                legacy_assessment, profile_assessment,
-                "explicit LegacyOpenAi profile must preserve all current OpenAI decisions"
-            );
-        }
+        let http_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            NOW_UNIX_SECONDS,
+            RESPONSES_HTTP.clone(),
+            accounts.clone(),
+        ));
+        let websocket_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            NOW_UNIX_SECONDS,
+            RESPONSES_WEBSOCKET.clone(),
+            accounts,
+        ));
+        assert_eq!(
+            http_assessment, websocket_assessment,
+            "OpenAI HTTP and WebSocket profiles use the same legacy quota policy"
+        );
     }
 }

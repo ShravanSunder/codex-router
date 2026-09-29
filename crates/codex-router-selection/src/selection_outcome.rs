@@ -2,6 +2,7 @@
 
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::WindowKind;
 
 use crate::burn_down::BurnDownRouteBandAssessmentResult;
 use crate::burn_down::RoutingReason;
@@ -119,10 +120,8 @@ pub enum SelectionAccountRestriction {
     /// The enabled account must be logged in before it can serve requests.
     NeedsLogin,
     /// One or more provider-rejected windows still have no fresh headroom observation.
-    Exhausted {
-        /// Provider-reported reset time for each rejected window.
-        reported_resets: Vec<Option<HeadroomTimestamp>>,
-    },
+    /// The account has one or more durable rejected quota windows.
+    Exhausted,
     /// The account is held from new requests by a floor or missing weekly evidence.
     HeldByFloor {
         /// The reason the account is held.
@@ -137,50 +136,215 @@ pub enum SelectionHoldReason {
     HardFloor,
     /// A weekly floor is configured but the weekly observation is not fresh.
     WaitingForFreshWeeklyObservation,
-    /// The assessment had no reliable quota evidence to classify the account.
-    UnknownQuotaEvidence,
 }
 
-/// Provider account facts needed to classify an unavailable selection.
+/// One persisted per-window observation projected into selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SelectionWindowObservation {
+    window_kind: WindowKind,
+    remaining_basis_points: u32,
+    reset_unix_seconds: Option<HeadroomTimestamp>,
+    observation_started_at: u64,
+    freshness: crate::burn_down::QuotaEvidenceFreshness,
+}
+
+impl SelectionWindowObservation {
+    /// Creates one typed observation for selector and R12 reasoning.
+    #[must_use]
+    pub const fn new(
+        window_kind: WindowKind,
+        remaining_basis_points: u32,
+        reset_unix_seconds: Option<HeadroomTimestamp>,
+        observation_started_at: u64,
+        freshness: crate::burn_down::QuotaEvidenceFreshness,
+    ) -> Self {
+        Self {
+            window_kind,
+            remaining_basis_points,
+            reset_unix_seconds,
+            observation_started_at,
+            freshness,
+        }
+    }
+
+    /// Returns the window kind.
+    #[must_use]
+    pub const fn window_kind(self) -> WindowKind {
+        self.window_kind
+    }
+
+    /// Returns exact remaining quota in basis points.
+    #[must_use]
+    pub const fn remaining_basis_points(self) -> u32 {
+        self.remaining_basis_points
+    }
+
+    /// Returns the provider-reported reset time.
+    #[must_use]
+    pub const fn reset_unix_seconds(self) -> Option<HeadroomTimestamp> {
+        self.reset_unix_seconds
+    }
+
+    /// Returns when the observation poll or response began.
+    #[must_use]
+    pub const fn observation_started_at(self) -> u64 {
+        self.observation_started_at
+    }
+
+    /// Returns whether this observation is fresh for selection.
+    #[must_use]
+    pub const fn freshness(self) -> crate::burn_down::QuotaEvidenceFreshness {
+        self.freshness
+    }
+}
+
+/// One persisted provider rejection projected into selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SelectionWindowRejection {
+    window_kind: WindowKind,
+    rejected_at: u64,
+    reported_reset: Option<HeadroomTimestamp>,
+}
+
+impl SelectionWindowRejection {
+    /// Creates one typed rejection barrier for selector and R12 reasoning.
+    #[must_use]
+    pub const fn new(
+        window_kind: WindowKind,
+        rejected_at: u64,
+        reported_reset: Option<HeadroomTimestamp>,
+    ) -> Self {
+        Self {
+            window_kind,
+            rejected_at,
+            reported_reset,
+        }
+    }
+
+    /// Returns the rejected window kind.
+    #[must_use]
+    pub const fn window_kind(self) -> WindowKind {
+        self.window_kind
+    }
+
+    /// Returns when the provider rejected the account's window.
+    #[must_use]
+    pub const fn rejected_at(self) -> u64 {
+        self.rejected_at
+    }
+
+    /// Returns the reset reported with the rejection.
+    #[must_use]
+    pub const fn reported_reset(self) -> Option<HeadroomTimestamp> {
+        self.reported_reset
+    }
+}
+
+/// Provider account state needed to classify an unavailable selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SelectionAccountState {
-    account_id: AccountId,
-    provider: Provider,
-    enabled: bool,
-    restriction: SelectionAccountRestriction,
+pub enum SelectionAccountState {
+    /// Disabled account; it does not participate in credential or quota precedence.
+    Disabled {
+        /// Account identity.
+        account_id: AccountId,
+        /// Provider that owns the account.
+        provider: Provider,
+    },
+    /// Enabled account and its typed current restrictions and D9 state.
+    Enabled {
+        /// Account identity.
+        account_id: AccountId,
+        /// Provider that owns the account.
+        provider: Provider,
+        /// Current credential or quota restriction.
+        restriction: SelectionAccountRestriction,
+        /// Latest persisted observation for each quota window.
+        window_observations: Vec<SelectionWindowObservation>,
+        /// Latest persisted rejection for each quota window.
+        window_rejections: Vec<SelectionWindowRejection>,
+    },
 }
 
 impl SelectionAccountState {
-    /// Creates a state row for an enabled account.
+    /// Creates state for one enabled account.
     #[must_use]
     pub fn enabled(
         account_id: AccountId,
         provider: Provider,
         restriction: SelectionAccountRestriction,
+        window_observations: Vec<SelectionWindowObservation>,
+        window_rejections: Vec<SelectionWindowRejection>,
     ) -> Self {
-        Self {
+        Self::Enabled {
             account_id,
             provider,
-            enabled: true,
             restriction,
+            window_observations,
+            window_rejections,
         }
     }
 
-    /// Creates a state row for a disabled account.
+    /// Creates state for one disabled account without inventing a credential placeholder.
     #[must_use]
     pub fn disabled(account_id: AccountId, provider: Provider) -> Self {
-        Self {
+        Self::Disabled {
             account_id,
             provider,
-            enabled: false,
-            restriction: SelectionAccountRestriction::NeedsLogin,
         }
     }
 
     /// Returns the account identity.
     #[must_use]
     pub const fn account_id(&self) -> &AccountId {
-        &self.account_id
+        match self {
+            Self::Disabled { account_id, .. } | Self::Enabled { account_id, .. } => account_id,
+        }
+    }
+
+    /// Returns the account provider.
+    #[must_use]
+    pub const fn provider(&self) -> Provider {
+        match self {
+            Self::Disabled { provider, .. } | Self::Enabled { provider, .. } => *provider,
+        }
+    }
+
+    /// Returns whether the account is enabled.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled { .. })
+    }
+
+    /// Returns the enabled account's current restriction.
+    #[must_use]
+    pub const fn restriction(&self) -> Option<&SelectionAccountRestriction> {
+        match self {
+            Self::Disabled { .. } => None,
+            Self::Enabled { restriction, .. } => Some(restriction),
+        }
+    }
+
+    /// Returns projected per-window observations for an enabled account.
+    #[must_use]
+    pub fn window_observations(&self) -> &[SelectionWindowObservation] {
+        match self {
+            Self::Disabled { .. } => &[],
+            Self::Enabled {
+                window_observations,
+                ..
+            } => window_observations,
+        }
+    }
+
+    /// Returns projected per-window rejection barriers for an enabled account.
+    #[must_use]
+    pub fn window_rejections(&self) -> &[SelectionWindowRejection] {
+        match self {
+            Self::Disabled { .. } => &[],
+            Self::Enabled {
+                window_rejections, ..
+            } => window_rejections,
+        }
     }
 }
 
@@ -265,7 +429,7 @@ pub fn classify_unavailable_reason(
 ) -> UnavailableReason {
     let enabled_accounts = account_states
         .iter()
-        .filter(|account| account.provider == provider && account.enabled)
+        .filter(|account| account.provider() == provider && account.is_enabled())
         .collect::<Vec<_>>();
 
     if enabled_accounts.is_empty() {
@@ -280,16 +444,14 @@ pub fn classify_unavailable_reason(
         CredentialStoreAvailability::Available => {}
     }
 
-    if enabled_accounts.iter().all(|account| {
-        matches!(
-            &account.restriction,
-            SelectionAccountRestriction::NeedsLogin
-        )
-    }) {
+    if enabled_accounts
+        .iter()
+        .all(|account| account.restriction() == Some(&SelectionAccountRestriction::NeedsLogin))
+    {
         return UnavailableReason::AllNeedLogin {
             accounts: enabled_accounts
                 .iter()
-                .map(|account| account.account_id.clone())
+                .map(|account| account.account_id().clone())
                 .collect(),
         };
     }
@@ -297,20 +459,12 @@ pub fn classify_unavailable_reason(
     let accounts_with_usable_credentials = enabled_accounts
         .iter()
         .copied()
-        .filter(|account| {
-            !matches!(
-                &account.restriction,
-                SelectionAccountRestriction::NeedsLogin
-            )
-        })
+        .filter(|account| account.restriction() != Some(&SelectionAccountRestriction::NeedsLogin))
         .collect::<Vec<_>>();
     if !accounts_with_usable_credentials.is_empty()
-        && accounts_with_usable_credentials.iter().all(|account| {
-            matches!(
-                &account.restriction,
-                SelectionAccountRestriction::Exhausted { .. }
-            )
-        })
+        && accounts_with_usable_credentials
+            .iter()
+            .all(|account| account.restriction() == Some(&SelectionAccountRestriction::Exhausted))
     {
         return UnavailableReason::AllExhausted {
             earliest_headroom: earliest_headroom(&accounts_with_usable_credentials),
@@ -319,17 +473,12 @@ pub fn classify_unavailable_reason(
 
     let held_accounts = enabled_accounts
         .iter()
-        .filter_map(|account| match &account.restriction {
-            SelectionAccountRestriction::HeldByFloor { reason } => Some(HeldAccount {
-                account_id: account.account_id.clone(),
+        .filter_map(|account| match account.restriction() {
+            Some(SelectionAccountRestriction::HeldByFloor { reason }) => Some(HeldAccount {
+                account_id: account.account_id().clone(),
                 reason: *reason,
             }),
-            SelectionAccountRestriction::Available => Some(HeldAccount {
-                account_id: account.account_id.clone(),
-                reason: SelectionHoldReason::UnknownQuotaEvidence,
-            }),
-            SelectionAccountRestriction::NeedsLogin
-            | SelectionAccountRestriction::Exhausted { .. } => None,
+            _ => None,
         })
         .collect();
     UnavailableReason::HeldByFloors {
@@ -340,16 +489,16 @@ pub fn classify_unavailable_reason(
 fn earliest_headroom(accounts: &[&SelectionAccountState]) -> Option<HeadroomTimestamp> {
     let mut account_headroom = Vec::with_capacity(accounts.len());
     for account in accounts {
-        let SelectionAccountRestriction::Exhausted { reported_resets } = &account.restriction
-        else {
+        if account.restriction() != Some(&SelectionAccountRestriction::Exhausted) {
             continue;
-        };
-        if reported_resets.is_empty() {
+        }
+        if account.window_rejections().is_empty() {
             return None;
         }
-        let latest_rejected_window_reset = reported_resets
+        let latest_rejected_window_reset = account
+            .window_rejections()
             .iter()
-            .copied()
+            .map(|rejection| rejection.reported_reset())
             .collect::<Option<Vec<_>>>()?;
         let account_headroom_timestamp = latest_rejected_window_reset.into_iter().max()?;
         account_headroom.push(account_headroom_timestamp);

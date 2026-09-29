@@ -4,7 +4,6 @@ use crate::run_rate::QuotaRunRateConfidence;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::redaction::safe_account_label;
-use codex_router_core::route_profile::RESPONSES_HTTP;
 use codex_router_core::route_profile::RouteProfile;
 use codex_router_core::route_profile::WindowKind;
 use codex_router_core::route_profile::WindowPolicy;
@@ -33,6 +32,8 @@ pub const ACTIVE_SESSION_IMBALANCE_THRESHOLD: u32 = 1;
 pub const USAGE_LIMIT_SUSPECT_TTL_SECONDS: u64 = 300;
 /// Fixed v1 active-session rollup bucket size.
 pub const ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS: u64 = 300;
+/// Maximum age at which quota evidence remains fresh for selection.
+pub const QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS: u64 = 300;
 /// Fixed v1 minimum weekly runway before asking Codex to reconnect.
 pub const REACTIVE_RECONNECT_MIN_RUNWAY_SECONDS: u64 = 900;
 /// Fixed v1 weekly reset horizon for the near-reset drain pool.
@@ -54,9 +55,10 @@ pub fn weekly_quota_switch_at_basis_points(configured_floor: Option<u32>) -> Opt
 
 fn weekly_floor_switch_at_basis_points(
     configured_floor: u32,
-    window_policies: &[WindowPolicy],
+    route_profile: &RouteProfile,
 ) -> Option<u32> {
-    let weekly_rule = window_policies
+    let weekly_rule = route_profile
+        .windows
         .iter()
         .find(|window_policy| window_policy.kind == WindowKind::Weekly)?
         .rule;
@@ -91,7 +93,6 @@ pub struct BurnDownRouteBandAssessmentInput {
     accounts: Vec<BurnDownAccountInput>,
     policy: BurnDownRouteBandPolicy,
     route_profile: RouteProfile,
-    window_policies: Vec<WindowPolicy>,
 }
 
 impl BurnDownRouteBandAssessmentInput {
@@ -100,6 +101,7 @@ impl BurnDownRouteBandAssessmentInput {
     pub fn new(
         route_band: RouteBand,
         now_unix_seconds: u64,
+        route_profile: RouteProfile,
         accounts: Vec<BurnDownAccountInput>,
     ) -> Self {
         Self {
@@ -107,24 +109,8 @@ impl BurnDownRouteBandAssessmentInput {
             now_unix_seconds,
             accounts,
             policy: policy_for_route_band(route_band),
-            route_profile: RESPONSES_HTTP,
-            window_policies: RESPONSES_HTTP.windows.to_vec(),
+            route_profile,
         }
-    }
-
-    /// Uses one route's provider and quota-window policies for assessment.
-    #[must_use]
-    pub fn with_route_profile(mut self, route_profile: RouteProfile) -> Self {
-        self.route_profile = route_profile;
-        self.window_policies = route_profile.windows.to_vec();
-        self
-    }
-
-    /// Replaces static profile windows with the route's configured policy inputs.
-    #[must_use]
-    pub fn with_window_policies(mut self, window_policies: Vec<WindowPolicy>) -> Self {
-        self.window_policies = window_policies;
-        self
     }
 
     /// Returns the route band.
@@ -141,6 +127,7 @@ pub struct BurnDownAccountInput {
     account_label: String,
     provider: Provider,
     windows: Vec<QuotaWindowFact>,
+    rejected_windows: Vec<QuotaWindowRejectionFact>,
     account_enabled: bool,
     has_active_credential: bool,
     active_load_pressure: u32,
@@ -154,26 +141,21 @@ impl BurnDownAccountInput {
     pub fn new(
         account_id: AccountId,
         account_label: impl Into<String>,
+        provider: Provider,
         windows: Vec<QuotaWindowFact>,
     ) -> Self {
         Self {
             account_id,
             account_label: account_label.into(),
-            provider: Provider::Openai,
+            provider,
             windows,
+            rejected_windows: Vec::new(),
             account_enabled: true,
             has_active_credential: true,
             active_load_pressure: 0,
             current_active_sessions: 0,
             weekly_quota_floor_basis_points: None,
         }
-    }
-
-    /// Sets the provider that owns this account.
-    #[must_use]
-    pub const fn with_provider(mut self, provider: Provider) -> Self {
-        self.provider = provider;
-        self
     }
 
     /// Sets whether the account is enabled.
@@ -201,6 +183,16 @@ impl BurnDownAccountInput {
     #[must_use]
     pub const fn with_current_active_sessions(mut self, current_active_sessions: u32) -> Self {
         self.current_active_sessions = current_active_sessions;
+        self
+    }
+
+    /// Supplies outstanding Claude window rejections from durable state.
+    #[must_use]
+    pub fn with_rejected_windows(
+        mut self,
+        rejected_windows: Vec<QuotaWindowRejectionFact>,
+    ) -> Self {
+        self.rejected_windows = rejected_windows;
         self
     }
 
@@ -236,6 +228,12 @@ impl BurnDownAccountInput {
         &self.windows
     }
 
+    /// Returns durable rejected-window facts.
+    #[must_use]
+    pub fn rejected_windows(&self) -> &[QuotaWindowRejectionFact] {
+        &self.rejected_windows
+    }
+
     /// Returns current active sessions.
     #[must_use]
     pub const fn current_active_sessions(&self) -> u32 {
@@ -255,12 +253,55 @@ impl BurnDownAccountInput {
     }
 }
 
+/// Durable provider rejection fact for one quota window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuotaWindowRejectionFact {
+    window_kind: WindowKind,
+    rejected_at_unix_seconds: u64,
+    reported_reset_unix_seconds: Option<u64>,
+}
+
+impl QuotaWindowRejectionFact {
+    /// Creates one rejected-window fact from the D9 state projection.
+    #[must_use]
+    pub const fn new(
+        window_kind: WindowKind,
+        rejected_at_unix_seconds: u64,
+        reported_reset_unix_seconds: Option<u64>,
+    ) -> Self {
+        Self {
+            window_kind,
+            rejected_at_unix_seconds,
+            reported_reset_unix_seconds,
+        }
+    }
+
+    /// Returns the rejected quota window.
+    #[must_use]
+    pub const fn window_kind(&self) -> WindowKind {
+        self.window_kind
+    }
+
+    /// Returns when the provider rejection occurred.
+    #[must_use]
+    pub const fn rejected_at_unix_seconds(&self) -> u64 {
+        self.rejected_at_unix_seconds
+    }
+
+    /// Returns the reset time reported with the rejection.
+    #[must_use]
+    pub const fn reported_reset_unix_seconds(&self) -> Option<u64> {
+        self.reported_reset_unix_seconds
+    }
+}
+
 /// Pure fact for one provider quota window.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuotaWindowFact {
     window_seconds: u64,
     status: QuotaWindowStatus,
     remaining_headroom: u32,
+    remaining_basis_points: u32,
     reset_unix_seconds: Option<u64>,
     observed_unix_seconds: u64,
     effective: bool,
@@ -279,6 +320,7 @@ impl QuotaWindowFact {
             window_seconds,
             status,
             remaining_headroom: 0,
+            remaining_basis_points: 0,
             reset_unix_seconds: None,
             observed_unix_seconds: 0,
             effective: false,
@@ -294,6 +336,15 @@ impl QuotaWindowFact {
     #[must_use]
     pub const fn with_remaining_headroom(mut self, remaining_headroom: u32) -> Self {
         self.remaining_headroom = clamp_u32(remaining_headroom, 0, 100);
+        self.remaining_basis_points = self.remaining_headroom.saturating_mul(100);
+        self
+    }
+
+    /// Sets exact remaining quota in basis points.
+    #[must_use]
+    pub const fn with_remaining_basis_points(mut self, remaining_basis_points: u32) -> Self {
+        self.remaining_basis_points = clamp_u32(remaining_basis_points, 0, 10_000);
+        self.remaining_headroom = self.remaining_basis_points / 100;
         self
     }
 
@@ -398,6 +449,12 @@ impl QuotaWindowFact {
     #[must_use]
     pub const fn remaining_headroom(&self) -> u32 {
         self.remaining_headroom
+    }
+
+    /// Returns exact remaining quota in basis points.
+    #[must_use]
+    pub const fn remaining_basis_points(&self) -> u32 {
+        self.remaining_basis_points
     }
 
     /// Returns reset time.
@@ -563,6 +620,7 @@ pub struct BurnDownAccountAssessment {
     projected_drain_gap_after_selection: Option<i64>,
     projected_weekly_runway_seconds: Option<u64>,
     weekly_remaining_headroom: Option<u32>,
+    weekly_remaining_basis_points: Option<u32>,
     weekly_projected_candidate_burn_basis_points_per_hour: Option<u32>,
     initial_admission_priority: bool,
     salvage_sort_key: Option<SalvageSortKey>,
@@ -987,6 +1045,7 @@ struct SalvageSortKey {
 struct WindowAssessment {
     window_seconds: u64,
     remaining_headroom: u32,
+    remaining_basis_points: u32,
     reset_unix_seconds: Option<u64>,
     status: QuotaWindowStatus,
     pressure: u32,
@@ -1020,6 +1079,7 @@ struct AccountDisplayMetrics {
     projected_drain_gap_after_selection: Option<i64>,
     projected_weekly_runway_seconds: Option<u64>,
     weekly_remaining_headroom: Option<u32>,
+    weekly_remaining_basis_points: Option<u32>,
     weekly_projected_candidate_burn_basis_points_per_hour: Option<u32>,
     salvage_sort_key: Option<SalvageSortKey>,
 }
@@ -1029,8 +1089,7 @@ struct AccountDisplayMetrics {
 pub fn assess_route_band(
     input: BurnDownRouteBandAssessmentInput,
 ) -> BurnDownRouteBandAssessmentResult {
-    let legacy_openai_profile =
-        is_legacy_openai_profile(input.route_profile, &input.window_policies);
+    let legacy_openai_profile = is_legacy_openai_profile(&input.route_profile);
     let mut accounts = input
         .accounts
         .iter()
@@ -1040,13 +1099,12 @@ pub fn assess_route_band(
                 account,
                 input.now_unix_seconds,
                 input.policy,
-                input.route_profile,
-                &input.window_policies,
+                &input.route_profile,
             );
             assessment.weekly_floor_switch_band = account
                 .weekly_quota_floor_basis_points
-                .zip(assessment.weekly_remaining_headroom)
-                .is_some_and(|(floor, remaining_percent)| {
+                .zip(assessment.weekly_remaining_basis_points)
+                .is_some_and(|(floor, remaining_basis_points)| {
                     assessment.routing_exclusion == RoutingExclusion::None
                         && assessment.quota_evidence_reason == QuotaEvidenceReason::Ok
                         && assessment.freshness == QuotaEvidenceFreshness::Fresh
@@ -1054,10 +1112,12 @@ pub fn assess_route_band(
                             assessment.availability,
                             AccountAvailability::Usable | AccountAvailability::Reserve
                         )
-                        && remaining_percent.saturating_mul(100) > floor
-                        && weekly_floor_switch_at_basis_points(floor, &input.window_policies)
+                        && remaining_basis_points > floor
+                        && weekly_floor_switch_at_basis_points(floor, &input.route_profile)
                             .is_some_and(|switch_at| {
-                                remaining_percent.saturating_mul(100) <= switch_at
+                                assessment
+                                    .weekly_remaining_basis_points
+                                    .is_some_and(|remaining| remaining <= switch_at)
                             })
                 });
             if input.route_profile.provider == Provider::Claude
@@ -1201,8 +1261,7 @@ fn assess_account(
     input: &BurnDownAccountInput,
     now_unix_seconds: u64,
     policy: BurnDownRouteBandPolicy,
-    route_profile: RouteProfile,
-    window_policies: &[WindowPolicy],
+    route_profile: &RouteProfile,
 ) -> BurnDownAccountAssessment {
     let base = BurnDownAccountAssessment {
         account_id: input.account_id.clone(),
@@ -1235,6 +1294,7 @@ fn assess_account(
         projected_drain_gap_after_selection: None,
         projected_weekly_runway_seconds: None,
         weekly_remaining_headroom: None,
+        weekly_remaining_basis_points: None,
         weekly_projected_candidate_burn_basis_points_per_hour: None,
         initial_admission_priority: false,
         salvage_sort_key: None,
@@ -1266,14 +1326,15 @@ fn assess_account(
         .iter()
         .map(|window| assess_window(window, now_unix_seconds, policy))
         .collect::<Vec<_>>();
-    if input.provider == Provider::Claude
-        && (missing_profile_window(&windows, route_profile.windows)
-            || missing_profile_window(&windows, window_policies))
-    {
+    if input.provider == Provider::Claude && !input.rejected_windows.is_empty() {
         return with_display_metrics(
             BurnDownAccountAssessment {
+                availability: AccountAvailability::Blocked,
+                freshness: freshness_for_windows(&windows),
                 limiting_window: limiting_window(&windows),
-                quota_evidence_reason: QuotaEvidenceReason::MissingExpectedWindow,
+                quota_evidence_reason: QuotaEvidenceReason::WindowExhausted,
+                routing_reason: RoutingReason::BlockedWindowExhausted,
+                routing_weight: None,
                 ..base
             },
             account_display_metrics(input, &windows, policy),
@@ -1286,6 +1347,18 @@ fn assess_account(
         if weekly_quota_floor_excludes(input, &windows) {
             return weekly_quota_floor_exclusion(base, &windows, display_metrics);
         }
+    }
+    if input.provider == Provider::Claude
+        && missing_profile_window(&windows, route_profile.windows.as_ref())
+    {
+        return with_display_metrics(
+            BurnDownAccountAssessment {
+                limiting_window: limiting_window(&windows),
+                quota_evidence_reason: QuotaEvidenceReason::MissingExpectedWindow,
+                ..base
+            },
+            account_display_metrics(input, &windows, policy),
+        );
     }
     if windows.is_empty() {
         return base;
@@ -1316,7 +1389,9 @@ fn assess_account(
         );
     }
     if input.weekly_quota_floor_basis_points.is_some()
-        && windows.iter().any(|window| window.remaining_headroom == 0)
+        && windows
+            .iter()
+            .any(|window| window.remaining_basis_points == 0)
     {
         return with_display_metrics(
             BurnDownAccountAssessment {
@@ -1366,7 +1441,10 @@ fn assess_account(
             display_metrics,
         );
     }
-    if windows.iter().any(|window| window.remaining_headroom == 0) {
+    if windows
+        .iter()
+        .any(|window| window.remaining_basis_points == 0)
+    {
         return with_display_metrics(
             BurnDownAccountAssessment {
                 availability: AccountAvailability::Blocked,
@@ -1413,13 +1491,15 @@ fn assess_account(
         policy.selectable_weight_min,
         policy.selectable_weight_max,
     );
-    let availability = if claude_near_full_reserve(input.provider, &windows, window_policies)
-        || (input.provider == Provider::Openai && long_window_requires_reserve(&windows, policy))
-    {
-        AccountAvailability::Reserve
-    } else {
-        AccountAvailability::Usable
-    };
+    let availability =
+        if claude_near_full_reserve(input.provider, &windows, route_profile.windows.as_ref())
+            || (input.provider == Provider::Openai
+                && long_window_requires_reserve(&windows, policy))
+        {
+            AccountAvailability::Reserve
+        } else {
+            AccountAvailability::Usable
+        };
     if input.provider == Provider::Openai && short_window_fails_guard(&windows, policy) {
         return with_display_metrics(
             BurnDownAccountAssessment {
@@ -1487,7 +1567,7 @@ fn weekly_quota_floor_excludes(input: &BurnDownAccountInput, windows: &[WindowAs
         return true;
     }
 
-    let current_remaining_basis_points = weekly_window.remaining_headroom.saturating_mul(100);
+    let current_remaining_basis_points = weekly_window.remaining_basis_points;
     current_remaining_basis_points <= floor_basis_points
 }
 
@@ -1562,6 +1642,7 @@ fn account_display_metrics(
         projected_drain_gap_after_selection,
         projected_weekly_runway_seconds: weekly_window.and_then(projected_runway_seconds),
         weekly_remaining_headroom: weekly_window.map(|window| window.remaining_headroom),
+        weekly_remaining_basis_points: weekly_window.map(|window| window.remaining_basis_points),
         weekly_projected_candidate_burn_basis_points_per_hour: weekly_window
             .and_then(|window| window.projected_candidate_burn_basis_points_per_hour),
         salvage_sort_key: salvage_sort_key(windows, short_salvage, long_salvage, policy),
@@ -1589,6 +1670,7 @@ fn with_display_metrics(
     assessment.projected_drain_gap_after_selection = metrics.projected_drain_gap_after_selection;
     assessment.projected_weekly_runway_seconds = metrics.projected_weekly_runway_seconds;
     assessment.weekly_remaining_headroom = metrics.weekly_remaining_headroom;
+    assessment.weekly_remaining_basis_points = metrics.weekly_remaining_basis_points;
     assessment.weekly_projected_candidate_burn_basis_points_per_hour =
         metrics.weekly_projected_candidate_burn_basis_points_per_hour;
     assessment.salvage_sort_key = metrics.salvage_sort_key;
@@ -1745,6 +1827,7 @@ fn assess_window(
     WindowAssessment {
         window_seconds: window.window_seconds,
         remaining_headroom,
+        remaining_basis_points: window.remaining_basis_points,
         reset_unix_seconds: window.reset_unix_seconds,
         status: window.status,
         pressure,
@@ -1799,7 +1882,8 @@ fn claude_near_full_reserve(
             })
             .is_some_and(|window| {
                 window.status == QuotaWindowStatus::Eligible
-                    && (100_u32.saturating_sub(window.remaining_headroom)) >= u32::from(percent)
+                    && 10_000_u32.saturating_sub(window.remaining_basis_points)
+                        >= u32::from(percent.get()).saturating_mul(100)
             })
     })
 }
@@ -1871,7 +1955,7 @@ fn required_active_connections_to_drain(window: &WindowAssessment) -> Option<u32
         return None;
     }
 
-    let remaining_basis_points = u128::from(window.remaining_headroom).saturating_mul(100);
+    let remaining_basis_points = u128::from(window.remaining_basis_points);
     let denominator = per_connection_burn_basis_points_per_hour.saturating_mul(time_left_seconds);
     let required_connections = remaining_basis_points
         .saturating_mul(3_600)
@@ -2500,7 +2584,7 @@ fn survival_margin_basis_points(
     let projected_burn_basis_points = burn_rate_basis_points_per_hour
         .saturating_mul(time_left_seconds)
         .div_ceil(3_600);
-    let remaining_basis_points = i128::from(window.remaining_headroom) * 100;
+    let remaining_basis_points = i128::from(window.remaining_basis_points);
     let margin = remaining_basis_points - i128::try_from(projected_burn_basis_points).ok()?;
 
     Some(margin.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
@@ -2569,10 +2653,11 @@ const fn policy_for_route_band(_route_band: RouteBand) -> BurnDownRouteBandPolic
     }
 }
 
-fn is_legacy_openai_profile(route_profile: RouteProfile, window_policies: &[WindowPolicy]) -> bool {
+fn is_legacy_openai_profile(route_profile: &RouteProfile) -> bool {
     route_profile.provider == Provider::Openai
-        && !window_policies.is_empty()
-        && window_policies
+        && !route_profile.windows.is_empty()
+        && route_profile
+            .windows
             .iter()
             .all(|window_policy| window_policy.rule == WindowRule::LegacyOpenAi)
 }
@@ -2580,6 +2665,7 @@ fn is_legacy_openai_profile(route_profile: RouteProfile, window_policies: &[Wind
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_router_core::route_profile::RESPONSES_HTTP;
 
     const NOW: u64 = 1_700_000_000;
     const FIVE_HOURS: u64 = V1_SHORT_WINDOW_SECONDS;
@@ -5468,6 +5554,7 @@ mod tests {
         let assessment = assess_route_band(input(vec![BurnDownAccountInput::new(
             account_id("acct_secret"),
             "person@example.com",
+            Provider::Openai,
             vec![
                 window(FIVE_HOURS, 80, 4 * 3_600),
                 window(WEEKLY, 80, 5 * 86_400),
@@ -5844,11 +5931,16 @@ mod tests {
     }
 
     fn input(accounts: Vec<BurnDownAccountInput>) -> BurnDownRouteBandAssessmentInput {
-        BurnDownRouteBandAssessmentInput::new(RouteBand::Responses, NOW, accounts)
+        BurnDownRouteBandAssessmentInput::new(RouteBand::Responses, NOW, RESPONSES_HTTP, accounts)
     }
 
     fn account(account_id_value: &str, windows: Vec<QuotaWindowFact>) -> BurnDownAccountInput {
-        BurnDownAccountInput::new(account_id(account_id_value), account_id_value, windows)
+        BurnDownAccountInput::new(
+            account_id(account_id_value),
+            account_id_value,
+            Provider::Openai,
+            windows,
+        )
     }
 
     fn window(

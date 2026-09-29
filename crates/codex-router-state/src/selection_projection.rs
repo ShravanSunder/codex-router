@@ -3,12 +3,25 @@
 use std::collections::HashMap;
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::WindowKind;
 use codex_router_selection::burn_down::ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS;
 use codex_router_selection::burn_down::BurnDownAccountInput;
+use codex_router_selection::burn_down::QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
+use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaWindowFact;
+use codex_router_selection::burn_down::QuotaWindowRejectionFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
+use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
+use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
 use codex_router_selection::run_rate::NORMAL_CONFIDENCE_MIN_SPAN_SECONDS;
 use codex_router_selection::run_rate::QuotaRunRateConfidence;
+use codex_router_selection::selection_outcome::HeadroomTimestamp;
+use codex_router_selection::selection_outcome::SelectionAccountRestriction;
+use codex_router_selection::selection_outcome::SelectionAccountState;
+use codex_router_selection::selection_outcome::SelectionHoldReason;
+use codex_router_selection::selection_outcome::SelectionWindowObservation;
+use codex_router_selection::selection_outcome::SelectionWindowRejection;
 use futures_util::future::BoxFuture;
 
 use crate::account::AccountStatus;
@@ -23,25 +36,38 @@ use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
 
 const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
-const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
+const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
 
 /// Projected selector inputs for one route band.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteBandSelectionProjection {
     accounts: Vec<BurnDownAccountInput>,
+    account_states: Vec<SelectionAccountState>,
 }
 
 impl RouteBandSelectionProjection {
     /// Creates a route-band selection projection.
     #[must_use]
-    pub fn new(accounts: Vec<BurnDownAccountInput>) -> Self {
-        Self { accounts }
+    pub fn new(
+        accounts: Vec<BurnDownAccountInput>,
+        account_states: Vec<SelectionAccountState>,
+    ) -> Self {
+        Self {
+            accounts,
+            account_states,
+        }
     }
 
     /// Returns projected account selector inputs.
     #[must_use]
     pub fn accounts(&self) -> &[BurnDownAccountInput] {
         &self.accounts
+    }
+
+    /// Returns provider restrictions and D9 window state for R12 classification.
+    #[must_use]
+    pub fn account_states(&self) -> &[SelectionAccountState] {
+        &self.account_states
     }
 }
 
@@ -338,6 +364,7 @@ where
             .await
     }?;
     let mut projected_accounts = Vec::with_capacity(selector_inputs.len());
+    let mut account_states = Vec::with_capacity(selector_inputs.len());
 
     for input in selector_inputs {
         let current_active_sessions = active_counts
@@ -347,75 +374,262 @@ where
         let current_active_sessions = active_session_overrides
             .and_then(|overrides| overrides.get(input.account_id()).copied())
             .unwrap_or(current_active_sessions);
-        let mut windows = Vec::with_capacity(input.windows().len());
-        for window in input.windows() {
-            let mut fact = quota_window_fact_from_selector_window(window);
-            let projected_active_sessions = current_active_sessions.saturating_add(1);
-            let estimate = estimate_window_burn_rate(
-                state,
-                input.account_id(),
-                route_band,
-                window,
-                now_unix_seconds,
-                refresh_rollups,
-            )
-            .await?;
-            if let Some(per_connection_burn_basis_points_per_hour) =
-                estimate.per_connection_burn_basis_points_per_hour
-            {
-                let projected_candidate_burn_basis_points_per_hour =
-                    per_connection_burn_basis_points_per_hour
-                        .saturating_mul(projected_active_sessions.max(1));
-                fact = fact
-                    .with_per_connection_burn_basis_points_per_hour(
-                        per_connection_burn_basis_points_per_hour,
-                    )
-                    .with_projected_candidate_burn_basis_points_per_hour(
-                        projected_candidate_burn_basis_points_per_hour,
-                    );
-                if let Some(projected_exhaustion_unix_seconds) = projected_exhaustion_unix_seconds(
+        let weekly_floor_basis_points = weekly_quota_floors.get(input.account_id()).copied();
+        account_states.push(selection_account_state_from_selector_input(
+            &input,
+            weekly_floor_basis_points,
+            now_unix_seconds,
+        ));
+
+        let mut windows = if input.provider() == Provider::Claude {
+            claude_window_facts_from_observations(&input, now_unix_seconds)
+        } else {
+            Vec::with_capacity(input.windows().len())
+        };
+        if input.provider() == Provider::Openai {
+            for window in input.windows() {
+                let mut fact = quota_window_fact_from_selector_window(window);
+                let projected_active_sessions = current_active_sessions.saturating_add(1);
+                let estimate = estimate_window_burn_rate(
+                    state,
+                    input.account_id(),
+                    route_band,
+                    window,
                     now_unix_seconds,
-                    window.remaining_headroom(),
-                    projected_candidate_burn_basis_points_per_hour,
-                ) {
+                    refresh_rollups,
+                )
+                .await?;
+                if let Some(per_connection_burn_basis_points_per_hour) =
+                    estimate.per_connection_burn_basis_points_per_hour
+                {
+                    let projected_candidate_burn_basis_points_per_hour =
+                        per_connection_burn_basis_points_per_hour
+                            .saturating_mul(projected_active_sessions.max(1));
                     fact = fact
-                        .with_projected_exhaustion_unix_seconds(projected_exhaustion_unix_seconds);
-                }
-            } else if let Some(aggregate_burn_basis_points_per_hour) =
-                estimate.aggregate_burn_basis_points_per_hour
-            {
-                fact = fact
-                    .with_aggregate_burn_basis_points_per_hour(aggregate_burn_basis_points_per_hour)
-                    .with_projected_candidate_burn_basis_points_per_hour(
-                        aggregate_burn_basis_points_per_hour,
-                    );
-                if let Some(projected_exhaustion_unix_seconds) = projected_exhaustion_unix_seconds(
-                    now_unix_seconds,
-                    window.remaining_headroom(),
-                    aggregate_burn_basis_points_per_hour,
-                ) {
+                        .with_per_connection_burn_basis_points_per_hour(
+                            per_connection_burn_basis_points_per_hour,
+                        )
+                        .with_projected_candidate_burn_basis_points_per_hour(
+                            projected_candidate_burn_basis_points_per_hour,
+                        );
+                    if let Some(projected_exhaustion_unix_seconds) =
+                        projected_exhaustion_unix_seconds(
+                            now_unix_seconds,
+                            window.remaining_headroom(),
+                            projected_candidate_burn_basis_points_per_hour,
+                        )
+                    {
+                        fact = fact.with_projected_exhaustion_unix_seconds(
+                            projected_exhaustion_unix_seconds,
+                        );
+                    }
+                } else if let Some(aggregate_burn_basis_points_per_hour) =
+                    estimate.aggregate_burn_basis_points_per_hour
+                {
                     fact = fact
-                        .with_projected_exhaustion_unix_seconds(projected_exhaustion_unix_seconds);
+                        .with_aggregate_burn_basis_points_per_hour(
+                            aggregate_burn_basis_points_per_hour,
+                        )
+                        .with_projected_candidate_burn_basis_points_per_hour(
+                            aggregate_burn_basis_points_per_hour,
+                        );
+                    if let Some(projected_exhaustion_unix_seconds) =
+                        projected_exhaustion_unix_seconds(
+                            now_unix_seconds,
+                            window.remaining_headroom(),
+                            aggregate_burn_basis_points_per_hour,
+                        )
+                    {
+                        fact = fact.with_projected_exhaustion_unix_seconds(
+                            projected_exhaustion_unix_seconds,
+                        );
+                    }
                 }
+                fact = fact.with_burn_rate_confidence(estimate.confidence);
+                windows.push(fact);
             }
-            fact = fact.with_burn_rate_confidence(estimate.confidence);
-            windows.push(fact);
         }
 
-        let mut projected_account =
-            BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
-                .with_provider(input.provider())
-                .with_account_enabled(input.account_status() == AccountStatus::Enabled)
-                .with_active_credential(input.active_credential_generation().is_some())
-                .with_current_active_sessions(current_active_sessions);
-        if let Some(floor_basis_points) = weekly_quota_floors.get(input.account_id()).copied() {
+        let rejected_windows = input
+            .window_rejections()
+            .iter()
+            .map(|rejection| {
+                QuotaWindowRejectionFact::new(
+                    rejection.window_kind(),
+                    rejection.rejected_at(),
+                    rejection.reported_reset(),
+                )
+            })
+            .collect();
+        let mut projected_account = BurnDownAccountInput::new(
+            input.account_id().clone(),
+            input.account_label(),
+            input.provider(),
+            windows,
+        )
+        .with_rejected_windows(rejected_windows)
+        .with_account_enabled(input.account_status() == AccountStatus::Enabled)
+        .with_active_credential(input.active_credential_generation().is_some())
+        .with_current_active_sessions(current_active_sessions);
+        if let Some(floor_basis_points) = weekly_floor_basis_points {
             projected_account =
                 projected_account.with_weekly_quota_floor_basis_points(floor_basis_points);
         }
         projected_accounts.push(projected_account);
     }
 
-    Ok(RouteBandSelectionProjection::new(projected_accounts))
+    Ok(RouteBandSelectionProjection::new(
+        projected_accounts,
+        account_states,
+    ))
+}
+
+fn claude_window_facts_from_observations(
+    input: &SelectorQuotaInput,
+    now_unix_seconds: u64,
+) -> Vec<QuotaWindowFact> {
+    input
+        .window_observations()
+        .iter()
+        .map(|observation| {
+            let freshness =
+                quota_observation_freshness(observation.observation_started_at(), now_unix_seconds);
+            let status = match freshness {
+                QuotaEvidenceFreshness::Fresh => QuotaWindowStatus::Eligible,
+                QuotaEvidenceFreshness::Stale => QuotaWindowStatus::Stale,
+                QuotaEvidenceFreshness::Unknown => QuotaWindowStatus::Unknown,
+            };
+            let mut window =
+                QuotaWindowFact::new(window_seconds_for_kind(observation.window_kind()), status)
+                    .with_remaining_basis_points(observation.remaining_basis_points())
+                    .with_observed_unix_seconds(observation.observation_started_at())
+                    .with_effective(true);
+            if let Some(reset_unix_seconds) = observation.reset_unix_seconds() {
+                window = window.with_reset_unix_seconds(reset_unix_seconds);
+            }
+            window
+        })
+        .collect()
+}
+
+fn selection_account_state_from_selector_input(
+    input: &SelectorQuotaInput,
+    weekly_floor_basis_points: Option<u32>,
+    now_unix_seconds: u64,
+) -> SelectionAccountState {
+    if input.account_status() != AccountStatus::Enabled {
+        return SelectionAccountState::disabled(input.account_id().clone(), input.provider());
+    }
+
+    let window_observations = input
+        .window_observations()
+        .iter()
+        .map(|observation| {
+            SelectionWindowObservation::new(
+                observation.window_kind(),
+                observation.remaining_basis_points(),
+                observation
+                    .reset_unix_seconds()
+                    .map(HeadroomTimestamp::from_unix_seconds),
+                observation.observation_started_at(),
+                quota_observation_freshness(observation.observation_started_at(), now_unix_seconds),
+            )
+        })
+        .collect();
+    let window_rejections = input
+        .window_rejections()
+        .iter()
+        .map(|rejection| {
+            SelectionWindowRejection::new(
+                rejection.window_kind(),
+                rejection.rejected_at(),
+                rejection
+                    .reported_reset()
+                    .map(HeadroomTimestamp::from_unix_seconds),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let restriction = if input.active_credential_generation().is_none() {
+        SelectionAccountRestriction::NeedsLogin
+    } else if input.provider() == Provider::Claude && !window_rejections.is_empty() {
+        SelectionAccountRestriction::Exhausted
+    } else if let Some(floor_basis_points) = weekly_floor_basis_points {
+        match weekly_floor_hold_reason(input, floor_basis_points, now_unix_seconds) {
+            Some(reason) => SelectionAccountRestriction::HeldByFloor { reason },
+            None => SelectionAccountRestriction::Available,
+        }
+    } else {
+        SelectionAccountRestriction::Available
+    };
+
+    SelectionAccountState::enabled(
+        input.account_id().clone(),
+        input.provider(),
+        restriction,
+        window_observations,
+        window_rejections,
+    )
+}
+
+fn weekly_floor_hold_reason(
+    input: &SelectorQuotaInput,
+    floor_basis_points: u32,
+    now_unix_seconds: u64,
+) -> Option<SelectionHoldReason> {
+    let current_weekly_basis_points = if input.provider() == Provider::Claude {
+        let Some(weekly_observation) = input
+            .window_observations()
+            .iter()
+            .find(|observation| observation.window_kind() == WindowKind::Weekly)
+        else {
+            return Some(SelectionHoldReason::WaitingForFreshWeeklyObservation);
+        };
+        if quota_observation_freshness(
+            weekly_observation.observation_started_at(),
+            now_unix_seconds,
+        ) != QuotaEvidenceFreshness::Fresh
+        {
+            return Some(SelectionHoldReason::WaitingForFreshWeeklyObservation);
+        }
+        weekly_observation.remaining_basis_points()
+    } else {
+        let Some(weekly_window) = input
+            .windows()
+            .iter()
+            .find(|window| window.limit_window_seconds() == V1_WEEKLY_WINDOW_SECONDS)
+        else {
+            return Some(SelectionHoldReason::WaitingForFreshWeeklyObservation);
+        };
+        if weekly_window.status() != SelectorQuotaWindowStatus::Eligible {
+            return Some(SelectionHoldReason::WaitingForFreshWeeklyObservation);
+        }
+        weekly_window.remaining_headroom().saturating_mul(100)
+    };
+
+    (current_weekly_basis_points <= floor_basis_points).then_some(SelectionHoldReason::HardFloor)
+}
+
+fn quota_observation_freshness(
+    observation_started_at: u64,
+    now_unix_seconds: u64,
+) -> QuotaEvidenceFreshness {
+    if now_unix_seconds < observation_started_at {
+        QuotaEvidenceFreshness::Unknown
+    } else if now_unix_seconds.saturating_sub(observation_started_at)
+        <= QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS
+    {
+        QuotaEvidenceFreshness::Fresh
+    } else {
+        QuotaEvidenceFreshness::Stale
+    }
+}
+
+const fn window_seconds_for_kind(window_kind: WindowKind) -> u64 {
+    match window_kind {
+        WindowKind::FiveHour => V1_SHORT_WINDOW_SECONDS,
+        WindowKind::Weekly => V1_WEEKLY_WINDOW_SECONDS,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -936,6 +1150,7 @@ mod tests {
                 Ok(vec![SelectorQuotaInput::new(
                     self.account_id.clone(),
                     "safe-label",
+                    Provider::Openai,
                     AccountStatus::Enabled,
                     Some(1),
                     route_band,
@@ -1081,17 +1296,15 @@ mod tests {
                 .with_reset_unix_seconds(2_000)
                 .with_observed_unix_seconds(now_unix_seconds)
                 .with_effective(true);
-                Ok(vec![
-                    SelectorQuotaInput::new(
-                        self.account_id.clone(),
-                        "safe-label",
-                        AccountStatus::Enabled,
-                        Some(1),
-                        route_band,
-                        vec![window],
-                    )
-                    .with_provider(self.provider),
-                ])
+                Ok(vec![SelectorQuotaInput::new(
+                    self.account_id.clone(),
+                    "safe-label",
+                    self.provider,
+                    AccountStatus::Enabled,
+                    Some(1),
+                    route_band,
+                    vec![window],
+                )])
             })
         }
 

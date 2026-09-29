@@ -400,24 +400,6 @@ fn parse_usize_option(option: &'static str, value: &str) -> Result<usize, CliErr
         })
 }
 
-fn parse_percent_option(option: &'static str, value: &str) -> Result<u8, CliError> {
-    let percent = value
-        .parse::<u8>()
-        .map_err(|_| CliError::InvalidNumericOption {
-            option,
-            value: value.to_owned(),
-        })?;
-    if percent > 100 {
-        return Err(CliError::NumericOptionOutOfRange {
-            option,
-            value: value.to_owned(),
-            minimum: 0,
-            maximum: 100,
-        });
-    }
-    Ok(percent)
-}
-
 #[cfg(test)]
 mod tests {
     use super::ArgumentParser;
@@ -461,13 +443,13 @@ mod tests {
     }
 
     #[test]
-    fn serve_claude_five_hour_reserve_percent_defaults_and_accepts_bounds() {
+    fn serve_claude_five_hour_reserve_percent_defaults_and_accepts_one_through_ninety_nine() {
         let mut default_parser = ArgumentParser::new(Vec::new());
         let default_command = ServeCommand::parse(&mut default_parser)
             .unwrap_or_else(|error| panic!("default serve command should parse: {error}"));
-        assert_eq!(default_command.claude_five_hour_reserve_percent, 95);
+        assert_eq!(default_command.claude_five_hour_reserve_percent.get(), 95);
 
-        for (value, expected) in [("0", 0), ("100", 100), ("90", 90)] {
+        for (value, expected) in [("1", 1), ("99", 99), ("90", 90)] {
             let arguments = [
                 OsString::from("--claude-five-hour-reserve-percent"),
                 OsString::from(value),
@@ -475,28 +457,30 @@ mod tests {
             let mut parser = ArgumentParser::new(arguments.into());
             let command = ServeCommand::parse(&mut parser)
                 .unwrap_or_else(|error| panic!("serve percent should parse: {error}"));
-            assert_eq!(command.claude_five_hour_reserve_percent, expected);
+            assert_eq!(command.claude_five_hour_reserve_percent.get(), expected);
         }
     }
 
     #[test]
-    fn serve_claude_five_hour_reserve_percent_rejects_values_above_one_hundred() {
-        let arguments = [
-            OsString::from("--claude-five-hour-reserve-percent"),
-            OsString::from("101"),
-        ];
-        let mut parser = ArgumentParser::new(arguments.into());
-        let error = ServeCommand::parse(&mut parser)
-            .expect_err("Claude reserve percent must not exceed 100");
+    fn serve_claude_five_hour_reserve_percent_rejects_values_outside_supported_range() {
+        for value in ["0", "100", "101"] {
+            let arguments = [
+                OsString::from("--claude-five-hour-reserve-percent"),
+                OsString::from(value),
+            ];
+            let mut parser = ArgumentParser::new(arguments.into());
+            let error = ServeCommand::parse(&mut parser)
+                .expect_err("Claude reserve percent must be between 1 and 99");
 
-        assert!(matches!(
-            error,
-            super::CliError::NumericOptionOutOfRange {
-                option: "--claude-five-hour-reserve-percent",
-                value,
-                minimum: 0,
-                maximum: 100,
-            } if value == "101"
-        ));
+            assert!(matches!(
+                error,
+                super::CliError::NumericOptionOutOfRange {
+                    option: "--claude-five-hour-reserve-percent",
+                    value: parsed_value,
+                    minimum: 1,
+                    maximum: 99,
+                } if parsed_value == value
+            ));
+        }
     }
 }

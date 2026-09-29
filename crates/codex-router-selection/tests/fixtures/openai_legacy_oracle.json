@@ -1,0 +1,479 @@
+{
+  "cases": [
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_long_at_ten",
+          "availability": "Reserve",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 24,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_safest_quota",
+          "routing_weight": 0,
+          "short_pressure": 0
+        }
+      ],
+      "case": "long-headroom-threshold-at-ten",
+      "preferred_next": "acct_long_at_ten",
+      "selected_pool": "Reserve",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_long_at_ten",
+          "weight": 0
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_long_above_ten",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 23,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_safest_quota",
+          "routing_weight": 0,
+          "short_pressure": 0
+        }
+      ],
+      "case": "long-headroom-threshold-above-ten",
+      "preferred_next": "acct_long_above_ten",
+      "selected_pool": "Usable",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_long_above_ten",
+          "weight": 0
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_pressure_at_25",
+          "availability": "Reserve",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 25,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_safest_quota",
+          "routing_weight": 0,
+          "short_pressure": 0
+        }
+      ],
+      "case": "long-pressure-threshold-at-twenty-five",
+      "preferred_next": "acct_pressure_at_25",
+      "selected_pool": "Reserve",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_pressure_at_25",
+          "weight": 0
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_pressure_below_25",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 24,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_safest_quota",
+          "routing_weight": 0,
+          "short_pressure": 0
+        }
+      ],
+      "case": "long-pressure-threshold-below-twenty-five",
+      "preferred_next": "acct_pressure_below_25",
+      "selected_pool": "Usable",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_pressure_below_25",
+          "weight": 0
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_short_guard",
+          "availability": "Blocked",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 13,
+          "preferred_next": true,
+          "quota_evidence_reason": "ShortWindowGuard",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_last_resort_short_window_guard",
+          "routing_weight": 0,
+          "short_pressure": 23
+        }
+      ],
+      "case": "short-guard-last-resort",
+      "preferred_next": "acct_short_guard",
+      "selected_pool": "LastResort",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_short_guard",
+          "weight": 0
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_short_guard",
+          "availability": "Blocked",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 13,
+          "preferred_next": false,
+          "quota_evidence_reason": "ShortWindowGuard",
+          "routing_exclusion": "None",
+          "routing_reason": "held_short_window_guard",
+          "routing_weight": null,
+          "short_pressure": 23
+        },
+        {
+          "account_id": "acct_usable_peer",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 13,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_safest_quota",
+          "routing_weight": 31,
+          "short_pressure": 0
+        }
+      ],
+      "case": "short-guard-with-usable-peer",
+      "preferred_next": "acct_usable_peer",
+      "selected_pool": "Usable",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_usable_peer",
+          "weight": 31
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_floor_switch",
+          "availability": "Reserve",
+          "floor_switch_band": true,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 4,
+          "preferred_next": false,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "held_floor_switch",
+          "routing_weight": 0,
+          "short_pressure": 0
+        },
+        {
+          "account_id": "acct_healthy_peer",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 0,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_idle_far_reset",
+          "routing_weight": 60,
+          "short_pressure": 0
+        }
+      ],
+      "case": "held-floor-switch-early-peer",
+      "preferred_next": "acct_healthy_peer",
+      "selected_pool": "Usable",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_healthy_peer",
+          "weight": 60
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_unknown",
+          "availability": "Unknown",
+          "floor_switch_band": false,
+          "freshness": "Unknown",
+          "initial_admission_priority": false,
+          "long_pressure": 22,
+          "preferred_next": true,
+          "quota_evidence_reason": "UnknownQuotaWindow",
+          "routing_exclusion": "None",
+          "routing_reason": "unknown_fallback_preferred",
+          "routing_weight": 1,
+          "short_pressure": 0
+        }
+      ],
+      "case": "unknown-evidence-only",
+      "preferred_next": "acct_unknown",
+      "selected_pool": "Unknown",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_unknown",
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_stale",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Stale",
+          "initial_admission_priority": false,
+          "long_pressure": 22,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_safest_quota",
+          "routing_weight": 0,
+          "short_pressure": 0
+        }
+      ],
+      "case": "stale-evidence-only",
+      "preferred_next": "acct_stale",
+      "selected_pool": "Usable",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_stale",
+          "weight": 0
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_hard_floor",
+          "availability": "Excluded",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 67,
+          "preferred_next": false,
+          "quota_evidence_reason": "WeeklyQuotaFloor",
+          "routing_exclusion": "WeeklyQuotaFloor",
+          "routing_reason": "excluded_weekly_quota_floor",
+          "routing_weight": null,
+          "short_pressure": 0
+        }
+      ],
+      "case": "configured-floor-hard-stop",
+      "preferred_next": null,
+      "selected_pool": "None",
+      "weighted_candidates": []
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_healthy_later",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 20,
+          "preferred_next": false,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "available_same_pool",
+          "routing_weight": 20,
+          "short_pressure": 0
+        },
+        {
+          "account_id": "acct_initial_admission",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": true,
+          "long_pressure": 0,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_near_reset_initial_admission",
+          "routing_weight": 20,
+          "short_pressure": 0
+        },
+        {
+          "account_id": "acct_known_later",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 24,
+          "preferred_next": false,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "available_same_pool",
+          "routing_weight": 0,
+          "short_pressure": 0
+        }
+      ],
+      "case": "initial-admission",
+      "preferred_next": "acct_initial_admission",
+      "selected_pool": "Usable",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_initial_admission",
+          "weight": 20
+        },
+        {
+          "account_id": "acct_known_later",
+          "weight": 0
+        },
+        {
+          "account_id": "acct_healthy_later",
+          "weight": 20
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_busy_healthy",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 0,
+          "preferred_next": false,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "available_same_pool",
+          "routing_weight": 80,
+          "short_pressure": 0
+        },
+        {
+          "account_id": "acct_seven_53h",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 27,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_idle_far_reset",
+          "routing_weight": 0,
+          "short_pressure": 0
+        },
+        {
+          "account_id": "acct_two_97h",
+          "availability": "Reserve",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 56,
+          "preferred_next": false,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "held_reserve",
+          "routing_weight": 0,
+          "short_pressure": 0
+        }
+      ],
+      "case": "far-idle-priority-first",
+      "preferred_next": "acct_seven_53h",
+      "selected_pool": "Usable",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_seven_53h",
+          "weight": 0
+        },
+        {
+          "account_id": "acct_busy_healthy",
+          "weight": 80
+        }
+      ]
+    },
+    {
+      "account_assessments": [
+        {
+          "account_id": "acct_busy_healthy",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 0,
+          "preferred_next": false,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "available_same_pool",
+          "routing_weight": 80,
+          "short_pressure": 0
+        },
+        {
+          "account_id": "acct_seven_53h",
+          "availability": "Reserve",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 27,
+          "preferred_next": false,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "held_reserve",
+          "routing_weight": 0,
+          "short_pressure": 0
+        },
+        {
+          "account_id": "acct_two_97h",
+          "availability": "Usable",
+          "floor_switch_band": false,
+          "freshness": "Fresh",
+          "initial_admission_priority": false,
+          "long_pressure": 56,
+          "preferred_next": true,
+          "quota_evidence_reason": "Ok",
+          "routing_exclusion": "None",
+          "routing_reason": "preferred_idle_far_reset",
+          "routing_weight": 0,
+          "short_pressure": 0
+        }
+      ],
+      "case": "far-idle-priority-after-first-start",
+      "preferred_next": "acct_two_97h",
+      "selected_pool": "Usable",
+      "weighted_candidates": [
+        {
+          "account_id": "acct_two_97h",
+          "weight": 0
+        },
+        {
+          "account_id": "acct_busy_healthy",
+          "weight": 80
+        }
+      ]
+    }
+  ],
+  "oracle_commit": "05b0be91c7fbdc42c0ed429d5518755b9112c674"
+}

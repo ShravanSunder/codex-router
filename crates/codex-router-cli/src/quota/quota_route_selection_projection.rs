@@ -142,7 +142,12 @@ pub(super) fn burn_down_input_from_display_windows(
         })
         .collect::<Vec<_>>();
 
-    BurnDownAccountInput::new(account.account_id().clone(), account.label(), facts)
-        .with_account_enabled(account.status() == AccountStatus::Enabled)
-        .with_active_credential(account.active_credential_generation().is_some())
+    BurnDownAccountInput::new(
+        account.account_id().clone(),
+        account.label(),
+        account.provider(),
+        facts,
+    )
+    .with_account_enabled(account.status() == AccountStatus::Enabled)
+    .with_active_credential(account.active_credential_generation().is_some())
 }

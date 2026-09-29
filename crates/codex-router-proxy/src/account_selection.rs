@@ -14,11 +14,11 @@ use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_core::provider::Provider;
-use codex_router_core::route_profile::CLAUDE_WINDOW_POLICIES;
+use codex_router_core::route_profile::ClaudeFiveHourReservePercent;
+use codex_router_core::route_profile::DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT;
 use codex_router_core::route_profile::RESPONSES_HTTP;
 use codex_router_core::route_profile::RESPONSES_WEBSOCKET;
 use codex_router_core::route_profile::RouteProfile;
-use codex_router_core::route_profile::WindowPolicy;
 use codex_router_core::routes::RouteBand;
 use codex_router_quota::snapshot::SnapshotFreshness;
 use codex_router_selection::burn_down::AccountAvailability;
@@ -790,7 +790,7 @@ where
     selection_reservation_lock: SelectionReservationLock,
     minimum_account_hold_cooldown_seconds: u64,
     clock: UnixClock,
-    claude_window_policies: [WindowPolicy; 2],
+    claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
 }
 
 #[cfg(test)]
@@ -870,7 +870,7 @@ where
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
-            claude_window_policies: CLAUDE_WINDOW_POLICIES,
+            claude_five_hour_reserve_percent: DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT,
         }
     }
 
@@ -896,7 +896,7 @@ where
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds: DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             clock: Arc::new(current_unix_seconds),
-            claude_window_policies: CLAUDE_WINDOW_POLICIES,
+            claude_five_hour_reserve_percent: DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT,
         }
     }
 
@@ -924,7 +924,7 @@ where
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
-            claude_window_policies: CLAUDE_WINDOW_POLICIES,
+            claude_five_hour_reserve_percent: DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT,
         }
     }
 
@@ -953,7 +953,7 @@ where
             selection_reservation_lock: Arc::new(AsyncMutex::new(())),
             minimum_account_hold_cooldown_seconds,
             clock,
-            claude_window_policies: CLAUDE_WINDOW_POLICIES,
+            claude_five_hour_reserve_percent: DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT,
         }
     }
 
@@ -1003,7 +1003,7 @@ where
             selection_reservation_lock: runtime_state.selection_reservation_lock,
             minimum_account_hold_cooldown_seconds,
             clock,
-            claude_window_policies: CLAUDE_WINDOW_POLICIES,
+            claude_five_hour_reserve_percent: DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT,
         }
     }
 
@@ -1024,10 +1024,13 @@ where
         self
     }
 
-    /// Sets the Claude route window policies supplied by runtime configuration.
+    /// Sets the Claude five-hour Reserve threshold supplied by runtime configuration.
     #[must_use]
-    pub const fn with_window_policies(mut self, policies: [WindowPolicy; 2]) -> Self {
-        self.claude_window_policies = policies;
+    pub const fn with_claude_five_hour_reserve_percent(
+        mut self,
+        percent: ClaudeFiveHourReservePercent,
+    ) -> Self {
+        self.claude_five_hour_reserve_percent = percent;
         self
     }
 }
@@ -1060,9 +1063,12 @@ where
             .collect::<Vec<_>>();
         let selector_accounts =
             filter_selector_accounts_for_provider(selector_accounts, route_profile.provider);
-        let assessment_input =
-            BurnDownRouteBandAssessmentInput::new(route_band, now_unix_seconds, selector_accounts)
-                .with_route_profile(route_profile);
+        let assessment_input = BurnDownRouteBandAssessmentInput::new(
+            route_band,
+            now_unix_seconds,
+            route_profile.clone(),
+            selector_accounts,
+        );
         let assessment = assess_route_band(assessment_input);
         if assessment.selected_pool() == SelectedPool::None {
             return Err(empty_assessment_selection_error(&assessment));
@@ -1162,7 +1168,8 @@ where
         Box::pin(async move {
             let route_kind = route_kind_for_request(request)?;
             let route_band = route_kind.route_band();
-            let route_profile = route_profile_for_kind(route_kind);
+            let route_profile = route_profile_for_kind(route_kind)
+                .with_claude_five_hour_reserve_percent(self.claude_five_hour_reserve_percent);
             let _selection_reservation_guard = self.selection_reservation_lock.lock().await;
             let now_unix_seconds = (self.clock)();
             route_band_queue_health_allows_selection(&self.route_band_queue_health, route_band)
@@ -1203,16 +1210,12 @@ where
                 filter_selector_accounts_for_provider(selector_accounts, route_profile.provider);
             let short_quota_wait_delay_seconds =
                 short_quota_wait_delay_seconds(&selector_accounts, now_unix_seconds);
-            let mut assessment_input = BurnDownRouteBandAssessmentInput::new(
+            let assessment_input = BurnDownRouteBandAssessmentInput::new(
                 route_band,
                 now_unix_seconds,
+                route_profile.clone(),
                 selector_accounts,
-            )
-            .with_route_profile(route_profile);
-            if route_profile.provider == Provider::Claude {
-                assessment_input =
-                    assessment_input.with_window_policies(self.claude_window_policies.to_vec());
-            }
+            );
             let assessment = assess_route_band(assessment_input);
             let affinity_owner_account_id = if route_kind.previous_response_affinity_capable() {
                 match previous_response_id(request)? {
@@ -1374,7 +1377,7 @@ where
                 && !assessment_account_must_yield(
                     &assessment,
                     session_affinity.account_id(),
-                    route_profile,
+                    &route_profile,
                 )
             {
                 let selected = select_affinity_owner(
@@ -1502,7 +1505,7 @@ fn assessment_account_is_available(
 fn assessment_account_must_yield(
     assessment: &BurnDownRouteBandAssessmentResult,
     account_id: &AccountId,
-    route_profile: RouteProfile,
+    route_profile: &RouteProfile,
 ) -> bool {
     assessment.accounts().iter().any(|account| {
         if account.account_id() != account_id {
@@ -1670,6 +1673,7 @@ fn select_from_account_states_with_selector(
     let assessment_input = BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
         current_unix_seconds(),
+        RESPONSES_HTTP.clone(),
         account_inputs,
     );
     let assessment = assess_route_band(assessment_input);
@@ -1979,10 +1983,14 @@ fn account_input_from_selector_input(input: &SelectorQuotaInput) -> BurnDownAcco
         .map(quota_window_fact_from_selector_window)
         .collect::<Vec<_>>();
 
-    BurnDownAccountInput::new(input.account_id().clone(), input.account_label(), windows)
-        .with_provider(input.provider())
-        .with_account_enabled(input.account_status() == AccountStatus::Enabled)
-        .with_active_credential(input.active_credential_generation().is_some())
+    BurnDownAccountInput::new(
+        input.account_id().clone(),
+        input.account_label(),
+        input.provider(),
+        windows,
+    )
+    .with_account_enabled(input.account_status() == AccountStatus::Enabled)
+    .with_active_credential(input.active_credential_generation().is_some())
 }
 
 fn filter_selector_accounts_for_provider(
@@ -2221,18 +2229,42 @@ pub(crate) fn route_band_queue_health_allows_selection(
 }
 
 /// Classifies the safe route-band action after one account reports quota exhaustion.
-pub async fn route_band_post_exhaustion_outcome<R>(
-    state_repository: &R,
-    active_reservations: Option<&RouteBandReservationBooks>,
-    runtime_exhaustions: Option<&RouteBandRuntimeExhaustions>,
-    route_band_queue_health: Option<&RouteBandQueueHealth>,
-    route_band: RouteBand,
-    excluded_account_id: &AccountId,
-    now_unix_seconds: u64,
+pub struct RouteBandPostExhaustionOutcomeInput<'a, TRepository> {
+    /// Repository used to project persisted route-band selector state.
+    pub state_repository: &'a TRepository,
+    /// Process-local active reservations, when the caller owns them.
+    pub active_reservations: Option<&'a RouteBandReservationBooks>,
+    /// Process-local account exhaustion overlays, when available.
+    pub runtime_exhaustions: Option<&'a RouteBandRuntimeExhaustions>,
+    /// Process-local degraded write-queue health, when available.
+    pub route_band_queue_health: Option<&'a RouteBandQueueHealth>,
+    /// Route whose alternatives are being assessed.
+    pub route_band: RouteBand,
+    /// Provider policy that filters and assesses those alternatives.
+    pub route_profile: RouteProfile,
+    /// Account that reported the exhaustion event.
+    pub excluded_account_id: &'a AccountId,
+    /// Current selector time in Unix seconds.
+    pub now_unix_seconds: u64,
+}
+
+/// Classifies the safe route-band action after one account reports quota exhaustion.
+pub async fn route_band_post_exhaustion_outcome<TRepository>(
+    input: RouteBandPostExhaustionOutcomeInput<'_, TRepository>,
 ) -> Result<PostExhaustionRouteBandOutcome, StateStoreError>
 where
-    R: AsyncSelectionProjectionRepository + Sync,
+    TRepository: AsyncSelectionProjectionRepository + Sync,
 {
+    let RouteBandPostExhaustionOutcomeInput {
+        state_repository,
+        active_reservations,
+        runtime_exhaustions,
+        route_band_queue_health,
+        route_band,
+        route_profile,
+        excluded_account_id,
+        now_unix_seconds,
+    } = input;
     if let Some(route_band_queue_health) = route_band_queue_health {
         route_band_queue_health_allows_selection(route_band_queue_health, route_band)?;
     }
@@ -2261,9 +2293,13 @@ where
         active_session_overrides.as_ref(),
     )
     .await?;
-    let short_quota_wait_jitter_seconds = short_quota_wait_jitter_seconds();
-    let selected_account_wait_delay_seconds = projection
+    let provider_accounts = projection
         .accounts()
+        .iter()
+        .filter(|account| account.provider() == route_profile.provider)
+        .collect::<Vec<_>>();
+    let short_quota_wait_jitter_seconds = short_quota_wait_jitter_seconds();
+    let selected_account_wait_delay_seconds = provider_accounts
         .iter()
         .find(|input| input.account_id() == excluded_account_id)
         .and_then(|account| {
@@ -2273,11 +2309,10 @@ where
                 short_quota_wait_jitter_seconds,
             )
         });
-    let account_inputs = projection
-        .accounts()
+    let account_inputs = provider_accounts
         .iter()
         .filter(|input| input.account_id() != excluded_account_id)
-        .cloned()
+        .map(|account| (*account).clone())
         .collect::<Vec<_>>();
     let account_inputs = match runtime_exhaustions {
         Some(runtime_exhaustions) => projected_accounts_excluding_runtime_exhaustions(
@@ -2296,6 +2331,7 @@ where
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         route_band,
         now_unix_seconds,
+        route_profile,
         account_inputs,
     ));
     if post_exhaustion_assessment_has_safe_known_fresh_alternative(&assessment)? {
@@ -2434,8 +2470,13 @@ fn route_kind_for_request(
 
 fn route_profile_for_kind(route_kind: RouteKind) -> RouteProfile {
     match route_kind {
-        RouteKind::ResponsesWebSocket => RESPONSES_WEBSOCKET,
-        _ => RESPONSES_HTTP,
+        RouteKind::ResponsesWebSocket => RESPONSES_WEBSOCKET.clone(),
+        RouteKind::Responses
+        | RouteKind::Models
+        | RouteKind::MemoriesTraceSummarize
+        | RouteKind::ResponsesCompact
+        | RouteKind::ImageGenerations
+        | RouteKind::ImageEdits => RESPONSES_HTTP.clone(),
     }
 }
 
@@ -2587,6 +2628,7 @@ fn account_input_from_quota_state(account: &QuotaAwareAccountState) -> BurnDownA
     BurnDownAccountInput::new(
         account.account_id.clone(),
         account.account_id.as_str(),
+        Provider::Openai,
         vec![short_window, weekly_window],
     )
 }
@@ -2652,6 +2694,7 @@ mod tests {
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_core::provider::Provider;
+    use codex_router_core::route_profile::RESPONSES_HTTP;
     use codex_router_core::routes::RouteBand;
     use codex_router_quota::snapshot::SnapshotFreshness;
     use codex_router_selection::reservation::ReservationBook;
@@ -2701,6 +2744,7 @@ mod tests {
         BurnDownAccountInput::new(
             account_id,
             account_label,
+            Provider::Claude,
             vec![
                 QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
                     .with_remaining_headroom(five_hour_remaining)
@@ -2712,7 +2756,6 @@ mod tests {
                     .with_observed_unix_seconds(now_unix_seconds),
             ],
         )
-        .with_provider(Provider::Claude)
     }
 
     #[test]
@@ -2720,6 +2763,7 @@ mod tests {
         let openai_account = codex_router_selection::burn_down::BurnDownAccountInput::new(
             account_id("acct_openai_short_reset"),
             "openai-short-reset",
+            Provider::Openai,
             Vec::new(),
         );
         let claude_account = claude_quota_account("claude_short_reset", 80, 80);
@@ -2747,38 +2791,34 @@ mod tests {
         let reserve = claude_quota_account("reserve", 5, 80);
         let reserve_id = reserve.account_id().clone();
         let preferred = claude_quota_account("preferred", 6, 80);
-        let preferred_assessment = assess_route_band(
-            BurnDownRouteBandAssessmentInput::new(
-                RouteBand::Responses,
-                1_000_000,
-                vec![reserve, preferred],
-            )
-            .with_route_profile(CLAUDE_MESSAGES),
-        );
+        let preferred_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            1_000_000,
+            CLAUDE_MESSAGES.clone(),
+            vec![reserve, preferred],
+        ));
 
         assert_eq!(preferred_assessment.selected_pool(), SelectedPool::Usable);
         assert!(super::assessment_account_must_yield(
             &preferred_assessment,
             &reserve_id,
-            CLAUDE_MESSAGES,
+            &CLAUDE_MESSAGES,
         ));
 
         let lone_reserve = claude_quota_account("lone_reserve", 5, 80);
         let lone_reserve_id = lone_reserve.account_id().clone();
-        let reserve_assessment = assess_route_band(
-            BurnDownRouteBandAssessmentInput::new(
-                RouteBand::Responses,
-                1_000_000,
-                vec![lone_reserve],
-            )
-            .with_route_profile(CLAUDE_MESSAGES),
-        );
+        let reserve_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            1_000_000,
+            CLAUDE_MESSAGES.clone(),
+            vec![lone_reserve],
+        ));
 
         assert_eq!(reserve_assessment.selected_pool(), SelectedPool::Reserve);
         assert!(!super::assessment_account_must_yield(
             &reserve_assessment,
             &lone_reserve_id,
-            CLAUDE_MESSAGES,
+            &CLAUDE_MESSAGES,
         ));
     }
 
@@ -2790,14 +2830,12 @@ mod tests {
 
         let openai_account_id = account_id("acct_openai_cooldown");
         let claude_account = claude_quota_account("claude_cooldown", 80, 80);
-        let assessment = assess_route_band(
-            BurnDownRouteBandAssessmentInput::new(
-                RouteBand::Responses,
-                1_000_000,
-                vec![claude_account],
-            )
-            .with_route_profile(CLAUDE_MESSAGES),
-        );
+        let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            1_000_000,
+            CLAUDE_MESSAGES.clone(),
+            vec![claude_account],
+        ));
         let mut holds = HashMap::from([(
             super::ProviderRouteBand::new(Provider::Openai, RouteBand::Responses),
             super::AccountHold::new(openai_account_id.clone(), 999_990),
@@ -3021,6 +3059,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownAccountInput::new(
                 account_id("acct_stale_authority"),
                 "stale-authority",
+                Provider::Openai,
                 vec![
                     codex_router_selection::burn_down::QuotaWindowFact::new(
                         codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -3040,6 +3079,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownAccountInput::new(
                 account_id("acct_fresh_exhausted"),
                 "fresh-exhausted",
+                Provider::Openai,
                 vec![
                     codex_router_selection::burn_down::QuotaWindowFact::new(
                         codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -3060,6 +3100,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput::new(
                 codex_router_core::routes::RouteBand::Responses,
                 1_001,
+                RESPONSES_HTTP.clone(),
                 account_inputs,
             ),
         );
@@ -3217,6 +3258,25 @@ mod tests {
         assert!(!rendered_log.contains("/Users/shravansunder"));
     }
 
+    fn post_exhaustion_input<'a, TRepository>(
+        state_repository: &'a TRepository,
+        route_band: RouteBand,
+        route_profile: codex_router_core::route_profile::RouteProfile,
+        excluded_account_id: &'a AccountId,
+        now_unix_seconds: u64,
+    ) -> super::RouteBandPostExhaustionOutcomeInput<'a, TRepository> {
+        super::RouteBandPostExhaustionOutcomeInput {
+            state_repository,
+            active_reservations: None,
+            runtime_exhaustions: None,
+            route_band_queue_health: None,
+            route_band,
+            route_profile,
+            excluded_account_id,
+            now_unix_seconds,
+        }
+    }
+
     #[tokio::test]
     async fn post_exhaustion_alternative_selection_fails_closed_when_queue_health_degraded() {
         let route_band_health = super::RouteBandQueueHealth::default();
@@ -3228,16 +3288,16 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("queue degraded state should record: {error}"));
 
-        let result = super::route_band_post_exhaustion_outcome(
+        let exhausted_account_id = account_id("acct_exhausted");
+        let mut input = post_exhaustion_input(
             &PanicSelectionProjectionRepository,
-            None,
-            None,
-            Some(&route_band_health),
-            codex_router_core::routes::RouteBand::Responses,
-            &account_id("acct_exhausted"),
+            RouteBand::Responses,
+            RESPONSES_HTTP.clone(),
+            &exhausted_account_id,
             1_001,
-        )
-        .await;
+        );
+        input.route_band_queue_health = Some(&route_band_health);
+        let result = super::route_band_post_exhaustion_outcome(input).await;
 
         assert!(
             result.is_err(),
@@ -3258,15 +3318,13 @@ mod tests {
             ),
         ]);
 
-        let result = super::route_band_post_exhaustion_outcome(
+        let result = super::route_band_post_exhaustion_outcome(post_exhaustion_input(
             &repository,
-            None,
-            None,
-            None,
-            codex_router_core::routes::RouteBand::Responses,
+            RouteBand::Responses,
+            RESPONSES_HTTP.clone(),
             &exhausted_account_id,
             1_001,
-        )
+        ))
         .await;
 
         assert!(
@@ -3288,15 +3346,13 @@ mod tests {
             ),
         ]);
 
-        let result = super::route_band_post_exhaustion_outcome(
+        let result = super::route_band_post_exhaustion_outcome(post_exhaustion_input(
             &repository,
-            None,
-            None,
-            None,
-            codex_router_core::routes::RouteBand::Responses,
+            RouteBand::Responses,
+            RESPONSES_HTTP.clone(),
             &exhausted_account_id,
             1_001,
-        )
+        ))
         .await;
 
         assert!(
@@ -3314,15 +3370,13 @@ mod tests {
             selector_input_for_short_only_exhaustion_test(short_exhausted_account_id),
         ]);
 
-        let result = super::route_band_post_exhaustion_outcome(
+        let result = super::route_band_post_exhaustion_outcome(post_exhaustion_input(
             &repository,
-            None,
-            None,
-            None,
-            codex_router_core::routes::RouteBand::Responses,
+            RouteBand::Responses,
+            RESPONSES_HTTP.clone(),
             &exhausted_account_id,
             1_000,
-        )
+        ))
         .await;
 
         assert!(
@@ -3344,15 +3398,13 @@ mod tests {
             selector_input_for_runtime_exhaustion_test(exhausted_account_id.clone()),
         ]);
 
-        let result = super::route_band_post_exhaustion_outcome(
+        let result = super::route_band_post_exhaustion_outcome(post_exhaustion_input(
             &repository,
-            None,
-            None,
-            None,
-            codex_router_core::routes::RouteBand::Responses,
+            RouteBand::Responses,
+            RESPONSES_HTTP.clone(),
             &exhausted_account_id,
             1_000,
-        )
+        ))
         .await;
 
         assert!(matches!(
@@ -3361,6 +3413,34 @@ mod tests {
                 retry_after_seconds: 17_060..=17_120,
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn post_exhaustion_short_wait_ignores_other_provider_windows() {
+        let exhausted_account_id = account_id("acct_openai_exhausted_without_wait");
+        let claude_account_id = account_id("acct_claude_short_wait_must_not_leak");
+        let repository = StaticSelectionProjectionRepository::new(vec![
+            selector_input_for_post_exhaustion_test(
+                exhausted_account_id.clone(),
+                "openai-exhausted",
+                codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Ineligible,
+            ),
+            selector_input_for_claude_short_only_exhaustion_test(claude_account_id),
+        ]);
+
+        let result = super::route_band_post_exhaustion_outcome(post_exhaustion_input(
+            &repository,
+            RouteBand::Responses,
+            RESPONSES_HTTP.clone(),
+            &exhausted_account_id,
+            1_000,
+        ))
+        .await;
+
+        assert_eq!(
+            result,
+            Ok(super::PostExhaustionRouteBandOutcome::NoSelectableAlternative)
+        );
     }
 
     #[tokio::test]
@@ -3374,15 +3454,13 @@ mod tests {
             ),
         ]);
 
-        let result = super::route_band_post_exhaustion_outcome(
+        let result = super::route_band_post_exhaustion_outcome(post_exhaustion_input(
             &repository,
-            None,
-            None,
-            None,
-            codex_router_core::routes::RouteBand::Responses,
+            RouteBand::Responses,
+            RESPONSES_HTTP.clone(),
             &exhausted_account_id,
             1_000,
-        )
+        ))
         .await;
 
         assert_eq!(
@@ -3749,6 +3827,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownAccountInput::new(
                 weak_account_id.clone(),
                 "weak",
+                Provider::Openai,
                 vec![
                     codex_router_selection::burn_down::QuotaWindowFact::new(
                         codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -3768,6 +3847,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownAccountInput::new(
                 strong_account_id.clone(),
                 "strong",
+                Provider::Openai,
                 vec![
                     codex_router_selection::burn_down::QuotaWindowFact::new(
                         codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -3789,6 +3869,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput::new(
                 codex_router_core::routes::RouteBand::Responses,
                 10_000,
+                RESPONSES_HTTP.clone(),
                 account_inputs,
             ),
         );
@@ -3869,6 +3950,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownAccountInput::new(
                 guarded_account_id.clone(),
                 "guarded",
+                Provider::Openai,
                 vec![
                     codex_router_selection::burn_down::QuotaWindowFact::new(
                         codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -3889,6 +3971,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownAccountInput::new(
                 empty_account_id,
                 "empty",
+                Provider::Openai,
                 vec![
                     codex_router_selection::burn_down::QuotaWindowFact::new(
                         codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -3907,6 +3990,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownAccountInput::new(
                 ineligible_account_id,
                 "ineligible",
+                Provider::Openai,
                 vec![
                     codex_router_selection::burn_down::QuotaWindowFact::new(
                         codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -3923,6 +4007,7 @@ mod tests {
             codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput::new(
                 codex_router_core::routes::RouteBand::Responses,
                 10_000,
+                RESPONSES_HTTP.clone(),
                 account_inputs,
             ),
         );
@@ -3970,6 +4055,7 @@ mod tests {
         let account = codex_router_selection::burn_down::BurnDownAccountInput::new(
             account_id("acct_weekly_exhausted"),
             "weekly-exhausted",
+            Provider::Openai,
             vec![
                 codex_router_selection::burn_down::QuotaWindowFact::new(
                     codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -3997,6 +4083,7 @@ mod tests {
         let account = codex_router_selection::burn_down::BurnDownAccountInput::new(
             account_id("acct_short_stale"),
             "short-stale",
+            Provider::Openai,
             vec![
                 codex_router_selection::burn_down::QuotaWindowFact::new(
                     codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -4035,6 +4122,7 @@ mod tests {
         codex_router_selection::burn_down::BurnDownAccountInput::new(
             account_id(account_id_value),
             account_id_value,
+            Provider::Openai,
             vec![
                 codex_router_selection::burn_down::QuotaWindowFact::new(
                     codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -4425,6 +4513,7 @@ mod tests {
                         codex_router_state::quota_snapshot::SelectorQuotaInput::new(
                             account_id.clone(),
                             account_id.as_str(),
+                            Provider::Openai,
                             codex_router_state::account::AccountStatus::Enabled,
                             Some(1),
                             route_band,
@@ -4601,6 +4690,7 @@ mod tests {
         codex_router_selection::burn_down::BurnDownAccountInput::new(
             account_id,
             "runtime-test",
+            Provider::Openai,
             vec![
                 codex_router_selection::burn_down::QuotaWindowFact::new(
                     codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
@@ -4636,6 +4726,7 @@ mod tests {
         codex_router_state::quota_snapshot::SelectorQuotaInput::new(
             account_id.clone(),
             account_label,
+            Provider::Openai,
             codex_router_state::account::AccountStatus::Enabled,
             Some(1),
             "responses",
@@ -4670,6 +4761,7 @@ mod tests {
         codex_router_state::quota_snapshot::SelectorQuotaInput::new(
             account_id.clone(),
             "short-only-exhausted",
+            Provider::Openai,
             codex_router_state::account::AccountStatus::Enabled,
             Some(1),
             "responses",
@@ -4696,6 +4788,36 @@ mod tests {
                 .with_observed_unix_seconds(900),
             ],
         )
+    }
+
+    fn selector_input_for_claude_short_only_exhaustion_test(
+        account_id: AccountId,
+    ) -> codex_router_state::quota_snapshot::SelectorQuotaInput {
+        use codex_router_core::route_profile::WindowKind;
+        use codex_router_state::window_observation::WindowObservation;
+        use codex_router_state::window_observation::WindowObservationProps;
+
+        let five_hour = WindowObservation::new(
+            WindowObservationProps::new(account_id.clone(), WindowKind::FiveHour, 0, 900)
+                .with_reset_unix_seconds(1_005),
+        )
+        .unwrap_or_else(|error| panic!("Claude five-hour observation should validate: {error}"));
+        let weekly = WindowObservation::new(
+            WindowObservationProps::new(account_id.clone(), WindowKind::Weekly, 8_000, 900)
+                .with_reset_unix_seconds(100_000),
+        )
+        .unwrap_or_else(|error| panic!("Claude weekly observation should validate: {error}"));
+
+        codex_router_state::quota_snapshot::SelectorQuotaInput::new(
+            account_id,
+            "claude-short-only",
+            Provider::Claude,
+            codex_router_state::account::AccountStatus::Enabled,
+            Some(1),
+            "responses",
+            Vec::new(),
+        )
+        .with_window_state(vec![five_hour, weekly], Vec::new())
     }
 
     fn proxy_test_database_path(name: &str) -> PathBuf {
