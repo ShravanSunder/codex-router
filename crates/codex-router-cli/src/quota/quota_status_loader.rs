@@ -1,4 +1,5 @@
 use super::*;
+use codex_router_core::route_profile::RESPONSES_HTTP;
 
 #[derive(Clone)]
 pub(super) struct QuotaCredentialResources {
@@ -105,6 +106,10 @@ pub(super) async fn quota_status_report(
     now_unix_seconds: u64,
     unicode_bars: bool,
 ) -> Result<QuotaStatusReport, QuotaCommandError> {
+    let accounts = accounts
+        .iter()
+        .filter(|account| account.provider() == codex_router_core::provider::Provider::Openai)
+        .collect::<Vec<_>>();
     let selector_inputs = quota_history_state
         .selector_inputs_for_route_band(USER_QUOTA_ROUTE_BAND, now_unix_seconds)
         .await?;
@@ -256,6 +261,7 @@ pub(super) async fn quota_status_report(
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
         now_unix_seconds,
+        RESPONSES_HTTP.clone(),
         assessment_inputs,
     ));
     let selected_pool = assessment.selected_pool();

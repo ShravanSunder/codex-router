@@ -1,8 +1,11 @@
 //! SQLite quota snapshot DTOs.
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 
 use crate::account::AccountStatus;
+use crate::window_observation::WindowObservation;
+use crate::window_observation::WindowRejection;
 
 /// Source that produced a persisted quota snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -524,10 +527,13 @@ impl PersistedSelectorQuotaWindow {
 pub struct SelectorQuotaInput {
     account_id: AccountId,
     account_label: String,
+    provider: Provider,
     account_status: AccountStatus,
     active_credential_generation: Option<u64>,
     route_band: String,
     windows: Vec<PersistedSelectorQuotaWindow>,
+    window_observations: Vec<WindowObservation>,
+    window_rejections: Vec<WindowRejection>,
 }
 
 impl SelectorQuotaInput {
@@ -536,6 +542,7 @@ impl SelectorQuotaInput {
     pub fn new(
         account_id: AccountId,
         account_label: impl Into<String>,
+        provider: Provider,
         account_status: AccountStatus,
         active_credential_generation: Option<u64>,
         route_band: impl Into<String>,
@@ -544,11 +551,26 @@ impl SelectorQuotaInput {
         Self {
             account_id,
             account_label: account_label.into(),
+            provider,
             account_status,
             active_credential_generation,
             route_band: route_band.into(),
             windows,
+            window_observations: Vec::new(),
+            window_rejections: Vec::new(),
         }
+    }
+
+    /// Attaches the account's durable Claude per-window state.
+    #[must_use]
+    pub fn with_window_state(
+        mut self,
+        window_observations: Vec<WindowObservation>,
+        window_rejections: Vec<WindowRejection>,
+    ) -> Self {
+        self.window_observations = window_observations;
+        self.window_rejections = window_rejections;
+        self
     }
 
     /// Returns account id.
@@ -561,6 +583,12 @@ impl SelectorQuotaInput {
     #[must_use]
     pub fn account_label(&self) -> &str {
         &self.account_label
+    }
+
+    /// Returns the immutable provider for this account.
+    #[must_use]
+    pub const fn provider(&self) -> Provider {
+        self.provider
     }
 
     /// Returns account status.
@@ -585,6 +613,18 @@ impl SelectorQuotaInput {
     #[must_use]
     pub fn windows(&self) -> &[PersistedSelectorQuotaWindow] {
         &self.windows
+    }
+
+    /// Returns durable Claude quota observations ordered by window kind.
+    #[must_use]
+    pub fn window_observations(&self) -> &[WindowObservation] {
+        &self.window_observations
+    }
+
+    /// Returns durable Claude rejection barriers ordered by window kind.
+    #[must_use]
+    pub fn window_rejections(&self) -> &[WindowRejection] {
+        &self.window_rejections
     }
 }
 

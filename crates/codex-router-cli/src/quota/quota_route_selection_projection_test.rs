@@ -1,4 +1,5 @@
 use super::*;
+use codex_router_core::route_profile::RESPONSES_HTTP;
 
 #[test]
 fn quota_status_selection_uses_projected_run_rate_like_runtime_selector() {
@@ -46,6 +47,7 @@ fn quota_status_selection_uses_projected_run_rate_like_runtime_selector() {
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
         NOW,
+        RESPONSES_HTTP.clone(),
         vec![fast_burning_input, slow_burning_input],
     ));
 
@@ -110,6 +112,7 @@ fn quota_status_selection_exposes_initial_admission_for_fresh_idle_quota() {
     let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
         NOW,
+        RESPONSES_HTTP.clone(),
         vec![near_reset_input, reserve_input],
     ));
     let selected = assessment

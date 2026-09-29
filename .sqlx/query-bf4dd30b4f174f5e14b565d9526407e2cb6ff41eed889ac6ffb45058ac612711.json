@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT window_kind, rejected_at, reported_reset\n               FROM account_window_rejections\n              WHERE account_id = ?1\n              ORDER BY window_kind",
+  "describe": {
+    "columns": [
+      {
+        "name": "window_kind",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_window_rejections",
+            "name": "window_kind"
+          }
+        }
+      },
+      {
+        "name": "rejected_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_rejections",
+            "name": "rejected_at"
+          }
+        }
+      },
+      {
+        "name": "reported_reset",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_rejections",
+            "name": "reported_reset"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "bf4dd30b4f174f5e14b565d9526407e2cb6ff41eed889ac6ffb45058ac612711"
+}

@@ -104,13 +104,18 @@ impl TerminalDriver {
         self.drain_pending_output();
         let child_running = self.child_is_running().ok();
         let tail = self.transcript.get(start..).unwrap_or_default();
-        let visible_text = String::from_utf8_lossy(tail);
+        let terminal_bytes = String::from_utf8_lossy(tail);
         format!(
-            "tail_bytes={} inspecting_footer={} browse_footer={} reset_title={} eof={} child_running={:?}",
+            "tail_bytes={} fullscreen_entered={} keyboard_probe={} device_attributes_probe={} mouse_capture_enabled={} synchronized_update_started={} inspecting_footer={} browse_footer={} reset_title={} eof={} child_running={:?}",
             tail.len(),
-            visible_text.contains("esc/ctrl-r back"),
-            visible_text.contains("ctrl-r reset credits"),
-            visible_text.contains("Reset credit"),
+            terminal_bytes.contains("\u{1b}[?1049h"),
+            terminal_bytes.contains("\u{1b}[?u"),
+            terminal_bytes.contains("\u{1b}[c"),
+            terminal_bytes.contains("\u{1b}[?1003h") && terminal_bytes.contains("\u{1b}[?1006h"),
+            terminal_bytes.contains("\u{1b}[?2026h"),
+            terminal_bytes.contains("esc/ctrl-r back"),
+            terminal_bytes.contains("ctrl-r reset credits"),
+            terminal_bytes.contains("Reset credit"),
             self.reached_eof,
             child_running,
         )

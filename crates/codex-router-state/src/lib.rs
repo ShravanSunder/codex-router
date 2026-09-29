@@ -12,6 +12,7 @@ pub mod repositories;
 pub mod selection_projection;
 pub mod session_account_affinity;
 pub mod sqlite;
+pub mod window_observation;
 
 /// Returns this crate's package name.
 #[must_use]
@@ -531,6 +532,8 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE IF EXISTS account_window_observations;
+                 DROP TABLE IF EXISTS account_window_rejections;
                  DROP TABLE IF EXISTS credential_maintenance;
                  DROP TABLE account_routing_policies;
                  DROP TABLE session_account_affinities;
@@ -546,6 +549,8 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE IF EXISTS account_window_observations;
+                 DROP TABLE IF EXISTS account_window_rejections;
                  DROP TABLE IF EXISTS credential_maintenance;
                  ALTER TABLE account_routing_policies RENAME TO account_routing_policies_current;
                  CREATE TABLE account_routing_policies (
@@ -572,6 +577,8 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE IF EXISTS account_window_observations;
+                 DROP TABLE IF EXISTS account_window_rejections;
                  DROP TABLE IF EXISTS credential_maintenance;
                  DROP TABLE session_account_affinities;
                  PRAGMA user_version = 12;",

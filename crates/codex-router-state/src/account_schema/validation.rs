@@ -268,14 +268,17 @@ pub(super) async fn validate_table_constraints(
             .await
             .map_err(crate::sqlite::sqlx_error)?;
     let tokens = schema_tokens(&sql);
-    let forbidden = tokens.iter().any(|token| {
-        matches!(
-            token.as_str(),
-            "references" | "unique" | "without" | "strict" | "collate"
-        )
-    }) || tokens
-        .windows(2)
-        .any(|window| window == ["foreign", "key"] || window == ["on", "conflict"]);
+    let permits_account_window_foreign_key = matches!(
+        table_name,
+        "account_window_observations" | "account_window_rejections"
+    );
+    let has_foreign_key = tokens.iter().any(|token| token == "references")
+        || tokens.windows(2).any(|window| window == ["foreign", "key"]);
+    let forbidden = tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "unique" | "without" | "strict" | "collate"))
+        || tokens.windows(2).any(|window| window == ["on", "conflict"])
+        || (has_foreign_key && !permits_account_window_foreign_key);
     let check_count = tokens
         .iter()
         .filter(|token| token.as_str() == "check")
@@ -296,6 +299,9 @@ pub(super) async fn validate_table_constraints(
     {
         return incompatible_schema();
     }
+    if permits_account_window_foreign_key {
+        validate_account_window_foreign_key(connection, table_name).await?;
+    }
 
     let indexes = sqlx::query("SELECT [unique], origin FROM pragma_index_list(?1)")
         .bind(table_name)
@@ -305,6 +311,45 @@ pub(super) async fn validate_table_constraints(
     if indexes
         .iter()
         .any(|row| row.get::<i64, _>(0) != 0 && row.get::<String, _>(1) != "pk")
+    {
+        return incompatible_schema();
+    }
+    Ok(())
+}
+
+async fn validate_account_window_foreign_key(
+    connection: &mut SqliteConnection,
+    table_name: &'static str,
+) -> Result<(), StateStoreError> {
+    let query = match table_name {
+        "account_window_observations" => "PRAGMA foreign_key_list('account_window_observations')",
+        "account_window_rejections" => "PRAGMA foreign_key_list('account_window_rejections')",
+        _ => return incompatible_schema(),
+    };
+    let rows = sqlx::query(query)
+        .fetch_all(connection)
+        .await
+        .map_err(crate::sqlite::sqlx_error)?;
+    if rows.len() != 1 {
+        return incompatible_schema();
+    }
+    let Some(foreign_key) = rows.first() else {
+        return incompatible_schema();
+    };
+    if foreign_key.get::<i64, _>("id") != 0
+        || foreign_key.get::<i64, _>("seq") != 0
+        || foreign_key.get::<String, _>("table") != "accounts"
+        || foreign_key.get::<String, _>("from") != "account_id"
+        || foreign_key.get::<String, _>("to") != "account_id"
+        || !foreign_key
+            .get::<String, _>("on_update")
+            .eq_ignore_ascii_case("no action")
+        || !foreign_key
+            .get::<String, _>("on_delete")
+            .eq_ignore_ascii_case("cascade")
+        || !foreign_key
+            .get::<String, _>("match")
+            .eq_ignore_ascii_case("none")
     {
         return incompatible_schema();
     }
