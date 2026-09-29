@@ -118,6 +118,9 @@ incremental = false
 debug = "line-tables-only"
 incremental = false
 
+[profile.dev.package."*"]
+debug = 0
+
 # Debug Host restarts hash the managed executable before launch and publication.
 # Keep full content verification fast enough for native TUI reconnect deadlines.
 [profile.dev.package.sha2]
