@@ -238,7 +238,9 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                             "caller-correlation"
                         );
                         let text = request["params"]["input"][0]["text"].as_str().unwrap();
-                        assert!(text.starts_with("🤖 codex-local/proof-th ← 🤖 codex-local/proof-th\nAgent communication\nSelf-declared sender: "));
+                        assert!(text.starts_with(
+                            "🤖 Old name ← 🤖 Old name\nAgent communication\nSelf-declared sender: "
+                        ));
                         assert!(text.contains("\nIntended recipient: "));
                         assert!(text.ends_with("\n\nA checked finding"));
                     } else {

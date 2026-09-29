@@ -228,7 +228,7 @@ fn report_reply(
                 reply_target_line(&reply)
             };
             (
-                crate::endpoint_commands::result_envelope(serde_json::json!(reply.clone())),
+                crate::endpoint_commands::result_envelope(serde_json::json!(reply)),
                 exit_code,
                 Some(target_line),
             )
@@ -277,9 +277,7 @@ fn reply_target_line(reply: &collaboration_client::protocol::SessionMessageReply
 }
 
 fn session_ref_text(reply: &collaboration_client::protocol::SessionMessageReplyResult) -> String {
-    let target = serde_json::to_string(&reply.target)
-        .unwrap_or_else(|_| "SessionRef unavailable".to_owned());
-    target
+    serde_json::to_string(&reply.target).unwrap_or_else(|_| "SessionRef unavailable".to_owned())
 }
 
 fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i32 {

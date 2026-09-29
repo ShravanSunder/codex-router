@@ -4,7 +4,7 @@ use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
 use collaboration_protocol::{
-    AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageContent, MessageDelivery,
+    AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageDelivery,
     MessageHeaderContext, NativeInputDisposition, NativeInputOperation, NativeSendAcceptance,
     NativeSendParams, NativeSendReceipt, NonEmptyText, SessionRef, UuidIdentity,
 };
@@ -119,9 +119,7 @@ pub(crate) async fn dispatch_message(
     let result = session
         .deliver(
             &target_id,
-            params.delivery,
-            &params.target,
-            &params.message,
+            &params,
             &request.header_context,
             request.display_names,
             &correlation,
@@ -267,9 +265,7 @@ impl MessageSession<'_> {
     async fn deliver(
         &mut self,
         id: &str,
-        delivery: MessageDelivery,
-        target: &SessionRef,
-        message: &MessageContent,
+        params: &NativeSendParams,
         header_context: &MessageHeaderContext,
         display_names: &crate::SessionDisplayNameCache,
         correlation: &str,
@@ -281,13 +277,17 @@ impl MessageSession<'_> {
             Some(self.read_thread_metadata(id).await?)
         };
         if let Some(thread) = thread.as_ref() {
-            cache_thread_display_name(display_names, target, thread);
+            cache_thread_display_name(display_names, &params.target, thread);
         }
-        let current_header_context =
-            MessageHeaderContext::resolve(target, message, display_names, header_context.origin);
+        let current_header_context = MessageHeaderContext::resolve(
+            &params.target,
+            &params.message,
+            display_names,
+            header_context.origin,
+        );
         let rendered = collaboration_protocol::render_message_with_context(
-            target,
-            message,
+            &params.target,
+            &params.message,
             &current_header_context,
         )
         .map_err(|_| self.effects.failure("overloaded", "inspect"))?;
@@ -300,7 +300,7 @@ impl MessageSession<'_> {
                 .ok_or_else(|| self.effects.failure("unsupportedCapability", "inspect"))?,
         };
         let input = json!([{"type":"text","text":text}]);
-        if delivery == MessageDelivery::Queue {
+        if params.delivery == MessageDelivery::Queue {
             if status == "notLoaded" {
                 return Err(self.effects.failure("threadNotLoaded", "queue"));
             }
@@ -326,7 +326,7 @@ impl MessageSession<'_> {
                 submission_id: None,
             });
         }
-        if delivery == MessageDelivery::Steer {
+        if params.delivery == MessageDelivery::Steer {
             return Err(self.effects.failure("noActiveTurn", "steer"));
         }
         if status == "notLoaded" {
