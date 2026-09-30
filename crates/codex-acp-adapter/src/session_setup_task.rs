@@ -158,6 +158,7 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
                     | SessionSetupError::AccessMismatch { .. }
                     | SessionSetupError::NativeRejected
                     | SessionSetupError::SchemaUnavailable
+                    | SessionSetupError::HomeDirectoryUnavailable
             );
             let error = if let Some(operation_id) = operation_id.as_ref() {
                 if inputs

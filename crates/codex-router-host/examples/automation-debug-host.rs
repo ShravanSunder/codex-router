@@ -101,17 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let socket = native_directory.join("app-server.sock");
     let paths = CodexPaths::from_codex_home(codex_home.clone());
-    let control_socket =
-        codex_native_integration::RouterControlSocketPath::in_collaboration_directory(
-            &options.run_directory.join("agent-communication"),
-        )?;
-    let spec = AppServerCommandSpec::new(
-        &paths,
-        &CodexRouterProfile::new(options.port),
-        &control_socket,
-        &socket,
-    )
-    .with_debug_profile(&profile);
+    let spec = AppServerCommandSpec::new(&paths, &CodexRouterProfile::new(options.port), &socket)
+        .with_debug_profile(&profile);
     let executable = codex_native_integration::executable_identity(&spec.executable()).await?;
     let version = codex_native_integration::managed_executable_version(&spec.executable()).await?;
     // Home hooks can inject extra work after a test task ends. Disable them only
