@@ -7,10 +7,18 @@ use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialSt
 use codex_router_state::quota_snapshot::QuotaRefreshErrorClass;
 use codex_router_state::window_observation::WindowObservation;
 use codex_router_state::window_observation::WindowObservationProps;
-use std::io;
+use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc;
+use tracing::Event;
+use tracing::Subscriber;
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
 
 struct PersistingRecoveringClaudeCredentialResolver {
     state_path: PathBuf,
@@ -152,28 +160,50 @@ impl CredentialRefreshClient for RecordingClaudeUpkeepRefreshClient {
     }
 }
 
-#[derive(Clone)]
-struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);
+#[derive(Clone, Default)]
+struct StructuredEventCapture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
 
-impl io::Write for SharedLogBuffer {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+impl StructuredEventCapture {
+    fn snapshot(&self) -> Vec<BTreeMap<String, String>> {
         self.0
             .lock()
-            .map_err(|_| io::Error::other("log buffer lock poisoned"))?
-            .extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
-impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for SharedLogBuffer {
-    type Writer = Self;
+impl<S> Layer<S> for StructuredEventCapture
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+        let mut visitor = StructuredFieldVisitor::default();
+        event.record(&mut visitor);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(visitor.0);
+    }
+}
 
-    fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
+#[derive(Default)]
+struct StructuredFieldVisitor(BTreeMap<String, String>);
+
+impl Visit for StructuredFieldVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.0.insert(field.name().to_owned(), format!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0.insert(field.name().to_owned(), value.to_owned());
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.0.insert(field.name().to_owned(), value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.0.insert(field.name().to_owned(), value.to_string());
     }
 }
 
@@ -232,11 +262,8 @@ fn claude_usage_401_after_renewal_preserves_account_for_upkeep_and_records_failu
     let quota_provider = AlwaysUnauthorizedClaudeQuotaProvider {
         access_tokens: Mutex::new(Vec::new()),
     };
-    let log_bytes = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_writer(SharedLogBuffer(Arc::clone(&log_bytes)))
-        .finish();
+    let captured = StructuredEventCapture::default();
+    let subscriber = tracing_subscriber::registry().with(captured.clone());
     let mut stdout = Vec::new();
     let refresh_result = tracing::subscriber::with_default(subscriber, || {
         runtime.block_on(refresh_quota_store_paths_with_dependencies_async(
@@ -284,21 +311,42 @@ fn claude_usage_401_after_renewal_preserves_account_for_upkeep_and_records_failu
     assert_eq!(windows.len(), 1);
     assert_eq!(windows[0].remaining_basis_points(), 6_000);
 
-    let captured_logs = String::from_utf8(
-        log_bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone(),
-    )
-    .expect("captured logs should be UTF-8");
-    assert!(captured_logs.contains("Claude usage endpoint rejected a freshly renewed credential"));
-    assert!(captured_logs.contains("account.hash="));
-    assert!(!captured_logs.contains(account_id.as_str()));
-    assert!(captured_logs.contains("credential_generation=2"));
-    assert!(captured_logs.contains("http.status_code=401"));
-    assert!(captured_logs.contains("endpoint.path=\"/api/oauth/usage\""));
-    assert!(!captured_logs.contains("claude-old-access-canary"));
-    assert!(!captured_logs.contains("claude-recovered-access-canary"));
+    let captured_events = captured.snapshot();
+    let renewed_credential_rejection = captured_events
+        .iter()
+        .find(|event| {
+            event.get("message").is_some_and(|message| {
+                message.contains("Claude usage endpoint rejected a freshly renewed credential")
+            })
+        })
+        .expect("renewed-credential 401 event should be captured");
+    let account_hash = renewed_credential_rejection
+        .get("account.hash")
+        .expect("account hash field should be captured");
+    assert!(!account_hash.is_empty());
+    assert_ne!(account_hash, account_id.as_str());
+    assert_eq!(
+        renewed_credential_rejection
+            .get("credential_generation")
+            .map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(
+        renewed_credential_rejection
+            .get("http.status_code")
+            .map(String::as_str),
+        Some("401")
+    );
+    assert_eq!(
+        renewed_credential_rejection
+            .get("endpoint.path")
+            .map(String::as_str),
+        Some("/api/oauth/usage")
+    );
+    let captured_fields = format!("{captured_events:?}");
+    assert!(!captured_fields.contains(account_id.as_str()));
+    assert!(!captured_fields.contains("claude-old-access-canary"));
+    assert!(!captured_fields.contains("claude-recovered-access-canary"));
     must_ok(runtime.block_on(read_state.close()));
 
     let (observed_sender, observed_receiver) = mpsc::channel();
