@@ -2,6 +2,7 @@
 
 ## Unreleased - 2026-09-24
 
+- Encrypt pooled account credentials with a Router-owned Keychain key. After upgrading, authorize Router once at the first Host restart; refreshes in that running Host do not prompt. The Host migrates existing pooled credential files to encrypted envelopes, reads each credential back for verification, then removes the plaintext file. If migration stops early, the Host still starts, Claude requests report the incomplete migration, Codex requests keep the existing credential-unavailable response, and `account list` and `quota` identify accounts still to convert; the next Host restart resumes migration without marking accounts as needing login.
 - Add `serve --claude-five-hour-reserve-percent` to configure when Claude's five-hour window enters the reserve tier; defaults to 95 percent and accepts values from 1 to 99.
 - Route Claude accounts by their five-hour and weekly quota windows. Claude accounts are not yet shown by `quota`; that view is added in PR4.
 - Add provider identity to accounts and session pins, and migrate existing rows to OpenAI. The state migration blocks downgrade because older binaries reject its unknown migration version. Restart `serve` after upgrading; an older running process still writes pins with the previous schema and those upserts fail.

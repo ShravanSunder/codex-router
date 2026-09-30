@@ -16,6 +16,11 @@ pub(super) async fn start_router(
         RouterProbeResult::Incompatible => Err(HostError::RouterIncompatible),
         RouterProbeResult::Unavailable => {
             let command = router_command.ok_or(HostError::RouterUnavailable)?;
+            let secret_root = config
+                .coordination_paths()
+                .router_secret_root()
+                .ok_or(HostError::RouterSecretRootUnavailable)?;
+            crate::router_credential_migration::migrate_before_router_spawn(&secret_root).await;
             let mut command = command.command();
             let mut child = RouterChild::spawn(&mut command)?;
             let probe_result = match await_router_readiness(

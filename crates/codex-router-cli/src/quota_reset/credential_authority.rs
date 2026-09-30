@@ -7,11 +7,12 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-use codex_router_secret_store::file_backend::FileSecretStore;
+use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_state::account::AccountStatus;
 use sha2::Digest;
 use sha2::Sha256;
@@ -117,7 +118,7 @@ impl fmt::Debug for PinnedResetAuthority {
 /// Dropping this value is cancellation-safe: it only releases reserved capacity.
 #[must_use = "prepared credential reads must be started or explicitly dropped"]
 pub(in crate::quota_reset) struct PreparedCredentialAuthorityRead {
-    secret_root: std::path::PathBuf,
+    credential_store: EncryptedCredentialStore,
     account_id: AccountId,
     expected_generation: ActiveCredentialGeneration,
     now_unix_seconds: u64,
@@ -128,7 +129,7 @@ impl PreparedCredentialAuthorityRead {
     /// Starts the blocking secret read and transfers its capacity permit into that operation.
     pub(in crate::quota_reset) fn start(self) -> StartedCredentialAuthorityRead {
         let Self {
-            secret_root,
+            credential_store,
             account_id,
             expected_generation,
             now_unix_seconds,
@@ -137,7 +138,7 @@ impl PreparedCredentialAuthorityRead {
         StartedCredentialAuthorityRead {
             operation: start_bounded_blocking_read(permit, move || {
                 load_exact_credential_authority(
-                    &secret_root,
+                    &credential_store,
                     account_id,
                     expected_generation,
                     now_unix_seconds,
@@ -200,7 +201,7 @@ where
 /// Resolves one exact account and credential generation without refresh or persistence.
 pub(in crate::quota_reset) async fn prepare_reset_credential_authority_read(
     state_database_path: &Path,
-    secret_root: &Path,
+    credential_store: &EncryptedCredentialStore,
     account_id: &AccountId,
     expected_generation: ActiveCredentialGeneration,
     now_unix_seconds: u64,
@@ -218,7 +219,7 @@ pub(in crate::quota_reset) async fn prepare_reset_credential_authority_read(
         .await
         .map_err(|_error| CredentialAuthorityError::StateReadFailed)?;
     let account_row = sqlx::query(
-        "SELECT status, active_credential_generation
+        "SELECT status, active_credential_generation, provider
            FROM accounts
           WHERE account_id = ?1",
     )
@@ -231,6 +232,11 @@ pub(in crate::quota_reset) async fn prepare_reset_credential_authority_read(
     let status = AccountStatus::parse(account_row.get::<String, _>(0).as_str())
         .ok_or(CredentialAuthorityError::StateReadFailed)?;
     if status != AccountStatus::Enabled {
+        return Err(CredentialAuthorityError::AccountUnavailable);
+    }
+    let provider = Provider::parse(account_row.get::<String, _>(2).as_str())
+        .ok_or(CredentialAuthorityError::StateReadFailed)?;
+    if provider != Provider::Openai {
         return Err(CredentialAuthorityError::AccountUnavailable);
     }
     let active_generation = account_row
@@ -247,7 +253,7 @@ pub(in crate::quota_reset) async fn prepare_reset_credential_authority_read(
         .await
         .map_err(|_error| CredentialAuthorityError::CredentialTaskFailed)?;
     Ok(PreparedCredentialAuthorityRead {
-        secret_root: secret_root.to_path_buf(),
+        credential_store: credential_store.clone(),
         account_id: account_id.clone(),
         expected_generation,
         now_unix_seconds,
@@ -259,14 +265,14 @@ pub(in crate::quota_reset) async fn prepare_reset_credential_authority_read(
 #[cfg(test)]
 pub(in crate::quota_reset) async fn load_reset_credential_authority(
     state_database_path: &Path,
-    secret_root: &Path,
+    credential_store: &EncryptedCredentialStore,
     account_id: &AccountId,
     expected_generation: ActiveCredentialGeneration,
     now_unix_seconds: u64,
 ) -> Result<PinnedResetAuthority, CredentialAuthorityError> {
     let mut read = prepare_reset_credential_authority_read(
         state_database_path,
-        secret_root,
+        credential_store,
         account_id,
         expected_generation,
         now_unix_seconds,
@@ -277,15 +283,15 @@ pub(in crate::quota_reset) async fn load_reset_credential_authority(
 }
 
 fn load_exact_credential_authority(
-    secret_root: &Path,
+    credential_store: &EncryptedCredentialStore,
     account_id: AccountId,
     active_credential_generation: ActiveCredentialGeneration,
     now_unix_seconds: u64,
 ) -> Result<PinnedResetAuthority, CredentialAuthorityError> {
-    let store = FileSecretStore::open_read_only(secret_root)?;
     let bundle_key =
-        account_credential_bundle_key(&account_id, active_credential_generation.get())?;
-    let bundle = AccountCredentialBundle::from_secret_string(store.read_secret(&bundle_key)?)?;
+        openai_account_credential_bundle_key(&account_id, active_credential_generation.get())?;
+    let bundle =
+        AccountCredentialBundle::from_secret_string(credential_store.read_secret(&bundle_key)?)?;
     let expires_unix_seconds = bundle.expires_unix_seconds();
     if expires_unix_seconds.is_some_and(|expires_at| expires_at <= now_unix_seconds) {
         return Err(CredentialAuthorityError::Expired);

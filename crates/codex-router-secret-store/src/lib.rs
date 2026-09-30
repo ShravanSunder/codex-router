@@ -3,9 +3,23 @@
 pub mod account_tokens;
 pub mod affinity_secret;
 pub mod backend;
+pub mod credential_key;
+pub mod credential_migration;
+pub mod credential_store_lock;
+pub mod encrypted_credential_store;
 pub mod file_backend;
+pub mod keychain_data_key;
 pub mod model;
 pub mod refresh_lease;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
+#[cfg(test)]
+mod encrypted_credential_store_tests;
+
+#[cfg(test)]
+mod credential_migration_tests;
 
 pub use backend::SecretStore;
 
@@ -27,6 +41,7 @@ mod tests {
     use std::thread;
 
     use codex_router_core::ids::AccountId;
+    use codex_router_core::provider::Provider;
     use codex_router_core::redaction::SecretString;
 
     use super::package_name;
@@ -37,6 +52,7 @@ mod tests {
     use crate::affinity_secret::RouterAffinityHashSecretOrigin;
     use crate::affinity_secret::load_or_create_router_affinity_hash_secret;
     use crate::affinity_secret::router_affinity_hash_secret_key;
+    use crate::credential_key::AccountCredentialKey;
     use crate::file_backend::FileSecretStore;
     use crate::model::SecretKey;
     use crate::refresh_lease::LeaseAcquisition;
@@ -96,6 +112,183 @@ mod tests {
             mode(&test_root.path().join("local_router_token.secret")),
             0o600
         );
+    }
+
+    #[test]
+    fn file_backend_refuses_pooled_credential_writes() {
+        let test_root = TestRoot::new("plaintext-credential-write");
+        let store = must_ok(FileSecretStore::open(test_root.path()));
+        let account_id = must_ok(AccountId::new("acct_plaintext_write"));
+        let key = must_ok(crate::account_tokens::openai_account_credential_bundle_key(
+            &account_id,
+            1,
+        ));
+
+        let result = store.write_secret(&key, &SecretString::new("credential-canary"));
+
+        assert!(
+            result.is_err(),
+            "FileSecretStore must refuse pooled credential writes"
+        );
+        assert!(
+            !test_root
+                .path()
+                .join(format!("{}.secret", key.as_str()))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn file_backend_refuses_legacy_pooled_credential_reads() {
+        let test_root = TestRoot::new("plaintext-credential-read");
+        let store = must_ok(FileSecretStore::open(test_root.path()));
+        let account_id = must_ok(AccountId::new("acct_plaintext_read"));
+        let key = must_ok(crate::account_tokens::openai_account_credential_bundle_key(
+            &account_id,
+            1,
+        ));
+        let plaintext_path = test_root.path().join(format!("{}.secret", key.as_str()));
+        must_ok(fs::write(&plaintext_path, "credential-canary"));
+
+        let result = store.read_secret(&key);
+
+        assert!(
+            result.is_err(),
+            "FileSecretStore must refuse legacy pooled credential reads"
+        );
+    }
+
+    #[test]
+    fn openai_account_credential_bundle_key_includes_provider() {
+        let account_id = must_ok(AccountId::new("acct_provider_key"));
+
+        let openai_key = must_ok(crate::account_tokens::provider_credential_bundle_key(
+            Provider::Openai,
+            &account_id,
+            1,
+        ));
+        let claude_key = must_ok(crate::account_tokens::provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            1,
+        ));
+
+        assert_eq!(
+            openai_key.as_str(),
+            "openai_credential_bundle.acct_provider_key.1"
+        );
+        assert_eq!(
+            claude_key.as_str(),
+            "claude_credential_bundle.acct_provider_key.1"
+        );
+    }
+
+    #[test]
+    fn openai_account_credential_bundle_key_rejects_zero_generation() {
+        let account_id = must_ok(AccountId::new("acct_zero_generation"));
+
+        let result = crate::account_tokens::openai_account_credential_bundle_key(&account_id, 0);
+
+        assert!(
+            result.is_err(),
+            "generation zero is not a credential generation"
+        );
+    }
+
+    #[test]
+    fn keychain_service_apis_are_confined_to_the_keychain_access_boundary() {
+        fn visit_rust_sources(path: &Path, sources: &mut Vec<PathBuf>) {
+            let entries = fs::read_dir(path)
+                .unwrap_or_else(|error| panic!("source directory should read: {error}"));
+            for entry in entries {
+                let entry =
+                    entry.unwrap_or_else(|error| panic!("source entry should read: {error}"));
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    visit_rust_sources(&entry_path, sources);
+                } else if entry_path
+                    .extension()
+                    .is_some_and(|extension| extension == "rs")
+                {
+                    sources.push(entry_path);
+                }
+            }
+        }
+
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = Vec::new();
+        visit_rust_sources(&source_root, &mut sources);
+        let security_framework_path = ["security_", "framework::"].concat();
+        let apple_keychain_path = ["apple_native_", "keyring_store::keychain"].concat();
+        for source_path in sources {
+            let relative_path = source_path
+                .strip_prefix(&source_root)
+                .expect("source path should remain under the crate source root");
+            if relative_path == Path::new("keychain_data_key.rs") {
+                continue;
+            }
+            if relative_path == Path::new("keychain_data_key/temporary_keychain_tests.rs") {
+                let keychain_module = fs::read_to_string(source_root.join("keychain_data_key.rs"))
+                    .unwrap_or_else(|error| panic!("Keychain module should read: {error}"));
+                assert!(keychain_module.contains(
+                    "#[cfg(all(test, target_os = \"macos\"))]\n#[path = \"keychain_data_key/temporary_keychain_tests.rs\"]\npub(crate) mod temporary_keychain_tests;"
+                ));
+                continue;
+            }
+            let source = fs::read_to_string(&source_path)
+                .unwrap_or_else(|error| panic!("Rust source should read: {error}"));
+            assert!(
+                !source.contains(&security_framework_path),
+                "Security.framework access escaped the KeychainAccess module: {}",
+                source_path.display()
+            );
+            assert!(
+                !source.contains(&apple_keychain_path),
+                "native Keychain calls escaped the KeychainAccess module: {}",
+                source_path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn account_credential_key_parses_provider_account_and_generation() {
+        let account_id = must_ok(AccountId::new("acct_parsed_key"));
+        let secret_key = must_ok(crate::account_tokens::provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            17,
+        ));
+
+        let parsed = must_ok(AccountCredentialKey::parse(&secret_key));
+
+        assert!(matches!(
+            parsed,
+            Some(key)
+                if key.provider() == Provider::Claude
+                    && key.account_id() == &account_id
+                    && key.generation() == 17
+        ));
+    }
+
+    #[test]
+    fn account_credential_key_rejects_unknown_provider_and_zero_generation() {
+        let unknown_provider = must_ok(SecretKey::new(
+            "gemini_credential_bundle.acct_unknown_provider.1",
+        ));
+        let zero_generation = must_ok(SecretKey::new(
+            "openai_credential_bundle.acct_zero_generation.0",
+        ));
+
+        assert!(matches!(
+            AccountCredentialKey::parse(&unknown_provider),
+            Err(crate::model::SecretStoreError::UnknownCredentialProvider {
+                provider
+            }) if provider == "gemini"
+        ));
+        assert!(matches!(
+            AccountCredentialKey::parse(&zero_generation),
+            Err(crate::model::SecretStoreError::InvalidCredentialKey { .. })
+        ));
     }
 
     #[test]

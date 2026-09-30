@@ -39,6 +39,14 @@ impl HostCoordinationPaths {
     pub fn instance_lock(&self) -> &Path {
         &self.instance_lock
     }
+
+    /// Returns the pooled credential directory under the same router root.
+    #[must_use]
+    pub fn router_secret_root(&self) -> Option<PathBuf> {
+        self.instance_lock
+            .parent()
+            .map(|router_root| router_root.join("secrets"))
+    }
 }
 
 /// Validated host inputs with router-owned and Codex-owned paths kept separate.

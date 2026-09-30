@@ -47,6 +47,7 @@ impl TerminalDriver {
         let mut command = CommandBuilder::new(program);
         command.args(arguments);
         command.env_clear();
+        command.env("HOME", std::env::temp_dir());
         command.env("TERM", "xterm-256color");
         command.env("LANG", "C.UTF-8");
         command.env("TMPDIR", std::env::temp_dir());

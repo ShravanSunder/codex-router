@@ -97,7 +97,11 @@ async fn truncated_429_body_preserves_retry_after_and_blocks_refresh_before_cool
 
     let temp_dir = AuthTestTempDir::new("truncated-429-cooldown");
     let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
-    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("truncated-429-account");
     must_ok(
         state
@@ -112,7 +116,7 @@ async fn truncated_429_body_preserves_retry_after_and_blocks_refresh_before_cool
             )
             .await,
     );
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,

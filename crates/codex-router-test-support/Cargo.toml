@@ -9,11 +9,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-codex-router-cli = { path = "../codex-router-cli", version = "0.1.4" }
+codex-router-cli = { path = "../codex-router-cli", version = "0.1.4", features = ["keychain-test-support"] }
 codex-native-integration.workspace = true
 codex-router-core.workspace = true
 codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.4" }
-codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4" }
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4", features = ["test-support"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
 futures-util.workspace = true
 serde.workspace = true
@@ -23,3 +23,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tokio-tungstenite.workspace = true
 tungstenite = "0.28.0"
+
+[dev-dependencies]
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4", features = ["keychain-test-guard", "test-support"] }
