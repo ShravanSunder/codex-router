@@ -73,6 +73,7 @@ struct PeerSessionCandidate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerSessionRecord {
     pub session_id: SessionId,
+    pub name: Option<String>,
     pub process_id: PeerProcessId,
     pub status: PeerSessionStatus,
     pub socket_path: PathBuf,
@@ -393,6 +394,10 @@ fn decode_record(target: &SessionId, filename_pid: u32, envelope: &Value) -> Pee
     };
     PeerSessionLookup::Writable(PeerSessionRecord {
         session_id: target.clone(),
+        name: envelope
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         process_id,
         status,
         socket_path: PathBuf::from(socket_path),

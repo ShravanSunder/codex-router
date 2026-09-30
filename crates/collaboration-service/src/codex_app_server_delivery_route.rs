@@ -22,6 +22,7 @@ pub struct CodexAppServerDeliveryRoute {
     endpoints: EndpointDirectory,
     backend: NativeControlBackend,
     holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
+    display_names: crate::SessionDisplayNameCache,
 }
 
 impl CodexAppServerDeliveryRoute {
@@ -37,7 +38,14 @@ impl CodexAppServerDeliveryRoute {
             endpoints,
             backend,
             holder,
+            display_names: crate::SessionDisplayNameCache::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_display_names(mut self, display_names: crate::SessionDisplayNameCache) -> Self {
+        self.display_names = display_names;
+        self
     }
 
     async fn deliver_native(
@@ -54,6 +62,7 @@ impl CodexAppServerDeliveryRoute {
             return Ok(not_submitted("staleGeneration", false));
         }
         let generation = admission.generation().clone();
+        let header_context = request.header_context.clone();
         let mut effects = NativeEffectEvidence {
             target: Some(request.target.clone()),
             generation: Some(generation.clone()),
@@ -116,6 +125,8 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
+                        header_context: header_context.clone(),
+                        display_names: &self.display_names,
                         held_connection: Some(binding.connection_mut()),
                     },
                 )
@@ -160,6 +171,8 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
+                        header_context,
+                        display_names: &self.display_names,
                         held_connection: None,
                     },
                 )

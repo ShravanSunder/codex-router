@@ -17,8 +17,20 @@ pub struct ProviderPromptContentsRequest {
 impl ProviderPromptContentsRequest {
     pub(super) fn from_control(
         request: ConversationPromptRequest,
+        display_names: &collaboration_service::SessionDisplayNameCache,
     ) -> Result<Self, Box<ConversationOperationFailure>> {
-        let rendered = render_message(&request.target, &request.prompt).map_err(|_| {
+        let header_context = collaboration_protocol::MessageHeaderContext::resolve(
+            &request.target,
+            &request.prompt,
+            display_names,
+            collaboration_protocol::MessageHeaderOrigin::Agent,
+        );
+        let rendered = collaboration_protocol::render_message_with_context(
+            &request.target,
+            &request.prompt,
+            &header_context,
+        )
+        .map_err(|_| {
             Box::new(failure(
                 ConversationOperationFailureKind::InvalidRequest,
                 ConversationOperationFailureStage::Validation,
@@ -143,5 +155,56 @@ impl ExternalProviderSupervisor {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderPromptContentsRequest;
+    use collaboration_protocol::{
+        ConversationPromptRequest, MessageContent, MessageText, OperationId, SessionRef,
+    };
+    use collaboration_service::SessionDisplayNameCache;
+    use session_event_model::PromptContent;
+
+    #[test]
+    fn control_prompt_uses_router_known_session_display_names() {
+        let target: SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
+            "sessionId":"target-session"
+        }))
+        .expect("target session");
+        let sender: SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"claude-local"},
+            "sessionId":"sender-session"
+        }))
+        .expect("sender session");
+        let display_names = SessionDisplayNameCache::default();
+        display_names.remember(target.clone(), "🤖 Codex Main");
+        display_names.remember(sender.clone(), "🐒 Sidekick · provider prompt");
+        let request = ConversationPromptRequest {
+            operation_id: OperationId::generate(),
+            input_id: None,
+            target,
+            generation: None,
+            requested_by: sender.clone().into(),
+            approver: sender.clone().into(),
+            prompt: MessageContent::Agent {
+                sender,
+                text: MessageText::try_from("Check the provider prompt.".to_owned())
+                    .expect("prompt text"),
+            },
+        };
+
+        let rendered = ProviderPromptContentsRequest::from_control(request, &display_names)
+            .expect("provider prompt contents");
+        let Some(PromptContent::Text { text }) = rendered.contents.first() else {
+            panic!("one text prompt should be generated");
+        };
+        assert!(
+            text.as_str().starts_with(
+                "🤖 Codex Main ← 🐒 Sidekick · provider prompt\nAgent communication\n"
+            )
+        );
     }
 }

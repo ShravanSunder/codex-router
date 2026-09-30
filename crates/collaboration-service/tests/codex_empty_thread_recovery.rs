@@ -109,6 +109,7 @@ async fn missing_thread_without_holder_is_known_not_submitted()
                 message: MessageContent::Router {
                     text: "hello".to_owned().try_into()?,
                 },
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
                 mode: MessageDelivery::Auto,
                 precondition: DeliveryPrecondition::Unpinned,
                 correlation: DeliveryCorrelationId::generate(),

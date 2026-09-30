@@ -193,6 +193,7 @@ async fn idle_explicit_queue_is_accepted_and_drains_for_both_providers() {
                     message: MessageContent::HumanUser {
                         text: MessageText::try_from("queued work".to_owned()).expect("message"),
                     },
+                    header_context: collaboration_protocol::MessageHeaderContext::default(),
                     mode: MessageDelivery::Queue,
                     precondition: DeliveryPrecondition::Unpinned,
                     correlation: DeliveryCorrelationId::generate(),

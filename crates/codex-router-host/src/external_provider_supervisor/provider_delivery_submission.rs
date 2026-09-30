@@ -14,13 +14,29 @@ pub(crate) enum ProviderPromptDispatch {
 }
 
 impl ExternalProviderSupervisor {
+    #[cfg(test)]
     pub(crate) async fn submit_delivery_prompt(
         &self,
         request: ConversationPromptRequest,
     ) -> Result<ProviderPromptDispatch, Box<ConversationOperationFailure>> {
+        let header_context = collaboration_protocol::MessageHeaderContext::default();
+        self.submit_delivery_prompt_with_header_context(request, &header_context)
+            .await
+    }
+
+    pub(crate) async fn submit_delivery_prompt_with_header_context(
+        &self,
+        request: ConversationPromptRequest,
+        header_context: &collaboration_protocol::MessageHeaderContext,
+    ) -> Result<ProviderPromptDispatch, Box<ConversationOperationFailure>> {
         let operation_id = request.operation_id.clone();
         let target = request.target.clone();
-        let rendered = render_message(&target, &request.prompt).map_err(|_| {
+        let rendered = collaboration_protocol::render_message_with_context(
+            &target,
+            &request.prompt,
+            header_context,
+        )
+        .map_err(|_| {
             Box::new(failure(
                 ConversationOperationFailureKind::InvalidRequest,
                 ConversationOperationFailureStage::Validation,

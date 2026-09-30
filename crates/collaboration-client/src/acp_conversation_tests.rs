@@ -10,6 +10,28 @@ fn endpoint(service_id: &str) -> EndpointRef {
 }
 
 #[test]
+fn acp_prompt_rendering_uses_endpoint_fallback_identities() {
+    let target = SessionRef {
+        endpoint: endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f"),
+        session_id: collaboration_protocol::SessionId::try_from("codex-thread".to_owned())
+            .expect("target session"),
+    };
+    let sender = SessionRef {
+        endpoint: endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f"),
+        session_id: collaboration_protocol::SessionId::try_from("claude-session".to_owned())
+            .expect("sender session"),
+    };
+    let message = MessageContent::Agent {
+        sender,
+        text: MessageText::try_from("Check the implementation.".to_owned()).expect("message text"),
+    };
+    let rendered =
+        super::render_conversation_prompt(&target, &message).expect("rendered ACP prompt");
+
+    assert!(rendered.starts_with("🤖 codex-local/codex-th ← 🤖 codex-local/claude-s\n"));
+}
+
+#[test]
 fn wrong_service_is_rejected_by_read_only_validation_before_session_open() {
     let observed = endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f");
     let requested = endpoint("018f47d2-24d5-7a68-b9ec-6f759c394590");

@@ -49,6 +49,7 @@ pub async fn run_reader_proof(
             view: NativeSessionView::Stored,
             scope: collaboration_client::protocol::NativeSessionScope::Any,
             source: collaboration_client::protocol::NativeSessionSource::All,
+            include_empty_sessions: false,
             query: None,
             page_size: 100,
             cursor: None,

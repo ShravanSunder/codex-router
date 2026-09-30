@@ -5,8 +5,8 @@ use codex_native_integration::{
 };
 use collaboration_protocol::{
     AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageDelivery,
-    NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,
-    NativeSendReceipt, NonEmptyText, UuidIdentity,
+    MessageHeaderContext, NativeInputDisposition, NativeInputOperation, NativeSendAcceptance,
+    NativeSendParams, NativeSendReceipt, NonEmptyText, SessionRef, UuidIdentity,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -18,6 +18,8 @@ pub(crate) struct NativeMessageRequest<'a> {
     pub service_id: &'a UuidIdentity,
     pub backend: &'a NativeControlBackend,
     pub endpoints: &'a [EndpointDescription],
+    pub header_context: MessageHeaderContext,
+    pub display_names: &'a crate::SessionDisplayNameCache,
     pub held_connection: Option<&'a mut NativeProtocolConnection>,
 }
 
@@ -64,8 +66,11 @@ pub(crate) async fn dispatch_message(
     {
         return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "queue"));
     }
-    let Ok(rendered) = collaboration_protocol::render_message(&params.target, &params.message)
-    else {
+    let Ok(rendered) = collaboration_protocol::render_message_with_context(
+        &params.target,
+        &params.message,
+        &request.header_context,
+    ) else {
         return NativeMessageOutcome::Failed(effects.failure("overloaded", "inspect"));
     };
     let correlation = match &params.client_user_message_id {
@@ -114,8 +119,9 @@ pub(crate) async fn dispatch_message(
     let result = session
         .deliver(
             &target_id,
-            params.delivery,
-            &rendered.text,
+            &params,
+            &request.header_context,
+            request.display_names,
             &correlation,
             held,
         )
@@ -259,8 +265,9 @@ impl MessageSession<'_> {
     async fn deliver(
         &mut self,
         id: &str,
-        delivery: MessageDelivery,
-        text: &str,
+        params: &NativeSendParams,
+        header_context: &MessageHeaderContext,
+        display_names: &crate::SessionDisplayNameCache,
         correlation: &str,
         held_unmaterialized: bool,
     ) -> Result<NativeSendAcceptance, Value> {
@@ -269,6 +276,22 @@ impl MessageSession<'_> {
         } else {
             Some(self.read_thread_metadata(id).await?)
         };
+        if let Some(thread) = thread.as_ref() {
+            cache_thread_display_name(display_names, &params.target, thread);
+        }
+        let current_header_context = MessageHeaderContext::resolve(
+            &params.target,
+            &params.message,
+            display_names,
+            header_context.origin,
+        );
+        let rendered = collaboration_protocol::render_message_with_context(
+            &params.target,
+            &params.message,
+            &current_header_context,
+        )
+        .map_err(|_| self.effects.failure("overloaded", "inspect"))?;
+        let text = rendered.text;
         let status = match thread.as_ref() {
             None => "idle",
             Some(thread) => thread
@@ -277,7 +300,7 @@ impl MessageSession<'_> {
                 .ok_or_else(|| self.effects.failure("unsupportedCapability", "inspect"))?,
         };
         let input = json!([{"type":"text","text":text}]);
-        if delivery == MessageDelivery::Queue {
+        if params.delivery == MessageDelivery::Queue {
             if status == "notLoaded" {
                 return Err(self.effects.failure("threadNotLoaded", "queue"));
             }
@@ -303,7 +326,7 @@ impl MessageSession<'_> {
                 submission_id: None,
             });
         }
-        if delivery == MessageDelivery::Steer {
+        if params.delivery == MessageDelivery::Steer {
             return Err(self.effects.failure("noActiveTurn", "steer"));
         }
         if status == "notLoaded" {
@@ -343,5 +366,20 @@ impl MessageSession<'_> {
             .and_then(Value::as_str)
             .and_then(|id| NonEmptyText::try_from(id.to_owned()).ok())
             .ok_or_else(|| self.effects.failure("outcomeUnknown", stage))
+    }
+}
+
+fn cache_thread_display_name(
+    display_names: &crate::SessionDisplayNameCache,
+    target: &SessionRef,
+    thread: &Value,
+) {
+    let name = thread
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    match name {
+        Some(name) => display_names.remember(target.clone(), name),
+        None => display_names.forget(target.clone()),
     }
 }
