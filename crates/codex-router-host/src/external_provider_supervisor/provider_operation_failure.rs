@@ -8,6 +8,10 @@ use collaboration_protocol::{
     NonEmptyText, OperationId, ProviderOperationEffect, SessionRef,
 };
 
+const MAX_ADVERTISED_CHOICES: usize = 32;
+const MAX_ADVERTISED_SUMMARY_BYTES: usize = 2048;
+const MAX_SETTING_VALUE_DISPLAY_CHARS: usize = 120;
+
 pub(super) fn invalid_setting_failure(
     operation_id: OperationId,
     target: Option<SessionRef>,
@@ -16,30 +20,29 @@ pub(super) fn invalid_setting_failure(
     advertised: Vec<String>,
     disposition: acp_client_runtime::InvalidSettingSessionDisposition,
 ) -> ConversationOperationFailure {
-    let (session_status, disposition) = match disposition {
+    let (session_status, disposition, fallback_message) = match disposition {
         acp_client_runtime::InvalidSettingSessionDisposition::Closed => (
             "new Session was closed",
             InvalidSettingSessionDisposition::Closed,
+            "invalid provider setting; see advertised values; new Session was closed",
         ),
         acp_client_runtime::InvalidSettingSessionDisposition::RemainsCreated => (
             "new Session remains created and idle",
             InvalidSettingSessionDisposition::RemainsCreated,
+            "invalid provider setting; see advertised values; new Session remains created and idle",
         ),
     };
-    let advertised_values = if advertised.is_empty() {
-        "none".to_owned()
-    } else {
-        advertised.join(", ")
-    };
+    let advertised_values = format_bounded_advertised_values(&advertised);
+    let displayed_value = format!("{:?}", bounded_option_label(&value));
     let message = format!(
-        "invalid provider setting {}={value:?}; advertised: {advertised_values}; {session_status}",
+        "invalid provider setting {}={displayed_value}; advertised: {advertised_values}; {session_status}",
         setting.as_str()
     );
     let mut result = failure(
         ConversationOperationFailureKind::InvalidSetting,
         ConversationOperationFailureStage::Settlement,
         ProviderOperationEffect::Applied,
-        "invalid provider setting; see advertised values",
+        fallback_message,
         operation_id,
         target,
     );
@@ -53,6 +56,54 @@ pub(super) fn invalid_setting_failure(
         session_disposition: disposition,
     });
     result
+}
+
+fn bounded_option_label(label: &str) -> String {
+    label
+        .chars()
+        .take(MAX_SETTING_VALUE_DISPLAY_CHARS)
+        .collect()
+}
+
+fn format_bounded_advertised_values(advertised: &[String]) -> String {
+    if advertised.is_empty() {
+        return "none".to_owned();
+    }
+
+    let mut displayed_values = String::new();
+    let mut displayed_count = 0;
+    for option in advertised.iter().take(MAX_ADVERTISED_CHOICES) {
+        let displayed_option = format!("{:?}", bounded_option_label(option));
+        let separator = if displayed_count == 0 { "" } else { ", " };
+        let omitted_after_option = advertised.len() - displayed_count - 1;
+        let reserved_truncation_marker = if omitted_after_option == 0 {
+            String::new()
+        } else {
+            format!(", … (+{omitted_after_option} more; see invalidSetting.advertised)")
+        };
+        let candidate_bytes = displayed_values.len()
+            + separator.len()
+            + displayed_option.len()
+            + reserved_truncation_marker.len();
+        if candidate_bytes > MAX_ADVERTISED_SUMMARY_BYTES {
+            break;
+        }
+
+        displayed_values.push_str(separator);
+        displayed_values.push_str(&displayed_option);
+        displayed_count += 1;
+    }
+
+    let omitted_count = advertised.len() - displayed_count;
+    if omitted_count > 0 {
+        if displayed_count > 0 {
+            displayed_values.push_str(", ");
+        }
+        displayed_values.push_str(&format!(
+            "… (+{omitted_count} more; see invalidSetting.advertised)"
+        ));
+    }
+    displayed_values
 }
 
 pub(super) fn prompt_runtime_failure(
@@ -267,7 +318,7 @@ mod tests {
             assert_eq!(
                 String::from(failure.message.clone()),
                 format!(
-                    "invalid provider setting {name}=\"requested\"; advertised: first, second; new Session was closed"
+                    "invalid provider setting {name}=\"requested\"; advertised: \"first\", \"second\"; new Session was closed"
                 )
             );
             let invalid_setting = failure.invalid_setting.expect("invalid-setting detail");
@@ -278,5 +329,79 @@ mod tests {
                 vec!["first".to_owned(), "second".to_owned()]
             );
         }
+    }
+
+    #[test]
+    fn invalid_setting_failure_bounds_large_advertised_values_and_echo() {
+        let value = format!("requested\n{}", "v".repeat(500));
+        let advertised = (0..500)
+            .map(|choice_index| format!("choice-{choice_index}-{}", "🧪".repeat(120)))
+            .collect::<Vec<_>>();
+        let failure = invalid_setting_failure(
+            OperationId::generate(),
+            None,
+            ProviderSettingKind::Model,
+            value.clone(),
+            advertised.clone(),
+            acp_client_runtime::InvalidSettingSessionDisposition::Closed,
+        );
+
+        let message = String::from(failure.message.clone());
+        assert!(message.len() <= 4096);
+        assert!(message.starts_with(r#"invalid provider setting model="requested\n"#));
+        assert!(message.ends_with("; new Session was closed"));
+        assert!(!message.contains(&"v".repeat(121)));
+
+        let displayed_summary = message
+            .split_once("; advertised: ")
+            .and_then(|(_, after_advertised)| {
+                after_advertised.split_once("; new Session was closed")
+            })
+            .map(|(summary, _)| summary)
+            .expect("failure names the advertised choices and Session disposition");
+        assert!(displayed_summary.len() <= MAX_ADVERTISED_SUMMARY_BYTES);
+        assert!(displayed_summary.matches("\"choice-").count() <= MAX_ADVERTISED_CHOICES);
+
+        let omitted_count = message
+            .split("… (+")
+            .nth(1)
+            .and_then(|after_marker| {
+                after_marker
+                    .split_once(" more; see invalidSetting.advertised)")
+                    .map(|(count, _)| count)
+            })
+            .and_then(|count| count.parse::<usize>().ok())
+            .expect("truncation marker reports an omitted-choice count");
+        assert!(omitted_count > 0);
+
+        let invalid_setting = failure.invalid_setting.expect("invalid-setting detail");
+        assert_eq!(invalid_setting.setting, ProviderSettingName::Model);
+        assert_eq!(invalid_setting.value, value);
+        assert_eq!(invalid_setting.advertised, advertised);
+        assert_eq!(
+            invalid_setting.session_disposition,
+            InvalidSettingSessionDisposition::Closed
+        );
+
+        let short_advertised = (0..500)
+            .map(|choice_index| format!("choice-{choice_index}"))
+            .collect::<Vec<_>>();
+        let count_limited_summary = format_bounded_advertised_values(&short_advertised);
+        assert!(count_limited_summary.len() <= MAX_ADVERTISED_SUMMARY_BYTES);
+        assert_eq!(
+            count_limited_summary.matches("\"choice-").count(),
+            MAX_ADVERTISED_CHOICES
+        );
+        assert!(count_limited_summary.contains("… (+468 more; see invalidSetting.advertised)"));
+    }
+
+    #[test]
+    fn advertised_values_debug_escape_quotes_and_control_characters() {
+        let advertised = vec!["line\n\"quoted\"".to_owned()];
+
+        assert_eq!(
+            format_bounded_advertised_values(&advertised),
+            r#""line\n\"quoted\"""#
+        );
     }
 }

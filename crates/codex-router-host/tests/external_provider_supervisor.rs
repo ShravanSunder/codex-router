@@ -372,7 +372,7 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                 ensure_eq!(
                     failure_message,
                     format!(
-                        "invalid provider setting model=\"wrong\"; advertised: a, b; {}",
+                        "invalid provider setting model=\"wrong\"; advertised: \"a\", \"b\"; {}",
                         if mode == "invalid" {
                             "new Session was closed"
                         } else {
