@@ -45,14 +45,17 @@ impl MessageText {
 pub struct SessionDisplayName(String);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("session display name must be nonempty and contain no controls or header arrows")]
+#[error("session display name must be 1 to 120 characters, contain no controls or header arrows")]
 pub struct SessionDisplayNameError;
+
+const MAX_SESSION_DISPLAY_NAME_CHARS: usize = 120;
 
 impl TryFrom<String> for SessionDisplayName {
     type Error = SessionDisplayNameError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         if value.trim().is_empty()
+            || value.chars().count() > MAX_SESSION_DISPLAY_NAME_CHARS
             || value.chars().any(char::is_control)
             || value.contains(" ← ")
             || value.contains(" → ")
@@ -518,11 +521,25 @@ pub fn title_from_agent_message_envelope(text: &str) -> Option<String> {
         return Some(format!("{}: {first_body_line}", envelope.sender_identity));
     }
     let envelope = parse_router_message_envelope(text)?;
-    let first_body_line = envelope.body.lines().next()?.trim();
+    let router_body = scheduled_instruction_body(&envelope.body).unwrap_or(&envelope.body);
+    let first_body_line = router_body.lines().next()?.trim();
     if first_body_line.is_empty() {
         return None;
     }
     Some(format!("{}: {first_body_line}", envelope.router_identity))
+}
+
+fn scheduled_instruction_body(body: &str) -> Option<&str> {
+    let declaration_prefix =
+        "Agent communication\nSelf-declared sender: local scheduled automation ";
+    if !body.starts_with(declaration_prefix) {
+        return None;
+    }
+    let (declaration, instructions) = body.split_once("\n\n")?;
+    if !declaration.contains("\nIntended recipient: ") || !declaration.contains("\nRun: ") {
+        return None;
+    }
+    Some(instructions)
 }
 
 #[cfg(test)]
@@ -552,6 +569,15 @@ mod tests {
             );
         }
         assert!(SessionDisplayName::try_from("🐒 Sidekick · PR2".to_owned()).is_ok());
+    }
+
+    #[test]
+    fn display_names_are_bounded_to_120_unicode_scalar_values() {
+        let maximum_name = "🪿".repeat(120);
+        let oversized_name = "🪿".repeat(121);
+
+        assert!(SessionDisplayName::try_from(maximum_name).is_ok());
+        assert!(SessionDisplayName::try_from(oversized_name).is_err());
     }
 
     struct MapDisplayNames(

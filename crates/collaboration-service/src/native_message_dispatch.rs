@@ -377,13 +377,7 @@ fn cache_thread_display_name(
     let name = thread
         .get("name")
         .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            thread
-                .get("title")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-        });
+        .filter(|value| !value.trim().is_empty());
     match name {
         Some(name) => display_names.remember(target.clone(), name),
         None => display_names.forget(target.clone()),

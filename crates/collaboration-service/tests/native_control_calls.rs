@@ -135,8 +135,12 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     // The native Thread schema requires both timestamps as unix seconds.
     let thread_updated_at = chrono::Utc::now().timestamp() - 45;
     let thread_created_at = thread_updated_at - 600;
+    let long_prompt_title = format!(
+        "First prompt title: {}",
+        "private prompt detail ".repeat(12)
+    );
     let backend = tokio::spawn(async move {
-        let mut current_name = "Old name".to_owned();
+        let mut current_name = None::<String>;
         for (method, expected, result) in [
             (
                 "thread/read",
@@ -226,10 +230,12 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                 assert_eq!(request["method"], expected_method);
                 if expected_method == method {
                     if method == "thread/name/set" {
-                        current_name = expected["name"]
-                            .as_str()
-                            .unwrap_or_else(|| panic!("expected rename name"))
-                            .to_owned();
+                        current_name = Some(
+                            expected["name"]
+                                .as_str()
+                                .unwrap_or_else(|| panic!("expected rename name"))
+                                .to_owned(),
+                        );
                     }
                     if matches!(method, "turn/start" | "thread/queue/add") {
                         assert_eq!(request["params"]["threadId"], expected["threadId"]);
@@ -239,7 +245,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                         );
                         let text = request["params"]["input"][0]["text"].as_str().unwrap();
                         assert!(text.starts_with(
-                            "🤖 Old name ← 🤖 Old name\nAgent communication\nSelf-declared sender: "
+                            "🤖 codex-local/proof-th ← 🤖 codex-local/proof-th\nAgent communication\nSelf-declared sender: "
                         ));
                         assert!(text.contains("\nIntended recipient: "));
                         assert!(text.ends_with("\n\nA checked finding"));
@@ -268,7 +274,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                         } else {
                             json!({"type":"idle"})
                         };
-                        json!({"thread":{"id":"proof-thread","name":current_name,"cwd":"/tmp","status":status,"updatedAt":BUSY_THREAD_UPDATED_AT_SECONDS,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
+                        json!({"thread":{"id":"proof-thread","name":current_name,"title":long_prompt_title,"cwd":"/tmp","status":status,"updatedAt":BUSY_THREAD_UPDATED_AT_SECONDS,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
                     } else if expected_method == "thread/turns/list" {
                         json!({"data":[{"id":"proof-turn","items":[{"type":"userMessage","id":"proof-user-message","content":[]}]}],"nextCursor":null,"backwardsCursor":null})
                     } else {
@@ -395,7 +401,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .await
         .unwrap_or_else(|error| panic!("rename: {error}"));
     assert_eq!(renamed.name, "🔎 Review");
-    assert_eq!(renamed.previous_name.as_deref(), Some("Old name"));
+    assert_eq!(renamed.previous_name, None);
     let inventory_after_rename = client
         .list_sessions(collaboration_protocol::NativeSessionListParams {
             endpoint: target.endpoint.clone(),

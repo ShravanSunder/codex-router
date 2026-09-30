@@ -7,8 +7,7 @@ use crate::conversation_contract::{
 };
 use crate::{AcpTransportConnection, ClientError};
 use collaboration_protocol::{
-    AcpSchemaCatalog, EndpointId, EndpointRef, MessageContent, RouterNoticeKind,
-    SessionDisplayNameLookup, SessionRef, render_message, render_message_with_lookup,
+    AcpSchemaCatalog, EndpointId, EndpointRef, MessageContent, SessionRef, render_message,
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, time::Duration};
@@ -60,7 +59,6 @@ pub struct AcpConversation {
     endpoint: EndpointRef,
     service_directory: std::path::PathBuf,
     target: Option<SessionRef>,
-    display_name_lookup: Option<std::sync::Arc<dyn SessionDisplayNameLookup>>,
     session_ready: bool,
     next_id: u64,
     callbacks: BTreeSet<String>,
@@ -262,7 +260,6 @@ impl AcpConversation {
             endpoint: transport.endpoint,
             service_directory: directory.to_owned(),
             target: None,
-            display_name_lookup: None,
             session_ready: false,
             next_id: 0,
             callbacks: BTreeSet::new(),
@@ -552,8 +549,7 @@ impl AcpConversation {
             .as_ref()
             .ok_or(ClientError::Protocol("ACP session not opened"))?;
         let message = MessageContent::from(request.message);
-        let rendered =
-            render_conversation_prompt(target, &message, self.display_name_lookup.as_deref())?;
+        let rendered = render_conversation_prompt(target, &message)?;
         self.prompt(
             &rendered,
             request.effort.as_deref(),
@@ -564,13 +560,6 @@ impl AcpConversation {
         .await
     }
 
-    /// Supplies the Router's typed display-name lookup for subsequent prompts.
-    pub fn set_display_name_lookup(
-        &mut self,
-        lookup: std::sync::Arc<dyn SessionDisplayNameLookup>,
-    ) {
-        self.display_name_lookup = Some(lookup);
-    }
     async fn request(
         &mut self,
         method: &str,
@@ -749,15 +738,8 @@ impl AcpConversation {
 fn render_conversation_prompt(
     target: &SessionRef,
     message: &MessageContent,
-    display_names: Option<&dyn SessionDisplayNameLookup>,
 ) -> Result<String, ClientError> {
-    let rendered = match display_names {
-        Some(display_names) => {
-            render_message_with_lookup(target, message, display_names, RouterNoticeKind::Other)
-        }
-        None => render_message(target, message),
-    };
-    rendered
+    render_message(target, message)
         .map(|rendered| rendered.text)
         .map_err(|_| ClientError::Protocol("conversation message rendering failed"))
 }

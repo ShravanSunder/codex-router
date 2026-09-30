@@ -415,7 +415,7 @@ pub(super) fn create_codex_state_db_with_thread_rows(
                 git_branch TEXT,
                 git_origin_url TEXT,
                 cli_version TEXT,
-                first_user_message TEXT,
+                first_user_message TEXT NOT NULL DEFAULT '',
                 agent_nickname TEXT,
                 agent_role TEXT,
                 memory_mode TEXT,
@@ -479,9 +479,9 @@ pub(super) fn create_codex_state_db_with_thread_rows(
                 .bind(&row.git_branch)
                 .bind(&row.git_origin_url)
                 .bind(if row.has_user_message {
-                    Some(row.first_user_message.as_deref().unwrap_or(prompt_canary))
+                    row.first_user_message.as_deref().unwrap_or(prompt_canary)
                 } else {
-                    None
+                    ""
                 })
                 .bind(&row.model)
                 .bind(&row.reasoning_effort)

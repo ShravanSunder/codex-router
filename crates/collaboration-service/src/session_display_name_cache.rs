@@ -1,4 +1,4 @@
-//! Nonblocking display names learned from existing Router session observations.
+//! Cached display names learned from existing Router session observations.
 use collaboration_protocol::{
     SessionDisplayName, SessionDisplayNameLookup, SessionDisplayNameLookupError, SessionRef,
 };
@@ -17,17 +17,17 @@ pub struct SessionDisplayNameCache {
 impl SessionDisplayNameCache {
     /// Remembers a display name, or removes a stale one when the name was cleared/invalid.
     ///
-    /// Cache contention is logged and never changes the outcome of the operation that
-    /// learned the name.
+    /// Writes wait for the brief cache critical section. A poisoned lock is logged and
+    /// never changes the outcome of the operation that learned the name.
     pub fn remember(&self, session: SessionRef, name: &str) {
         let Ok(name) = SessionDisplayName::try_from(name.to_owned()) else {
             self.forget(session);
             return;
         };
-        let mut names = match self.names.try_write() {
+        let mut names = match self.names.write() {
             Ok(names) => names,
-            Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => {
-                tracing::warn!(session = ?session, "session display name cache write was contended");
+            Err(_) => {
+                tracing::warn!(session = ?session, "session display name cache write lock was poisoned");
                 return;
             }
         };
@@ -42,12 +42,12 @@ impl SessionDisplayNameCache {
 
     /// Removes a cached label after the Router observes that its name was cleared.
     pub fn forget(&self, session: SessionRef) {
-        match self.names.try_write() {
+        match self.names.write() {
             Ok(mut names) => {
                 names.remove(&session);
             }
-            Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => {
-                tracing::warn!(session = ?session, "session display name cache clear was contended");
+            Err(_) => {
+                tracing::warn!(session = ?session, "session display name cache clear lock was poisoned");
             }
         }
     }

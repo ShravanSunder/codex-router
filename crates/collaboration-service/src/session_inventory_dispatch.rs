@@ -347,10 +347,7 @@ async fn stored_page(
             endpoint: params.endpoint.clone(),
             session_id: id.clone().try_into().map_err(|_| ())?,
         };
-        let cached_name = name
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| title.as_deref().filter(|value| !value.trim().is_empty()));
+        let cached_name = name.as_deref().filter(|value| !value.trim().is_empty());
         if let Some(cached_name) = cached_name {
             display_names.remember(session_ref, cached_name);
         } else {
@@ -475,9 +472,7 @@ async fn runtime_page(
             endpoint: params.endpoint.clone(),
             session_id: id.to_owned().try_into().map_err(|_| ())?,
         };
-        let cached_name = name
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| (!title.trim().is_empty()).then_some(title));
+        let cached_name = name.filter(|value| !value.trim().is_empty());
         if let Some(cached_name) = cached_name {
             display_names.remember(session_ref, cached_name);
         } else {

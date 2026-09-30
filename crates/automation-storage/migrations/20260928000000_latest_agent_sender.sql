@@ -1,4 +1,4 @@
--- Best-effort latest direct Agent-message sender for each recipient session.
+-- Latest direct Agent-message sender for each recipient session.
 -- Router notices never write this table; records are retained for 30 days by maintenance.
 CREATE TABLE latest_agent_senders (
  recipient_service_id TEXT NOT NULL,

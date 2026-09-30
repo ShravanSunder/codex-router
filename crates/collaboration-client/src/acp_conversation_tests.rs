@@ -10,7 +10,7 @@ fn endpoint(service_id: &str) -> EndpointRef {
 }
 
 #[test]
-fn acp_prompt_rendering_uses_supplied_router_display_names() {
+fn acp_prompt_rendering_uses_endpoint_fallback_identities() {
     let target = SessionRef {
         endpoint: endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f"),
         session_id: collaboration_protocol::SessionId::try_from("codex-thread".to_owned())
@@ -25,33 +25,10 @@ fn acp_prompt_rendering_uses_supplied_router_display_names() {
         sender,
         text: MessageText::try_from("Check the implementation.".to_owned()).expect("message text"),
     };
-    struct DisplayNames(std::collections::HashMap<String, String>);
-    impl collaboration_protocol::SessionDisplayNameLookup for DisplayNames {
-        fn display_name_for(
-            &self,
-            session: &SessionRef,
-        ) -> Result<
-            Option<collaboration_protocol::SessionDisplayName>,
-            collaboration_protocol::SessionDisplayNameLookupError,
-        > {
-            Ok(self
-                .0
-                .get(&String::from(session.session_id.clone()))
-                .map(|name| {
-                    collaboration_protocol::SessionDisplayName::try_from(name.clone())
-                        .expect("validated fixture name")
-                }))
-        }
-    }
-    let display_names = DisplayNames(std::collections::HashMap::from([
-        ("claude-session".to_owned(), "🐒 Sidekick · PR2".to_owned()),
-        ("codex-thread".to_owned(), "🤖 Codex Main".to_owned()),
-    ]));
+    let rendered =
+        super::render_conversation_prompt(&target, &message).expect("rendered ACP prompt");
 
-    let rendered = super::render_conversation_prompt(&target, &message, Some(&display_names))
-        .expect("rendered ACP prompt");
-
-    assert!(rendered.starts_with("🤖 Codex Main ← 🐒 Sidekick · PR2\n"));
+    assert!(rendered.starts_with("🤖 codex-local/codex-th ← 🤖 codex-local/claude-s\n"));
 }
 
 #[test]
