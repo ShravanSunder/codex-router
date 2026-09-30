@@ -1,0 +1,254 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT subscription.reader_key,identity.kind AS reader_kind,identity.service_id, identity.endpoint_id,identity.session_id,identity.human_id, subscription.scope_kind,subscription.scope_id,subscription.mode, subscription.when_idle,subscription.quiet_seconds,subscription.cap_seconds, subscription.lifetime_seconds,subscription.renewed_at,subscription.expires_at, subscription.state,subscription.end_reason,subscription.ended_at, subscription.last_outcome,subscription.generation FROM thread_subscriptions subscription JOIN board_identities identity ON identity.identity_key=subscription.reader_key WHERE subscription.reader_key=? AND subscription.scope_kind=? AND subscription.scope_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "reader_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "reader_key"
+          }
+        }
+      },
+      {
+        "name": "reader_kind",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "service_id",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "service_id"
+          }
+        }
+      },
+      {
+        "name": "endpoint_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "endpoint_id"
+          }
+        }
+      },
+      {
+        "name": "session_id",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "session_id"
+          }
+        }
+      },
+      {
+        "name": "human_id",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_identities",
+            "name": "human_id"
+          }
+        }
+      },
+      {
+        "name": "scope_kind",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "scope_kind"
+          }
+        }
+      },
+      {
+        "name": "scope_id",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "scope_id"
+          }
+        }
+      },
+      {
+        "name": "mode",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "mode"
+          }
+        }
+      },
+      {
+        "name": "when_idle",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "when_idle"
+          }
+        }
+      },
+      {
+        "name": "quiet_seconds",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "quiet_seconds"
+          }
+        }
+      },
+      {
+        "name": "cap_seconds",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "cap_seconds"
+          }
+        }
+      },
+      {
+        "name": "lifetime_seconds",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "lifetime_seconds"
+          }
+        }
+      },
+      {
+        "name": "renewed_at",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "renewed_at"
+          }
+        }
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "end_reason",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "end_reason"
+          }
+        }
+      },
+      {
+        "name": "ended_at",
+        "ordinal": 17,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "ended_at"
+          }
+        }
+      },
+      {
+        "name": "last_outcome",
+        "ordinal": 18,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "last_outcome"
+          }
+        }
+      },
+      {
+        "name": "generation",
+        "ordinal": 19,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "generation"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "bc0dc3edc77172111a5eec451a0ebacc27eedcdc9d091aad4b7f503df9b70acf"
+}

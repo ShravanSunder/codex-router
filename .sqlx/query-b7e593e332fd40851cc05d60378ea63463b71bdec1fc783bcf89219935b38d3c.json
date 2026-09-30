@@ -1,0 +1,35 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"pending_count!: i64\", MIN(activity.activity_sequence) AS first_pending_sequence, MAX(activity.activity_sequence) AS through_sequence FROM board_activity activity WHERE ((activity.root_id=? AND activity.kind='threadMessageCreated') OR (activity.message_id=? AND activity.kind='mainMessageCreated')) AND activity.message_id IS NOT NULL AND activity.actor_key<>? AND activity.activity_sequence>?",
+  "describe": {
+    "columns": [
+      {
+        "name": "pending_count!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "first_pending_sequence",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "through_sequence",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "b7e593e332fd40851cc05d60378ea63463b71bdec1fc783bcf89219935b38d3c"
+}
