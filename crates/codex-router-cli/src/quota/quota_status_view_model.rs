@@ -1,6 +1,6 @@
 use super::*;
-use codex_router_secret_store::model::CredentialMigrationFailure;
 use codex_router_core::provider::Provider;
+use codex_router_secret_store::model::CredentialMigrationFailure;
 
 pub(super) struct QuotaStatusReport {
     pub(super) app_version: String,
@@ -272,7 +272,7 @@ impl DisplayQuotaWindow {
             } else {
                 QuotaWindowStatus::Stale
             },
-            remaining_headroom: observation.remaining_basis_points(),
+            remaining_headroom: observation.remaining_basis_points() / 100,
             reset_unix_seconds: observation.reset_unix_seconds(),
             observed_unix_seconds: observation.observation_started_at(),
             effective: true,

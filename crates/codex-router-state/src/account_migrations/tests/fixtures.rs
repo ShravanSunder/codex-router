@@ -403,7 +403,7 @@ pub(super) async fn assert_native_history_present(database_path: &Path) {
         .fetch_one(&mut connection)
         .await
         .expect("native history should query");
-    assert_eq!(history_rows, 4);
+    assert_eq!(history_rows, 5);
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut connection)
         .await

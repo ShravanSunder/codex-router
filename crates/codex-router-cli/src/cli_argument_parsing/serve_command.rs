@@ -14,6 +14,7 @@ use super::parse_u64_option;
 use super::parse_usize_option;
 use codex_router_core::route_profile::ClaudeFiveHourReservePercent;
 use codex_router_core::route_profile::DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT;
+use codex_router_selection::burn_down::QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -200,6 +201,16 @@ impl ServeCommandOptions {
                     });
                 }
             }
+        }
+
+        if let Some(seconds) = options.quota_refresh_interval_seconds
+            && seconds > QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS
+        {
+            return Err(CliError::QuotaRefreshIntervalOutOfRange {
+                option: "--quota-refresh-interval-seconds",
+                value: seconds,
+                maximum: QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS,
+            });
         }
 
         Ok(options)

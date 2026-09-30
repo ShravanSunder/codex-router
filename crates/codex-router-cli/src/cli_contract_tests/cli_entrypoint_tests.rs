@@ -296,15 +296,16 @@ fn nested_user_facing_help_does_not_leak_internal_commands() {
                 "codex-router account",
                 "disable --account <name>",
                 "enable --account <name>",
-                "login --label <name>  Add an OAuth account",
+                "login --provider <openai|claude> --label <name>  Add a provider OAuth account",
                 "list                  Show configured router accounts",
             ][..],
         ),
         (
             &["codex-router", "account", "login", "--help"][..],
             &[
-                "codex-router account login --label <name>",
+                "codex-router account login --provider <openai|claude> --label <name>",
                 "--label <name>",
+                "--provider <name>",
                 "--codex-bin <path>",
             ][..],
         ),

@@ -222,9 +222,10 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
             codex_router_core::provider::Provider::Openai,
             1,
             2,
-            codex_router_state::credential_maintenance::CredentialMaintenanceState::Retrying,
-            codex_router_state::credential_maintenance::CredentialFailureClass::RateLimited,
-            Some(11_500),
+            codex_router_state::credential_maintenance::CredentialRefreshClaimDisposition::Retrying {
+                failure_class: codex_router_state::credential_maintenance::CredentialFailureClass::RateLimited,
+                next_attempt_unix_seconds: 11_500,
+            },
         )
     )));
     must_ok(runtime.block_on(maintenance_store.close()));

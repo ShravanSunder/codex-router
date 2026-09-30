@@ -52,6 +52,7 @@ mod tests {
     use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
     use crate::credential_maintenance::ClaimPurpose;
     use crate::credential_maintenance::CredentialMaintenanceState;
+    use crate::credential_maintenance::CredentialRefreshClaimDisposition;
     use crate::quota_snapshot::PersistedQuotaHistoryObservation;
     use crate::quota_snapshot::PersistedQuotaSnapshot;
     use crate::quota_snapshot::PersistedSelectorQuotaWindow;
@@ -576,9 +577,10 @@ mod tests {
                     Provider::Openai,
                     2,
                     3,
-                    CredentialMaintenanceState::Retrying,
-                    CredentialFailureClass::TransportUnspent,
-                    Some(200),
+                    CredentialRefreshClaimDisposition::Retrying {
+                        failure_class: CredentialFailureClass::TransportUnspent,
+                        next_attempt_unix_seconds: 200,
+                    },
                 )
                 .await
                 .expect("safe claim failure")

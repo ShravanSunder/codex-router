@@ -471,9 +471,9 @@ where
                             provider,
                             current_generation,
                             successor,
-                            CredentialMaintenanceState::ReauthRequired,
-                            CredentialFailureClass::RotationCommitFailed,
-                            None,
+                            CredentialRefreshClaimDisposition::ReauthRequired {
+                                failure_class: CredentialFailureClass::RotationCommitFailed,
+                            },
                         )
                         .await
                         .map_err(map_state_error)?;
@@ -628,13 +628,16 @@ where
                             provider,
                             current_generation,
                             successor_generation,
-                            if failure.confirmed_unspent {
-                                CredentialMaintenanceState::Retrying
+                            if let Some(next_attempt_unix_seconds) = retry_deadline {
+                                CredentialRefreshClaimDisposition::Retrying {
+                                    failure_class: failure.failure_class,
+                                    next_attempt_unix_seconds,
+                                }
                             } else {
-                                CredentialMaintenanceState::ReauthRequired
+                                CredentialRefreshClaimDisposition::ReauthRequired {
+                                    failure_class: failure.failure_class,
+                                }
                             },
-                            failure.failure_class,
-                            retry_deadline,
                         )
                         .await
                     {

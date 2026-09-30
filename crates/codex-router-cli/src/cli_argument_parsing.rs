@@ -443,6 +443,36 @@ mod tests {
     }
 
     #[test]
+    fn serve_quota_refresh_interval_must_fit_the_quota_freshness_window() {
+        for (value, expected) in [("300", Ok(300)), ("301", Err(301))] {
+            let arguments = [
+                OsString::from("--quota-refresh-interval-seconds"),
+                OsString::from(value),
+            ];
+            let mut parser = ArgumentParser::new(arguments.into());
+            match expected {
+                Ok(seconds) => {
+                    let command = ServeCommand::parse(&mut parser)
+                        .unwrap_or_else(|error| panic!("interval should parse: {error}"));
+                    assert_eq!(command.quota_refresh_interval_seconds, seconds);
+                }
+                Err(seconds) => {
+                    let error = ServeCommand::parse(&mut parser)
+                        .expect_err("quota evidence must not become stale before the next poll");
+                    assert!(matches!(
+                        error,
+                        super::CliError::QuotaRefreshIntervalOutOfRange {
+                            option: "--quota-refresh-interval-seconds",
+                            value: actual,
+                            maximum: 300,
+                        } if actual == seconds
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn serve_claude_five_hour_reserve_percent_defaults_and_accepts_one_through_ninety_nine() {
         let mut default_parser = ArgumentParser::new(Vec::new());
         let default_command = ServeCommand::parse(&mut default_parser)

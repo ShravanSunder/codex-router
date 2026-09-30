@@ -1,5 +1,22 @@
 use super::*;
 
+struct FixedClaudeQuotaCredentialResolver;
+
+impl crate::credential_runtime::AsyncProviderCredentialResolver
+    for FixedClaudeQuotaCredentialResolver
+{
+    async fn resolve_provider_credentials_async(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
+        Ok(ResolvedProviderCredential::new(
+            account_id.clone(),
+            SecretString::new("claude-quota-http-access-token"),
+            1,
+        ))
+    }
+}
+
 #[test]
 fn quota_refresh_http_provider_fetches_usage_and_persists_sqlite_state() {
     let test_root = TestRoot::new("quota-refresh-http-provider");
@@ -145,6 +162,120 @@ fn quota_refresh_http_provider_fetches_usage_and_persists_sqlite_state() {
     match server_thread.join() {
         Ok(()) => {}
         Err(error) => panic!("quota mock thread panicked: {error:?}"),
+    }
+}
+
+#[test]
+fn claude_usage_http_response_is_persisted_as_started_window_observations() {
+    use codex_router_core::provider::Provider;
+    use codex_router_core::route_profile::WindowKind;
+    use codex_router_state::sqlite::AsyncSqliteStateStore;
+
+    let test_root = TestRoot::new("claude-quota-http-window-observations");
+    must_ok(fs::create_dir(test_root.path()));
+    let router_root = test_root.path().join("router");
+    must_ok(fs::create_dir_all(&router_root));
+    ensure_async_state_schema(&router_root);
+    let state_path = router_root.join("state.sqlite");
+    let account_id = account_id("acct_claude_usage_persisted");
+    let state = must_ok(test_async_runtime().block_on(AsyncSqliteStateStore::open(&state_path)));
+    must_ok(
+        test_async_runtime().block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "claude-http",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+    must_ok(test_async_runtime().block_on(state.close()));
+
+    let listener = must_ok(TcpListener::bind("127.0.0.1:0"));
+    let address = must_ok(listener.local_addr());
+    let (request_sender, request_receiver) = mpsc::channel();
+    let server_thread = thread::spawn(move || {
+        let (mut stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(error) => panic!("Claude usage mock should accept: {error}"),
+        };
+        if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(2))) {
+            panic!("Claude usage mock should set read timeout: {error}");
+        }
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        let header_end = loop {
+            let count = match stream.read(&mut buffer) {
+                Ok(count) => count,
+                Err(error) => panic!("Claude usage mock should read request: {error}"),
+            };
+            request.extend_from_slice(&buffer[..count]);
+            if let Some(position) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break position + 4;
+            }
+        };
+        request_sender
+            .send(String::from_utf8_lossy(&request[..header_end]).into_owned())
+            .expect("test should receive Claude request headers");
+        let body = r#"{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"},"seven_day":{"utilization":80,"resets_at":"2030-01-07T00:00:00Z"},"oauth_app":{}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        if let Err(error) = stream.write_all(response.as_bytes()) {
+            panic!("Claude usage mock should write response: {error}");
+        }
+    });
+
+    let resolver = FixedClaudeQuotaCredentialResolver;
+    let provider = must_ok(
+        HttpQuotaRefreshProvider::new_with_claude_usage_endpoint_for_test(
+            Duration::from_secs(2),
+            format!("http://{address}/api/oauth/usage"),
+        ),
+    );
+    let started_before_refresh = must_ok(codex_router_auth::resolver::current_unix_seconds());
+    let mut stdout = Vec::new();
+    must_ok(refresh_quota_with_dependencies(
+        &mut stdout,
+        router_root,
+        "unused-openai-base-url".to_owned(),
+        &resolver,
+        &provider,
+        1_100,
+    ));
+    let started_after_refresh = must_ok(codex_router_auth::resolver::current_unix_seconds());
+
+    let request =
+        must_ok(request_receiver.recv_timeout(Duration::from_secs(2))).to_ascii_lowercase();
+    assert!(request.starts_with("get /api/oauth/usage http/1.1"));
+    assert!(request.contains("authorization: bearer claude-quota-http-access-token"));
+    assert!(request.contains("anthropic-beta: oauth-2025-04-20"));
+    assert_eq!(must_ok(String::from_utf8(stdout)), "refreshed: 1\n");
+    let observations_state =
+        must_ok(test_async_runtime().block_on(AsyncSqliteStateStore::open_read_only(&state_path)));
+    let observations = must_ok(
+        test_async_runtime()
+            .block_on(observations_state.window_observations_for_account(&account_id)),
+    );
+    assert_eq!(observations.len(), 2);
+    assert_eq!(observations[0].window_kind(), WindowKind::FiveHour);
+    assert_eq!(observations[0].remaining_basis_points(), 7_500);
+    assert_eq!(observations[0].reset_unix_seconds(), Some(1_893_456_000));
+    assert_eq!(observations[1].window_kind(), WindowKind::Weekly);
+    assert_eq!(observations[1].remaining_basis_points(), 2_000);
+    assert_eq!(observations[1].reset_unix_seconds(), Some(1_893_974_400));
+    for observation in observations {
+        assert!(observation.observation_started_at() >= started_before_refresh);
+        assert!(observation.observation_started_at() <= started_after_refresh);
+    }
+    must_ok(test_async_runtime().block_on(observations_state.close()));
+    match server_thread.join() {
+        Ok(()) => {}
+        Err(error) => panic!("Claude usage mock thread panicked: {error:?}"),
     }
 }
 

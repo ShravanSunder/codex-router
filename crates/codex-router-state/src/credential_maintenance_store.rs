@@ -9,6 +9,7 @@ use crate::credential_maintenance::ClaimPurpose;
 use crate::credential_maintenance::CredentialFailureClass;
 use crate::credential_maintenance::CredentialMaintenanceRecord;
 use crate::credential_maintenance::CredentialMaintenanceState;
+use crate::credential_maintenance::CredentialRefreshClaimDisposition;
 use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
 use crate::sqlite::invalidate_credential_mutation_quota_async;
@@ -328,18 +329,11 @@ impl AsyncSqliteStateStore {
         provider: Provider,
         current_generation: u64,
         successor_generation: u64,
-        state: CredentialMaintenanceState,
-        failure_class: CredentialFailureClass,
-        next_attempt_unix_seconds: Option<u64>,
+        disposition: CredentialRefreshClaimDisposition,
     ) -> Result<bool, StateStoreError> {
-        if matches!(
-            state,
-            CredentialMaintenanceState::InProgress | CredentialMaintenanceState::Healthy
-        ) || (state == CredentialMaintenanceState::Retrying)
-            != next_attempt_unix_seconds.is_some()
-        {
-            return Err(corrupt_maintenance(account_id, "state"));
-        }
+        let state = disposition.state();
+        let failure_class = disposition.failure_class();
+        let next_attempt_unix_seconds = disposition.next_attempt_unix_seconds();
         let updated = sqlx::query(
             "UPDATE credential_maintenance
                 SET state = ?4, failure_class = ?5,

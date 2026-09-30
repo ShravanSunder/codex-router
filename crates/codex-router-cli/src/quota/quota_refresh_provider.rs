@@ -157,6 +157,27 @@ impl HttpQuotaRefreshProvider {
             client,
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_claude_usage_endpoint_for_test(
+        timeout: Duration,
+        usage_endpoint: impl Into<String>,
+    ) -> Result<Self, QuotaCommandError> {
+        let client = reqwest::Client::builder()
+            .user_agent("codex-router-quota-refresh")
+            .timeout(timeout)
+            .build()
+            .map_err(|error| QuotaCommandError::ProviderRequest {
+                message: error.to_string(),
+            })?;
+        Ok(Self {
+            claude_quota_fetcher: ClaudeQuotaFetcher::new_with_endpoint_for_test(
+                timeout,
+                usage_endpoint,
+            ),
+            client,
+        })
+    }
 }
 
 impl QuotaRefreshProvider for HttpQuotaRefreshProvider {

@@ -102,6 +102,16 @@ pub enum CliError {
         /// Highest accepted value.
         maximum: u8,
     },
+    /// Quota refresh interval exceeds the shared quota evidence freshness window.
+    #[error("value for {option} must not exceed {maximum} seconds: {value}")]
+    QuotaRefreshIntervalOutOfRange {
+        /// Option name.
+        option: &'static str,
+        /// Raw seconds value.
+        value: u64,
+        /// Maximum supported interval in seconds.
+        maximum: u64,
+    },
 
     /// CLI argument is not UTF-8.
     #[error("non-UTF-8 CLI argument: {value:?}")]

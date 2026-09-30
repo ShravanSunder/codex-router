@@ -1,4 +1,369 @@
 use super::*;
+use crate::resolver::CredentialRefreshFailure;
+use codex_router_core::provider::Provider;
+use codex_router_secret_store::SecretStore;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
+use codex_router_secret_store::model::SecretKey;
+use codex_router_secret_store::model::SecretStoreError;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
+#[derive(Clone)]
+struct ProviderPruningRefreshClient;
+
+impl CredentialRefreshClient for ProviderPruningRefreshClient {
+    fn refresh_credentials(
+        &self,
+        _account_id: &AccountId,
+        _refresh_token: &SecretString,
+    ) -> Result<AccountCredentialBundle, CredentialRefreshFailure> {
+        Err(CredentialRefreshFailure::ambiguous(
+            codex_router_state::credential_maintenance::CredentialFailureClass::ProviderOutcomeAmbiguous,
+        ))
+    }
+
+    fn refresh_provider_credentials(
+        &self,
+        provider: codex_router_core::provider::Provider,
+        _account_id: &AccountId,
+        _refresh_token: &SecretString,
+    ) -> Result<CredentialBundle, CredentialRefreshFailure> {
+        match provider {
+            codex_router_core::provider::Provider::Openai => Ok(CredentialBundle::OpenAi(
+                AccountCredentialBundle::imported_codex_auth(
+                    "pruning-refreshed-openai-access",
+                    Some("pruning-refreshed-openai-refresh".to_owned()),
+                )
+                .with_expires_unix_seconds(2_000_000),
+            )),
+            codex_router_core::provider::Provider::Claude => {
+                CredentialBundle::new_claude(
+                    SecretString::new("pruning-refreshed-claude-access"),
+                    SecretString::new("pruning-refreshed-claude-refresh"),
+                    2_000_000,
+                )
+                .map_err(|_| {
+                    CredentialRefreshFailure::ambiguous(
+                        codex_router_state::credential_maintenance::CredentialFailureClass::MalformedResponse,
+                    )
+                })
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ClaimReleasingSecretStore {
+    inner: EncryptedCredentialStore,
+    database_path: PathBuf,
+    account_id: AccountId,
+    claim_released: Arc<AtomicBool>,
+}
+
+impl SecretStore for ClaimReleasingSecretStore {
+    fn write_secret(&self, key: &SecretKey, secret: &SecretString) -> Result<(), SecretStoreError> {
+        self.inner.write_secret(key, secret)
+    }
+
+    fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError> {
+        self.inner.read_secret(key)
+    }
+
+    fn write_staged(&self, key: &SecretKey, secret: &SecretString) -> Result<(), SecretStoreError> {
+        self.inner.write_staged(key, secret)?;
+        if !self.claim_released.swap(true, Ordering::SeqCst) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| SecretStoreError::KeyUnavailable)?;
+            let database_path = self.database_path.clone();
+            let account_id = self.account_id.clone();
+            runtime.block_on(async move {
+                let state = AsyncSqliteStateStore::open(&database_path)
+                    .await
+                    .map_err(|_| SecretStoreError::KeyUnavailable)?;
+                let released = state
+                    .finish_credential_refresh_claim(
+                        &account_id,
+                        Provider::Openai,
+                        3,
+                        4,
+                        codex_router_state::credential_maintenance::CredentialRefreshClaimDisposition::ReauthRequired {
+                            failure_class: codex_router_state::credential_maintenance::CredentialFailureClass::ProviderOutcomeAmbiguous,
+                        },
+                    )
+                    .await
+                    .map_err(|_| SecretStoreError::KeyUnavailable)?;
+                state
+                    .close()
+                    .await
+                    .map_err(|_| SecretStoreError::KeyUnavailable)?;
+                if !released {
+                    return Err(SecretStoreError::KeyUnavailable);
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    fn prune_obsolete_generations(
+        &self,
+        provider: Provider,
+        account_id: &AccountId,
+        active_generation: u64,
+    ) -> Result<Vec<u64>, SecretStoreError> {
+        self.inner
+            .prune_obsolete_generations(provider, account_id, active_generation)
+    }
+}
+
+#[tokio::test]
+async fn committed_provider_refresh_keeps_active_and_previous_generation_only() {
+    use codex_router_secret_store::account_tokens::provider_credential_bundle_key;
+
+    let temp_dir = AuthTestTempDir::new("provider-refresh-generation-pruning");
+    let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
+    let secret_root = temp_dir.path().join("secrets");
+    let (secrets, write_trace) = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store_with_write_trace(
+            &secret_root,
+        ),
+    );
+    let openai_id = account_id("prune-openai-account");
+    let claude_id = account_id("prune-claude-account");
+    let accounts = [
+        (Provider::Openai, &openai_id),
+        (Provider::Claude, &claude_id),
+    ];
+
+    for (provider, account_id) in accounts {
+        must_ok(
+            state
+                .upsert_account(
+                    &AccountRecord::new(
+                        provider,
+                        account_id.clone(),
+                        "generation pruning",
+                        AccountStatus::Enabled,
+                    )
+                    .with_active_credential_generation(3),
+                )
+                .await,
+        );
+        for generation in 1..=3 {
+            let active_provider_key = must_ok(provider_credential_bundle_key(
+                provider, account_id, generation,
+            ));
+            let active_provider_bundle = test_pruning_bundle(provider, generation);
+            must_ok(secrets.write_secret(
+                &active_provider_key,
+                &must_ok(active_provider_bundle.to_secret_string()),
+            ));
+
+            let other_provider = match provider {
+                Provider::Openai => Provider::Claude,
+                Provider::Claude => Provider::Openai,
+            };
+            if generation <= 2 {
+                let other_provider_key = must_ok(provider_credential_bundle_key(
+                    other_provider,
+                    account_id,
+                    generation,
+                ));
+                let other_provider_bundle = test_pruning_bundle(other_provider, generation);
+                must_ok(secrets.write_secret(
+                    &other_provider_key,
+                    &must_ok(other_provider_bundle.to_secret_string()),
+                ));
+            }
+        }
+    }
+
+    let resolver = AsyncRouterCredentialResolver::new(
+        state.clone(),
+        secrets.clone(),
+        ProviderPruningRefreshClient,
+        Some(1_000),
+    );
+    for (_, account_id) in accounts {
+        must_ok(resolver.maintain_account_credentials(account_id).await);
+        assert_eq!(
+            must_ok(state.load_account(account_id).await)
+                .expect("refreshed provider account remains")
+                .active_credential_generation(),
+            Some(4)
+        );
+    }
+
+    for (provider, account_id) in accounts {
+        let other_provider = match provider {
+            Provider::Openai => Provider::Claude,
+            Provider::Claude => Provider::Openai,
+        };
+        for generation in 1..=2 {
+            let active_provider_key = must_ok(provider_credential_bundle_key(
+                provider, account_id, generation,
+            ));
+            let other_provider_key = must_ok(provider_credential_bundle_key(
+                other_provider,
+                account_id,
+                generation,
+            ));
+            assert!(
+                secrets.read_secret(&active_provider_key).is_err(),
+                "generations older than active - 1 are pruned for {provider:?}"
+            );
+            assert!(
+                secrets.read_secret(&other_provider_key).is_ok(),
+                "pruning {provider:?} must leave {other_provider:?} generations intact"
+            );
+        }
+        for generation in 3..=4 {
+            let key = must_ok(provider_credential_bundle_key(
+                provider, account_id, generation,
+            ));
+            assert!(secrets.read_secret(&key).is_ok());
+        }
+    }
+
+    let token_canaries = [
+        "openai-pruning-access-1",
+        "openai-pruning-refresh-1",
+        "openai-pruning-access-2",
+        "openai-pruning-refresh-2",
+        "openai-pruning-access-3",
+        "openai-pruning-refresh-3",
+        "claude-pruning-access-1",
+        "claude-pruning-refresh-1",
+        "claude-pruning-access-2",
+        "claude-pruning-refresh-2",
+        "claude-pruning-access-3",
+        "claude-pruning-refresh-3",
+        "pruning-refreshed-openai-access",
+        "pruning-refreshed-openai-refresh",
+        "pruning-refreshed-claude-access",
+        "pruning-refreshed-claude-refresh",
+    ];
+    for event in write_trace.events() {
+        if let codex_router_secret_store::test_support::FileWriteTraceEvent::TemporaryFileWritten {
+            contents,
+            ..
+        } = event
+        {
+            let temporary_bytes = String::from_utf8_lossy(&contents);
+            for canary in token_canaries {
+                assert!(!temporary_bytes.contains(canary));
+            }
+        }
+    }
+    for file in must_ok(std::fs::read_dir(&secret_root)) {
+        let path = must_ok(file).path();
+        let file_bytes = must_ok(std::fs::read(path));
+        let stored_file_contents = String::from_utf8_lossy(&file_bytes);
+        for canary in token_canaries {
+            assert!(!stored_file_contents.contains(canary));
+        }
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_refresh_activation_does_not_prune_any_generation() {
+    use codex_router_secret_store::account_tokens::provider_credential_bundle_key;
+
+    let temp_dir = AuthTestTempDir::new("ambiguous-refresh-activation-pruning");
+    let database_path = temp_dir.path().join("state.sqlite");
+    let state = must_ok(AsyncSqliteStateStore::open(&database_path).await);
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
+    let account_id = account_id("ambiguous-prune-account");
+    must_ok(
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Openai,
+                    account_id.clone(),
+                    "ambiguous activation",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(3),
+            )
+            .await,
+    );
+    for generation in 1..=3 {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Openai,
+            &account_id,
+            generation,
+        ));
+        let bundle = AccountCredentialBundle::imported_codex_auth(
+            format!("ambiguous-access-{generation}"),
+            Some(format!("ambiguous-refresh-{generation}")),
+        )
+        .with_expires_unix_seconds(900);
+        must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+    }
+    let wrapped_secrets = ClaimReleasingSecretStore {
+        inner: secrets.clone(),
+        database_path,
+        account_id: account_id.clone(),
+        claim_released: Arc::new(AtomicBool::new(false)),
+    };
+    let resolver = AsyncRouterCredentialResolver::new(
+        state.clone(),
+        wrapped_secrets,
+        ProviderPruningRefreshClient,
+        Some(1_000),
+    );
+
+    assert_eq!(
+        resolver.maintain_account_credentials(&account_id).await,
+        Err(CredentialResolverError::RefreshUnavailable)
+    );
+    assert_eq!(
+        must_ok(state.load_account(&account_id).await)
+            .expect("account should remain registered")
+            .active_credential_generation(),
+        Some(3)
+    );
+    for generation in 1..=4 {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Openai,
+            &account_id,
+            generation,
+        ));
+        assert!(
+            secrets.read_secret(&key).is_ok(),
+            "ambiguous activation leaves generation {generation} untouched"
+        );
+    }
+    assert!(must_ok(state.load_credential_maintenance(&account_id).await)
+        .is_some_and(|record| record.state == codex_router_state::credential_maintenance::CredentialMaintenanceState::ReauthRequired));
+}
+
+fn test_pruning_bundle(
+    provider: codex_router_core::provider::Provider,
+    generation: u64,
+) -> CredentialBundle {
+    match provider {
+        codex_router_core::provider::Provider::Openai => CredentialBundle::OpenAi(
+            AccountCredentialBundle::imported_codex_auth(
+                format!("openai-pruning-access-{generation}"),
+                Some(format!("openai-pruning-refresh-{generation}")),
+            )
+            .with_expires_unix_seconds(10_000_000),
+        ),
+        codex_router_core::provider::Provider::Claude => must_ok(CredentialBundle::new_claude(
+            SecretString::new(format!("claude-pruning-access-{generation}")),
+            SecretString::new(format!("claude-pruning-refresh-{generation}")),
+            10_000_000,
+        )),
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn independent_async_resolvers_use_one_rotating_refresh_generation() {

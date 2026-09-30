@@ -103,6 +103,52 @@ pub enum ClaimPurpose {
     Login,
 }
 
+/// Terminal or retry disposition for one claimed credential refresh.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRefreshClaimDisposition {
+    /// The provider confirmed the refresh token is unspent and may be retried later.
+    Retrying {
+        failure_class: CredentialFailureClass,
+        next_attempt_unix_seconds: u64,
+    },
+    /// The provider refused the token or its outcome is uncertain; require login.
+    ReauthRequired {
+        failure_class: CredentialFailureClass,
+    },
+    /// This credential cannot be refreshed by the current provider flow.
+    Unrefreshable {
+        failure_class: CredentialFailureClass,
+    },
+}
+
+impl CredentialRefreshClaimDisposition {
+    pub const fn state(self) -> CredentialMaintenanceState {
+        match self {
+            Self::Retrying { .. } => CredentialMaintenanceState::Retrying,
+            Self::ReauthRequired { .. } => CredentialMaintenanceState::ReauthRequired,
+            Self::Unrefreshable { .. } => CredentialMaintenanceState::Unrefreshable,
+        }
+    }
+
+    pub const fn failure_class(self) -> CredentialFailureClass {
+        match self {
+            Self::Retrying { failure_class, .. }
+            | Self::ReauthRequired { failure_class }
+            | Self::Unrefreshable { failure_class } => failure_class,
+        }
+    }
+
+    pub const fn next_attempt_unix_seconds(self) -> Option<u64> {
+        match self {
+            Self::Retrying {
+                next_attempt_unix_seconds,
+                ..
+            } => Some(next_attempt_unix_seconds),
+            Self::ReauthRequired { .. } | Self::Unrefreshable { .. } => None,
+        }
+    }
+}
+
 impl ClaimPurpose {
     pub const fn as_str(self) -> &'static str {
         match self {

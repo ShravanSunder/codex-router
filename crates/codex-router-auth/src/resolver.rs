@@ -32,6 +32,7 @@ use codex_router_secret_store::account_credential_lock::AccountCredentialLock;
 use codex_router_state::credential_maintenance::CredentialFailureClass;
 use codex_router_state::credential_maintenance::CredentialMaintenanceRecord;
 use codex_router_state::credential_maintenance::CredentialMaintenanceState;
+use codex_router_state::credential_maintenance::CredentialRefreshClaimDisposition;
 
 const DEFAULT_OPENAI_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const DEFAULT_OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";

@@ -69,7 +69,6 @@ impl ClaudeQuotaFetcher {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ClaudeUsageResponse {
     five_hour: Option<ClaudeLegacyUsageWindow>,
     seven_day: Option<ClaudeLegacyUsageWindow>,
@@ -78,17 +77,15 @@ struct ClaudeUsageResponse {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ClaudeLegacyUsageWindow {
     utilization: Option<f64>,
     resets_at: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ClaudeUsageLimit {
     kind: String,
-    percent: f64,
+    percent: serde_json::Value,
     resets_at: Option<String>,
 }
 
@@ -111,10 +108,13 @@ fn parse_claude_usage_response(
         .flatten();
 
     for limit in usage.limits.unwrap_or_default() {
-        let window = parse_percent_window(limit.percent, limit.resets_at.as_deref())?;
         match limit.kind.as_str() {
-            "session" if five_hour.is_none() => five_hour = Some(window),
-            "weekly_all" if weekly.is_none() => weekly = Some(window),
+            "session" if five_hour.is_none() => {
+                five_hour = Some(parse_limit_window(&limit)?);
+            }
+            "weekly_all" if weekly.is_none() => {
+                weekly = Some(parse_limit_window(&limit)?);
+            }
             "session" | "weekly_all" => {
                 return Err(QuotaCommandError::ProviderResponse {
                     message: "duplicate Claude quota window in usage response".to_owned(),
@@ -144,6 +144,19 @@ fn parse_claude_usage_response(
         windows,
         reset_credits_available: None,
     })
+}
+
+fn parse_limit_window(
+    limit: &ClaudeUsageLimit,
+) -> Result<ParsedClaudeUsageWindow, QuotaCommandError> {
+    let utilization_percent =
+        limit
+            .percent
+            .as_f64()
+            .ok_or_else(|| QuotaCommandError::ProviderResponse {
+                message: "Claude quota utilization percentage is not numeric".to_owned(),
+            })?;
+    parse_percent_window(utilization_percent, limit.resets_at.as_deref())
 }
 
 #[derive(Clone, Copy)]
@@ -202,6 +215,83 @@ fn quota_window_from_parsed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_router_core::ids::AccountId;
+    use codex_router_core::provider::Provider;
+    use codex_router_core::redaction::SecretString;
+    use std::io::Read;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+
+    #[tokio::test]
+    async fn fake_usage_endpoint_receives_oauth_headers_and_returns_windows() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake usage listener");
+        let endpoint = format!(
+            "http://{}/api/oauth/usage",
+            listener.local_addr().expect("listener address")
+        );
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept usage request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let request_end = loop {
+                let count = stream.read(&mut buffer).expect("read usage request");
+                assert!(count > 0, "usage request includes headers");
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(index) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            request_sender
+                .send(String::from_utf8(request[..request_end].to_vec()).expect("request headers"))
+                .expect("test receives request headers");
+            let body = r#"{"five_hour":{"utilization":25,"resets_at":"2026-10-01T00:00:00Z"},"seven_day":{"utilization":80,"resets_at":null}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write fake usage response");
+        });
+        let fetcher =
+            ClaudeQuotaFetcher::new_with_endpoint_for_test(Duration::from_secs(2), endpoint);
+        let account_id = AccountId::new("acct_claude_usage").expect("account id");
+        let response = fetcher
+            .fetch_quota(QuotaRefreshProviderRequest::new_for_provider(
+                Provider::Claude,
+                account_id,
+                "claude account",
+                "claude_messages",
+                "unused-openai-base-url",
+                SecretString::new("usage-access-canary"),
+                None,
+            ))
+            .await
+            .expect("usage response should decode");
+        let request = request_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fake usage server should observe one request")
+            .to_ascii_lowercase();
+
+        assert!(request.starts_with("get /api/oauth/usage "));
+        assert!(request.contains("authorization: bearer usage-access-canary"));
+        assert!(request.contains("anthropic-beta: oauth-2025-04-20"));
+        assert_eq!(response.windows.len(), 2);
+        assert_eq!(
+            response.windows[0].limit_window_seconds,
+            CLAUDE_FIVE_HOUR_WINDOW_SECONDS
+        );
+        assert_eq!(response.windows[0].remaining_headroom, 7_500);
+        assert_eq!(
+            response.windows[1].limit_window_seconds,
+            CLAUDE_WEEKLY_WINDOW_SECONDS
+        );
+        assert_eq!(response.windows[1].remaining_headroom, 2_000);
+        server.join().expect("fake usage server should finish");
+    }
 
     #[test]
     fn claude_usage_parses_legacy_and_limits_windows_without_inventing_missing_usage() {
@@ -236,5 +326,20 @@ mod tests {
         let unknown = parse_claude_usage_response(r#"{"five_hour":null,"seven_day":null}"#)
             .expect("valid response with unknown windows remains unknown");
         assert!(unknown.windows.is_empty());
+    }
+
+    #[test]
+    fn claude_usage_ignores_unknown_fields_and_irrelevant_window_utilization() {
+        let usage = parse_claude_usage_response(
+            r#"{"oauth_app":{},"five_hour":{"utilization":25,"resets_at":null,"is_local_entitlement":true},"seven_day":null,"limits":[{"kind":"weekly_scoped","percent":1000,"resets_at":null,"model":"claude-opus"}]}"#,
+        )
+        .expect("unknown fields and irrelevant utilization must not reject account windows");
+
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(
+            usage.windows[0].limit_window_seconds,
+            CLAUDE_FIVE_HOUR_WINDOW_SECONDS
+        );
+        assert_eq!(usage.windows[0].remaining_headroom, 7_500);
     }
 }

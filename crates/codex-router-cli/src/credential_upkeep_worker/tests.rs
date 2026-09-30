@@ -272,9 +272,9 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
                 codex_router_core::provider::Provider::Openai,
                 1,
                 2,
-                CredentialMaintenanceState::ReauthRequired,
-                CredentialFailureClass::ProviderOutcomeAmbiguous,
-                None,
+                codex_router_state::credential_maintenance::CredentialRefreshClaimDisposition::ReauthRequired {
+                    failure_class: CredentialFailureClass::ProviderOutcomeAmbiguous,
+                },
             )
             .await
             .expect("reauth disposition")
