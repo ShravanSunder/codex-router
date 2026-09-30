@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT topic_id FROM board_messages WHERE message_id=? AND root_id IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "topic_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "topic_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "84d0917a1f0020767d0b9e4ec7a6d0d5d9e672f29ae5fafb46ee251c7ff4d9e5"
+}

@@ -12,16 +12,19 @@ async fn thread_roots_and_duplicate_topic_names_use_specific_failure_codes() {
     let fixture = create_fixture(&mut store).await;
     let missing_root = MessageId::generate();
     let failure = store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Thread {
-                root_message_id: missing_root.clone(),
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Thread {
+                    root_message_id: missing_root.clone(),
+                },
+                actor: actor("author"),
+                acting_for: None,
+                text: text("reply"),
+                references: no_references(),
             },
-            actor: actor("author"),
-            acting_for: None,
-            text: text("reply"),
-            references: no_references(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(failure.kind, BoardFailureKind::InvalidRootMessage);
@@ -50,16 +53,19 @@ async fn thread_roots_and_duplicate_topic_names_use_specific_failure_codes() {
     )
     .await;
     let failure = store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Thread {
-                root_message_id: child.message.message_id,
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Thread {
+                    root_message_id: child.message.message_id,
+                },
+                actor: actor("nested-author"),
+                acting_for: None,
+                text: text("nested"),
+                references: no_references(),
             },
-            actor: actor("nested-author"),
-            acting_for: None,
-            text: text("nested"),
-            references: no_references(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(failure.kind, BoardFailureKind::InvalidRootMessage);
@@ -134,11 +140,14 @@ async fn watch_messages_explain_history_guidance_and_board_lifecycle() {
         .await
         .unwrap();
     let archived = store
-        .unwatch_thread(ThreadUnwatchRequest {
-            root_message_id: root.message.message_id,
-            actor: watcher,
-            acting_for: None,
-        })
+        .unwatch_thread(
+            ThreadUnwatchRequest {
+                root_message_id: root.message.message_id,
+                actor: watcher,
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert!(archived.watch_status.message.contains("read-only"));
@@ -163,11 +172,14 @@ async fn unresolve_outcomes_explain_when_thread_messages_are_available() {
     )
     .await;
     store
-        .resolve_thread(ThreadResolveRequest {
-            root_message_id: root.message.message_id.clone(),
-            actor: actor("resolver"),
-            acting_for: None,
-        })
+        .resolve_thread(
+            ThreadResolveRequest {
+                root_message_id: root.message.message_id.clone(),
+                actor: actor("resolver"),
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     let changed = store

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE subscription_windows SET held_since=CASE WHEN ? IS NULL THEN COALESCE(held_since,?) ELSE NULL END, retry_not_before=?,retry_attempts=CASE WHEN ? IS NULL THEN retry_attempts ELSE retry_attempts+1 END, in_flight_through=NULL,residual_opened_at=NULL WHERE reader_key=? AND root_id=? AND window_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "9165d734fb14e3656e6c61b2c42ba8d683fc76bdc1e1ef847a2b799ebac3e445"
+}

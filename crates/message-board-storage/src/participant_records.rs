@@ -11,6 +11,14 @@ use crate::storage_support::{
     decode_cursor as decode_signed_cursor, encode_cursor, ensure_identity, identity_key,
     invalid_cursor, invalid_record, recompute_project_unread, storage_error,
 };
+use crate::thread_delivery_position_writer::{
+    latest_message_activity_for_root, write_delivered_position_if_valid,
+};
+use crate::thread_subscription_lifecycle_records::{
+    end_thread_subscription_for_join_without_watch, end_thread_subscription_for_leave,
+    resolve_thread_subscriptions, upsert_join_subscription,
+};
+use chrono::{DateTime, Utc};
 use message_board::*;
 use serde::{Deserialize, Serialize};
 use sqlx::Connection;
@@ -134,6 +142,7 @@ impl BoardStore {
     pub async fn join_thread(
         &mut self,
         request: ThreadJoinRequest,
+        now: DateTime<Utc>,
     ) -> Result<ThreadJoinResult, BoardError> {
         if request.replace.as_ref() == Some(&request.actor) {
             return Err(BoardError::participant_refusal(ParticipantRefusal {
@@ -278,6 +287,14 @@ impl BoardStore {
                 ).execute(&mut *transaction).await.map_err(storage_error)?,
                 _ => return Err(BoardError::invalid_field("replace", "requires a unique seat")),
             };
+            end_thread_subscription_for_leave(
+                &mut transaction,
+                &holder_key,
+                &request.root_message_id,
+                EndReason::Replaced,
+                now,
+            )
+            .await?;
         }
         upsert_joined_participant(
             &mut transaction,
@@ -298,6 +315,38 @@ impl BoardStore {
             request.watch,
         )
         .await?;
+        if request.watch {
+            let subscription_started = upsert_join_subscription(
+                &mut transaction,
+                &actor_key,
+                &request.actor,
+                &request.root_message_id,
+                now,
+            )
+            .await?;
+            if subscription_started
+                && let Some(latest_message_activity) =
+                    latest_message_activity_for_root(&mut transaction, &request.root_message_id)
+                        .await?
+            {
+                let _ = write_delivered_position_if_valid(
+                    &mut transaction,
+                    &actor_key,
+                    &request.root_message_id,
+                    latest_message_activity,
+                )
+                .await?;
+            }
+        } else {
+            end_thread_subscription_for_join_without_watch(
+                &mut transaction,
+                &actor_key,
+                &request.actor,
+                &request.root_message_id,
+                now,
+            )
+            .await?;
+        }
         let participant =
             load_participant(&mut transaction, &request.actor, &request.root_message_id)
                 .await?
@@ -320,6 +369,7 @@ impl BoardStore {
     pub async fn leave_thread(
         &mut self,
         request: ThreadLeaveRequest,
+        now: DateTime<Utc>,
     ) -> Result<ThreadLeaveResult, BoardError> {
         if request.resolve && request.to.is_some() {
             return Err(BoardError::invalid_field(
@@ -379,9 +429,17 @@ impl BoardStore {
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?;
+            end_thread_subscription_for_leave(
+                &mut transaction,
+                &actor_key,
+                &request.root_message_id,
+                EndReason::Left,
+                now,
+            )
+            .await?;
         }
         let sequence = if request.resolve {
-            resolve_in_transaction(&mut transaction, &location, &actor_key).await?
+            resolve_in_transaction(&mut transaction, &location, &actor_key, now).await?
         } else if let Some(target) = &request.to {
             if *target == request.actor {
                 return Err(BoardError::invalid_field(
@@ -432,6 +490,14 @@ impl BoardStore {
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?;
+            end_thread_subscription_for_leave(
+                &mut transaction,
+                &actor_key,
+                &request.root_message_id,
+                EndReason::Replaced,
+                now,
+            )
+            .await?;
             sequence
         } else {
             let sequence = insert_lifecycle_activity(
@@ -451,6 +517,14 @@ impl BoardStore {
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?;
+            end_thread_subscription_for_leave(
+                &mut transaction,
+                &actor_key,
+                &request.root_message_id,
+                EndReason::Left,
+                now,
+            )
+            .await?;
             sequence
         };
         if !request.resolve {
@@ -573,6 +647,7 @@ pub(crate) async fn resolve_in_transaction(
     transaction: &mut BoardTransaction<'_>,
     location: &crate::message_records::ThreadLocation,
     actor_key: &str,
+    now: DateTime<Utc>,
 ) -> Result<i64, BoardError> {
     sqlx::query!(
         "UPDATE board_threads SET state='resolved' WHERE root_id=?",
@@ -607,6 +682,7 @@ pub(crate) async fn resolve_in_transaction(
     .await
     .map_err(storage_error)?;
     recompute_project_unread(transaction, actor_key, location.project_id.as_str()).await?;
+    resolve_thread_subscriptions(transaction, &location.root_message_id, now).await?;
     Ok(sequence)
 }
 

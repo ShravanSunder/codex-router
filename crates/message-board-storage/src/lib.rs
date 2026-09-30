@@ -9,8 +9,17 @@ mod participant_records;
 mod participant_row_decoding;
 mod project_records;
 mod storage_support;
+mod subscription_batch_settlement_records;
+mod subscription_window_records;
+mod thread_batch_selection;
+mod thread_delivery_position_writer;
 mod thread_listen_records;
 mod thread_records;
+mod thread_subscription_backfill;
+mod thread_subscription_lifecycle_records;
+mod thread_subscription_records;
+mod thread_subscription_row_decoding;
+mod thread_subscription_row_reads;
 
 mod board_topic_records;
 mod message_row_decoding;

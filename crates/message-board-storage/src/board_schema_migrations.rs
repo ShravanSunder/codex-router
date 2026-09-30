@@ -3,6 +3,7 @@ use crate::BoardStorageError;
 use sqlx::{Connection, Row, SqliteConnection};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+const THREAD_SUBSCRIPTIONS_VERSION: i64 = 202609170001;
 const BASELINE: &str = include_str!("../migrations/202609120001_project_board.sql");
 const THREAD_DELIVERY_POSITIONS: &str =
     include_str!("../migrations/202609140001_thread_delivery_positions.sql");
@@ -10,13 +11,15 @@ const THREAD_PARTICIPANTS: &str =
     include_str!("../migrations/202609150001_thread_participants.sql");
 const THREAD_IMPLEMENTER: &str = include_str!("../migrations/202609160001_thread_implementer.sql");
 const TOPIC_WATCHES: &str = include_str!("../migrations/202609160002_topic_watches.sql");
+const THREAD_SUBSCRIPTIONS: &str =
+    include_str!("../migrations/202609170001_thread_subscriptions.sql");
 
 pub(crate) async fn initialize(connection: &mut SqliteConnection) -> Result<(), BoardStorageError> {
     initialize_with(
         connection,
         &MIGRATOR,
         &format!(
-            "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES}"
+            "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS}"
         ),
     )
     .await
@@ -38,10 +41,30 @@ async fn initialize_with(
     if has_objects && !has_history {
         return Err(BoardStorageError::InvalidSchema);
     }
+    let subscription_migration_is_applied = if has_history {
+        sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=?)",
+            THREAD_SUBSCRIPTIONS_VERSION,
+        )
+        .fetch_one(&mut *transaction)
+        .await?
+            != 0
+    } else {
+        false
+    };
+    let subscription_backfill_is_new = migrator
+        .iter()
+        .any(|migration| migration.version == THREAD_SUBSCRIPTIONS_VERSION)
+        && !subscription_migration_is_applied;
     migrator
         .run_direct(None, &mut *transaction, false)
         .await
         .map_err(|_| BoardStorageError::InvalidSchema)?;
+    if subscription_backfill_is_new {
+        crate::thread_subscription_backfill::backfill_thread_subscriptions(&mut transaction)
+            .await
+            .map_err(|_| BoardStorageError::InvalidSchema)?;
+    }
     if !sqlx::query("PRAGMA foreign_key_check")
         .fetch_all(&mut *transaction)
         .await?

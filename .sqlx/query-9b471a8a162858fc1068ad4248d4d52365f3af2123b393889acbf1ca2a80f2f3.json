@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM thread_subscriptions WHERE reader_key=? AND scope_kind=? AND scope_id=? AND generation=? AND state IN ('active','draining'))",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS(SELECT 1 FROM thread_subscriptions WHERE reader_key=? AND scope_kind=? AND scope_id=? AND generation=? AND state IN ('active','draining'))",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9b471a8a162858fc1068ad4248d4d52365f3af2123b393889acbf1ca2a80f2f3"
+}

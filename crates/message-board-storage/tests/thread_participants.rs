@@ -101,16 +101,19 @@ impl Fixture {
         watch: bool,
     ) -> ThreadCreateResult {
         self.store
-            .create_thread(ThreadCreateRequest {
-                message_id: MessageId::generate(),
-                topic_id: self.topic_id.clone(),
-                actor,
-                acting_for: None,
-                text: MessageText::try_from("Root".to_owned()).unwrap(),
-                references: MessageReferences::try_from(Vec::new()).unwrap(),
-                role,
-                watch,
-            })
+            .create_thread(
+                ThreadCreateRequest {
+                    message_id: MessageId::generate(),
+                    topic_id: self.topic_id.clone(),
+                    actor,
+                    acting_for: None,
+                    text: MessageText::try_from("Root".to_owned()).unwrap(),
+                    references: MessageReferences::try_from(Vec::new()).unwrap(),
+                    role,
+                    watch,
+                },
+                chrono::Utc::now(),
+            )
             .await
             .unwrap()
     }
@@ -136,14 +139,17 @@ async fn implementer_seat_is_unique_replaceable_and_visible_on_thread_reads() {
     let second = session("implementer-two");
     let joined = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root.clone(),
-            actor: first.clone(),
-            role: ParticipantRole::Implementer,
-            watch: true,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root.clone(),
+                actor: first.clone(),
+                role: ParticipantRole::Implementer,
+                watch: true,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -152,28 +158,34 @@ async fn implementer_seat_is_unique_replaceable_and_visible_on_thread_reads() {
     );
     let refusal = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root.clone(),
-            actor: second.clone(),
-            role: ParticipantRole::Implementer,
-            watch: true,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root.clone(),
+                actor: second.clone(),
+                role: ParticipantRole::Implementer,
+                watch: true,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(refusal.kind, BoardFailureKind::ImplementerAlreadyExists);
     assert_eq!(refusal.next_action, BoardNextAction::ReplaceImplementer);
     fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root.clone(),
-            actor: second.clone(),
-            role: ParticipantRole::Implementer,
-            watch: true,
-            replace: Some(first),
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root.clone(),
+                actor: second.clone(),
+                role: ParticipantRole::Implementer,
+                watch: true,
+                replace: Some(first),
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     let shown = fixture
@@ -275,27 +287,33 @@ async fn create_and_repeat_join_preserve_one_valid_participant_and_explicit_watc
 
     let first_join = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: created.message.message_id.clone(),
-            actor: creator.clone(),
-            role: ParticipantRole::Reviewer,
-            watch: true,
-            replace: None,
-            note: Some(ParticipantNote::try_from("kept note".to_owned()).unwrap()),
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: created.message.message_id.clone(),
+                actor: creator.clone(),
+                role: ParticipantRole::Reviewer,
+                watch: true,
+                replace: None,
+                note: Some(ParticipantNote::try_from("kept note".to_owned()).unwrap()),
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert!(first_join.watch_status.watching);
     let second_join = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: created.message.message_id.clone(),
-            actor: creator,
-            role: ParticipantRole::Participant,
-            watch: false,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: created.message.message_id.clone(),
+                actor: creator,
+                role: ParticipantRole::Participant,
+                watch: false,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert_eq!(second_join.participant.role, ParticipantRole::Participant);
@@ -316,12 +334,15 @@ async fn create_and_repeat_join_preserve_one_valid_participant_and_explicit_watc
     assert_eq!(listed.page.records.len(), 1);
     let left = fixture
         .store
-        .leave_thread(ThreadLeaveRequest {
-            root_message_id: root_message_id.clone(),
-            actor: second_join.participant.identity.clone(),
-            to: None,
-            resolve: false,
-        })
+        .leave_thread(
+            ThreadLeaveRequest {
+                root_message_id: root_message_id.clone(),
+                actor: second_join.participant.identity.clone(),
+                to: None,
+                resolve: false,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -334,14 +355,17 @@ async fn create_and_repeat_join_preserve_one_valid_participant_and_explicit_watc
     );
     let rejoined = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id,
-            actor: second_join.participant.identity,
-            role: ParticipantRole::Advisor,
-            watch: false,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id,
+                actor: second_join.participant.identity,
+                role: ParticipantRole::Advisor,
+                watch: false,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert!(rejoined.participant.is_open());
@@ -355,16 +379,19 @@ async fn human_create_without_role_has_no_participant_and_session_topic_post_is_
     let mut fixture = Fixture::open("human-create").await;
     let missing_role = fixture
         .store
-        .create_thread(ThreadCreateRequest {
-            message_id: MessageId::generate(),
-            topic_id: fixture.topic_id.clone(),
-            actor: session("missing-role"),
-            acting_for: None,
-            text: MessageText::try_from("Root".to_owned()).unwrap(),
-            references: MessageReferences::try_from(Vec::new()).unwrap(),
-            role: None,
-            watch: false,
-        })
+        .create_thread(
+            ThreadCreateRequest {
+                message_id: MessageId::generate(),
+                topic_id: fixture.topic_id.clone(),
+                actor: session("missing-role"),
+                acting_for: None,
+                text: MessageText::try_from("Root".to_owned()).unwrap(),
+                references: MessageReferences::try_from(Vec::new()).unwrap(),
+                role: None,
+                watch: false,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(missing_role.kind, BoardFailureKind::InvalidField);
@@ -385,16 +412,19 @@ async fn human_create_without_role_has_no_participant_and_session_topic_post_is_
     assert!(listed.page.records.is_empty());
     let failure = fixture
         .store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Topic {
-                topic_id: fixture.topic_id.clone(),
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Topic {
+                    topic_id: fixture.topic_id.clone(),
+                },
+                actor: session("unjoined"),
+                acting_for: None,
+                text: MessageText::try_from("must create".to_owned()).unwrap(),
+                references: MessageReferences::try_from(Vec::new()).unwrap(),
             },
-            actor: session("unjoined"),
-            acting_for: None,
-            text: MessageText::try_from("must create".to_owned()).unwrap(),
-            references: MessageReferences::try_from(Vec::new()).unwrap(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(failure.kind, BoardFailureKind::SessionTopicPost);
@@ -414,39 +444,48 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
     let root = created.message.message_id;
     fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root.clone(),
-            actor: second.clone(),
-            role: ParticipantRole::Reviewer,
-            watch: true,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root.clone(),
+                actor: second.clone(),
+                role: ParticipantRole::Reviewer,
+                watch: true,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     let self_replace = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root.clone(),
-            actor: first.clone(),
-            role: ParticipantRole::Orchestrator,
-            watch: true,
-            replace: Some(first.clone()),
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root.clone(),
+                actor: first.clone(),
+                role: ParticipantRole::Orchestrator,
+                watch: true,
+                replace: Some(first.clone()),
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(self_replace.kind, BoardFailureKind::SelfReplace);
     let stale_replace = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root.clone(),
-            actor: third.clone(),
-            role: ParticipantRole::Orchestrator,
-            watch: false,
-            replace: Some(session("stale-holder")),
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root.clone(),
+                actor: third.clone(),
+                role: ParticipantRole::Orchestrator,
+                watch: false,
+                replace: Some(session("stale-holder")),
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(stale_replace.kind, BoardFailureKind::StaleOrchestrator);
@@ -462,14 +501,17 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
 
     let replaced = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root.clone(),
-            actor: third.clone(),
-            role: ParticipantRole::Orchestrator,
-            watch: false,
-            replace: Some(first.clone()),
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root.clone(),
+                actor: third.clone(),
+                role: ParticipantRole::Orchestrator,
+                watch: false,
+                replace: Some(first.clone()),
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert_eq!(replaced.orchestrator.unwrap().identity, third);
@@ -510,23 +552,29 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
 
     let left = fixture
         .store
-        .leave_thread(ThreadLeaveRequest {
-            root_message_id: root.clone(),
-            actor: replaced.participant.identity,
-            to: Some(second.clone()),
-            resolve: false,
-        })
+        .leave_thread(
+            ThreadLeaveRequest {
+                root_message_id: root.clone(),
+                actor: replaced.participant.identity,
+                to: Some(second.clone()),
+                resolve: false,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert_eq!(left.orchestrator.unwrap().identity, second);
     assert!(!left.watch_status.watching);
     let resolved = fixture
         .store
-        .resolve_thread(ThreadResolveRequest {
-            root_message_id: root.clone(),
-            actor: human("owner"),
-            acting_for: None,
-        })
+        .resolve_thread(
+            ThreadResolveRequest {
+                root_message_id: root.clone(),
+                actor: human("owner"),
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert_eq!(resolved.thread.state, ThreadState::Resolved);
@@ -581,49 +629,61 @@ async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
     let unjoined = session("unjoined");
     let post_failure = fixture
         .store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Thread {
-                root_message_id: root.clone(),
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Thread {
+                    root_message_id: root.clone(),
+                },
+                actor: unjoined.clone(),
+                acting_for: None,
+                text: MessageText::try_from("blocked".to_owned()).unwrap(),
+                references: MessageReferences::try_from(Vec::new()).unwrap(),
             },
-            actor: unjoined.clone(),
-            acting_for: None,
-            text: MessageText::try_from("blocked".to_owned()).unwrap(),
-            references: MessageReferences::try_from(Vec::new()).unwrap(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(post_failure.kind, BoardFailureKind::ParticipantRequired);
     let resolve_failure = fixture
         .store
-        .resolve_thread(ThreadResolveRequest {
-            root_message_id: root.clone(),
-            actor: unjoined.clone(),
-            acting_for: None,
-        })
+        .resolve_thread(
+            ThreadResolveRequest {
+                root_message_id: root.clone(),
+                actor: unjoined.clone(),
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(resolve_failure.kind, BoardFailureKind::ParticipantRequired);
     let joined_non_orchestrator = session("joined-non-orchestrator");
     fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root.clone(),
-            actor: joined_non_orchestrator.clone(),
-            role: ParticipantRole::Reviewer,
-            watch: false,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root.clone(),
+                actor: joined_non_orchestrator.clone(),
+                role: ParticipantRole::Reviewer,
+                watch: false,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     let resolve_failure = fixture
         .store
-        .resolve_thread(ThreadResolveRequest {
-            root_message_id: root.clone(),
-            actor: joined_non_orchestrator,
-            acting_for: None,
-        })
+        .resolve_thread(
+            ThreadResolveRequest {
+                root_message_id: root.clone(),
+                actor: joined_non_orchestrator,
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(resolve_failure.kind, BoardFailureKind::OrchestratorRequired);
@@ -646,16 +706,19 @@ async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
     assert_eq!(listen_failure.kind, BoardFailureKind::ParticipantRequired);
     let human_reply = fixture
         .store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Thread {
-                root_message_id: root.clone(),
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Thread {
+                    root_message_id: root.clone(),
+                },
+                actor: human("human-reader"),
+                acting_for: None,
+                text: MessageText::try_from("human reply".to_owned()).unwrap(),
+                references: MessageReferences::try_from(Vec::new()).unwrap(),
             },
-            actor: human("human-reader"),
-            acting_for: None,
-            text: MessageText::try_from("human reply".to_owned()).unwrap(),
-            references: MessageReferences::try_from(Vec::new()).unwrap(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert!(!human_reply.watch_status.watching);
@@ -759,8 +822,8 @@ async fn concurrent_orchestrator_joins_commit_one_holder_and_report_the_winner()
         note: None,
     };
     let (first_result, second_result) = tokio::join!(
-        first_store.join_thread(first_request),
-        second_store.join_thread(second_request)
+        first_store.join_thread(first_request, chrono::Utc::now()),
+        second_store.join_thread(second_request, chrono::Utc::now())
     );
     let successes = usize::from(first_result.is_ok()) + usize::from(second_result.is_ok());
     assert_eq!(successes, 1);
@@ -791,29 +854,35 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
     let reader = session("listener");
     let joined = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root.clone(),
-            actor: reader.clone(),
-            role: ParticipantRole::Reviewer,
-            watch: true,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root.clone(),
+                actor: reader.clone(),
+                role: ParticipantRole::Reviewer,
+                watch: true,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     let join_sequence = joined.participant.joined_at_activity;
     let external_message = fixture
         .store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Thread {
-                root_message_id: root.clone(),
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Thread {
+                    root_message_id: root.clone(),
+                },
+                actor: human("external"),
+                acting_for: None,
+                text: MessageText::try_from("external".to_owned()).unwrap(),
+                references: MessageReferences::try_from(Vec::new()).unwrap(),
             },
-            actor: human("external"),
-            acting_for: None,
-            text: MessageText::try_from("external".to_owned()).unwrap(),
-            references: MessageReferences::try_from(Vec::new()).unwrap(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     let context = fixture
@@ -834,16 +903,19 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
         .unwrap();
     let own_message = fixture
         .store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Thread {
-                root_message_id: root.clone(),
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Thread {
+                    root_message_id: root.clone(),
+                },
+                actor: reader.clone(),
+                acting_for: None,
+                text: MessageText::try_from("own newer presence".to_owned()).unwrap(),
+                references: MessageReferences::try_from(Vec::new()).unwrap(),
             },
-            actor: reader.clone(),
-            acting_for: None,
-            text: MessageText::try_from("own newer presence".to_owned()).unwrap(),
-            references: MessageReferences::try_from(Vec::new()).unwrap(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     let batch = fixture
@@ -900,14 +972,17 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
         .unwrap();
     fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: root,
-            actor: session("later-participant"),
-            role: ParticipantRole::Advisor,
-            watch: false,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: root,
+                actor: session("later-participant"),
+                role: ParticipantRole::Advisor,
+                watch: false,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     fixture
@@ -934,14 +1009,17 @@ async fn participant_cursor_is_thread_bound_and_unknown_stored_role_is_rejected(
     let second_root = second.message.message_id;
     let foreign_sequence = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: second_root.clone(),
-            actor: session("other-thread"),
-            role: ParticipantRole::Participant,
-            watch: false,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: second_root.clone(),
+                actor: session("other-thread"),
+                role: ParticipantRole::Participant,
+                watch: false,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap()
         .participant
@@ -949,14 +1027,17 @@ async fn participant_cursor_is_thread_bound_and_unknown_stored_role_is_rejected(
     for name in ["one", "two"] {
         fixture
             .store
-            .join_thread(ThreadJoinRequest {
-                root_message_id: first_root.clone(),
-                actor: session(name),
-                role: ParticipantRole::Participant,
-                watch: false,
-                replace: None,
-                note: None,
-            })
+            .join_thread(
+                ThreadJoinRequest {
+                    root_message_id: first_root.clone(),
+                    actor: session(name),
+                    role: ParticipantRole::Participant,
+                    watch: false,
+                    replace: None,
+                    note: None,
+                },
+                chrono::Utc::now(),
+            )
             .await
             .unwrap();
     }
@@ -1042,14 +1123,17 @@ async fn thread_list_rejects_corrupt_projected_orchestrator_records() {
     let second_root = second.message.message_id;
     let foreign_sequence = fixture
         .store
-        .join_thread(ThreadJoinRequest {
-            root_message_id: second_root,
-            actor: session("foreign-participant"),
-            role: ParticipantRole::Participant,
-            watch: false,
-            replace: None,
-            note: None,
-        })
+        .join_thread(
+            ThreadJoinRequest {
+                root_message_id: second_root,
+                actor: session("foreign-participant"),
+                role: ParticipantRole::Participant,
+                watch: false,
+                replace: None,
+                note: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap()
         .participant
@@ -1160,12 +1244,15 @@ async fn archived_leave_resolve_refuses_without_changing_participant_or_watch_st
 
     let failure = fixture
         .store
-        .leave_thread(ThreadLeaveRequest {
-            root_message_id: root_message_id.clone(),
-            actor: orchestrator.clone(),
-            to: None,
-            resolve: true,
-        })
+        .leave_thread(
+            ThreadLeaveRequest {
+                root_message_id: root_message_id.clone(),
+                actor: orchestrator.clone(),
+                to: None,
+                resolve: true,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(failure.kind, BoardFailureKind::ArchivedBoard);
@@ -1240,12 +1327,15 @@ async fn leave_resolve_publishes_unread_to_another_active_watcher() {
 
     fixture
         .store
-        .leave_thread(ThreadLeaveRequest {
-            root_message_id: root_message_id.clone(),
-            actor: orchestrator,
-            to: None,
-            resolve: true,
-        })
+        .leave_thread(
+            ThreadLeaveRequest {
+                root_message_id: root_message_id.clone(),
+                actor: orchestrator,
+                to: None,
+                resolve: true,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     let after = fixture
