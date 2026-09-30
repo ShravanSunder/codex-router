@@ -9,8 +9,9 @@ use agent_automation::{
 use codex_native_integration::{NativeConnectionError, NativeOperation, NativeProtocolConnection};
 use collaboration_protocol::{
     AcceptedResumeEffect, DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason,
-    MessageInputKind, MessageRepresentation, NativeExecution, NativeInputDisposition,
-    NativeInputOperation, NativeSendAcceptance, NativeSendReceipt, RunExecution,
+    MessageContent, MessageInputKind, MessageRepresentation, NativeExecution,
+    NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendReceipt,
+    RunExecution,
 };
 use serde_json::{Value, json};
 
@@ -43,6 +44,15 @@ pub(crate) async fn dispatch(
     let schemas = admission
         .schemas()
         .ok_or(DeliveryContractError::ClientOperation)?;
+    let scheduled_message = MessageContent::Router {
+        text: run.message.clone(),
+    };
+    let rendered_message = collaboration_protocol::render_message_with_context(
+        &run.target,
+        &scheduled_message,
+        &run.header_context,
+    )
+    .map_err(|_| DeliveryContractError::ClientOperation)?;
     let held_unmaterialized = held_connection.is_some();
     let mut opened_connection = None;
     if held_connection.is_none() {
@@ -136,7 +146,7 @@ pub(crate) async fn dispatch(
             result = connection.request_validated(
                 &schemas,
                 NativeOperation::StartTurn,
-                json!({"threadId":thread_id,"input":[{"type":"text","text":run.message.as_str()}],
+                json!({"threadId":thread_id,"input":[{"type":"text","text":rendered_message.text}],
                     "clientUserMessageId":run.run_id.as_str(),
                     "effort":run.inputs.execution_configuration.effort.as_deref().unwrap_or_default()}),
             ) => result,

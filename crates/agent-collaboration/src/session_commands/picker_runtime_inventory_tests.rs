@@ -157,7 +157,7 @@ async fn paged_runtime_only_threads_include_metadata_and_blocked_status_without_
     ];
     let (mut client, peer) = connect_fixture(steps).await;
     // Act
-    let (_, rows) = load_runtime_records(&mut client, &[]).await.unwrap();
+    let (_, rows) = load_runtime_records(&mut client, &[], false).await.unwrap();
     client.close().await.unwrap();
     let requests = peer.await.unwrap();
     // Assert
@@ -173,7 +173,32 @@ async fn paged_runtime_only_threads_include_metadata_and_blocked_status_without_
         crate::picker_runtime_status::PickerRuntimeStatus::Blocked
     );
     assert_eq!(requests[1]["params"]["view"], "loaded");
+    assert_eq!(requests[1]["params"]["includeEmptySessions"], false);
     assert_eq!(requests[3]["params"]["cursor"], "next-page");
+}
+
+#[tokio::test]
+async fn runtime_picker_passes_the_empty_session_opt_in_to_inventory() {
+    let (mut client, peer) = connect_fixture(vec![
+        ("endpoint/list", inventory()),
+        (
+            "codex/sessionList",
+            page("empty-thread", json!({"type":"idle"}), Value::Null),
+        ),
+        ("codex/sessionInspect", inspected("empty-thread")),
+        ("endpoint/list", inventory()),
+    ])
+    .await;
+
+    let (_, records) = load_runtime_records(&mut client, &[], true)
+        .await
+        .expect("explicitly opted-in inventory");
+    client.close().await.unwrap();
+    let requests = peer.await.unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].session_id, "empty-thread");
+    assert_eq!(requests[1]["params"]["includeEmptySessions"], true);
 }
 
 #[tokio::test]
@@ -192,7 +217,7 @@ async fn replacement_during_refresh_discards_the_entire_runtime_result() {
     ])
     .await;
     // Act / Assert: no mixture of generations may become live picker state.
-    assert!(load_runtime_records(&mut client, &[]).await.is_err());
+    assert!(load_runtime_records(&mut client, &[], false).await.is_err());
     client.close().await.unwrap();
     peer.await.unwrap();
 }
@@ -204,7 +229,7 @@ async fn unavailable_endpoint_does_not_attempt_to_load_or_inspect_threads() {
     unavailable["endpoints"][0]["availability"] = json!({"state":"unprobed"});
     let (mut client, peer) = connect_fixture(vec![("endpoint/list", unavailable)]).await;
     // Act / Assert
-    assert!(load_runtime_records(&mut client, &[]).await.is_err());
+    assert!(load_runtime_records(&mut client, &[], false).await.is_err());
     client.close().await.unwrap();
     assert_eq!(peer.await.unwrap().len(), 1);
 }
@@ -233,7 +258,9 @@ async fn stored_metadata_is_preserved_while_runtime_status_is_refreshed() {
     ])
     .await;
     // Act
-    let (_, rows) = load_runtime_records(&mut client, &[stored]).await.unwrap();
+    let (_, rows) = load_runtime_records(&mut client, &[stored], false)
+        .await
+        .unwrap();
     client.close().await.unwrap();
     peer.await.unwrap();
     // Assert
@@ -360,7 +387,7 @@ async fn hosted_refresh_keeps_equal_provider_and_codex_ids_as_two_rows() {
         &json!({"source":"cli"}),
     );
     let rows = PickerRuntimeInventory::default()
-        .refresh(Some(root.path()), vec![codex])
+        .refresh(Some(root.path()), vec![codex], false)
         .await
         .records;
     assert_eq!(rows.len(), 2);
@@ -387,7 +414,7 @@ async fn unavailable_service_retains_remembered_rows_without_stale_active_claims
     // Act
     let missing =
         std::env::temp_dir().join(format!("missing-picker-service-{}", std::process::id()));
-    let snapshot = inventory.refresh(Some(&missing), vec![]).await;
+    let snapshot = inventory.refresh(Some(&missing), vec![], false).await;
     assert_eq!(
         snapshot.runtime_coverage,
         crate::picker_runtime_status::PickerRuntimeCoverage::Unavailable
@@ -433,7 +460,7 @@ async fn unavailable_service_clears_remembered_provider_state() {
     };
     let missing =
         std::env::temp_dir().join(format!("missing-provider-picker-{}", std::process::id()));
-    let snapshot = inventory.refresh(Some(&missing), vec![]).await;
+    let snapshot = inventory.refresh(Some(&missing), vec![], false).await;
     assert_eq!(snapshot.records.len(), 1);
     assert_eq!(snapshot.records[0].provider_state, None);
     assert_eq!(
@@ -458,7 +485,7 @@ async fn local_picker_never_reuses_provider_rows() {
     let mut inventory = PickerRuntimeInventory {
         remembered: vec![provider],
     };
-    let snapshot = inventory.refresh(None, vec![codex]).await;
+    let snapshot = inventory.refresh(None, vec![codex], false).await;
     assert_eq!(snapshot.records.len(), 1);
     assert!(matches!(
         snapshot.records[0].identity,
@@ -477,7 +504,7 @@ async fn remembered_runtime_rows_refresh_age_labels_from_their_timestamps() {
         remembered: vec![row],
     };
 
-    let snapshot = inventory.refresh(None, vec![]).await;
+    let snapshot = inventory.refresh(None, vec![], false).await;
     assert_eq!(
         snapshot.runtime_coverage,
         crate::picker_runtime_status::PickerRuntimeCoverage::LocalOnly

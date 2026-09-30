@@ -365,6 +365,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
         run_id: run_id.clone(),
         target: target.clone(),
         message: MessageText::try_from("scheduled input".to_owned()).expect("message"),
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         precondition: DeliveryPrecondition::Unpinned,
         inputs: inputs.clone(),
         recorded: prepared.evidence,
@@ -512,6 +513,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
                 target: target.clone(),
                 message: MessageText::try_from("cancel scheduled input".to_owned())
                     .expect("cancel input"),
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
                 precondition: DeliveryPrecondition::Unpinned,
                 inputs: next_inputs.clone(),
                 recorded: prepared_stop.evidence,
@@ -570,6 +572,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
                     target: target.clone(),
                     message: MessageText::try_from("refuse scheduled input".to_owned())
                         .expect("refusal input"),
+                    header_context: collaboration_protocol::MessageHeaderContext::default(),
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs: next_inputs.clone(),
                     recorded: prepared_refused.evidence,
@@ -656,6 +659,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
                     target,
                     message: MessageText::try_from("never settled".to_owned())
                         .expect("pending input"),
+                    header_context: collaboration_protocol::MessageHeaderContext::default(),
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs: pending_inputs.clone(),
                     recorded: prepared_pending.evidence,
