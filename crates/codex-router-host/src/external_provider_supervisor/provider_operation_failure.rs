@@ -33,7 +33,7 @@ pub(super) fn invalid_setting_failure(
         ),
     };
     let advertised_values = format_bounded_advertised_values(&advertised);
-    let displayed_value = format!("{:?}", bounded_option_label(&value));
+    let displayed_value = format_bounded_option_label(&value);
     let message = format!(
         "invalid provider setting {}={displayed_value}; advertised: {advertised_values}; {session_status}",
         setting.as_str()
@@ -58,11 +58,18 @@ pub(super) fn invalid_setting_failure(
     result
 }
 
-fn bounded_option_label(label: &str) -> String {
-    label
-        .chars()
+fn format_bounded_option_label(label: &str) -> String {
+    let mut label_characters = label.chars();
+    let displayed_label = label_characters
+        .by_ref()
         .take(MAX_SETTING_VALUE_DISPLAY_CHARS)
-        .collect()
+        .collect::<String>();
+    let truncation_marker = if label_characters.next().is_some() {
+        "…"
+    } else {
+        ""
+    };
+    format!("{displayed_label:?}{truncation_marker}")
 }
 
 fn format_bounded_advertised_values(advertised: &[String]) -> String {
@@ -73,7 +80,7 @@ fn format_bounded_advertised_values(advertised: &[String]) -> String {
     let mut displayed_values = String::new();
     let mut displayed_count = 0;
     for option in advertised.iter().take(MAX_ADVERTISED_CHOICES) {
-        let displayed_option = format!("{:?}", bounded_option_label(option));
+        let displayed_option = format_bounded_option_label(option);
         let separator = if displayed_count == 0 { "" } else { ", " };
         let omitted_after_option = advertised.len() - displayed_count - 1;
         let reserved_truncation_marker = if omitted_after_option == 0 {
@@ -347,8 +354,15 @@ mod tests {
         );
 
         let message = String::from(failure.message.clone());
+        let bounded_value = value
+            .chars()
+            .take(MAX_SETTING_VALUE_DISPLAY_CHARS)
+            .collect::<String>();
+        let expected_displayed_value = format!("{bounded_value:?}…");
         assert!(message.len() <= 4096);
-        assert!(message.starts_with(r#"invalid provider setting model="requested\n"#));
+        assert!(message.starts_with(&format!(
+            "invalid provider setting model={expected_displayed_value}; advertised: "
+        )));
         assert!(message.ends_with("; new Session was closed"));
         assert!(!message.contains(&"v".repeat(121)));
 
@@ -361,6 +375,15 @@ mod tests {
             .expect("failure names the advertised choices and Session disposition");
         assert!(displayed_summary.len() <= MAX_ADVERTISED_SUMMARY_BYTES);
         assert!(displayed_summary.matches("\"choice-").count() <= MAX_ADVERTISED_CHOICES);
+        let first_advertised_choice = advertised
+            .first()
+            .expect("the fixture advertises a first choice");
+        let bounded_first_choice = first_advertised_choice
+            .chars()
+            .take(MAX_SETTING_VALUE_DISPLAY_CHARS)
+            .collect::<String>();
+        let expected_displayed_choice = format!("{bounded_first_choice:?}…");
+        assert!(displayed_summary.starts_with(&expected_displayed_choice));
 
         let omitted_count = message
             .split("… (+")
