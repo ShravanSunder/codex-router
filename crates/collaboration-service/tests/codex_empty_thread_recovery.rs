@@ -111,6 +111,7 @@ async fn missing_thread_without_holder_is_known_not_submitted()
                 },
                 header_context: collaboration_protocol::MessageHeaderContext::default(),
                 mode: MessageDelivery::Auto,
+                load_policy: collaboration_service::LoadPolicy::MayLoad,
                 precondition: DeliveryPrecondition::Unpinned,
                 correlation: DeliveryCorrelationId::generate(),
                 attempt: agent_automation::AttemptId::generate(),

@@ -2,12 +2,13 @@
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryContractError, DeliveryFuture, DeliveryReceipt, DeliveryRequest, RouteClaim,
-    SessionDeliveryRoute, SessionMessageDelivery,
+    RoutePresence, SessionDeliveryRoute, SessionMessageDelivery, TargetPresence,
+    TargetPresenceProbe,
 };
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
     DeliveryNextAction, DeliveryOutcome, DeliveryRejection, DeliveryRejectionReason,
-    SessionReachability,
+    SessionReachability, SessionRef,
 };
 use futures_util::future::join_all;
 use std::sync::Arc;
@@ -168,5 +169,66 @@ impl SessionMessageDelivery for SessionDeliveryRouter {
             };
             route.reconcile_attempt(context).await
         })
+    }
+}
+
+impl TargetPresenceProbe for SessionDeliveryRouter {
+    fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, TargetPresence> {
+        let target = target.clone();
+        Box::pin(async move {
+            let presences = join_all(self.routes.iter().map(|route| route.presence(&target)))
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(aggregate_presence(&presences))
+        })
+    }
+}
+
+fn aggregate_presence(presences: &[RoutePresence]) -> TargetPresence {
+    if presences
+        .iter()
+        .any(|presence| matches!(presence, RoutePresence::Running))
+    {
+        return TargetPresence::Running;
+    }
+
+    let has_live_elsewhere = presences
+        .iter()
+        .any(|presence| matches!(presence, RoutePresence::LiveElsewhere { .. }));
+    let mut unreachable_reasons = presences
+        .iter()
+        .filter_map(|presence| match presence {
+            RoutePresence::Unreachable { reason } => Some(reason.as_str()),
+            _ => None,
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if has_live_elsewhere {
+        let mut reasons = vec!["live elsewhere".to_owned()];
+        for detail in presences.iter().filter_map(|presence| match presence {
+            RoutePresence::LiveElsewhere { detail } => detail.as_deref(),
+            _ => None,
+        }) {
+            reasons.push(detail.to_owned());
+        }
+        reasons.extend(unreachable_reasons);
+        return TargetPresence::Unreachable {
+            reason: reasons.join("; "),
+        };
+    }
+
+    if presences
+        .iter()
+        .any(|presence| matches!(presence, RoutePresence::Wakeable))
+    {
+        return TargetPresence::Wakeable;
+    }
+
+    if unreachable_reasons.is_empty() {
+        unreachable_reasons.push("no route holds or can load this session".to_owned());
+    }
+    TargetPresence::Unreachable {
+        reason: unreachable_reasons.join("; "),
     }
 }

@@ -5,8 +5,9 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryPrecondition, DeliveryReceipt, DeliveryRequest, RouteClaim, RouteUnavailableReason,
-    SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
+    DeliveryPrecondition, DeliveryReceipt, DeliveryRequest, LoadPolicy, RouteClaim, RoutePresence,
+    RouteUnavailableReason, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
+    TargetPresence, TargetPresenceProbe,
 };
 use std::sync::{
     Arc,
@@ -16,6 +17,7 @@ use std::sync::{
 struct FakeRoute {
     reachability: SessionReachability,
     claim: RouteClaim,
+    presence: RoutePresence,
     outcome: DeliveryOutcome,
     calls: Arc<AtomicUsize>,
 }
@@ -26,6 +28,10 @@ impl SessionDeliveryRoute for FakeRoute {
     }
     fn claim(&self, _: &SessionRef) -> DeliveryFuture<'_, RouteClaim> {
         Box::pin(async { Ok(self.claim.clone()) })
+    }
+    fn presence(&self, _: &SessionRef) -> DeliveryFuture<'_, RoutePresence> {
+        let presence = self.presence.clone();
+        Box::pin(async move { Ok(presence) })
     }
     fn deliver(
         &self,
@@ -67,6 +73,12 @@ fn target() -> Result<SessionRef, Box<dyn std::error::Error>> {
 }
 
 fn request() -> Result<DeliveryRequest, Box<dyn std::error::Error>> {
+    request_with_load_policy(LoadPolicy::MayLoad)
+}
+
+fn request_with_load_policy(
+    load_policy: LoadPolicy,
+) -> Result<DeliveryRequest, Box<dyn std::error::Error>> {
     Ok(DeliveryRequest {
         target: target()?,
         message: MessageContent::Router {
@@ -74,6 +86,7 @@ fn request() -> Result<DeliveryRequest, Box<dyn std::error::Error>> {
         },
         header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode: MessageDelivery::Auto,
+        load_policy,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::generate(),
         attempt: agent_automation::AttemptId::generate(),
@@ -92,16 +105,198 @@ fn fake_with_outcome(
     reachability: SessionReachability,
     outcome: DeliveryOutcome,
 ) -> (Arc<dyn SessionDeliveryRoute>, Arc<AtomicUsize>) {
+    let presence = match &claim {
+        RouteClaim::NotMine => RoutePresence::NotMine,
+        RouteClaim::Holds => RoutePresence::Running,
+        RouteClaim::CanLoad => RoutePresence::Wakeable,
+        RouteClaim::LiveElsewhere { detail, .. } => RoutePresence::LiveElsewhere {
+            detail: detail.clone(),
+        },
+        RouteClaim::Unavailable { reason, .. } => RoutePresence::Unreachable {
+            reason: reason.reason.clone(),
+        },
+    };
+    fake_with_claim_and_presence(claim, presence, reachability, outcome)
+}
+
+fn fake_with_claim_and_presence(
+    claim: RouteClaim,
+    presence: RoutePresence,
+    reachability: SessionReachability,
+    outcome: DeliveryOutcome,
+) -> (Arc<dyn SessionDeliveryRoute>, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     (
         Arc::new(FakeRoute {
             reachability,
             claim,
+            presence,
             outcome,
             calls: calls.clone(),
         }),
         calls,
     )
+}
+
+#[tokio::test]
+#[allow(clippy::panic_in_result_fn)]
+async fn presence_aggregation_uses_running_then_live_elsewhere_then_wakeable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (running, _) = fake_with_claim_and_presence(
+        RouteClaim::Holds,
+        RoutePresence::Running,
+        SessionReachability::CodexAppServer,
+        DeliveryOutcome::Queued,
+    );
+    let (live_elsewhere, _) = fake_with_claim_and_presence(
+        RouteClaim::LiveElsewhere {
+            writable: false,
+            detail: Some("peer is live but unsupported".into()),
+        },
+        RoutePresence::LiveElsewhere {
+            detail: Some("peer is live but unsupported".into()),
+        },
+        SessionReachability::ClaudeCodePeer,
+        DeliveryOutcome::Queued,
+    );
+    let (wakeable, _) = fake_with_claim_and_presence(
+        RouteClaim::CanLoad,
+        RoutePresence::Wakeable,
+        SessionReachability::ProviderAcp,
+        DeliveryOutcome::Queued,
+    );
+
+    let router = SessionDeliveryRouter::new(vec![wakeable, live_elsewhere, running]);
+    assert!(matches!(
+        router.presence(&target()?).await?,
+        TargetPresence::Running
+    ));
+
+    let (live_elsewhere, _) = fake_with_claim_and_presence(
+        RouteClaim::LiveElsewhere {
+            writable: false,
+            detail: Some("peer is live but unsupported".into()),
+        },
+        RoutePresence::LiveElsewhere {
+            detail: Some("peer is live but unsupported".into()),
+        },
+        SessionReachability::ClaudeCodePeer,
+        DeliveryOutcome::Queued,
+    );
+    let (wakeable, _) = fake_with_claim_and_presence(
+        RouteClaim::CanLoad,
+        RoutePresence::Wakeable,
+        SessionReachability::ProviderAcp,
+        DeliveryOutcome::Queued,
+    );
+    let router = SessionDeliveryRouter::new(vec![wakeable, live_elsewhere]);
+    assert!(matches!(
+        router.presence(&target()?).await?,
+        TargetPresence::Unreachable { ref reason }
+            if reason.starts_with("live elsewhere")
+                && reason.contains("peer is live but unsupported")
+    ));
+
+    let (unreachable, _) = fake_with_claim_and_presence(
+        RouteClaim::Unavailable {
+            reason: RouteUnavailableReason {
+                reason: "Codex backend is down".into(),
+                fix: "retry after it starts".into(),
+            },
+            retryable: true,
+        },
+        RoutePresence::Unreachable {
+            reason: "Codex backend is down".into(),
+        },
+        SessionReachability::CodexAppServer,
+        DeliveryOutcome::Queued,
+    );
+    let (wakeable, _) = fake_with_claim_and_presence(
+        RouteClaim::CanLoad,
+        RoutePresence::Wakeable,
+        SessionReachability::ProviderAcp,
+        DeliveryOutcome::Queued,
+    );
+    let router = SessionDeliveryRouter::new(vec![unreachable, wakeable]);
+    assert!(matches!(
+        router.presence(&target()?).await?,
+        TargetPresence::Wakeable
+    ));
+
+    let (codex_unreachable, _) = fake_with_claim_and_presence(
+        RouteClaim::Unavailable {
+            reason: RouteUnavailableReason {
+                reason: "Codex backend is down".into(),
+                fix: "retry after it starts".into(),
+            },
+            retryable: true,
+        },
+        RoutePresence::Unreachable {
+            reason: "Codex backend is down".into(),
+        },
+        SessionReachability::CodexAppServer,
+        DeliveryOutcome::Queued,
+    );
+    let (provider_unreachable, _) = fake_with_claim_and_presence(
+        RouteClaim::Unavailable {
+            reason: RouteUnavailableReason {
+                reason: "provider runtime is unavailable".into(),
+                fix: "retry after provider starts".into(),
+            },
+            retryable: true,
+        },
+        RoutePresence::Unreachable {
+            reason: "provider runtime is unavailable".into(),
+        },
+        SessionReachability::ProviderAcp,
+        DeliveryOutcome::Queued,
+    );
+    let router = SessionDeliveryRouter::new(vec![codex_unreachable, provider_unreachable]);
+    assert!(matches!(
+        router.presence(&target()?).await?,
+        TargetPresence::Unreachable { reason }
+            if reason.contains("Codex backend is down")
+                && reason.contains("provider runtime is unavailable")
+    ));
+    let router = SessionDeliveryRouter::new(Vec::new());
+    assert!(matches!(
+        router.presence(&target()?).await?,
+        TargetPresence::Unreachable { reason }
+            if reason == "no route holds or can load this session"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::panic_in_result_fn)]
+async fn loaded_only_delegates_loadability_inspection_to_the_route()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (loadable, route_calls) = fake_with_outcome(
+        RouteClaim::CanLoad,
+        SessionReachability::ProviderAcp,
+        DeliveryOutcome::NotSubmitted {
+            retryable: false,
+            reason: "unsupported: load".into(),
+        },
+    );
+    let router = SessionDeliveryRouter::new(vec![loadable]);
+
+    let receipt = router
+        .deliver(
+            request_with_load_policy(LoadPolicy::LoadedOnly)?,
+            &NoopEvidenceSink,
+        )
+        .await?;
+
+    assert!(matches!(
+        receipt.outcome,
+        DeliveryOutcome::NotSubmitted {
+            retryable: false,
+            ref reason,
+        } if reason == "unsupported: load"
+    ));
+    assert_eq!(route_calls.load(Ordering::SeqCst), 1);
+    Ok(())
 }
 
 #[tokio::test]
