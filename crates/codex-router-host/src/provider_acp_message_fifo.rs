@@ -53,8 +53,9 @@ impl ProviderQueuedPrompt {
 
     fn load_policy(&self) -> LoadPolicy {
         match self {
-            Self::MessageWithHeader { load_policy, .. }
-            | Self::Contents { load_policy, .. } => *load_policy,
+            Self::MessageWithHeader { load_policy, .. } | Self::Contents { load_policy, .. } => {
+                *load_policy
+            }
         }
     }
 }

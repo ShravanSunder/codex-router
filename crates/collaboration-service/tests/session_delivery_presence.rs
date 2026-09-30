@@ -273,6 +273,7 @@ async fn loaded_only_refuses_not_loaded_codex_thread_without_resuming_it()
                 message: MessageContent::Router {
                     text: "held notification".to_owned().try_into()?,
                 },
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
                 mode: MessageDelivery::Auto,
                 load_policy: LoadPolicy::LoadedOnly,
                 precondition: DeliveryPrecondition::Unpinned,
@@ -347,6 +348,7 @@ async fn may_load_still_resumes_not_loaded_codex_thread_for_message_send()
                 message: MessageContent::HumanUser {
                     text: "hello".to_owned().try_into()?,
                 },
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
                 mode: MessageDelivery::Auto,
                 load_policy: LoadPolicy::MayLoad,
                 precondition: DeliveryPrecondition::Unpinned,

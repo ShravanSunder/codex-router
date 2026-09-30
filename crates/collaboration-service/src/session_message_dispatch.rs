@@ -1,8 +1,7 @@
 //! Public message Control call delegates one attempt to the injected delivery seam.
 use crate::{
-    DeliveryPrecondition, DeliveryRequest, LoadPolicy, ServiceIdentity, SessionMessageDelivery,
-    latest_agent_sender_tracking,
-    session_delivery_contract::UnstoredAttemptEvidenceSink,
+    DeliveryPrecondition, DeliveryRequest, LoadPolicy, ServiceIdentity,
+    latest_agent_sender_tracking, session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
 use collaboration_protocol::{
     MessageContent, MessageHeaderContext, MessageHeaderOrigin, SessionMessageSendParams,

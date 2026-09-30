@@ -451,6 +451,7 @@ async fn exercise_held_empty_thread(
                     run_id,
                     target: target.clone(),
                     message: "scheduled hello".to_owned().try_into()?,
+                    header_context: collaboration_protocol::MessageHeaderContext::default(),
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs,
                     recorded: prepared.evidence,

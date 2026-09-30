@@ -383,6 +383,7 @@ async fn route_queue_loaded_only_delivery_refuses_after_close_before_fifo_submis
         message: MessageContent::Router {
             text: MessageText::try_from("held batch".to_owned()).expect("message"),
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode: MessageDelivery::Queue,
         load_policy: LoadPolicy::LoadedOnly,
         precondition: DeliveryPrecondition::Unpinned,

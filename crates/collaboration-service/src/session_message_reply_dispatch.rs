@@ -1,7 +1,7 @@
 //! Reply delivery resolves the latest accepted sender for the exact caller session.
 use crate::latest_agent_sender_tracking;
 use crate::{
-    DeliveryPrecondition, DeliveryRequest, ServiceIdentity,
+    DeliveryPrecondition, DeliveryRequest, LoadPolicy, ServiceIdentity,
     session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
 use automation_storage::StorageError;
@@ -116,6 +116,7 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
         message,
         header_context,
         mode: MessageDelivery::Auto,
+        load_policy: LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::generate(),
         attempt: agent_automation::AttemptId::generate(),

@@ -94,10 +94,7 @@ pub(crate) async fn read_native_thread_status(
     let Some(thread) = response.get("thread").cloned() else {
         return Err(NativeThreadStatusReadError::InvalidResponse);
     };
-    let status = match thread
-        .pointer("/status/type")
-        .and_then(Value::as_str)
-    {
+    let status = match thread.pointer("/status/type").and_then(Value::as_str) {
         Some("notLoaded") => NativeThreadStatus::NotLoaded,
         Some("idle") => NativeThreadStatus::Idle,
         Some("active") => NativeThreadStatus::Active,
@@ -213,17 +210,16 @@ pub(crate) async fn dispatch_message(
         effects,
     };
     let target_id = String::from(params.target.session_id.clone());
-    let result = session
-        .deliver(
-            &target_id,
-            &params,
-            &request.header_context,
-            request.display_names,
-            &correlation,
-            held,
-            load_policy,
-        )
-        .await;
+    let delivery_context = NativeMessageDeliveryContext {
+        thread_id: &target_id,
+        params: &params,
+        header_context: &request.header_context,
+        display_names: request.display_names,
+        correlation: &correlation,
+        held_unmaterialized: held,
+        load_policy,
+    };
+    let result = session.deliver(&delivery_context).await;
     let acceptance = match result {
         Ok(value) => value,
         Err(value) => return NativeMessageOutcome::Failed(value),
@@ -254,6 +250,17 @@ struct MessageSession<'a> {
     retired: CancellationToken,
     effects: MessageEffects,
 }
+
+struct NativeMessageDeliveryContext<'a> {
+    thread_id: &'a str,
+    params: &'a NativeSendParams,
+    header_context: &'a MessageHeaderContext,
+    display_names: &'a crate::SessionDisplayNameCache,
+    correlation: &'a str,
+    held_unmaterialized: bool,
+    load_policy: LoadPolicy,
+}
+
 impl MessageSession<'_> {
     async fn call(
         &mut self,
@@ -358,31 +365,29 @@ impl MessageSession<'_> {
     }
     async fn deliver(
         &mut self,
-        id: &str,
-        params: &NativeSendParams,
-        header_context: &MessageHeaderContext,
-        display_names: &crate::SessionDisplayNameCache,
-        correlation: &str,
-        held_unmaterialized: bool,
-        load_policy: LoadPolicy,
+        request: &NativeMessageDeliveryContext<'_>,
     ) -> Result<NativeSendAcceptance, Value> {
-        let thread_snapshot = if held_unmaterialized {
+        let thread_snapshot = if request.held_unmaterialized {
             None
         } else {
-            Some(self.read_thread_status(id).await?)
+            Some(self.read_thread_status(request.thread_id).await?)
         };
         if let Some(snapshot) = thread_snapshot.as_ref() {
-            cache_thread_display_name(display_names, &params.target, &snapshot.thread);
+            cache_thread_display_name(
+                request.display_names,
+                &request.params.target,
+                &snapshot.thread,
+            );
         }
         let current_header_context = MessageHeaderContext::resolve(
-            &params.target,
-            &params.message,
-            display_names,
-            header_context.origin,
+            &request.params.target,
+            &request.params.message,
+            request.display_names,
+            request.header_context.origin,
         );
         let rendered = collaboration_protocol::render_message_with_context(
-            &params.target,
-            &params.message,
+            &request.params.target,
+            &request.params.message,
             &current_header_context,
         )
         .map_err(|_| self.effects.failure("overloaded", "inspect"))?;
@@ -390,17 +395,18 @@ impl MessageSession<'_> {
         let status = thread_snapshot
             .as_ref()
             .map_or(NativeThreadStatus::Idle, |snapshot| snapshot.status);
-        if status == NativeThreadStatus::NotLoaded && load_policy == LoadPolicy::LoadedOnly {
+        if status == NativeThreadStatus::NotLoaded && request.load_policy == LoadPolicy::LoadedOnly
+        {
             return Err(self.effects.failure(NOT_LOADED_REASON, "start"));
         }
-        if params.delivery == MessageDelivery::Queue {
+        if request.params.delivery == MessageDelivery::Queue {
             if status == NativeThreadStatus::NotLoaded {
                 return Err(self.effects.failure("threadNotLoaded", "queue"));
             }
             let result = self
                 .call(
                     NativeOperation::QueueAdd,
-                    json!({"threadId":id,"input":input,"clientUserMessageId":correlation}),
+                    json!({"threadId":request.thread_id,"input":input,"clientUserMessageId":request.correlation}),
                     "queue",
                 )
                 .await?;
@@ -408,8 +414,8 @@ impl MessageSession<'_> {
             return Ok(NativeSendAcceptance::QueueAccepted { submission_id });
         }
         if status == NativeThreadStatus::Active {
-            let turn = self.read_active_turn_id(id).await?;
-            let result = self.call(NativeOperation::SteerTurn, json!({"threadId":id,"expectedTurnId":turn,"input":input,"clientUserMessageId":correlation}), "steer").await?;
+            let turn = self.read_active_turn_id(request.thread_id).await?;
+            let result = self.call(NativeOperation::SteerTurn, json!({"threadId":request.thread_id,"expectedTurnId":turn,"input":input,"clientUserMessageId":request.correlation}), "steer").await?;
             let turn_id = self.receipt_id(&result, "/turnId", "steer")?;
             if String::from(turn_id.clone()) != turn {
                 return Err(self.effects.failure("outcomeUnknown", "steer"));
@@ -419,18 +425,18 @@ impl MessageSession<'_> {
                 submission_id: None,
             });
         }
-        if params.delivery == MessageDelivery::Steer {
+        if request.params.delivery == MessageDelivery::Steer {
             return Err(self.effects.failure("noActiveTurn", "steer"));
         }
         if status == NativeThreadStatus::NotLoaded {
             let resumed = self
                 .call(
                     NativeOperation::ResumeThread,
-                    json!({"threadId":id,"excludeTurns":true}),
+                    json!({"threadId":request.thread_id,"excludeTurns":true}),
                     "resume",
                 )
                 .await?;
-            if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(id) {
+            if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(request.thread_id) {
                 return Err(self.effects.failure("outcomeUnknown", "resume"));
             }
             self.effects.resume = "accepted";
@@ -438,7 +444,7 @@ impl MessageSession<'_> {
         let result = self
             .call(
                 NativeOperation::StartTurn,
-                json!({"threadId":id,"input":input,"clientUserMessageId":correlation}),
+                json!({"threadId":request.thread_id,"input":input,"clientUserMessageId":request.correlation}),
                 "start",
             )
             .await?;
