@@ -129,11 +129,14 @@ impl PopulatedBoard {
             .await
             .unwrap();
         store
-            .resolve_thread(ThreadResolveRequest {
-                root_message_id: first_root.message.message_id.clone(),
-                actor: human("first-author"),
-                acting_for: None,
-            })
+            .resolve_thread(
+                ThreadResolveRequest {
+                    root_message_id: first_root.message.message_id.clone(),
+                    actor: human("first-author"),
+                    acting_for: None,
+                },
+                chrono::Utc::now(),
+            )
             .await
             .unwrap();
         Self {
@@ -252,14 +255,17 @@ async fn post(
     references: Vec<ReferenceTarget>,
 ) -> MessagePostResult {
     store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement,
-            actor,
-            acting_for: None,
-            text: MessageText::try_from(body.to_owned()).unwrap(),
-            references: MessageReferences::try_from(references).unwrap(),
-        })
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement,
+                actor,
+                acting_for: None,
+                text: MessageText::try_from(body.to_owned()).unwrap(),
+                references: MessageReferences::try_from(references).unwrap(),
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap()
 }

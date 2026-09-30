@@ -1,0 +1,105 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT root_id,opened_at,last_arrival_at,0 AS pending_count, held_since,retry_not_before,retry_attempts,window_id FROM subscription_windows WHERE reader_key=? AND root_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "opened_at",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "opened_at"
+          }
+        }
+      },
+      {
+        "name": "last_arrival_at",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "last_arrival_at"
+          }
+        }
+      },
+      {
+        "name": "pending_count",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "held_since",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "held_since"
+          }
+        }
+      },
+      {
+        "name": "retry_not_before",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "retry_not_before"
+          }
+        }
+      },
+      {
+        "name": "retry_attempts",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "retry_attempts"
+          }
+        }
+      },
+      {
+        "name": "window_id",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "window_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "661ccfaa1b81ccb39ff19a671c40956cebf5daee65c2e62c240ce5fe9950d536"
+}

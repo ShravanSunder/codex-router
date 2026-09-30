@@ -10,13 +10,15 @@ const THREAD_PARTICIPANTS: &str =
     include_str!("../migrations/202609150001_thread_participants.sql");
 const THREAD_IMPLEMENTER: &str = include_str!("../migrations/202609160001_thread_implementer.sql");
 const TOPIC_WATCHES: &str = include_str!("../migrations/202609160002_topic_watches.sql");
+const THREAD_SUBSCRIPTIONS: &str =
+    include_str!("../migrations/202609170001_thread_subscriptions.sql");
 
 pub(crate) async fn initialize(connection: &mut SqliteConnection) -> Result<(), BoardStorageError> {
     initialize_with(
         connection,
         &MIGRATOR,
         &format!(
-            "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES}"
+            "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS}"
         ),
     )
     .await

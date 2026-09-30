@@ -14,6 +14,8 @@ use crate::storage_support::{
     decode_cursor as decode_signed_cursor, decode_identity, encode_cursor, ensure_identity,
     invalid_cursor, invalid_record, recompute_project_unread, storage_error,
 };
+use crate::thread_subscription_lifecycle_records::end_subscription;
+use chrono::{DateTime, Utc};
 use message_board::*;
 use serde::{Deserialize, Serialize};
 use sqlx::Connection;
@@ -85,6 +87,7 @@ impl BoardStore {
     pub async fn unwatch_topic(
         &mut self,
         request: TopicWatchRequest,
+        now: DateTime<Utc>,
     ) -> Result<TopicWatchResult, BoardError> {
         let mut transaction = self
             .connection
@@ -103,6 +106,14 @@ impl BoardStore {
         .execute(&mut *transaction)
         .await
         .map_err(storage_error)?;
+        end_subscription(
+            &mut transaction,
+            &reader_key,
+            &SubscriptionScope::topic(request.topic_id.clone()),
+            EndReason::Cancelled,
+            now,
+        )
+        .await?;
         recompute_project_unread(&mut transaction, &reader_key, board.project_id.as_str()).await?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(TopicWatchResult {
@@ -143,12 +154,14 @@ impl BoardStore {
     pub async fn resolve_thread(
         &mut self,
         request: ThreadResolveRequest,
+        now: DateTime<Utc>,
     ) -> Result<ThreadResolveResult, BoardError> {
         let (thread, sequence, changed) = set_thread_state(
             &mut self.connection,
             &request.root_message_id,
             &request.actor,
             ThreadState::Resolved,
+            Some(now),
         )
         .await?;
         if changed {
@@ -175,6 +188,7 @@ impl BoardStore {
             &request.root_message_id,
             &request.actor,
             ThreadState::Unresolved,
+            None,
         )
         .await?;
         if changed {
@@ -238,6 +252,7 @@ impl BoardStore {
     pub async fn unwatch_thread(
         &mut self,
         request: ThreadUnwatchRequest,
+        now: DateTime<Utc>,
     ) -> Result<ThreadUnwatchResult, BoardError> {
         let mut transaction = self
             .connection
@@ -254,6 +269,14 @@ impl BoardStore {
         .execute(&mut *transaction)
         .await
         .map_err(storage_error)?;
+        end_subscription(
+            &mut transaction,
+            &reader_key,
+            &SubscriptionScope::thread(request.root_message_id.clone()),
+            EndReason::Cancelled,
+            now,
+        )
+        .await?;
         recompute_project_unread(&mut transaction, &reader_key, location.project_id.as_str())
             .await?;
         let watch_status =
@@ -388,6 +411,7 @@ async fn set_thread_state(
     root: &MessageId,
     actor: &Identity,
     requested: ThreadState,
+    subscription_now: Option<DateTime<Utc>>,
 ) -> Result<(Thread, Option<ActivitySequence>, bool), BoardError> {
     let mut transaction = connection
         .begin_with("BEGIN IMMEDIATE")
@@ -450,7 +474,13 @@ async fn set_thread_state(
     }
     let sequence = match requested {
         ThreadState::Resolved => {
-            resolve_in_transaction(&mut transaction, &location, &actor_key).await?
+            resolve_in_transaction(
+                &mut transaction,
+                &location,
+                &actor_key,
+                subscription_now.ok_or_else(invalid_record)?,
+            )
+            .await?
         }
         ThreadState::Unresolved => {
             sqlx::query!(

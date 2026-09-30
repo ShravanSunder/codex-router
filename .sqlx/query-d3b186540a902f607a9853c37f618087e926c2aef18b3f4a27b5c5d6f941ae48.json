@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT root.message_id FROM board_messages root WHERE root.topic_id=? AND root.root_id IS NULL AND NOT EXISTS(SELECT 1 FROM thread_subscriptions thread_override WHERE thread_override.reader_key=? AND thread_override.scope_kind='thread' AND thread_override.scope_id=root.message_id) ORDER BY root.message_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "message_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_messages",
+            "name": "message_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d3b186540a902f607a9853c37f618087e926c2aef18b3f4a27b5c5d6f941ae48"
+}

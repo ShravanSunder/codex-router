@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT reader_key FROM thread_subscriptions WHERE state IN ('active','draining') ORDER BY reader_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "reader_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "reader_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "535b25319ecb257811f2fcc50347a2dddbc6c394053dea04de1cbbf2b811b163"
+}

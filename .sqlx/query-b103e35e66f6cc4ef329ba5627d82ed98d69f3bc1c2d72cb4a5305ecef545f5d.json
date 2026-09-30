@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE subscription_windows SET opened_at=COALESCE(residual_opened_at,opened_at),held_since=NULL, retry_not_before=NULL,retry_attempts=0,in_flight_through=NULL,residual_opened_at=NULL WHERE reader_key=? AND root_id=? AND window_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "b103e35e66f6cc4ef329ba5627d82ed98d69f3bc1c2d72cb4a5305ecef545f5d"
+}

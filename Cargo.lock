@@ -2483,6 +2483,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 name = "message-board"
 version = "0.1.47"
 dependencies = [
+ "chrono",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -2495,6 +2496,7 @@ name = "message-board-storage"
 version = "0.1.47"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "hmac 0.12.1",
  "message-board",
  "serde",

@@ -48,7 +48,7 @@ impl BoardStore {
             )?;
             sqlx::query!(
                 "INSERT INTO thread_delivery_positions(reader_key,root_id,delivered_through) VALUES(?,?,?) \
-                 ON CONFLICT(reader_key,root_id) DO UPDATE SET delivered_through=excluded.delivered_through",
+                 ON CONFLICT(reader_key,root_id) DO UPDATE SET delivered_through=MAX(thread_delivery_positions.delivered_through,excluded.delivered_through)",
                 reader_key,
                 batch.root_message_id.as_str(),
                 delivered_value,

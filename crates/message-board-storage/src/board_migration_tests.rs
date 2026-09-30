@@ -15,7 +15,7 @@ const REBUILD: &str = "CREATE TABLE replacement_projects(project_id TEXT PRIMARY
 
 fn current_schema() -> String {
     format!(
-        "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES}"
+        "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS}"
     )
 }
 
@@ -55,6 +55,13 @@ fn migrator(version: i64, description: &'static str, extra: &str) -> Migrator {
                 "topic watches".into(),
                 MigrationType::Simple,
                 TOPIC_WATCHES.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609170001,
+                "thread subscriptions".into(),
+                MigrationType::Simple,
+                THREAD_SUBSCRIPTIONS.into_sql_str(),
                 false,
             ),
             Migration::new(
@@ -171,7 +178,8 @@ async fn participant_migration_preserves_populated_board_and_enforces_one_open_o
             202609140001,
             202609150001,
             202609160001,
-            202609160002
+            202609160002,
+            202609170001
         ]
     );
     assert!(index_exists(&mut connection, "thread_single_orchestrator").await);
@@ -325,7 +333,8 @@ async fn delivered_position_migration_preserves_populated_thread_and_watch_state
             202609140001,
             202609150001,
             202609160001,
-            202609160002
+            202609160002,
+            202609170001
         ]
     );
     assert!(
@@ -354,7 +363,7 @@ async fn additive_migration_preserves_semantic_state_and_history() {
     let expected = format!("{} {ADDITIVE}", current_schema());
     initialize_with(
         &mut connection,
-        &migrator(202609170001, "test-only additive", ADDITIVE),
+        &migrator(202609170002, "test-only additive", ADDITIVE),
         &expected,
     )
     .await
@@ -369,7 +378,8 @@ async fn additive_migration_preserves_semantic_state_and_history() {
             202609150001,
             202609160001,
             202609160002,
-            202609170001
+            202609170001,
+            202609170002
         ]
     );
     assert!(index_exists(&mut store.connection, "board_projects_migration_note").await);
@@ -390,7 +400,7 @@ async fn populated_parent_rebuild_preserves_exact_rows_domain_reads_and_relation
     let expected = format!("{} {REBUILD}", current_schema());
     initialize_with(
         &mut connection,
-        &migrator(202609170001, "test-only rebuild", REBUILD),
+        &migrator(202609170002, "test-only rebuild", REBUILD),
         &expected,
     )
     .await
@@ -406,7 +416,8 @@ async fn populated_parent_rebuild_preserves_exact_rows_domain_reads_and_relation
             202609150001,
             202609160001,
             202609160002,
-            202609170001
+            202609170001,
+            202609170002
         ]
     );
     for index in [
@@ -439,7 +450,7 @@ async fn failed_rebuild_reopens_separately_with_original_exact_state_and_history
     assert!(
         initialize_with(
             &mut connection,
-            &migrator(202609170001, "test-only failing rebuild", &failing),
+            &migrator(202609170002, "test-only failing rebuild", &failing),
             &current_schema()
         )
         .await
@@ -460,7 +471,8 @@ async fn failed_rebuild_reopens_separately_with_original_exact_state_and_history
             202609140001,
             202609150001,
             202609160001,
-            202609160002
+            202609160002,
+            202609170001
         ]
     );
     fixture.finish(reopened).await;
@@ -479,7 +491,7 @@ async fn broken_relationship_rejects_migration_and_reopens_unchanged() {
     assert!(
         initialize_with(
             &mut connection,
-            &migrator(202609170001, "test-only invalid relationship", &invalid),
+            &migrator(202609170002, "test-only invalid relationship", &invalid),
             &current_schema()
         )
         .await
@@ -495,7 +507,8 @@ async fn broken_relationship_rejects_migration_and_reopens_unchanged() {
             202609140001,
             202609150001,
             202609160001,
-            202609160002
+            202609160002,
+            202609170001
         ]
     );
     assert!(
