@@ -199,16 +199,9 @@ impl CodexAppServerDeliveryRoute {
         if target.endpoint != self.backend.endpoint {
             return RoutePresence::NotMine;
         }
-        match self
-            .holder
-            .checkout(&String::from(target.session_id.clone()))
-        {
-            HeldBindingCheckout::Ready(binding) => {
-                self.holder.restore(*binding);
-                return RoutePresence::Running;
-            }
-            HeldBindingCheckout::Busy => return RoutePresence::Running,
-            HeldBindingCheckout::Missing => {}
+        let session_id = String::from(target.session_id.clone());
+        if self.holder.contains(&session_id) {
+            return RoutePresence::Running;
         }
         let Ok(admission) = self.backend.gate.acquire() else {
             return RoutePresence::Unreachable {
