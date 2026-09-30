@@ -13,11 +13,15 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+#[cfg(test)]
+use tokio::sync::Notify;
 
 #[derive(Default)]
 pub(crate) struct ProviderQueueOperationRegistry {
     operations: Mutex<HashMap<OperationId, QueuedProviderOperation>>,
     next_sequence: AtomicU64,
+    #[cfg(test)]
+    changed: Notify,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -200,6 +204,27 @@ impl ProviderQueueOperationRegistry {
                 reason: reason.into(),
             };
             operation.terminal_at_ms = Some(now_ms());
+            #[cfg(test)]
+            self.changed.notify_one();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_not_submitted(
+        &self,
+        operation_id: &OperationId,
+    ) -> ConversationOperationQueueState {
+        loop {
+            let changed = self.changed.notified();
+            let state = self
+                .snapshot(operation_id)
+                .expect("queued operation snapshot")
+                .expect("queued operation remains inspectable")
+                .queue_state;
+            if let Some(state @ ConversationOperationQueueState::NotSubmitted { .. }) = state {
+                return state;
+            }
+            changed.await;
         }
     }
 

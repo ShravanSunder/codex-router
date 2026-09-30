@@ -199,6 +199,17 @@ impl CodexAppServerDeliveryRoute {
         if target.endpoint != self.backend.endpoint {
             return RoutePresence::NotMine;
         }
+        match self
+            .holder
+            .checkout(&String::from(target.session_id.clone()))
+        {
+            HeldBindingCheckout::Ready(binding) => {
+                self.holder.restore(*binding);
+                return RoutePresence::Running;
+            }
+            HeldBindingCheckout::Busy => return RoutePresence::Running,
+            HeldBindingCheckout::Missing => {}
+        }
         let Ok(admission) = self.backend.gate.acquire() else {
             return RoutePresence::Unreachable {
                 reason: "native backend is unavailable".to_owned(),

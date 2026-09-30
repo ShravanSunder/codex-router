@@ -4,17 +4,24 @@ use super::*;
 use crate::{
     ExternalProviderBinding, ExternalProviderLaunch, ExternalProviderRuntime,
     ExternalProviderSupervisor, LiveSessionOwnership, LiveSessionOwnershipCheck,
-    ProviderSessionActivity,
+    ProviderAcpDeliveryRoute, ProviderSessionActivity,
 };
+use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
-    CodexGeneration, ConversationOperationShowRequest, EndpointId, EndpointRef, GenerationNumber,
-    MessageContent, MessageText, NonEmptyText, OperationId, ProviderBindingId,
-    ProviderBindingIdentity, ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence,
-    ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy,
-    ProviderRuntimeIdentity, ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId,
+    ChannelDescription, CodexGeneration, ConversationCloseRequest, ConversationOperationQueueState,
+    ConversationOperationSettlement, ConversationOperationShowRequest,
+    ConversationOperationWaitOutput, ConversationOperationWaitRequest, DeliveryCorrelationId,
+    DeliveryOutcome, EndpointAvailability, EndpointDescription, EndpointId, EndpointRef,
+    GenerationNumber, MessageContent, MessageDelivery, MessageText, NonEmptyText,
+    ObservationTimestamp, OperationId, PositiveSeconds, ProviderBindingId, ProviderBindingIdentity,
+    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy, ProviderRuntimeIdentity,
+    ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId,
 };
 use collaboration_service::{
-    DeliveryFuture, ProviderConversationBackend, ProviderOperationStore, ProviderSessionRecord,
+    AttemptEvidenceSink, DeliveryContractError, DeliveryFuture, DeliveryPrecondition,
+    DeliveryRequest, EndpointDirectory, LoadPolicy, ProviderConversationBackend,
+    ProviderOperationStore, ProviderSessionRecord, SessionDeliveryRoute,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -241,5 +248,177 @@ async fn queued_loaded_only_item_not_submitted_if_close_happens_before_fifo_drai
         !load_marker.exists(),
         "LoadedOnly FIFO must not call session/load"
     );
+    supervisor.shutdown().await.expect("supervisor shutdown");
+}
+
+struct CloseDuringQueueAcceptance {
+    supervisor: Arc<ExternalProviderSupervisor>,
+    target: SessionRef,
+}
+
+impl AttemptEvidenceSink for CloseDuringQueueAcceptance {
+    fn record(
+        &self,
+        _: RouteEffectEvidence<SessionRef, CodexGeneration>,
+    ) -> DeliveryFuture<'_, ()> {
+        let supervisor = Arc::clone(&self.supervisor);
+        let target = self.target.clone();
+        Box::pin(async move {
+            let operation_id = OperationId::generate();
+            supervisor
+                .close(ConversationCloseRequest {
+                    operation_id: operation_id.clone(),
+                    target: target.clone(),
+                    generation: None,
+                    requested_by: target.clone().into(),
+                    approver: target.clone().into(),
+                })
+                .await
+                .map_err(|_| DeliveryContractError::ClientOperation)?;
+            let timeout_seconds =
+                PositiveSeconds::try_from(5).map_err(|_| DeliveryContractError::ClientOperation)?;
+            let closed = supervisor
+                .wait(ConversationOperationWaitRequest {
+                    operation_id,
+                    timeout_seconds,
+                })
+                .await
+                .map_err(|_| DeliveryContractError::ClientOperation)?;
+            if !matches!(
+                closed.output,
+                ConversationOperationWaitOutput::Available {
+                    settlement: ConversationOperationSettlement::Closed { target: closed_target },
+                } if closed_target == target
+            ) {
+                return Err(DeliveryContractError::ClientOperation);
+            }
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn route_queue_loaded_only_delivery_refuses_after_close_before_fifo_submission() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let close_marker = root.path().join("close-marker.txt");
+    let load_marker = root.path().join("load-marker.txt");
+    let target = target();
+    let provider_binding = binding(&target);
+    let runtime =
+        ExternalProviderRuntime::initialize(close_and_load_fixture(&close_marker, &load_marker))
+            .await
+            .expect("fixture provider");
+    assert_eq!(
+        runtime
+            .create_session(root.path().to_owned())
+            .await
+            .expect("session/new"),
+        "fifo-session"
+    );
+    let store = Arc::new(Mutex::new(
+        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("store"),
+    ));
+    store
+        .lock()
+        .await
+        .record_session(&ProviderSessionRecord {
+            target: target.clone(),
+            working_directory: ProviderWorkingDirectory::try_from(
+                root.path().display().to_string(),
+            )
+            .expect("working directory"),
+            requested_policy: ProviderRequestedPolicy {
+                access: RouterAccess::WriteRestricted,
+            },
+            created_by: target.clone().into(),
+            approver: target.clone().into(),
+            updated_at_ms: 1,
+        })
+        .await
+        .expect("session record");
+    let supervisor = Arc::new(
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: provider_binding.clone(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor"),
+    );
+    let directory = EndpointDirectory::new(target.endpoint.service_id.clone());
+    directory
+        .publish(EndpointDescription {
+            endpoint: target.endpoint.clone(),
+            label: NonEmptyText::try_from("Cursor fixture".to_owned()).expect("label"),
+            availability: EndpointAvailability::Available {
+                observed_at: ObservationTimestamp::try_from("2026-09-24T12:00:00Z".to_owned())
+                    .expect("observation time"),
+            },
+            channels: vec![ChannelDescription::ExternalProvider {
+                transport: ProviderTransport::StdioAcp,
+                binding_id: provider_binding.binding_id.clone(),
+                binding_generation: provider_binding.generation.generation,
+                runtime: provider_binding.runtime.clone(),
+                capabilities: provider_binding.capabilities.clone(),
+            }],
+        })
+        .expect("endpoint publication");
+    let route = ProviderAcpDeliveryRoute::new(
+        target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
+        directory,
+        Arc::clone(&supervisor),
+        store,
+        Arc::new(NoLivePeer),
+    );
+    let attempt_id = agent_automation::AttemptId::generate();
+    let operation_id =
+        OperationId::try_from(attempt_id.as_str().to_owned()).expect("queue operation ID");
+    let request = DeliveryRequest {
+        target: target.clone(),
+        message: MessageContent::Router {
+            text: MessageText::try_from("held batch".to_owned()).expect("message"),
+        },
+        mode: MessageDelivery::Queue,
+        load_policy: LoadPolicy::LoadedOnly,
+        precondition: DeliveryPrecondition::Unpinned,
+        correlation: DeliveryCorrelationId::generate(),
+        attempt: attempt_id,
+    };
+    let receipt = route
+        .deliver(
+            request,
+            &CloseDuringQueueAcceptance {
+                supervisor: Arc::clone(&supervisor),
+                target: target.clone(),
+            },
+        )
+        .await
+        .expect("queued delivery receipt");
+    assert!(matches!(receipt.outcome, DeliveryOutcome::Queued));
+    assert!(close_marker.exists(), "session close precedes FIFO enqueue");
+
+    let queue_state = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        supervisor
+            .queued_operation_registry()
+            .wait_for_not_submitted(&operation_id),
+    )
+    .await
+    .expect("FIFO observes the closed session");
+    assert_eq!(
+        queue_state,
+        ConversationOperationQueueState::NotSubmitted {
+            reason: collaboration_service::NOT_LOADED_REASON.to_owned(),
+        }
+    );
+    assert!(
+        !load_marker.exists(),
+        "LoadedOnly queue submission must not call session/load"
+    );
+    route.shutdown_queue().await;
     supervisor.shutdown().await.expect("supervisor shutdown");
 }

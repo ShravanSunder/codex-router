@@ -37,19 +37,26 @@ pub(crate) async fn read_native_thread_status(
     deadline: tokio::time::Instant,
     retired: &CancellationToken,
 ) -> Result<NativeThreadStatus, NativeThreadStatusReadError> {
-    let response = tokio::time::timeout_at(deadline, async {
-        tokio::select! {
-            biased;
-            result = connection.request_validated(
+    if retired.is_cancelled() || tokio::time::Instant::now() >= deadline {
+        return Err(NativeThreadStatusReadError::Unavailable);
+    }
+    let response = tokio::select! {
+        biased;
+        () = retired.cancelled() => {
+            return Err(NativeThreadStatusReadError::Unavailable);
+        }
+        response = tokio::time::timeout_at(
+            deadline,
+            connection.request_validated(
                 schemas,
                 NativeOperation::ReadThread,
                 json!({"threadId":thread_id,"includeTurns":false}),
-            ) => result,
-            _ = retired.cancelled() => Err(NativeConnectionError::Unavailable),
+            ),
+        ) => match response {
+            Ok(response) => response,
+            Err(_) => return Err(NativeThreadStatusReadError::Unavailable),
         }
-    })
-    .await
-    .unwrap_or(Err(NativeConnectionError::Unavailable));
+    };
 
     let response = match response {
         Ok(response) => response,

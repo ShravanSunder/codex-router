@@ -252,6 +252,12 @@ impl ProviderAcpDeliveryRoute {
             }
         };
         if request.mode == MessageDelivery::Queue
+            && request.load_policy == LoadPolicy::LoadedOnly
+            && activity == ProviderSessionActivity::NotLoaded
+        {
+            return Ok(Self::not_submitted(NOT_LOADED_REASON, true));
+        }
+        if request.mode == MessageDelivery::Queue
             || (!capabilities.supports_steering
                 && request.mode == MessageDelivery::Auto
                 && activity == ProviderSessionActivity::Running)

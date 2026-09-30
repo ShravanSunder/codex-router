@@ -11,8 +11,8 @@ use codex_router_host::{
 use collaboration_protocol::{
     CodexGeneration, ConversationCloseRequest, ConversationOperationSettlement,
     ConversationOperationWaitOutput, ConversationOperationWaitRequest, DeliveryOutcome, EndpointId,
-    OperationId, PositiveSeconds, ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess,
-    SessionRef,
+    MessageDelivery, OperationId, PositiveSeconds, ProviderRequestedPolicy,
+    ProviderWorkingDirectory, RouterAccess, SessionRef,
 };
 use collaboration_service::{
     AttemptEvidenceSink, DeliveryContractError, DeliveryFuture, LoadPolicy, NOT_LOADED_REASON,
@@ -464,6 +464,94 @@ async fn loaded_only_reports_non_retryable_missing_record_after_can_load_claim()
             .expect("record read")
             .is_none()
     );
+    assert!(!load_marker.exists());
+    route.shutdown_queue().await;
+    supervisor.shutdown().await.expect("supervisor shutdown");
+}
+
+#[tokio::test]
+async fn loaded_only_queue_refuses_not_loaded_session_before_enqueue() {
+    let root = tempfile::tempdir().expect("provider root");
+    let close_marker = root.path().join("close-marker.txt");
+    let load_marker = root.path().join("load-marker.txt");
+    let target = target();
+    let binding = provider_binding(&target);
+    let runtime =
+        ExternalProviderRuntime::initialize(close_and_load_fixture(&close_marker, &load_marker))
+            .await
+            .expect("fixture provider");
+    assert_eq!(
+        runtime
+            .create_session(root.path().to_owned())
+            .await
+            .expect("session/new"),
+        "fixture-session"
+    );
+    let store = store_with_session_record(root.path(), &target).await;
+    let supervisor = Arc::new(
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: binding.clone(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor"),
+    );
+    let route = ProviderAcpDeliveryRoute::new(
+        target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
+        available_directory(&target, &binding),
+        Arc::clone(&supervisor),
+        store,
+        Arc::new(NoLivePeer),
+    );
+    let close_id = OperationId::generate();
+    supervisor
+        .close(ConversationCloseRequest {
+            operation_id: close_id.clone(),
+            target: target.clone(),
+            generation: None,
+            requested_by: target.clone().into(),
+            approver: target.clone().into(),
+        })
+        .await
+        .expect("ConversationClose");
+    let timeout_seconds = PositiveSeconds::try_from(5).expect("close timeout");
+    let closed = supervisor
+        .wait(ConversationOperationWaitRequest {
+            operation_id: close_id,
+            timeout_seconds,
+        })
+        .await
+        .expect("close settlement");
+    assert!(matches!(
+        closed.output,
+        ConversationOperationWaitOutput::Available {
+            settlement: ConversationOperationSettlement::Closed { target: closed_target },
+        } if closed_target == target
+    ));
+
+    let mut queued_request = request(target.clone(), "held batch");
+    queued_request.mode = MessageDelivery::Queue;
+    queued_request.load_policy = LoadPolicy::LoadedOnly;
+    let receipt = route
+        .deliver(
+            queued_request,
+            &RecordedEvidence(tokio::sync::Mutex::new(Vec::new())),
+        )
+        .await
+        .expect("loaded-only queue receipt");
+
+    assert!(matches!(
+        receipt.outcome,
+        DeliveryOutcome::NotSubmitted {
+            retryable: true,
+            ref reason,
+        } if reason == NOT_LOADED_REASON
+    ));
+    assert!(route.queue_list(&target).is_empty());
+    assert!(close_marker.exists());
     assert!(!load_marker.exists());
     route.shutdown_queue().await;
     supervisor.shutdown().await.expect("supervisor shutdown");

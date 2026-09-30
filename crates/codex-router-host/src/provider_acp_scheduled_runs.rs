@@ -226,7 +226,7 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
                             kind: ScheduleFailureKind::OutcomeUnknown,
                             explanation: "Provider session is not loaded".into(),
                             evidence,
-                            uncertain: false,
+                            uncertain: true,
                         })
                     }
                     ProviderSessionLoadOutcome::UnsupportedLoad => {
