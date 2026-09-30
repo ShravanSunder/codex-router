@@ -50,6 +50,12 @@ pub(super) fn write_quota_plain(
     writeln!(stdout, "codex-router {}", report.app_version).map_err(QuotaCommandError::Stdout)?;
     writeln!(
         stdout,
+        "pooled credentials\t{}",
+        report.credential_store_availability.status_label()
+    )
+    .map_err(QuotaCommandError::Stdout)?;
+    writeln!(
+        stdout,
         "account\tstatus\tOAuth\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
     )
     .map_err(QuotaCommandError::Stdout)?;
@@ -58,12 +64,26 @@ pub(super) fn write_quota_plain(
             reset_pace_view_model_from_snapshot(row.weekly_pace, report.now_unix_seconds);
         let sample_metadata =
             sample_metadata_from_display_windows(&row.windows, report.now_unix_seconds);
+        let account_status = if report.credential_store_availability.is_ready() {
+            row.account_status.clone()
+        } else {
+            format!(
+                "{} / {}",
+                row.account_status,
+                report.credential_store_availability.status_label()
+            )
+        };
+        let oauth_status = if report.credential_store_availability.is_ready() {
+            oauth_maintenance_human(row.oauth_maintenance.as_ref()).to_owned()
+        } else {
+            report.credential_store_availability.status_label()
+        };
         writeln!(
             stdout,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.account_label,
-            row.account_status,
-            oauth_maintenance_human(row.oauth_maintenance.as_ref()),
+            account_status,
+            oauth_status,
             row.short_window.replace('\n', " "),
             row.weekly_window.replace('\n', " "),
             row.weekly_quota_floor_basis_points.map_or_else(

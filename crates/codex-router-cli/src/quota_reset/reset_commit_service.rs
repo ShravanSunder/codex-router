@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use codex_router_core::ids::AccountId;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 
 use super::QuotaResetError;
 use super::credential_authority::CredentialFingerprint;
@@ -30,17 +31,17 @@ use super::reset_credit_policy::validate_credit_inventory;
 
 pub(in crate::quota_reset) struct LiveResetAuthorityReader {
     state_database_path: PathBuf,
-    secret_root: PathBuf,
+    credential_store: EncryptedCredentialStore,
 }
 
 impl LiveResetAuthorityReader {
-    pub(in crate::quota_reset) const fn new(
+    pub(in crate::quota_reset) fn new(
         state_database_path: PathBuf,
-        secret_root: PathBuf,
+        credential_store: EncryptedCredentialStore,
     ) -> Self {
         Self {
             state_database_path,
-            secret_root,
+            credential_store,
         }
     }
 }
@@ -80,7 +81,7 @@ impl ResetAuthorityReader for LiveResetAuthorityReader {
     ) -> Result<Self::PreparedRead, RenderSafeFailure> {
         prepare_reset_credential_authority_read(
             &self.state_database_path,
-            &self.secret_root,
+            &self.credential_store,
             account_id,
             expected_generation,
             now_unix_seconds,
@@ -159,6 +160,9 @@ impl ResetServiceProvider for HttpLiveQuotaResetProvider {
 
 fn render_safe_provider_failure(error: &QuotaResetError) -> RenderSafeFailure {
     match error {
+        QuotaResetError::CredentialStoreKeyUnavailable
+        | QuotaResetError::CredentialMigrationIncomplete { .. }
+        | QuotaResetError::CredentialStoreUnavailable => RenderSafeFailure::CredentialUnavailable,
         QuotaResetError::Request { .. } => RenderSafeFailure::Transport,
         QuotaResetError::Status { .. } => RenderSafeFailure::ProviderStatus,
         _ => RenderSafeFailure::InvalidResponse,

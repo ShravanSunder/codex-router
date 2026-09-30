@@ -5,11 +5,13 @@ use std::fmt;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 use codex_router_core::redaction::SecretString;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::SecretStore;
+use crate::credential_key::AccountCredentialKey;
 use crate::model::SecretKey;
 use crate::model::SecretStoreError;
 
@@ -193,21 +195,27 @@ pub fn upstream_refresh_token_key(account_id: &AccountId) -> Result<SecretKey, S
     SecretKey::new(format!("openai_refresh_token.{}", account_id.as_str()))
 }
 
-/// Builds the secret key for one bundled account credential generation.
-pub fn account_credential_bundle_key(
+/// Builds the provider-scoped secret key for one bundled account credential generation.
+pub fn provider_credential_bundle_key(
+    provider: Provider,
     account_id: &AccountId,
     generation: u64,
 ) -> Result<SecretKey, SecretStoreError> {
-    SecretKey::new(format!(
-        "openai_credential_bundle.{}.{}",
-        account_id.as_str(),
-        generation
-    ))
+    AccountCredentialKey::new(provider, account_id.clone(), generation)?.secret_key()
+}
+
+/// Builds an OpenAI credential key for an OpenAI-only account path.
+pub fn openai_account_credential_bundle_key(
+    account_id: &AccountId,
+    generation: u64,
+) -> Result<SecretKey, SecretStoreError> {
+    provider_credential_bundle_key(Provider::Openai, account_id, generation)
 }
 
 /// Finds a successor slot proven unused, skipping orphaned bundles.
 pub fn first_unused_account_credential_generation(
     store: &impl SecretStore,
+    provider: Provider,
     account_id: &AccountId,
     active_generation: u64,
 ) -> Result<u64, SecretStoreError> {
@@ -218,7 +226,7 @@ pub fn first_unused_account_credential_generation(
                 message: "credential generation overflow".to_owned(),
             })?;
     loop {
-        let key = account_credential_bundle_key(account_id, candidate)?;
+        let key = provider_credential_bundle_key(provider, account_id, candidate)?;
         match store.read_secret(&key) {
             Ok(_) => {
                 candidate = candidate.checked_add(1).ok_or_else(|| {

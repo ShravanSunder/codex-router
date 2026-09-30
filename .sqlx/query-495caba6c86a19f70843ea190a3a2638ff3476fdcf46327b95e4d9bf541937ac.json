@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE accounts SET active_credential_generation = ?3\n                      WHERE account_id = ?1 AND active_credential_generation = ?2\n                        AND status = ?4 AND provider = ?5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "495caba6c86a19f70843ea190a3a2638ff3476fdcf46327b95e4d9bf541937ac"
+}

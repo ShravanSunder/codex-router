@@ -11,7 +11,16 @@ path = "src/main.rs"
 
 [features]
 default = []
-quota-reset-test-harness = ["dep:agent-collaboration", "agent-collaboration/quota-reset-test-harness"]
+quota-reset-test-harness = [
+    "dep:agent-collaboration",
+    "agent-collaboration/quota-reset-test-harness",
+    "keychain-test-support",
+]
+keychain-test-support = [
+    "codex-router-secret-store/keychain-test-guard",
+    "codex-router-secret-store/test-support",
+    "codex-router-host/keychain-test-support",
+]
 
 [lints]
 workspace = true
@@ -55,7 +64,9 @@ unicode-width.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+codex-router-host = { path = "../codex-router-host", version = "0.1.4", features = ["keychain-test-support"] }
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4", features = ["keychain-test-guard", "test-support"] }
 codex-router-auth = { path = "../codex-router-auth", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
 futures-util.workspace = true

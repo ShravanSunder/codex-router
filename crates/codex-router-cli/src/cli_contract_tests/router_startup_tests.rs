@@ -7,7 +7,9 @@ fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let account_id = account_id("acct_cli_serve");
     let account = AccountRecord::new(
         codex_router_core::provider::Provider::Openai,
@@ -23,7 +25,7 @@ fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
             .with_route_band("responses", 100);
     must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
     persist_effective_selector_window(&state, &account_id, "responses", 100);
-    let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let upstream_token_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let upstream_credential_bundle = must_ok(
         AccountCredentialBundle::imported_codex_auth(
             "cli-upstream-token",
@@ -115,6 +117,114 @@ fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
 }
 
 #[test]
+fn serve_starts_and_codex_route_fails_closed_for_unavailable_pooled_stores() {
+    #[derive(Clone, Copy)]
+    enum UnavailableStoreKind {
+        KeyUnavailable,
+        MigrationIncomplete,
+    }
+
+    for (suffix, store_kind) in [
+        ("key-unavailable", UnavailableStoreKind::KeyUnavailable),
+        (
+            "migration-incomplete",
+            UnavailableStoreKind::MigrationIncomplete,
+        ),
+    ] {
+        let test_root = TestRoot::new(&format!("serve-{suffix}"));
+        must_ok(fs::create_dir(test_root.path()));
+        let state_path = test_root.path().join("state.sqlite");
+        let secret_root = test_root.path().join("secrets");
+        let state = must_ok(SqliteStateStore::open(&state_path));
+        let account_id = account_id(&format!("acct_serve_{suffix}"));
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                suffix,
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
+        ));
+        let snapshot =
+            PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
+                .with_observed_unix_seconds(1_000)
+                .with_route_band("responses", 100);
+        must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
+        persist_effective_selector_window(&state, &account_id, "responses", 100);
+        let file_store = must_ok(FileSecretStore::open(&secret_root));
+        let credential_store = match store_kind {
+            UnavailableStoreKind::KeyUnavailable => EncryptedCredentialStore::key_unavailable(file_store),
+            UnavailableStoreKind::MigrationIncomplete => EncryptedCredentialStore::migration_incomplete(
+                file_store,
+                vec![account_id.as_str().to_owned()],
+                codex_router_secret_store::credential_migration::CredentialMigrationFailure::MigrationNotComplete,
+            ),
+        };
+
+        let upstream_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
+        must_ok(upstream_listener.set_nonblocking(true));
+        let upstream_address = must_ok(upstream_listener.local_addr());
+        let router_port = reserve_loopback_port();
+        let command = must_ok(CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--listen-host"),
+            OsString::from("127.0.0.1"),
+            OsString::from("--port"),
+            OsString::from(router_port.to_string()),
+            OsString::from("--state-db"),
+            state_path.as_os_str().to_os_string(),
+            OsString::from("--secret-root"),
+            secret_root.as_os_str().to_os_string(),
+            OsString::from("--upstream-base-url"),
+            OsString::from(format!("http://{upstream_address}/v1")),
+            OsString::from("--now-unix-seconds"),
+            OsString::from("1030"),
+            OsString::from("--max-snapshot-age-seconds"),
+            OsString::from("60"),
+            OsString::from("--disable-background-quota-refresh"),
+            OsString::from("--max-connections"),
+            OsString::from("1"),
+        ]));
+        let CliCommand::Serve(command) = command else {
+            panic!("serve command should parse");
+        };
+        let client_thread = thread::spawn(move || {
+            send_tokenless_loopback_request_with_retry(
+                router_port,
+                br#"{"model":"gpt-5","serve":true}"#,
+            )
+        });
+        let serve_thread = thread::spawn(move || {
+            let mut stdout = Vec::new();
+            let result = run_serve_command_with_upkeep_start(
+                &mut stdout,
+                command,
+                credential_store,
+                credential_upkeep_worker::start_background_credential_upkeep_worker,
+            );
+            (result, stdout)
+        });
+
+        let response = must_ok(client_thread.join().map_err(|_| "client thread failed"));
+        let (serve_result, stdout) =
+            must_ok(serve_thread.join().map_err(|_| "serve thread failed"));
+        must_ok(serve_result);
+
+        assert!(String::from_utf8_lossy(&stdout).contains("listening: 127.0.0.1:"));
+        assert!(
+            response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"),
+            "{suffix}: {response}"
+        );
+        assert!(matches!(
+            upstream_listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+}
+
+#[test]
 fn serve_command_defaults_to_live_runtime_clock_with_quota_freshness_margin() {
     let command = match CliCommand::parse([
         OsString::from("serve"),
@@ -183,7 +293,9 @@ fn serve_command_dispatches_websocket_upgrade_through_runtime() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let account_id = account_id("acct_cli_ws");
     let account = AccountRecord::new(
         codex_router_core::provider::Provider::Openai,
@@ -199,7 +311,7 @@ fn serve_command_dispatches_websocket_upgrade_through_runtime() {
             .with_route_band("responses", 100);
     must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
     persist_effective_selector_window(&state, &account_id, "responses", 100);
-    let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let upstream_token_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let upstream_credential_bundle = must_ok(
         AccountCredentialBundle::imported_codex_auth(
             "cli-ws-upstream-token",
@@ -377,7 +489,9 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let enabled_id = account_id("serve-upkeep-enabled");
     let disabled_id = account_id("serve-upkeep-disabled");
     for (account_id, status, refresh_token) in [
@@ -402,7 +516,7 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
             )
             .with_active_credential_generation(1),
         ));
-        let key = must_ok(account_credential_bundle_key(account_id, 1));
+        let key = must_ok(openai_account_credential_bundle_key(account_id, 1));
         must_ok(
             secrets.write_secret(
                 &key,
@@ -500,16 +614,20 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
     let oauth_client = LoopbackUpkeepOAuthClient {
         token_endpoint: format!("http://{oauth_address}/oauth/token"),
     };
+    let credential_store = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let serve_thread = thread::spawn(move || {
         let mut stdout = Vec::new();
         let result = run_serve_command_with_upkeep_start(
             &mut stdout,
             command,
-            move |state_path, secret_root| {
+            credential_store,
+            move |state_path, credential_store| {
                 let clock = Arc::clone(&worker_clock);
                 let worker = start_background_credential_upkeep_worker_with_client_and_clock(
                     state_path,
-                    secret_root,
+                    credential_store,
                     oauth_client,
                     move || clock.load(Ordering::SeqCst),
                 )?;

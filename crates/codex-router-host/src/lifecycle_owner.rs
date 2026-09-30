@@ -152,6 +152,9 @@ pub enum HostError {
     /// No compatible router was available and no owned launch command was supplied.
     #[error("no compatible Codex router is available")]
     RouterUnavailable,
+    /// Router-root secret path could not be derived for the startup migration.
+    #[error("router secret root is unavailable for the credential migration")]
+    RouterSecretRootUnavailable,
     /// An existing listener requires unsupported local authentication.
     #[error("the configured Codex router requires unsupported local authentication")]
     RouterAuthenticationRequired,

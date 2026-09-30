@@ -27,8 +27,57 @@ fn explicit_auth_file_account_entrypoints_are_unknown() {
     assert!(matches!(live_error, CliError::UnknownOption { option } if option == "--auth-json"));
 }
 
+#[test]
+fn openai_auth_import_refuses_an_existing_claude_account_before_writing() {
+    let test_root = TestRoot::new("openai-import-provider-guard");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let runtime = test_async_runtime();
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let account_id = account_id("claude-import-target");
+    must_ok(
+        runtime.block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Claude,
+                    account_id.clone(),
+                    "shared-label",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+
+    let result = runtime.block_on(import_codex_auth_from_request_async(
+        &state,
+        &secrets,
+        AccountImportRequest::new(account_id.clone(), "shared-label", "fake-openai-access"),
+    ));
+
+    assert!(
+        result.is_err(),
+        "OpenAI auth must not be written to a Claude account"
+    );
+    assert_eq!(
+        must_ok(runtime.block_on(state.load_account(&account_id)))
+            .and_then(|account| account.active_credential_generation()),
+        Some(1)
+    );
+    assert!(
+        !secret_root
+            .join("openai_credential_bundle.acct_claude-import-target.2.v2")
+            .exists()
+    );
+}
+
+#[derive(Clone)]
 struct FailingWriteOnlySecretStore {
-    write_attempts: AtomicUsize,
+    write_attempts: Arc<AtomicUsize>,
 }
 
 impl SecretStore for FailingWriteOnlySecretStore {
@@ -74,8 +123,10 @@ fn device_login_commit_preserves_old_secret_and_invalidates_quota() {
             ),
         ),
     );
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let old_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let old_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let old_secret = must_ok(
         AccountCredentialBundle::imported_codex_auth(
             "old-access-canary",
@@ -108,7 +159,7 @@ fn device_login_commit_preserves_old_secret_and_invalidates_quota() {
         must_ok(secrets.read_secret(&old_key)).expose_secret(),
         old_secret.expose_secret()
     );
-    let new_key = must_ok(account_credential_bundle_key(&account_id, 2));
+    let new_key = must_ok(openai_account_credential_bundle_key(&account_id, 2));
     let new_bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
         secrets.read_secret(&new_key),
     )));
@@ -172,8 +223,10 @@ fn device_relogin_waits_for_claimed_refresh_then_wins_the_active_generation() {
         )
         .with_active_credential_generation(1),
     ));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,
@@ -213,7 +266,11 @@ fn device_relogin_waits_for_claimed_refresh_then_wins_the_active_generation() {
     let login_thread = thread::spawn(move || {
         let runtime = test_async_runtime();
         let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&login_state_path)));
-        let secrets = must_ok(FileSecretStore::open(&login_secret_root));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                &login_secret_root,
+            ),
+        );
         must_ok(
             runtime.block_on(import_codex_auth_from_request_async(
                 &state,
@@ -239,7 +296,7 @@ fn device_relogin_waits_for_claimed_refresh_then_wins_the_active_generation() {
     let active = must_ok(AccountStateRepository::load_account(&state, &account_id))
         .expect("account should remain");
     assert_eq!(active.active_credential_generation(), Some(3));
-    let login_key = must_ok(account_credential_bundle_key(&account_id, 3));
+    let login_key = must_ok(openai_account_credential_bundle_key(&account_id, 3));
     let login_bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
         secrets.read_secret(&login_key),
     )));
@@ -247,6 +304,91 @@ fn device_relogin_waits_for_claimed_refresh_then_wins_the_active_generation() {
         login_bundle.access_token().expose_secret(),
         "login-access-canary"
     );
+}
+
+#[test]
+fn refresh_claim_cannot_reenable_an_account_disabled_during_provider_refresh() {
+    let test_root = TestRoot::new("refresh-disabled-account-race");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let account_id = account_id("refresh-disable-race");
+    must_ok(AccountStateRepository::upsert_account(
+        &state,
+        &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "refresh disable race",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1),
+    ));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
+    must_ok(
+        secrets.write_secret(
+            &active_key,
+            &must_ok(
+                AccountCredentialBundle::imported_codex_auth(
+                    "disable-race-expired-access-canary",
+                    Some("old-refresh-canary".to_owned()),
+                )
+                .with_expires_unix_seconds(900)
+                .to_secret_string(),
+            ),
+        ),
+    );
+    drop(state);
+
+    let (entered_sender, entered_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let refresh_client = HeldLoginRaceRefreshClient {
+        entered_sender,
+        release_receiver: Arc::new(Mutex::new(release_receiver)),
+    };
+    let refresh_state_path = state_path.clone();
+    let refresh_secret_root = secret_root;
+    let refresh_account = account_id.clone();
+    let refresh_thread = thread::spawn(move || {
+        let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
+            &refresh_state_path,
+            &refresh_secret_root,
+            refresh_client,
+        ));
+        resolver
+            .resolve_provider_credentials(&refresh_account)
+            .is_err()
+    });
+    must_ok(entered_receiver.recv_timeout(Duration::from_secs(2)));
+
+    let disable_runtime = test_async_runtime();
+    let disable_state = must_ok(disable_runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    must_ok(
+        disable_runtime.block_on(
+            disable_state.upsert_account(
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "refresh disable race",
+                    AccountStatus::Disabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+    must_ok(release_sender.send(()));
+
+    assert!(must_ok(
+        refresh_thread.join().map_err(|_| "refresh thread failed")
+    ));
+    let disabled_account =
+        must_ok(disable_runtime.block_on(disable_state.load_account(&account_id)))
+            .expect("disabled account should remain registered");
+    assert_eq!(disabled_account.status(), AccountStatus::Disabled);
+    assert_eq!(disabled_account.active_credential_generation(), Some(1));
 }
 
 #[test]
@@ -259,7 +401,7 @@ fn failed_device_login_secret_commit_leaves_new_account_disabled() {
     )));
     let account_id = account_id("device-write-failure");
     let secrets = FailingWriteOnlySecretStore {
-        write_attempts: AtomicUsize::new(0),
+        write_attempts: Arc::new(AtomicUsize::new(0)),
     };
     let error = must_err(
         runtime.block_on(import_codex_auth_from_request_async(
@@ -337,8 +479,12 @@ JSON
     assert_eq!(account.status(), AccountStatus::Enabled);
     assert_eq!(account.active_credential_generation(), Some(1));
 
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
         secrets.read_secret(&bundle_key),
     )));
@@ -391,8 +537,10 @@ fn account_login_reauthenticates_the_same_openai_account() {
             ),
         ),
     );
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let active_bundle = must_ok(
         AccountCredentialBundle::imported_codex_auth(
             "expired-access-canary",
@@ -446,8 +594,10 @@ JSON
     assert!(must_ok(runtime.block_on(reopened.load_credential_maintenance(&account_id))).is_none());
     must_ok(runtime.block_on(reopened.close()));
 
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let new_key = must_ok(account_credential_bundle_key(&account_id, 2));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let new_key = must_ok(openai_account_credential_bundle_key(&account_id, 2));
     let new_bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
         secrets.read_secret(&new_key),
     )));
