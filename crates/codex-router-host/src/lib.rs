@@ -50,6 +50,7 @@ mod owned_router;
 mod owner_identity_resolution;
 mod process_group_child;
 mod provider_configuration_file;
+mod router_credential_migration;
 pub use provider_configuration_file::{
     ProviderConfigurationEntries, ProviderConfigurationEntry, ProviderConfigurationError,
     ProviderConfigurationFile,

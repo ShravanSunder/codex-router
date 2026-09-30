@@ -12,4 +12,13 @@ pub trait SecretStore {
 
     /// Reads a secret value.
     fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError>;
+
+    /// Writes a new credential generation without activating it.
+    ///
+    /// Backends that store pooled credentials must keep this write encrypted.
+    /// Activation belongs to the auth coordinator after the staged value has
+    /// been written successfully.
+    fn write_staged(&self, key: &SecretKey, secret: &SecretString) -> Result<(), SecretStoreError> {
+        self.write_secret(key, secret)
+    }
 }

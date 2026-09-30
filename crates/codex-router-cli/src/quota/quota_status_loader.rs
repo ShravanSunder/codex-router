@@ -1,16 +1,76 @@
 use super::*;
 use codex_router_core::route_profile::RESPONSES_HTTP;
 
+#[derive(Clone)]
+pub(super) struct QuotaCredentialResources {
+    credential_store:
+        Option<codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore>,
+    availability: CredentialStoreAvailability,
+}
+
+impl QuotaCredentialResources {
+    pub(super) async fn open(router_root: &Path) -> Self {
+        match crate::secret_store_factory::open_cli_secret_store_async(router_root.join("secrets"))
+            .await
+        {
+            Ok(credential_store) => Self::from_opened_store(credential_store),
+            Err(_error) => Self {
+                credential_store: None,
+                availability: CredentialStoreAvailability::Unavailable,
+            },
+        }
+    }
+
+    fn from_opened_store(
+        credential_store: codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
+    ) -> Self {
+        let availability = credential_store_availability(&credential_store);
+        Self {
+            credential_store: Some(credential_store),
+            availability,
+        }
+    }
+
+    pub(super) fn credential_store(
+        &self,
+    ) -> Option<codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore>
+    {
+        self.credential_store.clone()
+    }
+
+    pub(super) fn availability(&self) -> CredentialStoreAvailability {
+        self.availability.clone()
+    }
+}
+
 pub(super) async fn load_quota_status_report_async(
     router_root: &Path,
     all_limits: bool,
     now_unix_seconds: u64,
     unicode_bars: bool,
 ) -> Result<QuotaStatusReport, QuotaCommandError> {
+    let credential_resources = QuotaCredentialResources::open(router_root).await;
+    load_quota_status_report_with_availability_async(
+        router_root,
+        all_limits,
+        now_unix_seconds,
+        unicode_bars,
+        credential_resources.availability(),
+    )
+    .await
+}
+
+pub(super) async fn load_quota_status_report_with_availability_async(
+    router_root: &Path,
+    all_limits: bool,
+    now_unix_seconds: u64,
+    unicode_bars: bool,
+    credential_store_availability: CredentialStoreAvailability,
+) -> Result<QuotaStatusReport, QuotaCommandError> {
     let quota_history_state =
         AsyncSqliteStateStore::open_read_only(&router_root.join("state.sqlite")).await?;
     let accounts = quota_history_state.list_accounts().await?;
-    let report = quota_status_report(
+    let mut report = quota_status_report(
         &quota_history_state,
         &accounts,
         all_limits,
@@ -18,8 +78,25 @@ pub(super) async fn load_quota_status_report_async(
         unicode_bars,
     )
     .await?;
+    report.credential_store_availability = credential_store_availability;
     quota_history_state.close().await?;
     Ok(report)
+}
+
+fn credential_store_availability(
+    credential_store: &codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
+) -> CredentialStoreAvailability {
+    match credential_store.status() {
+        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::Ready => {
+            CredentialStoreAvailability::Ready
+        }
+        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::KeyUnavailable => {
+            CredentialStoreAvailability::KeychainLocked
+        }
+        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::MigrationIncomplete { accounts, failure } => {
+            CredentialStoreAvailability::MigrationIncomplete { accounts, failure }
+        }
+    }
 }
 
 pub(super) async fn quota_status_report(
@@ -246,6 +323,11 @@ pub(super) async fn quota_status_report(
         preferred_next_account_id,
         selection_projection_source,
         now_unix_seconds,
+        credential_store_availability: CredentialStoreAvailability::Ready,
         rows,
     })
 }
+
+#[cfg(test)]
+#[path = "quota_status_loader_tests.rs"]
+mod tests;

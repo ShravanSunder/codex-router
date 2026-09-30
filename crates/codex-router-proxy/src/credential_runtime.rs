@@ -1,5 +1,6 @@
 //! Runtime credential resolver factory for the loopback proxy.
 
+#[cfg(test)]
 use std::path::Path;
 
 use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
@@ -26,6 +27,7 @@ use codex_router_core::ids::AccountId;
 #[cfg(test)]
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 #[cfg(test)]
@@ -38,6 +40,7 @@ use crate::http_sse::AsyncProviderCredentialResolver;
 use crate::http_sse::HttpAffinitySecretProvider;
 use crate::http_sse::HttpProxyError;
 use crate::secret_store_factory::ProxyRuntimeSecretStore;
+#[cfg(test)]
 use crate::secret_store_factory::open_proxy_secret_store;
 
 /// Credential resolver used by proxy runtime entrypoints.
@@ -116,10 +119,9 @@ pub(crate) struct ProxyRuntimeCredentialResources {
 
 impl ProxyRuntimeCredentialResources {
     pub(crate) fn open(
-        secret_store_root: &Path,
+        secret_store: EncryptedCredentialStore,
         fixed_now_unix_seconds: Option<u64>,
     ) -> Result<Self, ProxyRuntimeCredentialResourcesOpenError> {
-        let secret_store = open_proxy_secret_store(secret_store_root)?;
         let affinity_secret = load_or_create_router_affinity_hash_secret(&secret_store)
             .map(|loaded| loaded.secret().clone())?;
 

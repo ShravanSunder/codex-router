@@ -53,8 +53,10 @@ fn quota_401_renews_once_and_retries_with_the_committed_generation() {
             )
             .with_active_credential_generation(1),
         ));
-        let secrets = must_ok(FileSecretStore::open(&secret_root));
-        let key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+        );
+        let key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         let bundle = AccountCredentialBundle::imported_codex_auth(
             "rejected-access-canary",
             Some("renewable-refresh-canary".to_owned()),
@@ -132,8 +134,12 @@ impl QuotaRefreshProvider for ConcurrentGenerationQuotaProvider {
             seen_tokens.len()
         };
         if call == 1 {
-            let secrets = must_ok(FileSecretStore::open(&self.secret_root));
-            let successor_key = must_ok(account_credential_bundle_key(&self.account_id, 2));
+            let secrets = must_ok(
+                codex_router_secret_store::test_support::open_encrypted_credential_store(
+                    &self.secret_root,
+                ),
+            );
+            let successor_key = must_ok(openai_account_credential_bundle_key(&self.account_id, 2));
             let successor = AccountCredentialBundle::imported_codex_auth(
                 "concurrent-access-canary",
                 Some("concurrent-refresh-canary".to_owned()),
@@ -183,8 +189,10 @@ fn quota_401_reuses_a_concurrently_committed_generation_without_oauth_refresh() 
         )
         .with_active_credential_generation(1),
     ));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let active = AccountCredentialBundle::imported_codex_auth(
         "rejected-access-canary",
         Some("original-refresh-canary".to_owned()),
@@ -255,8 +263,10 @@ fn quota_401_does_not_bypass_terminal_or_retry_cooldown_maintenance() {
             )
             .with_active_credential_generation(1),
         ));
-        let secrets = must_ok(FileSecretStore::open(&secret_root));
-        let key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+        );
+        let key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         let bundle = AccountCredentialBundle::imported_codex_auth(
             "rejected-access-canary",
             Some("refresh-canary".to_owned()),
@@ -338,7 +348,11 @@ fn quota_refresh_rejects_non_provider_base_url_before_token_egress() {
         AccountStatus::Enabled,
     );
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
     let access_key = must_ok(upstream_access_token_key(&account_id));
     must_ok(secrets.write_secret(
         &access_key,
@@ -388,8 +402,12 @@ fn quota_refresh_resolver_refreshes_expired_access_token_before_provider_egress(
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &expired_key,
@@ -495,8 +513,10 @@ fn quota_refresh_store_paths_uses_current_thread_runtime_without_nested_runtime(
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -554,8 +574,12 @@ fn quota_refresh_missing_refresh_token_fails_closed_before_provider_egress() {
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &expired_key,
@@ -632,12 +656,16 @@ fn quota_refresh_continues_after_one_account_provider_failure() {
         &state,
         &healthy_account,
     ));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
     for (account_id, access_token) in [
         (&failing_account_id, "failing-provider-token-canary"),
         (&healthy_account_id, "healthy-provider-token-canary"),
     ] {
-        let bundle_key = must_ok(account_credential_bundle_key(account_id, 1));
+        let bundle_key = must_ok(openai_account_credential_bundle_key(account_id, 1));
         must_ok(
             secrets.write_secret(
                 &bundle_key,
@@ -721,12 +749,16 @@ fn quota_refresh_preserves_enabled_account_when_401_recovery_is_unavailable() {
             .with_active_credential_generation(1);
             must_ok(AccountStateRepository::upsert_account(&state, &account));
         }
-        let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                router_root.join("secrets"),
+            ),
+        );
         for (account_id, access_token) in [
             (&rejected_account_id, "rejected-provider-token-canary"),
             (&healthy_account_id, "healthy-provider-token-canary"),
         ] {
-            let bundle_key = must_ok(account_credential_bundle_key(account_id, 1));
+            let bundle_key = must_ok(openai_account_credential_bundle_key(account_id, 1));
             must_ok(
                 secrets.write_secret(
                     &bundle_key,
