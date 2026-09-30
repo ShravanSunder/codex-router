@@ -16,8 +16,12 @@ fn quota_refresh_http_provider_fetches_usage_and_persists_sqlite_state() {
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -162,8 +166,10 @@ fn loopback_quota_401_retries_with_a_concurrently_committed_generation() {
         )
         .with_active_credential_generation(1),
     ));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let active = AccountCredentialBundle::imported_codex_auth(
         "rejected-access-canary",
         Some("original-refresh-canary".to_owned()),
@@ -221,13 +227,18 @@ fn loopback_quota_401_retries_with_a_concurrently_committed_generation() {
             };
             assert!(request.contains(&format!("authorization: Bearer {expected_access}\r\n")));
             if request_index == 0 {
-                let successor_key = must_ok(account_credential_bundle_key(&server_account_id, 2));
+                let successor_key =
+                    must_ok(openai_account_credential_bundle_key(&server_account_id, 2));
                 let successor = AccountCredentialBundle::imported_codex_auth(
                     "concurrent-access-canary",
                     Some("concurrent-refresh-canary".to_owned()),
                 )
                 .with_expires_unix_seconds(5_000_000_000);
-                let secrets = must_ok(FileSecretStore::open(&server_secret_root));
+                let secrets = must_ok(
+                    codex_router_secret_store::test_support::open_encrypted_credential_store(
+                        &server_secret_root,
+                    ),
+                );
                 must_ok(
                     secrets.write_secret(&successor_key, &must_ok(successor.to_secret_string())),
                 );

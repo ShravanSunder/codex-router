@@ -16,8 +16,8 @@ use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
 use codex_router_proxy::upstream::UpstreamEndpoint;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-use codex_router_secret_store::file_backend::FileSecretStore;
+use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
@@ -119,6 +119,9 @@ pub(super) fn start_route_native_router(
         SecretString::new(LOCAL_TOKEN.to_owned()),
         TokenGeneration::new(1),
     );
+    let credential_store =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+            .map_err(|error| format!("failed to open route-native credential store: {error}"))?;
     let runtime = LoopbackRouterRuntime::start(
         LoopbackRouterRuntimeConfig::new(
             bind_address,
@@ -128,6 +131,7 @@ pub(super) fn start_route_native_router(
             local_token,
         )
         .with_quota_clock(1_030, 60),
+        credential_store,
     )
     .map_err(|error| format!("failed to start route-native router: {error}"))?;
     let address = runtime.local_addr();
@@ -147,8 +151,9 @@ pub(super) fn start_route_native_router(
 pub(super) fn seed_route_native_state(state_path: &Path, secret_root: &Path) -> Result<(), String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open route-native state: {error}"))?;
-    let secrets = FileSecretStore::open(secret_root)
-        .map_err(|error| format!("failed to open route-native secrets: {error}"))?;
+    let secrets =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+            .map_err(|error| format!("failed to open route-native secrets: {error}"))?;
     for fixture in ROUTE_NATIVE_ACCOUNTS {
         seed_route_native_account(&state, &secrets, *fixture)?;
     }
@@ -182,7 +187,7 @@ pub(super) fn join_result<T>(
 
 fn seed_route_native_account(
     state: &SqliteStateStore,
-    secrets: &FileSecretStore,
+    secrets: &EncryptedCredentialStore,
     fixture: RouteNativeAccountFixture,
 ) -> Result<(), String> {
     let account_id = account_id(fixture.account_id)?;
@@ -234,7 +239,7 @@ fn seed_route_native_account(
         format!("failed to seed route-native weekly window for {route_band}: {error}")
     })?;
 
-    let credential_key = account_credential_bundle_key(&account_id, 1)
+    let credential_key = openai_account_credential_bundle_key(&account_id, 1)
         .map_err(|error| format!("failed to build route-native credential key: {error}"))?;
     let credential_bundle = AccountCredentialBundle::imported_codex_auth(
         fixture.upstream_token,

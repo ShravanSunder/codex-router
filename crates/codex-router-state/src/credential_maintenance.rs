@@ -86,3 +86,13 @@ pub struct CredentialMaintenanceRecord {
     pub claimed_successor_generation: Option<u64>,
     pub consecutive_failures: u32,
 }
+
+/// Why a credential generation is being claimed.
+///
+/// This value selects guards for a transient claim stored in the existing
+/// `credential_maintenance` row; the purpose itself is never persisted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaimPurpose {
+    Refresh,
+    Login,
+}

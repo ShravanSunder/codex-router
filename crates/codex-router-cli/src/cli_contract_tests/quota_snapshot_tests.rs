@@ -75,8 +75,10 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
             )
             .with_active_credential_generation(1),
         ));
-        let secrets = must_ok(FileSecretStore::open(&secret_root));
-        let key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+        );
+        let key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &key,
@@ -156,8 +158,12 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -295,12 +301,16 @@ fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
         &state,
         &healthy_account,
     ));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
     for (account_id, access_token) in [
         (&floor_account_id, "floor-access-token"),
         (&healthy_account_id, "healthy-access-token"),
     ] {
-        let bundle_key = must_ok(account_credential_bundle_key(account_id, 1));
+        let bundle_key = must_ok(openai_account_credential_bundle_key(account_id, 1));
         must_ok(
             secrets.write_secret(
                 &bundle_key,
@@ -380,8 +390,10 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
         )
         .with_active_credential_generation(1),
     ));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let bundle = AccountCredentialBundle::imported_codex_auth(
         "switch-intent-access",
         Some("switch-intent-refresh".to_owned()),
@@ -476,8 +488,12 @@ fn quota_refresh_weekly_only_response_is_known_with_five_hour_no_data() {
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -586,8 +602,12 @@ fn quota_refresh_missing_reset_response_is_unknown_fallback() {
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,

@@ -170,7 +170,13 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
         &router_root.join("state.sqlite"),
     )));
     assert!(must_ok(runtime.block_on(
-        maintenance_store.claim_credential_refresh(primary_account.account_id(), 1, 2,)
+        maintenance_store.claim_credential_refresh(
+            primary_account.account_id(),
+            codex_router_core::provider::Provider::Openai,
+            codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+            1,
+            2
+        )
     )));
     must_ok(runtime.block_on(maintenance_store.close()));
     let in_progress = run_cli(
