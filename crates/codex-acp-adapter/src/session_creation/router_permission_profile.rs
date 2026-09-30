@@ -15,9 +15,10 @@ use std::path::{Path, PathBuf};
 /// Package managers, toolchains and build systems keep shared caches, stores and
 /// toolchain state here; without them `pnpm install`, Cargo, SwiftPM and Xcode fail
 /// outside the working directory. These are shared tool state, not only caches: a
-/// write here can affect later runs in other sessions. Locations that do not exist yet
-/// are granted too, so a first install can create them.
-const TOOL_LOCATIONS_UNDER_HOME: [&str; 21] = [
+/// write here can affect later runs in other sessions and the owner's own builds.
+/// Locations that do not exist yet are granted too, so a first install can create
+/// them when their parent directory exists.
+const TOOL_LOCATIONS_UNDER_HOME: [&str; 20] = [
     // Platform and XDG caches: SwiftPM, Xcode, clang modules, Go builds, Homebrew, pip, uv.
     "Library/Caches",
     ".cache",
@@ -29,7 +30,6 @@ const TOOL_LOCATIONS_UNDER_HOME: [&str; 21] = [
     ".npm",
     ".yarn",
     ".bun/install/cache",
-    ".local/state/fnm_multishells",
     // Rust toolchains and Cargo's registry, git checkouts and package-cache lock.
     ".cargo",
     ".rustup",
@@ -45,6 +45,22 @@ const TOOL_LOCATIONS_UNDER_HOME: [&str; 21] = [
     ".local/share/uv",
     ".local/share/mise",
     ".local/state/mise",
+];
+
+/// Paths inside the tool locations that stay read-only: executables on the owner's
+/// `PATH` and files the owner's shells source or tools load as configuration or
+/// credentials. A session writing these could run code in the owner's next
+/// unsandboxed shell or build. Native does not report these exceptions back.
+const READ_ONLY_INSIDE_TOOL_LOCATIONS: [&str; 9] = [
+    "Library/pnpm/bin",
+    ".cargo/bin",
+    ".cargo/env",
+    ".cargo/config",
+    ".cargo/config.toml",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".gradle/init.d",
+    ".gradle/gradle.properties",
 ];
 
 const fn profile_name(access: RouterAccess) -> &'static str {
@@ -73,6 +89,7 @@ const fn parent_profile(access: RouterAccess) -> &'static str {
 pub(super) struct RouterSessionProfile {
     access: RouterAccess,
     writable_roots: BTreeSet<String>,
+    read_only_exceptions: BTreeSet<String>,
 }
 
 /// Host locations a profile's grants are resolved against.
@@ -89,7 +106,7 @@ impl HostLocations {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|home| home.is_absolute())
-            .ok_or(SessionSetupError::HomeDirectoryUnavailable)?;
+            .ok_or(SessionSetupError::HostLocationsUnavailable)?;
         let mut temporary_directories = Vec::new();
         let candidates = std::env::var_os("TMPDIR")
             .map(PathBuf::from)
@@ -98,9 +115,11 @@ impl HostLocations {
             .filter(|path| path.is_absolute());
         for candidate in candidates {
             // Seatbelt matches canonical paths, so `/tmp` is granted as `/private/tmp`.
-            if let Ok(canonical) = tokio::fs::canonicalize(&candidate).await {
-                temporary_directories.push(canonical);
-            }
+            // An unresolvable directory fails setup rather than silently losing a grant.
+            let canonical = tokio::fs::canonicalize(&candidate)
+                .await
+                .map_err(|_| SessionSetupError::HostLocationsUnavailable)?;
+            temporary_directories.push(canonical);
         }
         Ok(Self {
             home,
@@ -143,9 +162,14 @@ impl RouterSessionProfile {
                     .map(|directory| directory.to_string_lossy().into_owned()),
             );
         }
+        let read_only_exceptions = READ_ONLY_INSIDE_TOOL_LOCATIONS
+            .iter()
+            .map(|location| host.home.join(location).to_string_lossy().into_owned())
+            .collect();
         Self {
             access,
             writable_roots,
+            read_only_exceptions,
         }
     }
 
@@ -160,6 +184,11 @@ impl RouterSessionProfile {
             .writable_roots
             .iter()
             .map(|root| (root.clone(), json!("write")))
+            .chain(
+                self.read_only_exceptions
+                    .iter()
+                    .map(|path| (path.clone(), json!("read"))),
+            )
             .collect::<Map<_, _>>();
         Map::from_iter([
             ("default_permissions".to_owned(), json!(profile)),
@@ -303,6 +332,37 @@ mod tests {
             assert_eq!(restricted_filesystem[root], "write");
             assert!(!workspace_filesystem.contains_key(root));
         }
+    }
+
+    #[test]
+    fn executables_and_startup_files_inside_tool_locations_stay_read_only() {
+        // Arrange
+        let workspace = profile(RouterAccess::WorkspaceWrite);
+
+        // Act
+        let config = workspace.native_config();
+        let filesystem = config["permissions.router-workspace-write.filesystem"]
+            .as_object()
+            .unwrap();
+
+        // Assert: PATH entries and sourced files are read-only inside writable parents.
+        for path in [
+            ".cargo/bin",
+            ".cargo/env",
+            "Library/pnpm/bin",
+            ".gradle/init.d",
+        ] {
+            assert_eq!(filesystem[&format!("{HOME}/{path}")], "read", "{path}");
+        }
+        assert_eq!(filesystem[&format!("{HOME}/.cargo")], "write");
+        // Assert: fnm's per-shell PATH links are not granted at all.
+        assert!(!filesystem.contains_key(&format!("{HOME}/.local/state/fnm_multishells")));
+        // Assert: the exceptions are not expected back as writable roots.
+        assert!(
+            !workspace
+                .writable_roots
+                .contains(&format!("{HOME}/.cargo/bin"))
+        );
     }
 
     #[test]

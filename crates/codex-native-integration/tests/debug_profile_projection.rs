@@ -1,5 +1,6 @@
 use codex_native_integration::{
     AppServerCommandSpec, CodexPaths, CodexRouterProfile, DebugCodexProfile,
+    router_permission_profile_overrides,
 };
 use std::path::Path;
 
@@ -78,11 +79,23 @@ fn backend_overrides_preserve_supported_debug_profile_values() {
             configuration.push('\n');
         }
     }
-    // Assert: no model/project/provider/retry setting was silently dropped.
-    assert_eq!(
-        toml::from_str::<toml::Table>(&configuration).unwrap(),
-        toml::from_str::<toml::Table>(PROFILE).unwrap()
+    // Assert: no model/project/provider/retry setting was silently dropped, and the
+    // debug launch keeps Router's permission profiles so access validation still passes.
+    let mut expected = toml::from_str::<toml::Table>(PROFILE).unwrap();
+    expected.extend(
+        router_permission_profile_overrides()
+            .join("\n")
+            .parse::<toml::Table>()
+            .unwrap(),
     );
+    let decoded = toml::from_str::<toml::Table>(&configuration).unwrap();
+    assert_eq!(decoded, expected);
+    for profile in ["router-write-restricted", "router-workspace-write"] {
+        assert_eq!(
+            decoded["permissions"][profile]["network"]["enabled"].as_bool(),
+            Some(true)
+        );
+    }
     assert!(
         !args
             .iter()

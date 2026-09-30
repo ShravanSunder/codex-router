@@ -14,6 +14,9 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
+#[path = "../../codex-acp-adapter/tests/support/native_permission_echo.rs"]
+mod native_permission_echo;
+use native_permission_echo::applied_router_sandbox;
 #[path = "../../codex-acp-adapter/tests/support/conversation_operation_recorder.rs"]
 mod conversation_operation_recorder;
 use conversation_operation_recorder::AcceptingConversationRecorder;
@@ -379,7 +382,6 @@ async fn acp_listener_reports_unavailable_codex_without_closing_the_connection()
     let schemas = Arc::new(NativePayloadSchemas::from_bundle(&bundle).unwrap());
     let backend_path = root.join("backend.sock");
     let backend_listener = tokio::net::UnixListener::bind(&backend_path).unwrap();
-    let scratch_for_backend = scratch.clone();
     let backend = tokio::spawn(async move {
         let (stream, _) = backend_listener.accept().await.unwrap();
         let mut wire = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -396,7 +398,7 @@ async fn acp_listener_reports_unavailable_codex_without_closing_the_connection()
                 json!({"cwd":"/tmp","model":"gpt-5.6-sol","approvalPolicy":"on-request",
                     "approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
-                    "sandbox":{"type":"workspaceWrite","writableRoots":[scratch_for_backend]},
+                    "sandbox":applied_router_sandbox(&request),
                     "thread":{"id":"native-thread-1","cwd":"/tmp","turns":[]}})
             };
             wire.send(tokio_tungstenite::tungstenite::Message::Text(

@@ -47,6 +47,7 @@ pub use native_session_launch::caller_overrides;
 pub use native_state_paths::CodexPaths;
 pub use remote_control_observation::RemoteControlObservation;
 pub use router_profile_projection::CodexRouterProfile;
+pub use router_profile_projection::router_permission_profile_overrides;
 pub use stored_repository_identity::{
     RepositoryIdentity, non_empty_trimmed, normalize_git_origin_url, normalize_path,
     normalized_paths_resolve_to_same_location, path_identity_candidates,

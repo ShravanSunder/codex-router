@@ -28,8 +28,12 @@ impl AppServerCommandSpec {
         }
     }
     #[must_use]
+    /// Replaces the production model routing with the debug profile, keeping Router's
+    /// permission profiles so debug sessions pass the same access validation. A debug
+    /// profile's own `permissions` or `features` tables come later and take precedence.
     pub fn with_debug_profile(mut self, profile: &crate::DebugCodexProfile) -> Self {
-        self.root_overrides = profile.root_overrides();
+        self.root_overrides = crate::router_permission_profile_overrides();
+        self.root_overrides.extend(profile.root_overrides());
         self.remote_control = false;
         self
     }

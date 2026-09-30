@@ -36,15 +36,8 @@ supports_websockets = true
         )
     }
 
-    /// Returns root configuration overrides for the managed app-server child.
-    ///
-    /// Carries both halves Router owns: the model provider, and direct network
-    /// access for both Router profiles. The managed network proxy is switched off
-    /// explicitly so a home or project setting cannot reinstate it: behind it,
-    /// Seatbelt admits only the loopback proxy and allowlisted Unix sockets, which
-    /// breaks DNS for SwiftPM and ssh and the 1Password agent. Per-session overrides
-    /// add only dotted `extends` and `filesystem` keys, so they merge into these
-    /// profiles instead of replacing their `network`.
+    /// Returns root configuration overrides for the managed app-server child:
+    /// the model provider, then Router's permission profiles.
     #[must_use]
     pub fn root_overrides(self) -> Vec<String> {
         let mut overrides = vec![
@@ -57,12 +50,27 @@ supports_websockets = true
             "model_providers.codex-router.wire_api=\"responses\"".to_owned(),
             "model_providers.codex-router.requires_openai_auth=true".to_owned(),
             "model_providers.codex-router.supports_websockets=true".to_owned(),
-            "features.network_proxy.enabled=false".to_owned(),
         ];
-        for (profile, parent) in ROUTER_PERMISSION_PROFILES {
-            overrides.push(format!("permissions.{profile}.extends=\"{parent}\""));
-            overrides.push(format!("permissions.{profile}.network.enabled=true"));
-        }
+        overrides.extend(router_permission_profile_overrides());
         overrides
     }
+}
+
+/// Returns the network half of Router's permission profiles, shared by the production
+/// and debug app-server launches.
+///
+/// Both profiles get direct network access. The managed network proxy is switched
+/// off explicitly so a home or project setting cannot reinstate it: behind it,
+/// Seatbelt admits only the loopback proxy and allowlisted Unix sockets, which breaks
+/// DNS for SwiftPM and ssh and the 1Password agent. Per-session overrides add only
+/// dotted `extends` and `filesystem` keys, so they merge into these profiles instead
+/// of replacing their `network`.
+#[must_use]
+pub fn router_permission_profile_overrides() -> Vec<String> {
+    let mut overrides = vec!["features.network_proxy.enabled=false".to_owned()];
+    for (profile, parent) in ROUTER_PERMISSION_PROFILES {
+        overrides.push(format!("permissions.{profile}.extends=\"{parent}\""));
+        overrides.push(format!("permissions.{profile}.network.enabled=true"));
+    }
+    overrides
 }
