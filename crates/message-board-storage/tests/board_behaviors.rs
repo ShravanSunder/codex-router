@@ -250,24 +250,30 @@ async fn immutable_messages_threads_references_and_signed_pagination_share_one_a
     std::fs::remove_file(other_path).unwrap();
 
     store
-        .resolve_thread(ThreadResolveRequest {
-            root_message_id: root.message.message_id.clone(),
-            actor: alice.clone(),
-            acting_for: None,
-        })
+        .resolve_thread(
+            ThreadResolveRequest {
+                root_message_id: root.message.message_id.clone(),
+                actor: alice.clone(),
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     let failure = store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Thread {
-                root_message_id: root.message.message_id.clone(),
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Thread {
+                    root_message_id: root.message.message_id.clone(),
+                },
+                actor: alice,
+                acting_for: None,
+                text: text("blocked"),
+                references: no_references(),
             },
-            actor: alice,
-            acting_for: None,
-            text: text("blocked"),
-            references: no_references(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(failure.kind, BoardFailureKind::ThreadResolved);
@@ -349,11 +355,14 @@ async fn future_only_watches_scoped_acknowledgements_and_unread_summaries_surviv
     )
     .await;
     let resolved = store
-        .resolve_thread(ThreadResolveRequest {
-            root_message_id: root.message.message_id.clone(),
-            actor: alice,
-            acting_for: None,
-        })
+        .resolve_thread(
+            ThreadResolveRequest {
+                root_message_id: root.message.message_id.clone(),
+                actor: alice,
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap()
         .activity_sequence

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE thread_subscriptions SET state='draining',generation=? WHERE reader_key=? AND scope_kind='thread' AND scope_id=? AND state IN ('active','draining')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "871fa1d41673e0f976a9940893bc5820c6d0fa32567934b998087fba0ea0ad69"
+}

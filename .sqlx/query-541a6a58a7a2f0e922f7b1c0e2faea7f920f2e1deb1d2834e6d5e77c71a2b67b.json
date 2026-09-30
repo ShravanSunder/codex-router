@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT root_id FROM subscription_windows WHERE reader_key=? ORDER BY opened_at,root_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "root_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "541a6a58a7a2f0e922f7b1c0e2faea7f920f2e1deb1d2834e6d5e77c71a2b67b"
+}

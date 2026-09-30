@@ -11,6 +11,9 @@ use crate::storage_support::{
     ensure_acting_for_identity, ensure_identity, invalid_record, recompute_project_unread,
     resource_already_exists, storage_error,
 };
+use crate::subscription_window_records::record_subscription_post;
+use crate::thread_subscription_lifecycle_records::upsert_join_subscription;
+use chrono::{DateTime, Utc};
 use message_board::*;
 use sqlx::Connection;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,6 +24,7 @@ impl BoardStore {
     pub async fn post_message(
         &mut self,
         request: MessagePostRequest,
+        now: DateTime<Utc>,
     ) -> Result<MessagePostResult, BoardError> {
         let mut transaction = self
             .connection
@@ -157,6 +161,16 @@ impl BoardStore {
             )
             .await?;
         }
+        let subscription_root = root_id.as_ref().unwrap_or(&request.message_id);
+        record_subscription_post(
+            &mut transaction,
+            &actor_key,
+            &topic_id,
+            subscription_root,
+            activity_sequence,
+            now,
+        )
+        .await?;
         publish_message_unread(&mut transaction, &project_id, root_id.as_ref(), &actor_key).await?;
         recompute_project_unread(&mut transaction, &actor_key, project_id.as_str()).await?;
         let message = load_message(&mut transaction, &request.message_id).await?;
@@ -173,6 +187,7 @@ impl BoardStore {
     pub async fn create_thread(
         &mut self,
         request: ThreadCreateRequest,
+        now: DateTime<Utc>,
     ) -> Result<ThreadCreateResult, BoardError> {
         if matches!(request.actor, Identity::Session { .. }) && request.role.is_none() {
             return Err(BoardError::invalid_field(
@@ -288,6 +303,25 @@ impl BoardStore {
             &request.message_id,
             message_activity,
             request.watch,
+        )
+        .await?;
+        if request.role.is_some() && request.watch {
+            upsert_join_subscription(
+                &mut transaction,
+                &actor_key,
+                &request.actor,
+                &request.message_id,
+                now,
+            )
+            .await?;
+        }
+        record_subscription_post(
+            &mut transaction,
+            &actor_key,
+            &topic.topic_id,
+            &request.message_id,
+            message_activity,
+            now,
         )
         .await?;
         publish_message_unread(&mut transaction, &board.project_id, None, &actor_key).await?;

@@ -140,19 +140,20 @@ fn decode_participant_with_identity(
             root_message_id,
         }));
     }
-    Participant::new(
+    Participant::new(ParticipantProps {
         identity,
-        decode_role(&row.role)?,
-        row.note
+        role: decode_role(&row.role)?,
+        note: row
+            .note
             .map(ParticipantNote::try_from)
             .transpose()
             .map_err(|_| invalid_record())?,
-        activity_sequence(row.joined_at_activity)?,
-        activity_sequence(row.last_seen_activity)?,
-        row.closed_at_activity.map(activity_sequence).transpose()?,
-        decode_closed_reason(row.closed_reason.as_deref())?,
+        joined_at_activity: activity_sequence(row.joined_at_activity)?,
+        last_seen_activity: activity_sequence(row.last_seen_activity)?,
+        closed_at_activity: row.closed_at_activity.map(activity_sequence).transpose()?,
+        closed_reason: decode_closed_reason(row.closed_reason.as_deref())?,
         replaced_by,
-    )
+    })
     .map_err(|_| BoardError::invalid_record(ResourceIdentity::Thread { root_message_id }))
 }
 

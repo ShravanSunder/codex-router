@@ -369,8 +369,9 @@ pub(crate) async fn validate_reader_activity_boundaries(
         "SELECT position.root_id,position.delivered_through,watch.starts_after_activity, \
            EXISTS(SELECT 1 FROM board_activity activity \
              WHERE activity.activity_sequence=position.delivered_through \
-               AND activity.root_id=position.root_id \
-               AND activity.kind='threadMessageCreated') AS valid_scope \
+               AND ((activity.root_id=position.root_id AND activity.kind='threadMessageCreated') \
+                 OR (activity.message_id=position.root_id AND activity.kind='mainMessageCreated'))) \
+             AS valid_scope \
          FROM thread_delivery_positions position \
          JOIN thread_watches watch ON watch.reader_key=position.reader_key AND watch.root_id=position.root_id \
          JOIN board_messages message ON message.message_id=position.root_id \

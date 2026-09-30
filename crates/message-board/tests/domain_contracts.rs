@@ -201,7 +201,9 @@ fn activity_positions_fit_the_sqlite_signed_integer_domain() {
 
 #[test]
 fn participant_role_note_and_closed_state_are_validated_in_rust() {
-    use message_board::{Participant, ParticipantClosedReason, ParticipantNote, ParticipantRole};
+    use message_board::{
+        Participant, ParticipantClosedReason, ParticipantNote, ParticipantProps, ParticipantRole,
+    };
     assert!(serde_json::from_value::<ParticipantRole>(json!("orchestrator")).is_ok());
     assert!(serde_json::from_value::<ParticipantRole>(json!("driver")).is_err());
     let note = ParticipantNote::try_from("  reviewing storage  ".to_owned()).unwrap();
@@ -219,70 +221,70 @@ fn participant_role_note_and_closed_state_are_validated_in_rust() {
     let joined = ActivitySequence::try_from(10).unwrap();
     let closed = ActivitySequence::try_from(12).unwrap();
     assert!(
-        Participant::new(
-            identity.clone(),
-            ParticipantRole::Reviewer,
-            Some(note),
-            joined,
-            joined,
-            None,
-            None,
-            None,
-        )
+        Participant::new(ParticipantProps {
+            identity: identity.clone(),
+            role: ParticipantRole::Reviewer,
+            note: Some(note),
+            joined_at_activity: joined,
+            last_seen_activity: joined,
+            closed_at_activity: None,
+            closed_reason: None,
+            replaced_by: None,
+        })
         .is_ok()
     );
     assert!(
-        Participant::new(
-            identity.clone(),
-            ParticipantRole::Reviewer,
-            None,
-            joined,
-            closed,
-            Some(closed),
-            Some(ParticipantClosedReason::Left),
-            None,
-        )
+        Participant::new(ParticipantProps {
+            identity: identity.clone(),
+            role: ParticipantRole::Reviewer,
+            note: None,
+            joined_at_activity: joined,
+            last_seen_activity: closed,
+            closed_at_activity: Some(closed),
+            closed_reason: Some(ParticipantClosedReason::Left),
+            replaced_by: None,
+        })
         .is_ok()
     );
     assert!(
-        Participant::new(
-            identity.clone(),
-            ParticipantRole::Reviewer,
-            None,
-            joined,
-            closed,
-            Some(closed),
-            Some(ParticipantClosedReason::Replaced),
-            Some(replacement.clone()),
-        )
+        Participant::new(ParticipantProps {
+            identity: identity.clone(),
+            role: ParticipantRole::Reviewer,
+            note: None,
+            joined_at_activity: joined,
+            last_seen_activity: closed,
+            closed_at_activity: Some(closed),
+            closed_reason: Some(ParticipantClosedReason::Replaced),
+            replaced_by: Some(replacement.clone()),
+        })
         .is_err(),
         "only an Orchestrator can be closed as replaced"
     );
     assert!(
-        Participant::new(
-            identity.clone(),
-            ParticipantRole::Orchestrator,
-            None,
-            joined,
-            closed,
-            Some(closed),
-            Some(ParticipantClosedReason::Replaced),
-            Some(identity),
-        )
+        Participant::new(ParticipantProps {
+            identity: identity.clone(),
+            role: ParticipantRole::Orchestrator,
+            note: None,
+            joined_at_activity: joined,
+            last_seen_activity: closed,
+            closed_at_activity: Some(closed),
+            closed_reason: Some(ParticipantClosedReason::Replaced),
+            replaced_by: Some(identity),
+        })
         .is_err(),
         "self replacement is not a valid stored state"
     );
     assert!(
-        Participant::new(
-            replacement,
-            ParticipantRole::Participant,
-            None,
-            closed,
-            joined,
-            None,
-            None,
-            None,
-        )
+        Participant::new(ParticipantProps {
+            identity: replacement,
+            role: ParticipantRole::Participant,
+            note: None,
+            joined_at_activity: closed,
+            last_seen_activity: joined,
+            closed_at_activity: None,
+            closed_reason: None,
+            replaced_by: None,
+        })
         .is_err(),
         "last-seen cannot precede Join"
     );
