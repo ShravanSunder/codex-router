@@ -135,9 +135,11 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     // The native Thread schema requires both timestamps as unix seconds.
     let thread_updated_at = chrono::Utc::now().timestamp() - 45;
     let thread_created_at = thread_updated_at - 600;
-    let long_prompt_title = format!(
-        "First prompt title: {}",
-        "private prompt detail ".repeat(12)
+    // This is a valid SessionDisplayName if a regression caches title as the name.
+    // The identity header must still use the endpoint/session fallback because name is absent.
+    let valid_short_title = "Fix the retry path";
+    assert!(
+        collaboration_protocol::SessionDisplayName::try_from(valid_short_title.to_owned()).is_ok()
     );
     let backend = tokio::spawn(async move {
         let mut current_name = None::<String>;
@@ -274,7 +276,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                         } else {
                             json!({"type":"idle"})
                         };
-                        json!({"thread":{"id":"proof-thread","name":current_name,"title":long_prompt_title,"cwd":"/tmp","status":status,"updatedAt":BUSY_THREAD_UPDATED_AT_SECONDS,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
+                        json!({"thread":{"id":"proof-thread","name":current_name,"title":valid_short_title,"cwd":"/tmp","status":status,"updatedAt":BUSY_THREAD_UPDATED_AT_SECONDS,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}})
                     } else if expected_method == "thread/turns/list" {
                         json!({"data":[{"id":"proof-turn","items":[{"type":"userMessage","id":"proof-user-message","content":[]}]}],"nextCursor":null,"backwardsCursor":null})
                     } else {

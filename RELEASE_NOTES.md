@@ -3,6 +3,7 @@
 ## Unreleased - 2026-09-24
 
 - Provider setting rejection errors now name the setting, requested value, and advertised choices; display truncation is marked with an ellipsis.
+- Add recipient-first emoji identity headers and `agent-collaboration message reply --expect-sender`; hide empty sessions from the picker by default.
 - Encrypt pooled account credentials with a Router-owned Keychain key. After upgrading, authorize Router once at the first Host restart; refreshes in that running Host do not prompt. The Host migrates existing pooled credential files to encrypted envelopes, reads each credential back for verification, then removes the plaintext file. If migration stops early, the Host still starts, Claude requests report the incomplete migration, Codex requests keep the existing credential-unavailable response, and `account list` and `quota` identify accounts still to convert; the next Host restart resumes migration without marking accounts as needing login.
 - Add `serve --claude-five-hour-reserve-percent` to configure when Claude's five-hour window enters the reserve tier; defaults to 95 percent and accepts values from 1 to 99.
 - Route Claude accounts by their five-hour and weekly quota windows. Claude accounts are not yet shown by `quota`; that view is added in PR4.

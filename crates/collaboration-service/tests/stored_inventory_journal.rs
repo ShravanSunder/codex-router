@@ -3,15 +3,141 @@
 mod tests {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use collaboration_client::{ClientError, ControlClient, JournalStatus};
-    use collaboration_protocol::{NativeSessionListParams, NativeSessionView};
+    use collaboration_protocol::{
+        MessageContent, MessageText, NativeSessionListParams, NativeSessionScope,
+        NativeSessionSource, NativeSessionView, RouterNoticeKind, SessionDisplayNameLookup,
+        render_message_with_lookup,
+    };
     use collaboration_service::{
         LocalControlService, ManifestPublication, NativeControlBackend, NativeGenerationGate,
         ServiceIdentity,
     };
     use lifecycle_observation::{LifecycleStore, ObservationJournal};
     use serde_json::json;
-    use std::{os::unix::fs::DirBuilderExt, path::PathBuf, sync::Arc};
+    use std::{
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
+        path::PathBuf,
+        sync::Arc,
+    };
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn stored_inventory_does_not_cache_a_short_title_as_display_name() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = root.path().join("native-home");
+        std::fs::create_dir(&home).unwrap();
+        let database = home.join("state_5.sqlite");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&database)
+            .create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT NOT NULL DEFAULT '', created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO threads (id,cwd,model,name,title,preview,first_user_message,updated_at_ms,recency_at_ms,archived) VALUES ('stored-title-only','/private-fixture-workspace','gpt-5.6-sol',NULL,'Fix the retry path','PRIVATE_BODY','PRIVATE_BODY',1000,1000,0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let id = "00000000-0000-4000-8000-000000000021";
+        let epoch = "00000000-0000-4000-8000-000000000022";
+        let endpoint: collaboration_protocol::EndpointRef = serde_json::from_value(json!({
+            "serviceId": id,
+            "endpointId": "codex-local"
+        }))
+        .unwrap();
+        let description = serde_json::from_value(json!({
+            "endpoint": endpoint,
+            "label": "Stored title fixture",
+            "availability": {"state": "unprobed"},
+            "channels": [{
+                "kind": "nativeCodex",
+                "transport": "unixWebSocket",
+                "path": "absent-native.sock",
+                "schemaDigest": null,
+                "generation": null
+            }]
+        }))
+        .unwrap();
+        let identity = ServiceIdentity::new(id, epoch, &format!("sha256:{}", "a".repeat(64)))
+            .unwrap()
+            .with_endpoints(vec![description])
+            .unwrap()
+            .with_native_backend(NativeControlBackend {
+                endpoint: endpoint.clone(),
+                gate: NativeGenerationGate::default(),
+                codex_home: home,
+            })
+            .unwrap();
+        let display_names = identity.session_display_name_cache();
+        let listener =
+            LocalControlService::bind(&root.path().join("control.sock"), identity).unwrap();
+        let manifest = serde_json::from_value(json!({
+            "version": 2,
+            "serviceId": id,
+            "serviceEpoch": epoch,
+            "control": {"transport": "unixJsonLines", "path": "control.sock"},
+            "controlSchemaDigest": format!("sha256:{}", "a".repeat(64)),
+            "mcp": {"transport": "streamableHttp", "url": "http://127.0.0.1:0/mcp"}
+        }))
+        .unwrap();
+        let publication = ManifestPublication::publish(root.path(), &manifest).unwrap();
+        let stop = CancellationToken::new();
+        let server = tokio::spawn(listener.run(stop.clone()));
+        let mut client = ControlClient::connect(root.path(), "stored-title-test", "1")
+            .await
+            .unwrap();
+        let inventory = client
+            .list_sessions(NativeSessionListParams {
+                endpoint: endpoint.clone(),
+                view: NativeSessionView::Stored,
+                scope: NativeSessionScope::Any,
+                source: NativeSessionSource::All,
+                include_empty_sessions: false,
+                query: None,
+                page_size: 10,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+        client.close().await.unwrap();
+        stop.cancel();
+        server.await.unwrap().unwrap();
+        drop(publication);
+
+        let session = inventory
+            .sessions
+            .first()
+            .expect("stored row is visible when its first user message exists");
+        assert_eq!(session.name, None);
+        assert_eq!(session.title, "Fix the retry path");
+        assert!(
+            collaboration_protocol::SessionDisplayName::try_from(session.title.clone()).is_ok()
+        );
+        assert_eq!(display_names.display_name_for(&session.target), Ok(None));
+        let rendered = render_message_with_lookup(
+            &session.target,
+            &MessageContent::Agent {
+                sender: session.target.clone(),
+                text: MessageText::try_from("stored display fallback proof".to_owned()).unwrap(),
+            },
+            &display_names,
+            RouterNoticeKind::Other,
+        )
+        .unwrap();
+        assert!(
+            rendered
+                .text
+                .starts_with("🤖 codex-local/stored-t ← 🤖 codex-local/stored-t\n")
+        );
+    }
 
     #[tokio::test]
     async fn paged_stored_discovery_records_addresses_without_claiming_live_state() {
