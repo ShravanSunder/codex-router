@@ -105,8 +105,9 @@ pub use session_command_port::{
 };
 pub use session_delivery_contract::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, RouteClaim,
-    RouteUnavailableReason, SessionDeliveryRoute, SessionMessageDelivery,
+    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, LoadPolicy,
+    NOT_LOADED_REASON, RouteClaim, RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
+    SessionMessageDelivery, TargetPresence, TargetPresenceProbe,
 };
 pub use session_delivery_router::SessionDeliveryRouter;
 pub use session_event_hub::{

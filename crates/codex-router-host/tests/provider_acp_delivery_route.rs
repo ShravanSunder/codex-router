@@ -22,8 +22,9 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, ProviderOperationAdmission,
-    ProviderOperationStore, ProviderSessionRecord, SessionDeliveryRoute,
+    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, LoadPolicy, NOT_LOADED_REASON,
+    ProviderOperationAdmission, ProviderOperationStore, ProviderSessionRecord, RouteClaim,
+    RoutePresence, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
 };
 use std::{
     path::{Path, PathBuf},
@@ -59,6 +60,37 @@ impl AttemptEvidenceSink for RecordedEvidence {
             self.0.lock().await.push(evidence);
             Ok(())
         })
+    }
+}
+
+struct StaleRunningClaimRoute(Arc<ProviderAcpDeliveryRoute>);
+
+impl SessionDeliveryRoute for StaleRunningClaimRoute {
+    fn reachability(&self) -> collaboration_protocol::SessionReachability {
+        collaboration_protocol::SessionReachability::ProviderAcp
+    }
+
+    fn claim(&self, _: &SessionRef) -> DeliveryFuture<'_, RouteClaim> {
+        Box::pin(async { Ok(RouteClaim::Holds) })
+    }
+
+    fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, RoutePresence> {
+        self.0.presence(target)
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        request: DeliveryRequest,
+        evidence: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
+        self.0.deliver(request, evidence)
+    }
+
+    fn reconcile_attempt(
+        &self,
+        context: AttemptReconciliationContext,
+    ) -> DeliveryFuture<'_, AttemptReconciliation> {
+        self.0.reconcile_attempt(context)
     }
 }
 
@@ -229,6 +261,7 @@ fn request(target: SessionRef, text: &str) -> DeliveryRequest {
         },
         header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode: MessageDelivery::Auto,
+        load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::generate(),
         attempt: AttemptId::generate(),
@@ -285,6 +318,7 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
         store,
         Arc::new(NoLivePeer),
     );
+
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
 
     let receipt = route
@@ -296,6 +330,7 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
                 },
                 header_context: collaboration_protocol::MessageHeaderContext::default(),
                 mode: MessageDelivery::Steer,
+                load_policy: collaboration_service::LoadPolicy::MayLoad,
                 precondition: DeliveryPrecondition::Unpinned,
                 correlation: DeliveryCorrelationId::generate(),
                 attempt: AttemptId::generate(),
@@ -561,18 +596,47 @@ async fn provider_load_auth_rejection_is_typed_without_session_new() {
         )
         .expect("supervisor"),
     );
-    let route = ProviderAcpDeliveryRoute::new(
+    let route = Arc::new(ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
         std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         store,
         Arc::new(NoLivePeer),
+    ));
+    assert_eq!(
+        route.presence(&target).await.expect("provider presence"),
+        RoutePresence::Wakeable
     );
+
+    let stale_router =
+        SessionDeliveryRouter::new(vec![Arc::new(StaleRunningClaimRoute(Arc::clone(&route)))]);
+    let mut loaded_only_request = request(target.clone(), "held batch");
+    loaded_only_request.load_policy = LoadPolicy::LoadedOnly;
+    let loaded_only_evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
+    let loaded_only_receipt = stale_router
+        .deliver(loaded_only_request, &loaded_only_evidence)
+        .await
+        .expect("loaded-only stale-claim refusal");
+    assert!(matches!(
+        loaded_only_receipt.outcome,
+        DeliveryOutcome::NotSubmitted {
+            retryable: true,
+            ref reason,
+        } if reason == NOT_LOADED_REASON
+    ));
+    assert!(!load_marker.exists());
+    assert!(matches!(
+        loaded_only_evidence.0.lock().await.as_slice(),
+        [RouteEffectEvidence::ProviderAcp(before), RouteEffectEvidence::ProviderAcp(after)]
+            if before.submission == SubmissionEffect::Dispatching
+                && after.submission == SubmissionEffect::NotDispatched
+    ));
+
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
 
     let receipt = route
-        .deliver(request(target, "hello"), &evidence)
+        .deliver(request(target.clone(), "hello"), &evidence)
         .await
         .expect("load refusal");
 
@@ -640,6 +704,10 @@ async fn unadvertised_load_settles_not_submitted_without_sending_load() {
         store,
         Arc::new(NoLivePeer),
     );
+    assert!(matches!(
+        route.presence(&target).await.expect("provider presence"),
+        RoutePresence::Unreachable { .. }
+    ));
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
     let receipt = tokio::time::timeout(
         Duration::from_secs(2),
@@ -881,6 +949,10 @@ async fn live_peer_recheck_prevents_provider_load() {
         store,
         Arc::new(LivePeer),
     );
+    assert!(matches!(
+        route.presence(&target).await.expect("provider presence"),
+        RoutePresence::LiveElsewhere { .. }
+    ));
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
 
     let receipt = route

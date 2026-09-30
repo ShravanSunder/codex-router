@@ -308,6 +308,7 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
                     prompt,
                 },
                 header_context: collaboration_protocol::MessageHeaderContext::default(),
+                load_policy: collaboration_service::LoadPolicy::MayLoad,
             },
         );
     }
@@ -419,6 +420,7 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
                 prompt: queued_prompt,
             },
             header_context: collaboration_protocol::MessageHeaderContext::default(),
+            load_policy: collaboration_service::LoadPolicy::MayLoad,
         },
     );
 
@@ -515,6 +517,7 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
                 },
             },
             header_context: collaboration_protocol::MessageHeaderContext::default(),
+            load_policy: collaboration_service::LoadPolicy::MayLoad,
         },
     );
     backend
