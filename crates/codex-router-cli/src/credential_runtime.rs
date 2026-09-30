@@ -7,7 +7,7 @@ use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
 use codex_router_auth::resolver::AsyncRouterCredentialResolver;
 use codex_router_auth::resolver::CredentialRefreshClient;
 use codex_router_auth::resolver::CredentialResolverError;
-use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
+use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::ids::AccountId;
@@ -38,7 +38,7 @@ pub enum CliCredentialResolverOpenError {
 
 /// CLI-owned credential resolver adapter.
 #[derive(Debug)]
-pub struct CliCredentialResolver<C = OpenAiOAuthRefreshClient>
+pub struct CliCredentialResolver<C = ProviderCredentialRefreshClients>
 where
     C: CredentialRefreshClient + Clone,
 {
@@ -66,7 +66,7 @@ pub(crate) trait AsyncProviderCredentialResolver {
     }
 }
 
-impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
+impl CliCredentialResolver<ProviderCredentialRefreshClients> {
     /// Opens resolver state while reusing the serving process's encrypted-store handle.
     pub(crate) fn open_with_secret_store(
         state_db_path: &Path,
@@ -81,7 +81,7 @@ impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
             state_db_path: state_db_path.to_path_buf(),
             state_store,
             secret_store,
-            refresh_client: OpenAiOAuthRefreshClient::new(),
+            refresh_client: ProviderCredentialRefreshClients::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
     }
@@ -136,7 +136,7 @@ where
 
 /// CLI credential resolver owned by the process Tokio runtime.
 #[derive(Debug)]
-pub(crate) struct AsyncCliCredentialResolver<C = OpenAiOAuthRefreshClient>
+pub(crate) struct AsyncCliCredentialResolver<C = ProviderCredentialRefreshClients>
 where
     C: CredentialRefreshClient + Clone,
 {
@@ -146,7 +146,7 @@ where
     refresh_leases: AsyncRefreshLeaseRegistry,
 }
 
-impl AsyncCliCredentialResolver<OpenAiOAuthRefreshClient> {
+impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
     /// Opens credential resolver dependencies without creating a nested runtime.
     pub(crate) async fn open(
         state_db_path: &Path,
@@ -159,7 +159,7 @@ impl AsyncCliCredentialResolver<OpenAiOAuthRefreshClient> {
         Ok(Self {
             state_store,
             secret_store,
-            refresh_client: OpenAiOAuthRefreshClient::new(),
+            refresh_client: ProviderCredentialRefreshClients::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
     }

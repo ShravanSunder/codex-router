@@ -112,7 +112,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     1,
-                    3
+                    3,
+                    10
                 )
                 .await
                 .expect("claim should save")
@@ -136,7 +137,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     1,
-                    4
+                    4,
+                    20
                 )
                 .await
                 .expect("second claim should evaluate")
@@ -183,6 +185,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_login_claim_restores_previous_health_instead_of_requiring_login() {
+        let temp_dir = TestTempDir::new("credential_stale_login_claim");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let account_id = account_id("stale-login-claim");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        store
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "pooled claude",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await
+            .expect("account should save");
+
+        assert!(
+            store
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    900,
+                )
+                .await
+                .expect("initial refresh claim should save")
+        );
+        assert!(
+            store
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    1_000,
+                )
+                .await
+                .expect("refresh claim should activate")
+        );
+        assert!(
+            store
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Login,
+                    2,
+                    3,
+                    2_000,
+                )
+                .await
+                .expect("login claim should save")
+        );
+
+        let in_progress = store
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("maintenance should load")
+            .expect("login claim should be durable");
+        assert_eq!(in_progress.claim_purpose, Some(ClaimPurpose::Login));
+        assert_eq!(in_progress.claim_started_unix_seconds, Some(2_000));
+        assert_eq!(
+            in_progress.claim_prior_state,
+            Some(CredentialMaintenanceState::Healthy)
+        );
+
+        assert!(
+            !store
+                .release_stale_login_credential_claim(&account_id, Provider::Claude, 2_300, 300)
+                .await
+                .expect("claim younger than timeout should remain active")
+        );
+        assert!(
+            store
+                .release_stale_login_credential_claim(&account_id, Provider::Claude, 2_301, 300)
+                .await
+                .expect("stale login claim should be released")
+        );
+
+        let restored = store
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("maintenance should load")
+            .expect("pre-login maintenance should be restored");
+        assert_eq!(restored.credential_generation, 2);
+        assert_eq!(restored.state, CredentialMaintenanceState::Healthy);
+        assert_eq!(restored.claimed_successor_generation, None);
+        assert_eq!(restored.claim_purpose, None);
+        assert_eq!(restored.claim_started_unix_seconds, None);
+        assert_eq!(restored.claim_prior_state, None);
+    }
+
+    #[tokio::test]
     async fn login_claim_accepts_a_new_disabled_account_and_removes_its_claim_on_activation() {
         let temp_dir = TestTempDir::new("credential_login_claim_first_generation");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -202,7 +303,14 @@ mod tests {
 
         assert!(
             store
-                .claim_credential_refresh(&account_id, Provider::Claude, ClaimPurpose::Login, 0, 1,)
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Login,
+                    0,
+                    1,
+                    100,
+                )
                 .await
                 .expect("login claim should evaluate")
         );
@@ -279,6 +387,7 @@ mod tests {
                     ClaimPurpose::Refresh,
                     1,
                     2,
+                    100,
                 )
                 .await
                 .expect("refresh provider guard should evaluate")
@@ -291,6 +400,7 @@ mod tests {
                     ClaimPurpose::Login,
                     1,
                     2,
+                    100,
                 )
                 .await
                 .expect("login provider guard should evaluate")
@@ -324,7 +434,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     1,
-                    2
+                    2,
+                    100
                 )
                 .await
                 .expect("old claim")
@@ -349,7 +460,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     3,
-                    4
+                    4,
+                    200
                 )
                 .await
                 .expect("new claim")
@@ -418,7 +530,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     1,
-                    2
+                    2,
+                    100
                 )
                 .await
                 .expect("initial claim")
@@ -444,7 +557,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     2,
-                    3
+                    3,
+                    200
                 )
                 .await
                 .expect("same-generation claim")
@@ -459,6 +573,7 @@ mod tests {
             state
                 .finish_credential_refresh_claim(
                     &account_id,
+                    Provider::Openai,
                     2,
                     3,
                     CredentialMaintenanceState::Retrying,
@@ -510,7 +625,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     6,
-                    7
+                    7,
+                    400
                 )
                 .await
                 .expect("replacement claim")

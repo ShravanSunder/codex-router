@@ -41,6 +41,7 @@ async fn unavailable_credential_store_does_not_change_healthy_maintenance() {
                     ClaimPurpose::Refresh,
                     1,
                     2,
+                    1_000,
                 )
                 .await
         ));

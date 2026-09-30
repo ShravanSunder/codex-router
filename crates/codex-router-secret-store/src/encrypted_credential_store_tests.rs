@@ -185,3 +185,50 @@ fn ready_store_reads_only_v2_and_never_legacy_credential_files() {
     assert!(matches!(error, SecretStoreError::Filesystem { .. }));
     assert!(!error.to_string().contains("legacy-token-canary"));
 }
+
+#[test]
+fn generation_pruning_keeps_active_and_previous_and_isolated_by_provider_and_account() {
+    let root = tempfile::tempdir().expect("temporary secret root");
+    let store = EncryptedCredentialStore::new(
+        FileSecretStore::open(root.path()).expect("file secret store"),
+        PooledCredentialDataKey::from_bytes([0x62; 32]),
+    );
+    let account_id = AccountId::new("acct_prune_generations").expect("account id");
+    let other_account_id = AccountId::new("acct_prune_other").expect("other account id");
+    for (provider, owner, generation) in [
+        (Provider::Openai, &account_id, 1),
+        (Provider::Openai, &account_id, 2),
+        (Provider::Openai, &account_id, 3),
+        (Provider::Openai, &account_id, 4),
+        (Provider::Claude, &account_id, 1),
+        (Provider::Claude, &account_id, 2),
+        (Provider::Claude, &other_account_id, 1),
+    ] {
+        let key =
+            crate::account_tokens::provider_credential_bundle_key(provider, owner, generation)
+                .expect("provider-scoped key");
+        store
+            .write_staged(&key, &SecretString::new(format!("opaque-{generation}")))
+            .expect("credential generation should be encrypted");
+    }
+
+    let removed = store
+        .prune_obsolete_generations(Provider::Openai, &account_id, 4)
+        .expect("obsolete OpenAI generations should be pruned");
+
+    assert_eq!(removed, vec![1, 2]);
+    for (provider, owner, generation, should_remain) in [
+        (Provider::Openai, &account_id, 1, false),
+        (Provider::Openai, &account_id, 2, false),
+        (Provider::Openai, &account_id, 3, true),
+        (Provider::Openai, &account_id, 4, true),
+        (Provider::Claude, &account_id, 1, true),
+        (Provider::Claude, &account_id, 2, true),
+        (Provider::Claude, &other_account_id, 1, true),
+    ] {
+        let key =
+            crate::account_tokens::provider_credential_bundle_key(provider, owner, generation)
+                .expect("provider-scoped key");
+        assert_eq!(store.read_secret(&key).is_ok(), should_remain);
+    }
+}

@@ -549,9 +549,13 @@ fn account_login_reauthenticates_the_same_openai_account() {
         .to_secret_string(),
     );
     must_ok(secrets.write_secret(&active_key, &active_bundle));
-    assert!(must_ok(
-        runtime.block_on(state.mark_credential_unrefreshable(&account_id, 1))
-    ));
+    assert!(must_ok(runtime.block_on(
+        state.mark_credential_unrefreshable(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+            1,
+        )
+    )));
     must_ok(runtime.block_on(state.close()));
 
     let codex_bin = test_root.path().join("fake-codex");
@@ -731,6 +735,7 @@ fn account_login_defaults_to_device_auth_method() {
     let AccountCommand::LoginDeviceAuth {
         router_root,
         label,
+        provider_login_flow,
         codex_bin,
         allow_plaintext_file_secrets,
     } = command
@@ -739,6 +744,40 @@ fn account_login_defaults_to_device_auth_method() {
     };
     assert_eq!(router_root, default_router_root_for_test());
     assert_eq!(label, "primary");
+    assert_eq!(
+        provider_login_flow,
+        crate::account::ProviderLoginFlow::OpenAiDevice
+    );
     assert_eq!(codex_bin, PathBuf::from("codex"));
     assert!(!allow_plaintext_file_secrets);
+}
+
+#[test]
+fn account_login_provider_dispatch_selects_claude_oauth_flow() {
+    let command = match CliCommand::parse([
+        OsString::from("account"),
+        OsString::from("login"),
+        OsString::from("--provider"),
+        OsString::from("claude"),
+        OsString::from("--label"),
+        OsString::from("primary-claude"),
+    ]) {
+        Ok(CliCommand::Account(command)) => command,
+        Ok(other) => panic!("account command should parse, got {other:?}"),
+        Err(error) => panic!("account command should parse: {error}"),
+    };
+
+    let AccountCommand::LoginDeviceAuth {
+        provider_login_flow,
+        label,
+        ..
+    } = command
+    else {
+        panic!("provider login should use the shared typed dispatcher");
+    };
+    assert_eq!(
+        provider_login_flow,
+        crate::account::ProviderLoginFlow::ClaudeOAuth
+    );
+    assert_eq!(label, "primary-claude");
 }

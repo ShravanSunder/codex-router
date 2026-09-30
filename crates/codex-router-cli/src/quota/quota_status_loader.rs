@@ -1,4 +1,6 @@
 use super::*;
+use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::CLAUDE_MESSAGES;
 use codex_router_core::route_profile::RESPONSES_HTTP;
 
 #[derive(Clone)]
@@ -106,10 +108,6 @@ pub(super) async fn quota_status_report(
     now_unix_seconds: u64,
     unicode_bars: bool,
 ) -> Result<QuotaStatusReport, QuotaCommandError> {
-    let accounts = accounts
-        .iter()
-        .filter(|account| account.provider() == codex_router_core::provider::Provider::Openai)
-        .collect::<Vec<_>>();
     let selector_inputs = quota_history_state
         .selector_inputs_for_route_band(USER_QUOTA_ROUTE_BAND, now_unix_seconds)
         .await?;
@@ -183,7 +181,17 @@ pub(super) async fn quota_status_report(
             .as_ref()
             .and_then(PersistedQuotaSnapshot::reset_credits_available);
         let mut display_windows = if let Some(selector_input) = selector_input {
-            display_windows_from_selector_input(selector_input)
+            if account.provider() == Provider::Claude {
+                selector_input
+                    .window_observations()
+                    .iter()
+                    .map(|observation| {
+                        DisplayQuotaWindow::from_claude_observation(observation, now_unix_seconds)
+                    })
+                    .collect()
+            } else {
+                display_windows_from_selector_input(selector_input)
+            }
         } else {
             snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
                 vec![DisplayQuotaWindow::from_snapshot(snapshot)]
@@ -235,6 +243,7 @@ pub(super) async fn quota_status_report(
                     }
                 });
         status_inputs.push(QuotaStatusAccountInput {
+            provider: account.provider(),
             account_label: account.label().to_owned(),
             account_status: account.status().as_str().to_owned(),
             account_id: account.account_id().clone(),
@@ -258,16 +267,32 @@ pub(super) async fn quota_status_report(
         assessment_inputs.push(assessment_input);
     }
 
-    let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+    let openai_inputs = assessment_inputs
+        .iter()
+        .filter(|input| input.provider() == Provider::Openai)
+        .cloned()
+        .collect();
+    let claude_inputs = assessment_inputs
+        .iter()
+        .filter(|input| input.provider() == Provider::Claude)
+        .cloned()
+        .collect();
+    let openai_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
         now_unix_seconds,
         RESPONSES_HTTP.clone(),
-        assessment_inputs,
+        openai_inputs,
     ));
-    let selected_pool = assessment.selected_pool();
+    let claude_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+        RouteBand::Responses,
+        now_unix_seconds,
+        CLAUDE_MESSAGES.clone(),
+        claude_inputs,
+    ));
+    let selected_pool = openai_assessment.selected_pool();
     let authoritative_projection = selection_projection_source.is_authoritative();
     let preferred_next_account_id = authoritative_projection
-        .then(|| assessment.preferred_next().cloned())
+        .then(|| openai_assessment.preferred_next().cloned())
         .flatten();
     let preferred_next_hash = preferred_next_account_id
         .as_ref()
@@ -276,7 +301,7 @@ pub(super) async fn quota_status_report(
     let preferred_selection_reason = preferred_next_account_id
         .as_ref()
         .and_then(|preferred_account_id| {
-            assessment
+            openai_assessment
                 .accounts()
                 .iter()
                 .find(|account| account.account_id() == preferred_account_id)
@@ -295,6 +320,10 @@ pub(super) async fn quota_status_report(
     let mut rows = status_inputs
         .iter()
         .filter_map(|input| {
+            let assessment = match input.provider {
+                Provider::Openai => &openai_assessment,
+                Provider::Claude => &claude_assessment,
+            };
             assessment
                 .accounts()
                 .iter()

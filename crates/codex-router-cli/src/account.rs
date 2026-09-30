@@ -1,5 +1,6 @@
 //! Account command glue for router-owned account state.
 
+use std::io::BufRead;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -10,6 +11,10 @@ use std::time::UNIX_EPOCH;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use codex_router_auth::claude_oauth::AccountLoginFlow;
+use codex_router_auth::claude_oauth::ClaudeOAuthLoginFlow;
+use codex_router_auth::claude_oauth::LoginFlowError;
+use codex_router_auth::claude_oauth::PendingClaudeOAuthLogin;
 use codex_router_auth::credential_activation::CredentialActivation;
 use codex_router_auth::credential_activation::CredentialActivationError;
 use codex_router_auth::credential_activation::CredentialActivationRequest;
@@ -45,6 +50,8 @@ pub enum AccountCommand {
         router_root: PathBuf,
         /// Display label.
         label: String,
+        /// Typed provider flow selected by the shared login dispatcher.
+        provider_login_flow: ProviderLoginFlow,
         /// Codex executable to run.
         codex_bin: PathBuf,
         /// Explicit plaintext file-backend acknowledgement.
@@ -75,6 +82,15 @@ pub enum AccountCommand {
     },
 }
 
+/// Provider-specific OAuth flow selected by `account login --provider`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderLoginFlow {
+    /// Existing Codex device-auth path, which PR5 will replace.
+    OpenAiDevice,
+    /// Claude's hosted callback and pasted code#state flow.
+    ClaudeOAuth,
+}
+
 impl AccountCommand {
     pub(crate) fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
         let Some(command) = parser.next_string()? else {
@@ -97,6 +113,10 @@ impl AccountCommand {
                 Ok(Self::LoginDeviceAuth {
                     router_root: options.router_root()?,
                     label: options.label()?,
+                    provider_login_flow: match options.provider.unwrap_or(Provider::Openai) {
+                        Provider::Openai => ProviderLoginFlow::OpenAiDevice,
+                        Provider::Claude => ProviderLoginFlow::ClaudeOAuth,
+                    },
                     codex_bin: options.codex_bin.unwrap_or_else(|| PathBuf::from("codex")),
                     allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
                 })
@@ -243,6 +263,15 @@ pub enum AccountCommandError {
         /// Duplicated option name.
         option: &'static str,
     },
+    /// Provider login option was supplied more than once.
+    #[error("account login option supplied more than once: {option}")]
+    DuplicateAccountLoginOption {
+        /// Duplicated option name.
+        option: &'static str,
+    },
+    /// Claude OAuth flow could not safely produce account credentials.
+    #[error(transparent)]
+    ClaudeOAuth(#[from] LoginFlowError),
     /// No configured account has the supplied exact label.
     #[error("weekly floor account label did not match a configured account")]
     WeeklyFloorAccountNotFound,
@@ -308,15 +337,21 @@ pub fn run_account_command(
         AccountCommand::LoginDeviceAuth {
             router_root,
             label,
+            provider_login_flow,
             codex_bin,
             allow_plaintext_file_secrets,
-        } => login_with_codex_device_auth(
-            stdout,
-            router_root,
-            label,
-            codex_bin,
-            allow_plaintext_file_secrets,
-        ),
+        } => match provider_login_flow {
+            ProviderLoginFlow::OpenAiDevice => login_with_codex_device_auth(
+                stdout,
+                router_root,
+                label,
+                codex_bin,
+                allow_plaintext_file_secrets,
+            ),
+            ProviderLoginFlow::ClaudeOAuth => {
+                login_with_claude_oauth(stdout, router_root, label, &ClaudeOAuthLoginFlow::new())
+            }
+        },
         AccountCommand::List { router_root } => list_accounts(stdout, router_root),
         AccountCommand::SetStatus {
             router_root,
@@ -337,19 +372,21 @@ codex-router account
 commands:
   disable --account <name>  Stop routing to an account while retaining its credentials
   enable --account <name>   Resume routing to an account
-  login --label <name>  Add an OAuth account with device-code login
+  login --provider <openai|claude> --label <name>  Add a provider OAuth account
   list                  Show configured router accounts
   set-weekly-floor      Set or disable one account's weekly quota floor
 ";
 
 const ACCOUNT_LOGIN_HELP_TEXT: &str = "\
-codex-router account login --label <name>
+codex-router account login --provider <openai|claude> --label <name>
 
-Adds an OAuth account to router-owned storage.
+Adds an OAuth account to router-owned encrypted storage.
 
 options:
   --label <name>         Friendly account name shown in quota and account list
+  --provider <name>      OAuth account provider [default: openai]
   --codex-bin <path>     Codex binary to use for device-code login [default: codex]
+  Claude login opens the hosted authorization URL and asks you to paste code#state.
 ";
 
 const ACCOUNT_LIST_HELP_TEXT: &str = "\
@@ -486,6 +523,67 @@ fn login_with_codex_device_auth(
     import_codex_auth_text(stdout, router_root, label, &auth_text)
 }
 
+fn login_with_claude_oauth(
+    stdout: &mut impl Write,
+    router_root: PathBuf,
+    label: String,
+    flow: &impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin>,
+) -> Result<(), AccountCommandError> {
+    let label = normalize_label(&label)?;
+    ensure_account_label_available_at_router_root(&router_root, &label, Provider::Claude)?;
+    let account_id = account_id_from_label(&label)?;
+    let pending = flow.begin_login()?;
+    let authorization_url = flow.authorization_url(&pending)?;
+    writeln!(stdout, "Open this URL and finish the Claude authorization:")
+        .map_err(AccountCommandError::Stdout)?;
+    writeln!(stdout, "{authorization_url}").map_err(AccountCommandError::Stdout)?;
+    write!(stdout, "Paste the returned code#state: ").map_err(AccountCommandError::Stdout)?;
+    stdout.flush().map_err(AccountCommandError::Stdout)?;
+    let mut pasted_callback = String::new();
+    std::io::stdin().lock().read_line(&mut pasted_callback)?;
+    let bundle = flow.finish_login(pending, &pasted_callback)?;
+
+    create_router_root(&router_root)?;
+    let runtime = account_command_runtime()?;
+    let state = runtime.block_on(AsyncSqliteStateStore::open(
+        &router_root.join("state.sqlite"),
+    ))?;
+    ensure_account_label_available(&state, &label, Provider::Claude, &runtime)?;
+    let secret_store = runtime
+        .block_on(crate::secret_store_factory::open_cli_secret_store_async(
+            router_root.join("secrets"),
+        ))
+        .map_err(|_| AccountCommandError::CredentialStoreInitialization)?;
+    let activation_request = CredentialActivationRequest::new(
+        Provider::Claude,
+        account_id.clone(),
+        label.clone(),
+        bundle,
+    );
+    runtime
+        .block_on(CredentialActivation::activate_login(
+            &state,
+            &secret_store,
+            activation_request,
+        ))
+        .map_err(|error| match error {
+            CredentialActivationError::AccountProviderMismatch => {
+                AccountCommandError::AccountProviderMismatch
+            }
+            other => AccountCommandError::CredentialActivation(other),
+        })?;
+
+    writeln!(stdout, "logged in Claude account: {label}").map_err(AccountCommandError::Stdout)?;
+    writeln!(stdout, "account_id: {}", account_id.as_str()).map_err(AccountCommandError::Stdout)?;
+    writeln!(
+        stdout,
+        "next: codex-router quota refresh --router-root {}",
+        router_root.display()
+    )
+    .map_err(AccountCommandError::Stdout)?;
+    Ok(())
+}
+
 fn temporary_codex_home_path() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -575,7 +673,7 @@ where
         Provider::Openai,
         request.account_id,
         request.label,
-        bundle,
+        bundle.into(),
     );
     CredentialActivation::activate_login(state, secrets, activation_request)
         .await
@@ -1014,6 +1112,7 @@ fn normalize_auth_mode(value: &str) -> String {
 struct AccountLoginOptions {
     router_root: Option<PathBuf>,
     label: Option<String>,
+    provider: Option<Provider>,
     codex_bin: Option<PathBuf>,
     allow_plaintext_file_secrets: bool,
 }
@@ -1030,6 +1129,21 @@ impl AccountLoginOptions {
                 }
                 "--label" => {
                     options.label = Some(parser.next_required_value("--label")?);
+                }
+                "--provider" if options.provider.is_none() => {
+                    let value = parser.next_required_value("--provider")?;
+                    options.provider =
+                        Some(
+                            Provider::parse(&value).ok_or_else(|| CliError::UnknownOption {
+                                option: format!("--provider {value}"),
+                            })?,
+                        );
+                }
+                "--provider" => {
+                    return Err(AccountCommandError::DuplicateAccountLoginOption {
+                        option: "--provider",
+                    }
+                    .into());
                 }
                 "--device-auth" => {}
                 "--codex-bin" => {

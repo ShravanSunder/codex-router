@@ -1,5 +1,6 @@
 use super::*;
 use codex_router_secret_store::model::CredentialMigrationFailure;
+use codex_router_core::provider::Provider;
 
 pub(super) struct QuotaStatusReport {
     pub(super) app_version: String,
@@ -112,6 +113,7 @@ mod tests {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct QuotaStatusAccountInput {
+    pub(super) provider: Provider,
     pub(super) account_label: String,
     pub(super) account_status: String,
     pub(super) account_id: AccountId,
@@ -127,6 +129,7 @@ pub(super) struct QuotaStatusAccountInput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct QuotaStatusRow {
+    pub(super) provider: Provider,
     pub(super) account_id: AccountId,
     pub(super) active_credential_generation: Option<u64>,
     pub(super) account_label: String,
@@ -171,6 +174,7 @@ impl QuotaStatusRow {
         unicode_bars: bool,
     ) -> Self {
         Self {
+            provider: input.provider,
             account_id: input.account_id.clone(),
             active_credential_generation: input.active_credential_generation,
             account_label: assessment.account_label().to_owned(),
@@ -252,6 +256,30 @@ pub(super) struct DisplayQuotaWindow {
 }
 
 impl DisplayQuotaWindow {
+    pub(super) fn from_claude_observation(
+        observation: &codex_router_state::window_observation::WindowObservation,
+        now_unix_seconds: u64,
+    ) -> Self {
+        Self {
+            window_seconds: match observation.window_kind() {
+                codex_router_core::route_profile::WindowKind::FiveHour => V1_SHORT_WINDOW_SECONDS,
+                codex_router_core::route_profile::WindowKind::Weekly => V1_WEEKLY_WINDOW_SECONDS,
+            },
+            status: if now_unix_seconds.saturating_sub(observation.observation_started_at())
+                <= codex_router_selection::burn_down::QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS
+            {
+                QuotaWindowStatus::Eligible
+            } else {
+                QuotaWindowStatus::Stale
+            },
+            remaining_headroom: observation.remaining_basis_points(),
+            reset_unix_seconds: observation.reset_unix_seconds(),
+            observed_unix_seconds: observation.observation_started_at(),
+            effective: true,
+            run_rate_estimate: QuotaRunRateEstimate::unknown(),
+        }
+    }
+
     pub(super) fn from_selector_window(window: &PersistedSelectorQuotaWindow) -> Self {
         Self {
             window_seconds: window.limit_window_seconds(),

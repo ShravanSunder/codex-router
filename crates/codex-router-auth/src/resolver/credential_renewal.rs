@@ -43,9 +43,9 @@ impl CredentialRefreshTaskSupervisor {
 
 /// Default async router credential resolver for OpenAI OAuth account tokens.
 pub type DefaultAsyncRouterCredentialResolver<S> =
-    AsyncRouterCredentialResolver<S, OpenAiOAuthRefreshClient>;
+    AsyncRouterCredentialResolver<S, ProviderCredentialRefreshClients>;
 
-impl<S> AsyncRouterCredentialResolver<S, OpenAiOAuthRefreshClient>
+impl<S> AsyncRouterCredentialResolver<S, ProviderCredentialRefreshClients>
 where
     S: SecretStore + Clone + Send + Sync + 'static,
 {
@@ -60,7 +60,7 @@ where
         Self::new_with_refresh_leases(
             state_store,
             secret_store,
-            OpenAiOAuthRefreshClient::new(),
+            ProviderCredentialRefreshClients::new(),
             fixed_now_unix_seconds,
             refresh_leases,
         )
@@ -152,9 +152,12 @@ where
         account_id: &AccountId,
     ) -> Result<(), CredentialResolverError> {
         let now_unix_seconds = self.observed_now_unix_seconds()?;
-        self.renew_credentials(account_id, now_unix_seconds, RenewalTrigger::Proactive)
-            .await
-            .map(|_| ())
+        let (generation, bundle, _) = self
+            .renew_credentials(account_id, now_unix_seconds, RenewalTrigger::Proactive)
+            .await?;
+        self.prune_obsolete_generations(account_id, bundle.provider(), generation)
+            .await?;
+        Ok(())
     }
 
     /// Returns the next useful upkeep wake for this enabled account.
@@ -239,7 +242,7 @@ where
         account_id: &AccountId,
         now_unix_seconds: u64,
         trigger: RenewalTrigger,
-    ) -> Result<(u64, AccountCredentialBundle, bool), CredentialResolverError> {
+    ) -> Result<(u64, CredentialBundle, bool), CredentialResolverError> {
         let mut current_trigger = trigger;
         for attempt in 0..2 {
             let owned_resolver = self.clone();
@@ -276,7 +279,7 @@ where
     async fn read_active_bundle(
         &self,
         account_id: &AccountId,
-    ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
+    ) -> Result<(u64, CredentialBundle), CredentialResolverError> {
         let account = self
             .state_store
             .load_account(account_id)
@@ -286,21 +289,18 @@ where
         if account.status() != AccountStatus::Enabled {
             return Err(CredentialResolverError::AccountIneligible);
         }
-        if account.provider() != Provider::Openai {
-            return Err(CredentialResolverError::AccountIneligible);
-        }
+        let provider = account.provider();
         let active_generation = account
             .active_credential_generation()
             .ok_or(CredentialResolverError::AccountIneligible)?;
-        let bundle_key =
-            provider_credential_bundle_key(account.provider(), account_id, active_generation)
-                .map_err(map_secret_error)?;
+        let bundle_key = provider_credential_bundle_key(provider, account_id, active_generation)
+            .map_err(map_secret_error)?;
         let secret_store = self.secret_store.clone();
         let bundle_join = tokio::task::spawn_blocking(move || {
             let secret = secret_store
                 .read_secret(&bundle_key)
                 .map_err(map_secret_error)?;
-            AccountCredentialBundle::from_secret_string(secret).map_err(map_secret_error)
+            CredentialBundle::from_secret_string(provider, secret).map_err(map_secret_error)
         })
         .await;
         let bundle_result = match bundle_join {
@@ -330,7 +330,7 @@ where
         Ok((active_generation, bundle))
     }
 
-    fn bundle_is_expired(&self, bundle: &AccountCredentialBundle, now_unix_seconds: u64) -> bool {
+    fn bundle_is_expired(&self, bundle: &CredentialBundle, now_unix_seconds: u64) -> bool {
         bundle
             .expires_unix_seconds()
             .is_some_and(|expires| expires <= now_unix_seconds)
@@ -352,12 +352,29 @@ where
         }
     }
 
+    async fn prune_obsolete_generations(
+        &self,
+        account_id: &AccountId,
+        provider: Provider,
+        active_generation: u64,
+    ) -> Result<(), CredentialResolverError> {
+        let secret_store = self.secret_store.clone();
+        let account_id = account_id.clone();
+        tokio::task::spawn_blocking(move || {
+            secret_store.prune_obsolete_generations(provider, &account_id, active_generation)
+        })
+        .await
+        .map_err(|_| CredentialResolverError::SecretUnavailable)?
+        .map(|_| ())
+        .map_err(map_secret_error)
+    }
+
     async fn renew_bundle_under_lock(
         &self,
         account_id: &AccountId,
         now_unix_seconds: u64,
         trigger: RenewalTrigger,
-    ) -> Result<(u64, AccountCredentialBundle, bool), CredentialResolverError> {
+    ) -> Result<(u64, CredentialBundle, bool), CredentialResolverError> {
         let database_path = self.state_store.database_path().to_path_buf();
         let account_for_lock = account_id.clone();
         let file_lock_result = tokio::task::spawn_blocking(move || {
@@ -377,13 +394,14 @@ where
             }
         };
         let (current_generation, bundle) = self.read_active_bundle(account_id).await?;
+        let provider = bundle.provider();
         let now_unix_seconds = self.observed_now_unix_seconds()?.max(now_unix_seconds);
         if let RenewalTrigger::UnauthorizedGeneration(rejected_generation) = trigger
             && current_generation > rejected_generation
         {
             return Ok((current_generation, bundle, false));
         }
-        let maintenance = match self
+        let mut maintenance = match self
             .state_store
             .load_credential_maintenance(account_id)
             .await
@@ -395,68 +413,107 @@ where
                 return Err(map_state_error(error));
             }
         };
-        if let Some(record) = &maintenance
-            && record.credential_generation == current_generation
-        {
-            if record.state == CredentialMaintenanceState::InProgress {
-                let successor = record
-                    .claimed_successor_generation
-                    .ok_or(CredentialResolverError::RefreshUnavailable)?;
-                let claimed_key =
-                    provider_credential_bundle_key(Provider::Openai, account_id, successor)
+        let active_claim = maintenance
+            .as_ref()
+            .filter(|record| {
+                record.credential_generation == current_generation
+                    && record.state == CredentialMaintenanceState::InProgress
+            })
+            .cloned();
+        if let Some(record) = active_claim {
+            let purpose = record
+                .claim_purpose
+                .ok_or(CredentialResolverError::RefreshUnavailable)?;
+            let successor = record
+                .claimed_successor_generation
+                .ok_or(CredentialResolverError::RefreshUnavailable)?;
+            let claimed_key = provider_credential_bundle_key(provider, account_id, successor)
+                .map_err(map_secret_error)?;
+            let secret_store = self.secret_store.clone();
+            let claimed_secret =
+                tokio::task::spawn_blocking(move || secret_store.read_secret(&claimed_key))
+                    .await
+                    .map_err(|_| CredentialResolverError::SecretUnavailable)?;
+            match (purpose, claimed_secret) {
+                (ClaimPurpose::Refresh | ClaimPurpose::Login, Ok(secret)) => {
+                    let staged = CredentialBundle::from_secret_string(provider, secret)
                         .map_err(map_secret_error)?;
-                let secret_store = self.secret_store.clone();
-                let claimed_secret =
-                    tokio::task::spawn_blocking(move || secret_store.read_secret(&claimed_key))
+                    let activated = self
+                        .state_store
+                        .activate_claimed_credential_generation(
+                            account_id,
+                            provider,
+                            purpose,
+                            current_generation,
+                            successor,
+                            now_unix_seconds,
+                        )
                         .await
-                        .map_err(|_| CredentialResolverError::SecretUnavailable)?;
-                match claimed_secret {
-                    Ok(secret) => {
-                        let staged = AccountCredentialBundle::from_secret_string(secret)
-                            .map_err(map_secret_error)?;
-                        let activated = self
-                            .state_store
-                            .activate_claimed_credential_generation(
-                                account_id,
-                                Provider::Openai,
-                                ClaimPurpose::Refresh,
-                                current_generation,
-                                successor,
-                                now_unix_seconds,
-                            )
+                        .map_err(map_state_error)?;
+                    if activated {
+                        if self
+                            .prune_obsolete_generations(account_id, provider, successor)
                             .await
-                            .map_err(map_state_error)?;
-                        if activated {
-                            return Ok((successor, staged, false));
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                "obsolete credential generations could not be pruned after recovered activation"
+                            );
                         }
+                        return Ok((successor, staged, false));
                     }
-                    Err(error) if secret_is_missing(&error) => {
-                        self.state_store
-                            .finish_credential_refresh_claim(
-                                account_id,
-                                current_generation,
-                                successor,
-                                CredentialMaintenanceState::ReauthRequired,
-                                CredentialFailureClass::RotationCommitFailed,
-                                None,
-                            )
-                            .await
-                            .map_err(map_state_error)?;
-                    }
-                    Err(error) => return Err(map_secret_error(error)),
+                    return Err(CredentialResolverError::RefreshUnavailable);
                 }
-                return Err(CredentialResolverError::RefreshUnavailable);
+                (ClaimPurpose::Refresh, Err(error)) if secret_is_missing(&error) => {
+                    self.state_store
+                        .finish_credential_refresh_claim(
+                            account_id,
+                            provider,
+                            current_generation,
+                            successor,
+                            CredentialMaintenanceState::ReauthRequired,
+                            CredentialFailureClass::RotationCommitFailed,
+                            None,
+                        )
+                        .await
+                        .map_err(map_state_error)?;
+                    return Err(CredentialResolverError::RefreshUnavailable);
+                }
+                (ClaimPurpose::Login, Err(error)) if secret_is_missing(&error) => {
+                    let released = self
+                        .state_store
+                        .release_stale_login_credential_claim(
+                            account_id,
+                            provider,
+                            now_unix_seconds,
+                            LOGIN_CREDENTIAL_CLAIM_TIMEOUT_SECONDS,
+                        )
+                        .await
+                        .map_err(map_state_error)?;
+                    if !released {
+                        return Err(CredentialResolverError::RefreshUnavailable);
+                    }
+                    maintenance = self
+                        .state_store
+                        .load_credential_maintenance(account_id)
+                        .await
+                        .map_err(map_state_error)?;
+                }
+                (_, Err(error)) => return Err(map_secret_error(error)),
             }
-            if matches!(
+        }
+        if let Some(record) = maintenance
+            .as_ref()
+            .filter(|record| record.credential_generation == current_generation)
+            && (matches!(
                 record.state,
                 CredentialMaintenanceState::ReauthRequired
                     | CredentialMaintenanceState::Unrefreshable
             ) || record
                 .next_attempt_unix_seconds
-                .is_some_and(|deadline| deadline > now_unix_seconds)
-            {
-                return Err(CredentialResolverError::RefreshUnavailable);
-            }
+                .is_some_and(|deadline| deadline > now_unix_seconds))
+        {
+            return Err(CredentialResolverError::RefreshUnavailable);
         }
         let current_maintenance = maintenance
             .as_ref()
@@ -480,7 +537,7 @@ where
         }
         let Some(refresh_token) = bundle.refresh_token().cloned() else {
             self.state_store
-                .mark_credential_unrefreshable(account_id, current_generation)
+                .mark_credential_unrefreshable(account_id, provider, current_generation)
                 .await
                 .map_err(map_state_error)?;
             return Err(CredentialResolverError::RefreshUnavailable);
@@ -490,7 +547,7 @@ where
         let successor_result = tokio::task::spawn_blocking(move || {
             first_unused_account_credential_generation(
                 &secret_store,
-                Provider::Openai,
+                provider,
                 &account_for_slot,
                 current_generation,
             )
@@ -513,10 +570,11 @@ where
             .state_store
             .claim_credential_refresh(
                 account_id,
-                Provider::Openai,
+                provider,
                 ClaimPurpose::Refresh,
                 current_generation,
                 successor_generation,
+                now_unix_seconds,
             )
             .await;
         let claimed = match claim_result {
@@ -533,8 +591,11 @@ where
         let refresh_client = self.refresh_client.clone();
         let account_id_for_refresh = account_id.clone();
         let (returned_lock, provider_result) = tokio::task::spawn_blocking(move || {
-            let result =
-                refresh_client.refresh_credentials(&account_id_for_refresh, &refresh_token);
+            let result = refresh_client.refresh_provider_credentials(
+                provider,
+                &account_id_for_refresh,
+                &refresh_token,
+            );
             (file_lock, result)
         })
         .await
@@ -564,6 +625,7 @@ where
                         .state_store
                         .finish_credential_refresh_claim(
                             account_id,
+                            provider,
                             current_generation,
                             successor_generation,
                             if failure.confirmed_unspent {
@@ -590,10 +652,10 @@ where
         if refreshed.chatgpt_account_id().is_none()
             && let Some(chatgpt_account_id) = bundle.chatgpt_account_id()
         {
-            refreshed = refreshed.with_chatgpt_account_id(chatgpt_account_id);
+            refreshed = refreshed.with_openai_chatgpt_account_id(chatgpt_account_id.to_owned());
         }
         let refreshed_key =
-            provider_credential_bundle_key(Provider::Openai, account_id, successor_generation)
+            provider_credential_bundle_key(provider, account_id, successor_generation)
                 .map_err(map_secret_error)?;
         let refreshed_secret = refreshed.to_secret_string().map_err(map_secret_error)?;
         let commit_started = std::time::Instant::now();
@@ -603,8 +665,23 @@ where
                 let secret_store = self.secret_store.clone();
                 let key_for_write = refreshed_key.clone();
                 let secret_for_write = refreshed_secret.clone();
+                let expected_bundle = refreshed.clone();
                 let (returned_lock, write_result) = tokio::task::spawn_blocking(move || {
-                    let result = secret_store.write_staged(&key_for_write, &secret_for_write);
+                    let result = secret_store
+                        .write_staged(&key_for_write, &secret_for_write)
+                        .and_then(|()| secret_store.read_secret(&key_for_write))
+                        .and_then(|stored_secret| {
+                            CredentialBundle::from_secret_string(provider, stored_secret)
+                        })
+                        .and_then(|stored_bundle| {
+                            if stored_bundle == expected_bundle {
+                                Ok(())
+                            } else {
+                                Err(SecretStoreError::InvalidSecretPayload {
+                                    message: "staged credential verification failed".to_owned(),
+                                })
+                            }
+                        });
                     (file_lock, result)
                 })
                 .await
@@ -617,7 +694,7 @@ where
                     .state_store
                     .activate_claimed_credential_generation(
                         account_id,
-                        Provider::Openai,
+                        provider,
                         ClaimPurpose::Refresh,
                         current_generation,
                         successor_generation,
@@ -635,6 +712,13 @@ where
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+        if self
+            .prune_obsolete_generations(account_id, provider, successor_generation)
+            .await
+            .is_err()
+        {
+            tracing::warn!("obsolete credential generations could not be pruned after refresh");
+        }
         drop(file_lock);
 
         Ok((successor_generation, refreshed, true))
@@ -646,7 +730,7 @@ fn secret_is_missing(error: &SecretStoreError) -> bool {
 }
 
 pub(crate) fn credential_renewal_is_due(
-    bundle: &AccountCredentialBundle,
+    bundle: &CredentialBundle,
     maintenance: Option<&CredentialMaintenanceRecord>,
     now_unix_seconds: u64,
 ) -> bool {
@@ -654,7 +738,7 @@ pub(crate) fn credential_renewal_is_due(
 }
 
 fn credential_renewal_due_at(
-    bundle: &AccountCredentialBundle,
+    bundle: &CredentialBundle,
     maintenance: Option<&CredentialMaintenanceRecord>,
     now_unix_seconds: u64,
 ) -> u64 {

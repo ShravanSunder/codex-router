@@ -14,9 +14,11 @@ use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::provider_credential_bundle_key;
+use codex_router_secret_store::credential_bundle::CredentialBundle;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::credential_maintenance::ClaimPurpose;
+use codex_router_state::credential_maintenance::LOGIN_CREDENTIAL_CLAIM_TIMEOUT_SECONDS;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use codex_router_state::sqlite::SqliteStateStore;
@@ -169,6 +171,22 @@ pub trait CredentialRefreshClient {
         account_id: &AccountId,
         refresh_token: &SecretString,
     ) -> Result<AccountCredentialBundle, CredentialRefreshFailure>;
+
+    /// Refreshes the provider-specific bundle selected by the stored account identity.
+    fn refresh_provider_credentials(
+        &self,
+        provider: Provider,
+        account_id: &AccountId,
+        refresh_token: &SecretString,
+    ) -> Result<CredentialBundle, CredentialRefreshFailure> {
+        if provider != Provider::Openai {
+            return Err(CredentialRefreshFailure::ambiguous(
+                CredentialFailureClass::ProviderOutcomeAmbiguous,
+            ));
+        }
+        self.refresh_credentials(account_id, refresh_token)
+            .map(CredentialBundle::OpenAi)
+    }
 }
 
 /// Secret-safe outcome of one OAuth refresh attempt.
@@ -275,6 +293,58 @@ impl CredentialRefreshClient for OpenAiOAuthRefreshClient {
         refresh_token: &SecretString,
     ) -> Result<AccountCredentialBundle, CredentialRefreshFailure> {
         self.refresh_with_token(refresh_token)
+    }
+}
+
+/// Provider-selected refresh clients used by account resolution and upkeep.
+#[derive(Clone, Debug)]
+pub struct ProviderCredentialRefreshClients {
+    openai: OpenAiOAuthRefreshClient,
+    claude: crate::claude_oauth::ClaudeOAuthRefreshClient,
+}
+
+impl ProviderCredentialRefreshClients {
+    /// Creates the Router-owned OpenAI and Claude subscription refresh clients.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            openai: OpenAiOAuthRefreshClient::new(),
+            claude: crate::claude_oauth::ClaudeOAuthRefreshClient::new(),
+        }
+    }
+}
+
+impl Default for ProviderCredentialRefreshClients {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CredentialRefreshClient for ProviderCredentialRefreshClients {
+    fn refresh_credentials(
+        &self,
+        account_id: &AccountId,
+        refresh_token: &SecretString,
+    ) -> Result<AccountCredentialBundle, CredentialRefreshFailure> {
+        self.openai.refresh_credentials(account_id, refresh_token)
+    }
+
+    fn refresh_provider_credentials(
+        &self,
+        provider: Provider,
+        account_id: &AccountId,
+        refresh_token: &SecretString,
+    ) -> Result<CredentialBundle, CredentialRefreshFailure> {
+        match provider {
+            Provider::Openai => self
+                .openai
+                .refresh_credentials(account_id, refresh_token)
+                .map(CredentialBundle::OpenAi),
+            Provider::Claude => {
+                self.claude
+                    .refresh_provider_credentials(provider, account_id, refresh_token)
+            }
+        }
     }
 }
 

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE credential_maintenance\n                SET state = claim_prior_state,\n                    claimed_successor_generation = NULL,\n                    claim_purpose = NULL,\n                    claim_started_unix_seconds = NULL,\n                    claim_prior_state = NULL\n              WHERE account_id = ?1 AND state = 'in_progress'\n                AND claim_purpose = 'login' AND claim_prior_state IS NOT NULL\n                AND claim_started_unix_seconds < ?2\n                AND EXISTS (\n                    SELECT 1 FROM accounts\n                     WHERE accounts.account_id = credential_maintenance.account_id\n                       AND accounts.provider = ?3\n                )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a44747b58011d074e5ca7bb961c1c650c9e3ecdfcf1759f167363a71bf208250"
+}

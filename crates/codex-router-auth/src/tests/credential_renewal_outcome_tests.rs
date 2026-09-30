@@ -168,7 +168,8 @@ async fn orphaned_successor_is_skipped_and_unresolved_claim_blocks_old_token_reu
                 codex_router_core::provider::Provider::Openai,
                 codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
                 1,
-                3
+                3,
+                1_000
             )
             .await
     ));
@@ -248,7 +249,8 @@ async fn claimed_staged_successor_activates_without_reusing_old_refresh_token() 
                 codex_router_core::provider::Provider::Openai,
                 codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
                 1,
-                2
+                2,
+                1_000
             )
             .await
     ));
@@ -324,7 +326,8 @@ async fn expired_claimed_successor_is_renewed_before_provider_egress() {
                 codex_router_core::provider::Provider::Openai,
                 codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
                 1,
-                2
+                2,
+                1_000
             )
             .await
     ));
@@ -489,7 +492,8 @@ async fn elapsed_retry_deadline_renews_even_when_ordinary_renewal_is_not_due() {
                 codex_router_core::provider::Provider::Openai,
                 codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
                 1,
-                2
+                2,
+                1_000
             )
             .await
     ));

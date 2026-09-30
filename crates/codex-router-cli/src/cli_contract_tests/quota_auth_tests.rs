@@ -278,8 +278,11 @@ fn quota_401_does_not_bypass_terminal_or_retry_cooldown_maintenance() {
         let changed =
             if scenario == "terminal" {
                 must_ok(
-                    test_async_runtime()
-                        .block_on(async_state.mark_credential_unrefreshable(&account_id, 1)),
+                    test_async_runtime().block_on(async_state.mark_credential_unrefreshable(
+                        &account_id,
+                        codex_router_core::provider::Provider::Openai,
+                        1,
+                    )),
                 )
             } else {
                 must_ok(test_async_runtime().block_on(

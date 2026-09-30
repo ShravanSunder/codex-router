@@ -14,7 +14,7 @@ use codex_router_auth::resolver::CredentialRefreshClient;
 #[cfg(test)]
 use codex_router_auth::resolver::NoopCredentialRefreshClient;
 #[cfg(not(test))]
-use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
+use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 use codex_router_auth::resolver::current_unix_seconds;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::model::SecretStoreError;
@@ -119,7 +119,7 @@ pub(crate) fn start_background_credential_upkeep_worker(
     start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
         secret_store,
-        OpenAiOAuthRefreshClient::new(),
+        ProviderCredentialRefreshClients::new(),
         || current_unix_seconds().unwrap_or(0),
     )
 }

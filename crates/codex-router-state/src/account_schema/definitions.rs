@@ -213,6 +213,9 @@ pub(super) const CREDENTIAL_MAINTENANCE: &[ColumnSpec] = &[
     column!("last_success_unix_seconds", "INTEGER", false, 0),
     column!("next_attempt_unix_seconds", "INTEGER", false, 0),
     column!("claimed_successor_generation", "INTEGER", false, 0),
+    column!("claim_purpose", "TEXT", false, 0),
+    column!("claim_started_unix_seconds", "INTEGER", false, 0),
+    column!("claim_prior_state", "TEXT", false, 0),
     ColumnSpec {
         name: "consecutive_failures",
         declared_type: "INTEGER",

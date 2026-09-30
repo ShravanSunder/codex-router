@@ -45,6 +45,24 @@ impl FileSecretStore {
         fs::read(&path).map_err(|source| SecretStoreError::Filesystem { path, source })
     }
 
+    /// Deletes one encrypted generation bundle if it exists.
+    pub(crate) fn delete_credential_envelope(
+        &self,
+        key: &SecretKey,
+    ) -> Result<(), SecretStoreError> {
+        require_credential_key(key)?;
+        let path = self.encrypted_credential_path(key);
+        reject_symlink_path(&path)?;
+        match fs::remove_file(&path) {
+            Ok(()) => self.record_file_removed(&path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(SecretStoreError::Filesystem { path, source });
+            }
+        }
+        Ok(())
+    }
+
     /// Reads legacy plaintext only for the startup migration.
     pub(crate) fn read_legacy_credential_for_migration(
         &self,

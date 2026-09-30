@@ -55,6 +55,7 @@ async fn unavailable_credential_stores_skip_upkeep_without_health_changes() {
                     codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
                     1,
                     2,
+                    1_000,
                 )
                 .await
                 .expect("refresh claim")
@@ -258,7 +259,8 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
                 codex_router_core::provider::Provider::Openai,
                 codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
                 1,
-                2
+                2,
+                1_000
             )
             .await
             .expect("reauth claim")
@@ -267,6 +269,7 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         state
             .finish_credential_refresh_claim(
                 &reauth_id,
+                codex_router_core::provider::Provider::Openai,
                 1,
                 2,
                 CredentialMaintenanceState::ReauthRequired,
@@ -373,7 +376,8 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
                 codex_router_core::provider::Provider::Openai,
                 codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
                 1,
-                2
+                2,
+                1_000
             )
             .await
             .expect("unresolved claim")

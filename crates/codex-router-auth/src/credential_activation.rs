@@ -7,12 +7,13 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_credential_lock::AccountCredentialLock;
-use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::first_unused_account_credential_generation;
 use codex_router_secret_store::account_tokens::provider_credential_bundle_key;
+use codex_router_secret_store::credential_bundle::CredentialBundle;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::credential_maintenance::ClaimPurpose;
+use codex_router_state::credential_maintenance::LOGIN_CREDENTIAL_CLAIM_TIMEOUT_SECONDS;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use thiserror::Error;
@@ -22,6 +23,8 @@ use thiserror::Error;
 pub enum CredentialActivationError {
     #[error("account provider does not match login credentials")]
     AccountProviderMismatch,
+    #[error("credential provider does not match the requested account provider")]
+    CredentialProviderMismatch,
     #[error("account credential lock unavailable")]
     CredentialLockUnavailable,
     #[error("credential generation claim unavailable")]
@@ -39,7 +42,7 @@ pub struct CredentialActivationRequest {
     provider: Provider,
     account_id: AccountId,
     label: String,
-    bundle: AccountCredentialBundle,
+    bundle: CredentialBundle,
 }
 
 impl CredentialActivationRequest {
@@ -49,7 +52,7 @@ impl CredentialActivationRequest {
         provider: Provider,
         account_id: AccountId,
         label: impl Into<String>,
-        bundle: AccountCredentialBundle,
+        bundle: CredentialBundle,
     ) -> Self {
         Self {
             provider,
@@ -67,8 +70,7 @@ impl CredentialActivation {
     /// Claims a generation, writes its encrypted envelope, then activates it in SQLite.
     ///
     /// The account lock serializes login with refresh across processes. The existing
-    /// credential-maintenance claim row is reused and removed by successful login
-    /// activation; no login-only durable state is introduced.
+    /// credential-maintenance row is reused and removed by successful login activation.
     pub async fn activate_login<S>(
         state_store: &AsyncSqliteStateStore,
         secret_store: &S,
@@ -77,6 +79,9 @@ impl CredentialActivation {
     where
         S: SecretStore + Clone + Send + Sync + 'static,
     {
+        if request.bundle.provider() != request.provider {
+            return Err(CredentialActivationError::CredentialProviderMismatch);
+        }
         let database_path = state_store.database_path().to_path_buf();
         let lock_account_id = request.account_id.clone();
         let mut account_lock = tokio::task::spawn_blocking(move || {
@@ -131,10 +136,28 @@ impl CredentialActivation {
         account_lock = returned_lock;
         let next_generation =
             next_generation.map_err(|_| CredentialActivationError::CredentialStoreUnavailable)?;
+        let now_unix_seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| CredentialActivationError::ClockUnavailable)?
+            .as_secs();
+        state_store
+            .release_stale_login_credential_claim(
+                &request.account_id,
+                request.provider,
+                now_unix_seconds,
+                LOGIN_CREDENTIAL_CLAIM_TIMEOUT_SECONDS,
+            )
+            .await
+            .map_err(map_state_error)?;
         let previous_maintenance = state_store
             .load_credential_maintenance(&request.account_id)
             .await
             .map_err(map_state_error)?;
+
+        let serialized_bundle = request
+            .bundle
+            .to_secret_string()
+            .map_err(|_| CredentialActivationError::CredentialStoreUnavailable)?;
 
         let claimed = state_store
             .claim_credential_refresh(
@@ -143,6 +166,7 @@ impl CredentialActivation {
                 ClaimPurpose::Login,
                 current_generation,
                 next_generation,
+                now_unix_seconds,
             )
             .await
             .map_err(map_state_error)?;
@@ -150,20 +174,30 @@ impl CredentialActivation {
             return Err(CredentialActivationError::GenerationClaimUnavailable);
         }
 
-        let now_unix_seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| CredentialActivationError::ClockUnavailable)?
-            .as_secs();
         let secret_key =
             provider_credential_bundle_key(request.provider, &request.account_id, next_generation)
                 .map_err(|_| CredentialActivationError::CredentialStoreUnavailable)?;
-        let serialized_bundle = request
-            .bundle
-            .to_secret_string()
-            .map_err(|_| CredentialActivationError::CredentialStoreUnavailable)?;
         let secret_store_for_write = secret_store.clone();
+        let expected_bundle = request.bundle.clone();
+        let write_key = secret_key.clone();
+        let provider = request.provider;
         let write_outcome = tokio::task::spawn_blocking(move || {
-            let result = secret_store_for_write.write_staged(&secret_key, &serialized_bundle);
+            let result = secret_store_for_write
+                .write_staged(&secret_key, &serialized_bundle)
+                .and_then(|()| secret_store_for_write.read_secret(&write_key))
+                .and_then(|stored_secret| {
+                    CredentialBundle::from_secret_string(provider, stored_secret)
+                })
+                .and_then(|stored_bundle| {
+                    if stored_bundle == expected_bundle {
+                        Ok(())
+                    } else {
+                        Err(codex_router_secret_store::model::SecretStoreError::
+                            InvalidSecretPayload {
+                                message: "staged credential verification failed".to_owned(),
+                            })
+                    }
+                });
             (account_lock, result)
         })
         .await;
@@ -222,6 +256,20 @@ impl CredentialActivation {
             .map_err(map_state_error)?;
         if !activated {
             return Err(CredentialActivationError::GenerationClaimUnavailable);
+        }
+
+        let pruner_store = secret_store.clone();
+        let account_for_pruning = request.account_id.clone();
+        let pruned = tokio::task::spawn_blocking(move || {
+            pruner_store.prune_obsolete_generations(
+                request.provider,
+                &account_for_pruning,
+                next_generation,
+            )
+        })
+        .await;
+        if !matches!(pruned, Ok(Ok(_))) {
+            tracing::warn!("obsolete credential generations could not be pruned after login");
         }
 
         drop(account_lock);

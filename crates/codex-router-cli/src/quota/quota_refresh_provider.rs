@@ -1,7 +1,10 @@
+use super::claude_quota_fetcher::ClaudeQuotaFetcher;
 use super::*;
+use codex_router_core::provider::Provider;
 
 /// Quota provider request after provider credentials have been resolved.
 pub(crate) struct QuotaRefreshProviderRequest {
+    provider: Provider,
     account_id: AccountId,
     account_label: String,
     route_band: String,
@@ -20,6 +23,7 @@ impl QuotaRefreshProviderRequest {
         chatgpt_account_id: Option<&str>,
     ) -> Self {
         Self {
+            provider: Provider::Openai,
             account_id,
             account_label: account_label.into(),
             route_band: route_band.into(),
@@ -27,6 +31,32 @@ impl QuotaRefreshProviderRequest {
             access_token,
             chatgpt_account_id: chatgpt_account_id.map(str::to_owned),
         }
+    }
+
+    pub(crate) fn new_for_provider(
+        provider: Provider,
+        account_id: AccountId,
+        account_label: impl Into<String>,
+        route_band: impl Into<String>,
+        base_url: impl Into<String>,
+        access_token: SecretString,
+        chatgpt_account_id: Option<&str>,
+    ) -> Self {
+        let mut request = Self::new(
+            account_id,
+            account_label,
+            route_band,
+            base_url,
+            access_token,
+            chatgpt_account_id,
+        );
+        request.provider = provider;
+        request
+    }
+
+    #[must_use]
+    pub(crate) const fn provider(&self) -> Provider {
+        self.provider
     }
 
     /// Returns the account id.
@@ -104,6 +134,7 @@ pub(crate) trait QuotaRefreshProvider {
 #[derive(Debug)]
 pub(crate) struct HttpQuotaRefreshProvider {
     client: reqwest::Client,
+    claude_quota_fetcher: ClaudeQuotaFetcher,
 }
 
 impl HttpQuotaRefreshProvider {
@@ -121,7 +152,10 @@ impl HttpQuotaRefreshProvider {
             .map_err(|error| QuotaCommandError::ProviderRequest {
                 message: error.to_string(),
             })?;
-        Ok(Self { client })
+        Ok(Self {
+            claude_quota_fetcher: ClaudeQuotaFetcher::new(client.clone()),
+            client,
+        })
     }
 }
 
@@ -130,6 +164,9 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
         &self,
         request: QuotaRefreshProviderRequest,
     ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+        if request.provider() == Provider::Claude {
+            return self.claude_quota_fetcher.fetch_quota(request).await;
+        }
         let _account_context = (request.account_id(), request.account_label());
         let mut usage_request = self
             .client

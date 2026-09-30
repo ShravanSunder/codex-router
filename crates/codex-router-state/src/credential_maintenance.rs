@@ -1,5 +1,8 @@
 //! Non-secret health and provider-use claim for one active credential generation.
 
+/// Login claim age after which maintenance may reclaim an abandoned OAuth activation.
+pub const LOGIN_CREDENTIAL_CLAIM_TIMEOUT_SECONDS: u64 = 300;
+
 /// The durable renewal state for an account's current credential generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialMaintenanceState {
@@ -84,15 +87,35 @@ pub struct CredentialMaintenanceRecord {
     pub last_success_unix_seconds: Option<u64>,
     pub next_attempt_unix_seconds: Option<u64>,
     pub claimed_successor_generation: Option<u64>,
+    pub claim_purpose: Option<ClaimPurpose>,
+    pub claim_started_unix_seconds: Option<u64>,
+    pub claim_prior_state: Option<CredentialMaintenanceState>,
     pub consecutive_failures: u32,
 }
 
 /// Why a credential generation is being claimed.
 ///
-/// This value selects guards for a transient claim stored in the existing
-/// `credential_maintenance` row; the purpose itself is never persisted.
+/// This value selects guards for a claim stored in the existing
+/// `credential_maintenance` row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimPurpose {
     Refresh,
     Login,
+}
+
+impl ClaimPurpose {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Refresh => "refresh",
+            Self::Login => "login",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "refresh" => Some(Self::Refresh),
+            "login" => Some(Self::Login),
+            _ => None,
+        }
+    }
 }

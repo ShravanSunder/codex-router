@@ -99,7 +99,8 @@ fn production_opener_marks_a_fresh_store_ready_for_login() {
         AccountCredentialBundle::imported_codex_auth(
             "fresh-root-access-canary",
             Some("fresh-root-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let generation = must_ok(runtime.block_on(CredentialActivation::activate_login(
@@ -133,7 +134,8 @@ fn login_activation_claims_first_generation_and_removes_transient_claim() {
         AccountCredentialBundle::imported_codex_auth(
             "first-login-access-canary",
             Some("first-login-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let generation = must_ok(runtime.block_on(CredentialActivation::activate_login(
@@ -192,6 +194,7 @@ fn failed_login_staged_write_restores_healthy_maintenance() {
         codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
         1,
         2,
+        1_000,
     ))));
     assert!(must_ok(runtime.block_on(
         state.activate_claimed_credential_generation(
@@ -214,7 +217,8 @@ fn failed_login_staged_write_restores_healthy_maintenance() {
         AccountCredentialBundle::imported_codex_auth(
             "failed-login-access-canary",
             Some("failed-login-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let result = runtime.block_on(CredentialActivation::activate_login(
@@ -283,7 +287,8 @@ fn login_activation_reenables_a_disabled_account_on_the_next_generation() {
         AccountCredentialBundle::imported_codex_auth(
             "new-access-canary",
             Some("new-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let generation = must_ok(runtime.block_on(CredentialActivation::activate_login(
@@ -328,7 +333,8 @@ fn login_activation_rejects_a_provider_mismatch_before_writing() {
         AccountCredentialBundle::imported_codex_auth(
             "must-not-write-access-canary",
             Some("must-not-write-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let result = runtime.block_on(CredentialActivation::activate_login(

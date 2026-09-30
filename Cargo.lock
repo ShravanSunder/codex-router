@@ -692,12 +692,15 @@ dependencies = [
 name = "codex-router-auth"
 version = "0.1.49"
 dependencies = [
+ "base64 0.22.1",
  "codex-router-core",
  "codex-router-secret-store",
  "codex-router-state",
+ "getrandom 0.4.3",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
