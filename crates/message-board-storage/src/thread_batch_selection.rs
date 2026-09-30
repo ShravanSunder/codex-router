@@ -1,5 +1,5 @@
 //! Shared bounded Thread batch selection for listening and subscriptions.
-use crate::message_records::{load_identity, load_message, require_thread};
+use crate::message_records::{load_message, require_thread};
 use crate::storage_support::{
     BoardTransaction, invalid_record, storage_error, validate_stored_boundary,
 };
@@ -26,11 +26,6 @@ struct StoredPendingRootRange {
     pending_count: i64,
     first_pending_sequence: Option<i64>,
     through_sequence: Option<i64>,
-}
-
-struct StoredPendingRootAuthor {
-    actor_key: String,
-    first_activity_sequence: i64,
 }
 
 pub(crate) async fn load_thread_batch_boundary(
@@ -177,58 +172,13 @@ pub(crate) async fn select_pending_root_notices(
         )?;
         validate_stored_boundary(through, first_pending, latest, resource.clone())?;
 
-        let author_rows = sqlx::query_as!(
-            StoredPendingRootAuthor,
-            "SELECT activity.actor_key AS \"actor_key!: String\", \
-               MIN(activity.activity_sequence) AS \"first_activity_sequence!: i64\" \
-             FROM board_activity activity \
-             WHERE ((activity.root_id=? AND activity.kind='threadMessageCreated') \
-               OR (activity.message_id=? AND activity.kind='mainMessageCreated')) \
-               AND activity.message_id IS NOT NULL AND activity.actor_key<>? \
-               AND activity.activity_sequence>? \
-             GROUP BY activity.actor_key \
-             ORDER BY MIN(activity.activity_sequence) ASC",
-            root.root_message_id.as_str(),
-            root.root_message_id.as_str(),
-            reader_key,
-            boundary.effective_delivered_position,
-        )
-        .fetch_all(&mut **transaction)
-        .await
-        .map_err(storage_error)?;
-        let mut authors = Vec::with_capacity(author_rows.len());
-        let mut previous_author_sequence = None;
-        for author_row in author_rows {
-            validate_stored_boundary(
-                author_row.first_activity_sequence,
-                first_pending,
-                through,
-                resource.clone(),
-            )?;
-            if previous_author_sequence
-                .is_some_and(|previous| author_row.first_activity_sequence <= previous)
-            {
-                return Err(BoardError::invalid_record(resource.clone()));
-            }
-            previous_author_sequence = Some(author_row.first_activity_sequence);
-            authors.push(load_identity(transaction, author_row.actor_key.as_str()).await?);
-        }
-
         let location = require_thread(transaction, &root.root_message_id).await?;
-        let root_message = load_message(transaction, &root.root_message_id).await?;
-        let title_excerpt_source = match root_message.text.as_str().lines().next() {
-            Some(first_line) => first_line.trim(),
-            None => "",
-        };
-        let root_title_excerpt = title_excerpt_source.chars().take(80).collect();
         let notice = PendingRootNotice::new(
             root.root_message_id.clone(),
             location.topic_id,
             crate::message_records::activity_sequence(first_pending)?,
             crate::message_records::activity_sequence(through)?,
             u64::try_from(range.pending_count).map_err(|_| invalid_record())?,
-            authors,
-            root_title_excerpt,
         )
         .map_err(|_| invalid_record())?;
         notices.push(notice);

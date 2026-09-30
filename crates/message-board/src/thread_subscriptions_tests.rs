@@ -50,22 +50,27 @@ fn policy_bounds_and_human_delivery_rule_are_validated_by_constructors() {
 }
 
 #[test]
-fn pending_root_notice_rejects_invalid_ranges_counts_authors_and_excerpts() {
+fn pending_root_notice_contains_only_neutral_activity_locators() {
     let from_sequence = ActivitySequence::try_from(4_u64).unwrap();
     let through_sequence = ActivitySequence::try_from(7_u64).unwrap();
-    let author = session_reader();
-    assert!(
-        PendingRootNotice::new(
-            MessageId::generate(),
-            TopicId::generate(),
-            from_sequence,
-            through_sequence,
-            3,
-            vec![author.clone()],
-            "root title".to_owned(),
-        )
-        .is_ok()
-    );
+    let notice = PendingRootNotice::new(
+        MessageId::generate(),
+        TopicId::generate(),
+        from_sequence,
+        through_sequence,
+        3,
+    )
+    .unwrap();
+    let encoded_notice = serde_json::to_value(notice).unwrap();
+    let notice_fields = encoded_notice.as_object().unwrap();
+    assert_eq!(notice_fields.len(), 5);
+    assert!(notice_fields.contains_key("rootId"));
+    assert!(notice_fields.contains_key("topicId"));
+    assert!(notice_fields.contains_key("fromSequence"));
+    assert!(notice_fields.contains_key("throughSequence"));
+    assert!(notice_fields.contains_key("messageCount"));
+    assert!(!notice_fields.contains_key("authors"));
+    assert!(!notice_fields.contains_key("rootTitleExcerpt"));
 
     assert_eq!(
         PendingRootNotice::new(
@@ -74,8 +79,6 @@ fn pending_root_notice_rejects_invalid_ranges_counts_authors_and_excerpts() {
             through_sequence,
             from_sequence,
             3,
-            vec![author.clone()],
-            "root title".to_owned(),
         )
         .unwrap_err()
         .field,
@@ -88,53 +91,9 @@ fn pending_root_notice_rejects_invalid_ranges_counts_authors_and_excerpts() {
             from_sequence,
             through_sequence,
             0,
-            vec![author.clone()],
-            "root title".to_owned(),
         )
         .unwrap_err()
         .field,
         "messageCount"
-    );
-    assert_eq!(
-        PendingRootNotice::new(
-            MessageId::generate(),
-            TopicId::generate(),
-            from_sequence,
-            through_sequence,
-            3,
-            vec![author.clone(), author.clone()],
-            "root title".to_owned(),
-        )
-        .unwrap_err()
-        .field,
-        "authors"
-    );
-    assert_eq!(
-        PendingRootNotice::new(
-            MessageId::generate(),
-            TopicId::generate(),
-            from_sequence,
-            through_sequence,
-            3,
-            vec![author.clone()],
-            " title with spaces ".to_owned(),
-        )
-        .unwrap_err()
-        .field,
-        "rootTitleExcerpt"
-    );
-    assert_eq!(
-        PendingRootNotice::new(
-            MessageId::generate(),
-            TopicId::generate(),
-            from_sequence,
-            through_sequence,
-            3,
-            vec![author],
-            "x".repeat(81),
-        )
-        .unwrap_err()
-        .field,
-        "rootTitleExcerpt"
     );
 }

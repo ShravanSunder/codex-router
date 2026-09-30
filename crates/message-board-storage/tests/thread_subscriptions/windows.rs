@@ -38,13 +38,13 @@ async fn raw_connection(path: &std::path::Path) -> SqliteConnection {
 }
 
 #[tokio::test]
-async fn subscription_notice_returns_ranges_counts_authors_excerpt_and_keeps_messages_unread() {
+async fn subscription_notice_returns_only_ranges_and_counts_and_keeps_messages_unread() {
     let mut fixture = ThreadSubscriptionFixture::create_without_participant("root-notice").await;
-    let root_title = format!("  {}  \nignored second line", "é".repeat(90));
+    let root_content = format!("  {}  \nignored second line", "é".repeat(90));
     let root_message_id = fixture
         .create_root(
             human("root-author"),
-            &root_title,
+            &root_content,
             fixture.now + chrono::Duration::seconds(1),
         )
         .await;
@@ -115,12 +115,15 @@ async fn subscription_notice_returns_ranges_counts_authors_excerpt_and_keeps_mes
     assert_eq!(root_notice.from_sequence, first.message.activity_sequence);
     assert_eq!(root_notice.through_sequence, last.message.activity_sequence);
     assert_eq!(root_notice.message_count, 3);
-    assert_eq!(root_notice.authors, vec![first_author, second_author]);
-    assert_eq!(root_notice.root_title_excerpt, "é".repeat(80));
     let encoded_notice = serde_json::to_string(&notice).unwrap();
     assert!(!encoded_notice.contains("first private body"));
     assert!(!encoded_notice.contains("second private body"));
     assert!(!encoded_notice.contains("third private body"));
+    assert!(!encoded_notice.contains(&root_content));
+    assert!(!encoded_notice.contains("first-author"));
+    assert!(!encoded_notice.contains("second-author"));
+    assert!(!encoded_notice.contains("authors"));
+    assert!(!encoded_notice.contains("rootTitleExcerpt"));
 
     let fetched = fixture
         .store
