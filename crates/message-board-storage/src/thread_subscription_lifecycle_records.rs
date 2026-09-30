@@ -43,12 +43,12 @@ pub(crate) async fn end_subscription(
     let Some(record) = load_subscription_record(transaction, reader_key, scope).await? else {
         return Ok(false);
     };
-    if matches!(record.state, SubscriptionState::Ended { .. }) {
+    if matches!(record.state(), SubscriptionState::Ended { .. }) {
         delete_scope_windows(transaction, reader_key, scope).await?;
         return Ok(true);
     }
     let (scope_kind, scope_id) = encode_scope(scope);
-    let next_generation = stored_generation(record.generation.next().map_err(policy_error)?)?;
+    let next_generation = stored_generation(record.generation().next().map_err(policy_error)?)?;
     sqlx::query!(
         "UPDATE thread_subscriptions SET state='ended',end_reason=?,ended_at=?,generation=? \
          WHERE reader_key=? AND scope_kind=? AND scope_id=? AND state<>'ended'",
@@ -153,18 +153,18 @@ async fn load_covering_subscription(
     let thread_scope = SubscriptionScope::thread(root_message_id.clone());
     if let Some(row) = load_subscription_row(transaction, reader_key, &thread_scope).await? {
         let decoded = decode_thread_subscription_record(row, Vec::new())?;
-        if !decoded.state.is_delivery_eligible() || decoded.expires_at <= now {
+        if !decoded.state().is_delivery_eligible() || decoded.expires_at() <= now {
             return Ok(None);
         }
         return Ok(Some(CoveringSubscriptionRow {
-            scope: decoded.scope,
-            mode: decoded.policy.mode(),
-            when_idle: decoded.policy.when_idle(),
-            quiet_seconds: decoded.policy.timing().quiet_seconds(),
-            cap_seconds: decoded.policy.timing().cap_seconds(),
-            lifetime_seconds: decoded.policy.lifetime().seconds(),
-            generation: decoded.generation,
-            state: decoded.state,
+            scope: decoded.scope().clone(),
+            mode: decoded.policy().mode(),
+            when_idle: decoded.policy().when_idle(),
+            quiet_seconds: decoded.policy().timing().quiet_seconds(),
+            cap_seconds: decoded.policy().timing().cap_seconds(),
+            lifetime_seconds: decoded.policy().lifetime().seconds(),
+            generation: decoded.generation(),
+            state: decoded.state(),
         }));
     }
     let topic_id: String = sqlx::query_scalar!(
@@ -181,18 +181,18 @@ async fn load_covering_subscription(
         return Ok(None);
     };
     let decoded = decode_thread_subscription_record(row, Vec::new())?;
-    if decoded.state != SubscriptionState::Active || decoded.expires_at <= now {
+    if decoded.state() != SubscriptionState::Active || decoded.expires_at() <= now {
         return Ok(None);
     }
     Ok(Some(CoveringSubscriptionRow {
-        scope: decoded.scope,
-        mode: decoded.policy.mode(),
-        when_idle: decoded.policy.when_idle(),
-        quiet_seconds: decoded.policy.timing().quiet_seconds(),
-        cap_seconds: decoded.policy.timing().cap_seconds(),
-        lifetime_seconds: decoded.policy.lifetime().seconds(),
-        generation: decoded.generation,
-        state: decoded.state,
+        scope: decoded.scope().clone(),
+        mode: decoded.policy().mode(),
+        when_idle: decoded.policy().when_idle(),
+        quiet_seconds: decoded.policy().timing().quiet_seconds(),
+        cap_seconds: decoded.policy().timing().cap_seconds(),
+        lifetime_seconds: decoded.policy().lifetime().seconds(),
+        generation: decoded.generation(),
+        state: decoded.state(),
     }))
 }
 
@@ -233,7 +233,7 @@ pub(crate) async fn activate_topic_watch_scope(
     .map_err(storage_error)?
     {
         let root_id = MessageId::try_from(root_id).map_err(|_| invalid_record())?;
-        ensure_topic_root_watch(
+        activate_topic_root_watch(
             transaction,
             reader_key,
             &board.project_id,
@@ -255,27 +255,10 @@ pub(crate) async fn ensure_topic_root_watch(
     root_message_id: &MessageId,
     boundary: i64,
 ) -> Result<(), BoardError> {
-    let thread_override = sqlx::query_scalar!(
-        "SELECT EXISTS(SELECT 1 FROM thread_subscriptions \
-         WHERE reader_key=? AND scope_kind='thread' AND scope_id=?)",
-        reader_key,
-        root_message_id.as_str(),
-    )
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(storage_error)?;
-    if thread_override != 0 {
+    if !topic_root_watch_can_be_materialized(transaction, reader_key, topic_id, root_message_id)
+        .await?
+    {
         return Ok(());
-    }
-    let root_topic: Option<String> = sqlx::query_scalar!(
-        "SELECT topic_id FROM board_messages WHERE message_id=? AND root_id IS NULL",
-        root_message_id.as_str(),
-    )
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(storage_error)?;
-    if root_topic.as_deref() != Some(topic_id.as_str()) {
-        return Err(invalid_record());
     }
     crate::storage_support::ensure_project_reader_state(
         transaction,
@@ -294,6 +277,60 @@ pub(crate) async fn ensure_topic_root_watch(
     .await
     .map_err(storage_error)?;
     Ok(())
+}
+
+async fn activate_topic_root_watch(
+    transaction: &mut BoardTransaction<'_>,
+    reader_key: &str,
+    project_id: &ProjectId,
+    topic_id: &TopicId,
+    root_message_id: &MessageId,
+    boundary: i64,
+) -> Result<(), BoardError> {
+    if !topic_root_watch_can_be_materialized(transaction, reader_key, topic_id, root_message_id)
+        .await?
+    {
+        return Ok(());
+    }
+    crate::message_records::activate_watch(
+        transaction,
+        reader_key,
+        project_id,
+        root_message_id,
+        boundary,
+    )
+    .await
+}
+
+async fn topic_root_watch_can_be_materialized(
+    transaction: &mut BoardTransaction<'_>,
+    reader_key: &str,
+    topic_id: &TopicId,
+    root_message_id: &MessageId,
+) -> Result<bool, BoardError> {
+    let thread_override = sqlx::query_scalar!(
+        "SELECT EXISTS(SELECT 1 FROM thread_subscriptions \
+         WHERE reader_key=? AND scope_kind='thread' AND scope_id=?)",
+        reader_key,
+        root_message_id.as_str(),
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if thread_override != 0 {
+        return Ok(false);
+    }
+    let root_topic: Option<String> = sqlx::query_scalar!(
+        "SELECT topic_id FROM board_messages WHERE message_id=? AND root_id IS NULL",
+        root_message_id.as_str(),
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if root_topic.as_deref() != Some(topic_id.as_str()) {
+        return Err(invalid_record());
+    }
+    Ok(true)
 }
 
 pub(super) async fn activate_scope_watch(
@@ -326,24 +363,24 @@ pub(crate) async fn upsert_join_subscription(
     reader: &Identity,
     root_message_id: &MessageId,
     now: DateTime<Utc>,
-) -> Result<(), BoardError> {
+) -> Result<bool, BoardError> {
     let scope = SubscriptionScope::thread(root_message_id.clone());
     let existing = load_subscription_record(transaction, reader_key, &scope).await?;
     let policy = existing
         .as_ref()
-        .map(|record| record.policy.clone())
+        .map(|record| record.policy().clone())
         .unwrap_or_else(|| SubscriptionPolicy::defaults_for(reader));
-    let state_changed = existing
+    let subscription_started = existing
         .as_ref()
-        .is_none_or(|record| !matches!(record.state, SubscriptionState::Active));
+        .is_none_or(|record| !matches!(record.state(), SubscriptionState::Active));
     let generation = match existing.as_ref() {
         None => SubscriptionGeneration::new(1).map_err(policy_error)?,
-        Some(record) if state_changed => record.generation.next().map_err(policy_error)?,
-        Some(record) => record.generation,
+        Some(record) if subscription_started => record.generation().next().map_err(policy_error)?,
+        Some(record) => record.generation(),
     };
     let previous_outcome = existing
         .as_ref()
-        .and_then(|record| record.last_outcome.as_ref());
+        .and_then(ThreadSubscriptionRecord::last_outcome);
     upsert_subscription(
         transaction,
         SubscriptionWrite {
@@ -356,7 +393,8 @@ pub(crate) async fn upsert_join_subscription(
             last_outcome: previous_outcome,
         },
     )
-    .await
+    .await?;
+    Ok(subscription_started)
 }
 
 pub(crate) async fn end_thread_subscription_for_join_without_watch(
@@ -461,7 +499,7 @@ pub(crate) async fn resolve_thread_subscriptions(
         let record = load_subscription_record(transaction, reader_key.as_str(), &scope)
             .await?
             .ok_or_else(invalid_record)?;
-        if record.policy.mode() == SubscriptionMode::Off {
+        if record.policy().mode() == SubscriptionMode::Off {
             end_subscription(
                 transaction,
                 reader_key.as_str(),
@@ -470,11 +508,11 @@ pub(crate) async fn resolve_thread_subscriptions(
                 now,
             )
             .await?;
-        } else if record.policy.mode() == SubscriptionMode::Deliver
-            || record.policy.mode() == SubscriptionMode::Poll
+        } else if record.policy().mode() == SubscriptionMode::Deliver
+            || record.policy().mode() == SubscriptionMode::Poll
         {
             let next_generation =
-                stored_generation(record.generation.next().map_err(policy_error)?)?;
+                stored_generation(record.generation().next().map_err(policy_error)?)?;
             sqlx::query!(
                 "UPDATE thread_subscriptions SET state='draining',generation=? \
                  WHERE reader_key=? AND scope_kind='thread' AND scope_id=? \

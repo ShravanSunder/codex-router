@@ -69,7 +69,7 @@ async fn m3_unsubscribe_after_expiry_keeps_the_expired_end_reason() {
         .await
         .unwrap();
     assert_eq!(
-        record.state,
+        record.state(),
         SubscriptionState::Ended {
             reason: EndReason::Expired
         }
@@ -141,12 +141,12 @@ async fn m6_draining_thread_subscription_completes_as_resolved_after_settlement(
         .await
         .unwrap();
     assert_eq!(
-        completed.state,
+        completed.state(),
         SubscriptionState::Ended {
             reason: EndReason::Resolved
         }
     );
-    assert!(completed.roots.is_empty());
+    assert!(completed.roots().is_empty());
     fixture.finish().await;
 }
 
@@ -196,6 +196,6 @@ async fn m7_rescan_prunes_a_window_with_no_pending_messages() {
         .await
         .unwrap()
         .unwrap();
-    assert!(record.roots.is_empty());
+    assert!(record.roots().is_empty());
     fixture.finish().await;
 }

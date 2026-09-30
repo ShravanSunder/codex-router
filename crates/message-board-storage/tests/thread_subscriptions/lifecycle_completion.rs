@@ -24,12 +24,12 @@ async fn leave_replacement_and_expiry_end_rows_and_delete_windows() {
         .await
         .unwrap();
     assert_eq!(
-        left_record.state,
+        left_record.state(),
         SubscriptionState::Ended {
             reason: EndReason::Left
         }
     );
-    assert!(left_record.roots.is_empty());
+    assert!(left_record.roots().is_empty());
     left_fixture.finish().await;
 
     let mut replaced_fixture =
@@ -53,7 +53,7 @@ async fn leave_replacement_and_expiry_end_rows_and_delete_windows() {
         )
         .await
         .unwrap()
-        .roots
+        .roots()
         .len(),
         1
     );
@@ -82,12 +82,12 @@ async fn leave_replacement_and_expiry_end_rows_and_delete_windows() {
     .await
     .unwrap();
     assert_eq!(
-        replaced_record.state,
+        replaced_record.state(),
         SubscriptionState::Ended {
             reason: EndReason::Replaced
         }
     );
-    assert!(replaced_record.roots.is_empty());
+    assert!(replaced_record.roots().is_empty());
     replaced_fixture.finish().await;
 
     let mut expired_fixture = ThreadSubscriptionFixture::create("expired-end-reason").await;
@@ -112,12 +112,12 @@ async fn leave_replacement_and_expiry_end_rows_and_delete_windows() {
     .await
     .unwrap();
     assert_eq!(
-        expired_record.state,
+        expired_record.state(),
         SubscriptionState::Ended {
             reason: EndReason::Expired
         }
     );
-    assert!(expired_record.roots.is_empty());
+    assert!(expired_record.roots().is_empty());
     expired_fixture.finish().await;
 }
 
@@ -156,8 +156,8 @@ async fn resolve_drains_pending_or_ends_mode_off_subscription() {
     )
     .await
     .unwrap();
-    assert_eq!(draining_record.state, SubscriptionState::Draining);
-    assert_eq!(draining_record.roots.len(), 1);
+    assert_eq!(draining_record.state(), SubscriptionState::Draining);
+    assert_eq!(draining_record.roots().len(), 1);
     assert!(
         draining_fixture
             .watch_status(draining_fixture.reader.clone())
@@ -217,12 +217,12 @@ async fn resolve_drains_pending_or_ends_mode_off_subscription() {
         .await
         .unwrap();
     assert_eq!(
-        off_record.state,
+        off_record.state(),
         SubscriptionState::Ended {
             reason: EndReason::Resolved
         }
     );
-    assert!(off_record.roots.is_empty());
+    assert!(off_record.roots().is_empty());
     off_fixture.finish().await;
 }
 
@@ -274,20 +274,20 @@ async fn leave_resolve_ends_resolver_as_left_and_drains_other_readers() {
         .await
         .unwrap();
     assert_eq!(
-        resolver_record.state,
+        resolver_record.state(),
         SubscriptionState::Ended {
             reason: EndReason::Left
         }
     );
-    assert!(resolver_record.roots.is_empty());
+    assert!(resolver_record.roots().is_empty());
     assert!(!fixture.watch_status(resolver.clone()).await.watching);
 
     let other_record = get_record(&mut fixture.store, &other_reader, &scope)
         .await
         .unwrap();
-    assert_eq!(other_record.state, SubscriptionState::Draining);
-    assert_eq!(other_record.roots.len(), 1);
-    assert_eq!(other_record.roots[0].pending_count, 1);
+    assert_eq!(other_record.state(), SubscriptionState::Draining);
+    assert_eq!(other_record.roots().len(), 1);
+    assert_eq!(other_record.roots()[0].pending_count(), 1);
     assert!(fixture.watch_status(other_reader.clone()).await.watching);
     assert_eq!(
         fixture
@@ -368,7 +368,7 @@ async fn topic_subscription_keeps_off_activity_unread_and_thread_rows_take_prece
     let topic_record = get_record(&mut fixture.store, &topic_reader, &topic_scope)
         .await
         .unwrap();
-    assert!(topic_record.roots.is_empty());
+    assert!(topic_record.roots().is_empty());
     let unread_messages = fixture
         .store
         .fetch_inbox(InboxFetchRequest {
@@ -471,7 +471,7 @@ async fn topic_subscription_keeps_off_activity_unread_and_thread_rows_take_prece
         get_record(&mut fixture.store, &thread_reader, &thread_scope)
             .await
             .unwrap()
-            .roots
+            .roots()
             .is_empty()
     );
     fixture
@@ -496,7 +496,7 @@ async fn topic_subscription_keeps_off_activity_unread_and_thread_rows_take_prece
         get_record(&mut fixture.store, &thread_reader, &topic_scope)
             .await
             .unwrap()
-            .roots
+            .roots()
             .is_empty()
     );
     fixture.finish().await;

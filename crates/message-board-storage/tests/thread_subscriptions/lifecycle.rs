@@ -49,9 +49,9 @@ async fn join_watch_creates_default_subscription_and_no_watch_does_not() {
     )
     .await
     .unwrap();
-    assert_eq!(watched_record.state, SubscriptionState::Active);
+    assert_eq!(watched_record.state(), SubscriptionState::Active);
     assert_eq!(
-        watched_record.policy,
+        watched_record.policy().clone(),
         SubscriptionPolicy::defaults_for(&watched_reader)
     );
 
@@ -102,8 +102,11 @@ async fn create_with_role_subscribes_the_session_creator() {
     let record = get_record(&mut fixture.store, &creator, &scope)
         .await
         .unwrap();
-    assert_eq!(record.state, SubscriptionState::Active);
-    assert_eq!(record.policy, SubscriptionPolicy::defaults_for(&creator));
+    assert_eq!(record.state(), SubscriptionState::Active);
+    assert_eq!(
+        record.policy().clone(),
+        SubscriptionPolicy::defaults_for(&creator)
+    );
     let watch = fixture
         .store
         .show_thread(ThreadShowRequest {
@@ -152,7 +155,7 @@ async fn rejoin_reactivates_ended_subscription_and_keeps_policy() {
         .await
         .unwrap();
     assert_eq!(
-        ended.state,
+        ended.state(),
         SubscriptionState::Ended {
             reason: EndReason::Cancelled
         }
@@ -170,10 +173,10 @@ async fn rejoin_reactivates_ended_subscription_and_keeps_policy() {
     let reactivated = get_record(&mut fixture.store, &fixture.reader, &scope)
         .await
         .unwrap();
-    assert_eq!(reactivated.state, SubscriptionState::Active);
-    assert_eq!(reactivated.policy, patched.policy);
-    assert_eq!(reactivated.renewed_at, persisted_time(rejoined_at));
-    assert!(reactivated.generation.get() > ended.generation.get());
+    assert_eq!(reactivated.state(), SubscriptionState::Active);
+    assert_eq!(reactivated.policy(), patched.policy());
+    assert_eq!(reactivated.renewed_at(), persisted_time(rejoined_at));
+    assert!(reactivated.generation().get() > ended.generation().get());
     fixture.finish().await;
 }
 
@@ -222,9 +225,9 @@ async fn thread_subscribe_checks_participant_validates_patch_and_activates_watch
         )
         .await
         .unwrap();
-    assert_eq!(record.policy.mode(), SubscriptionMode::Poll);
-    assert_eq!(record.policy.timing().quiet_seconds(), 60);
-    assert_eq!(record.policy.timing().cap_seconds(), 600);
+    assert_eq!(record.policy().mode(), SubscriptionMode::Poll);
+    assert_eq!(record.policy().timing().quiet_seconds(), 60);
+    assert_eq!(record.policy().timing().cap_seconds(), 600);
     assert!(fixture.watch_status(fixture.reader.clone()).await.watching);
 
     let invalid = fixture
@@ -287,12 +290,12 @@ async fn unsubscribe_keeps_watch_but_unwatch_ends_without_post_reactivation() {
         .await
         .unwrap();
     assert_eq!(
-        cancelled.state,
+        cancelled.state(),
         SubscriptionState::Ended {
             reason: EndReason::Cancelled
         }
     );
-    assert!(cancelled.roots.is_empty());
+    assert!(cancelled.roots().is_empty());
     assert!(fixture.watch_status(fixture.reader.clone()).await.watching);
     fixture
         .post_reply("other", "does not recreate subscription")
@@ -300,8 +303,8 @@ async fn unsubscribe_keeps_watch_but_unwatch_ends_without_post_reactivation() {
     let after_post = get_record(&mut fixture.store, &fixture.reader, &scope)
         .await
         .unwrap();
-    assert_eq!(after_post.state, cancelled.state);
-    assert!(after_post.roots.is_empty());
+    assert_eq!(after_post.state(), cancelled.state());
+    assert!(after_post.roots().is_empty());
 
     let unwatch_reader = session("unwatch-reader");
     fixture
@@ -339,12 +342,12 @@ async fn unsubscribe_keeps_watch_but_unwatch_ends_without_post_reactivation() {
         .await
         .unwrap();
     assert_eq!(
-        opted_out_record.state,
+        opted_out_record.state(),
         SubscriptionState::Ended {
             reason: EndReason::Cancelled
         }
     );
-    assert!(opted_out_record.roots.is_empty());
+    assert!(opted_out_record.roots().is_empty());
 
     fixture
         .store
@@ -362,12 +365,12 @@ async fn unsubscribe_keeps_watch_but_unwatch_ends_without_post_reactivation() {
         .await
         .unwrap();
     assert_eq!(
-        unwatch_record.state,
+        unwatch_record.state(),
         SubscriptionState::Ended {
             reason: EndReason::Cancelled
         }
     );
-    assert!(unwatch_record.roots.is_empty());
+    assert!(unwatch_record.roots().is_empty());
     assert!(!fixture.watch_status(unwatch_reader.clone()).await.watching);
     fixture
         .post_reply("later-author", "must not recreate ended subscription")
@@ -376,8 +379,8 @@ async fn unsubscribe_keeps_watch_but_unwatch_ends_without_post_reactivation() {
         get_record(&mut fixture.store, &unwatch_reader, &scope)
             .await
             .unwrap()
-            .state,
-        unwatch_record.state
+            .state(),
+        unwatch_record.state()
     );
 
     let topic_reader = session("topic-unwatch-reader");
@@ -405,7 +408,7 @@ async fn unsubscribe_keeps_watch_but_unwatch_ends_without_post_reactivation() {
         get_record(&mut fixture.store, &topic_reader, &topic_scope)
             .await
             .unwrap()
-            .roots
+            .roots()
             .len(),
         1
     );
@@ -425,12 +428,12 @@ async fn unsubscribe_keeps_watch_but_unwatch_ends_without_post_reactivation() {
         .await
         .unwrap();
     assert_eq!(
-        topic_record.state,
+        topic_record.state(),
         SubscriptionState::Ended {
             reason: EndReason::Cancelled
         }
     );
-    assert!(topic_record.roots.is_empty());
+    assert!(topic_record.roots().is_empty());
     assert!(
         fixture
             .watch_status_for(fixture.root_message_id.clone(), topic_reader.clone())

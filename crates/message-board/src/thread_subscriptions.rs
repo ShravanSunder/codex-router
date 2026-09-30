@@ -550,13 +550,13 @@ pub enum SubscriptionDeliveryOutcome {
     try_from = "RawSubscriptionRootRecord"
 )]
 pub struct SubscriptionRootRecord {
-    pub root_message_id: MessageId,
-    pub opened_at: DateTime<Utc>,
-    pub last_arrival_at: DateTime<Utc>,
-    pub pending_count: u64,
-    pub held_since: Option<DateTime<Utc>>,
-    pub next_retry_at: Option<DateTime<Utc>>,
-    pub retry_attempts: u32,
+    root_message_id: MessageId,
+    opened_at: DateTime<Utc>,
+    last_arrival_at: DateTime<Utc>,
+    pending_count: u64,
+    held_since: Option<DateTime<Utc>>,
+    next_retry_at: Option<DateTime<Utc>>,
+    retry_attempts: u32,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -616,6 +616,41 @@ impl SubscriptionRootRecord {
             retry_attempts: props.retry_attempts,
         })
     }
+
+    #[must_use]
+    pub fn root_message_id(&self) -> &MessageId {
+        &self.root_message_id
+    }
+
+    #[must_use]
+    pub fn opened_at(&self) -> DateTime<Utc> {
+        self.opened_at
+    }
+
+    #[must_use]
+    pub fn last_arrival_at(&self) -> DateTime<Utc> {
+        self.last_arrival_at
+    }
+
+    #[must_use]
+    pub const fn pending_count(&self) -> u64 {
+        self.pending_count
+    }
+
+    #[must_use]
+    pub fn held_since(&self) -> Option<DateTime<Utc>> {
+        self.held_since
+    }
+
+    #[must_use]
+    pub fn next_retry_at(&self) -> Option<DateTime<Utc>> {
+        self.next_retry_at
+    }
+
+    #[must_use]
+    pub const fn retry_attempts(&self) -> u32 {
+        self.retry_attempts
+    }
 }
 
 /// Stored subscription facts plus the windows currently covered by its scope.
@@ -626,16 +661,16 @@ impl SubscriptionRootRecord {
     try_from = "RawThreadSubscriptionRecord"
 )]
 pub struct ThreadSubscriptionRecord {
-    pub reader: Identity,
-    pub scope: SubscriptionScope,
-    pub policy: SubscriptionPolicy,
-    pub state: SubscriptionState,
-    pub renewed_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub ended_at: Option<DateTime<Utc>>,
-    pub generation: SubscriptionGeneration,
-    pub last_outcome: Option<SubscriptionDeliveryOutcome>,
-    pub roots: Vec<SubscriptionRootRecord>,
+    reader: Identity,
+    scope: SubscriptionScope,
+    policy: SubscriptionPolicy,
+    state: SubscriptionState,
+    renewed_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    generation: SubscriptionGeneration,
+    last_outcome: Option<SubscriptionDeliveryOutcome>,
+    roots: Vec<SubscriptionRootRecord>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -719,6 +754,56 @@ impl ThreadSubscriptionRecord {
             last_outcome: props.last_outcome,
             roots: props.roots,
         })
+    }
+
+    #[must_use]
+    pub fn reader(&self) -> &Identity {
+        &self.reader
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> &SubscriptionScope {
+        &self.scope
+    }
+
+    #[must_use]
+    pub fn policy(&self) -> &SubscriptionPolicy {
+        &self.policy
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> SubscriptionState {
+        self.state
+    }
+
+    #[must_use]
+    pub fn renewed_at(&self) -> DateTime<Utc> {
+        self.renewed_at
+    }
+
+    #[must_use]
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
+
+    #[must_use]
+    pub fn ended_at(&self) -> Option<DateTime<Utc>> {
+        self.ended_at
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> SubscriptionGeneration {
+        self.generation
+    }
+
+    #[must_use]
+    pub fn last_outcome(&self) -> Option<&SubscriptionDeliveryOutcome> {
+        self.last_outcome.as_ref()
+    }
+
+    #[must_use]
+    pub fn roots(&self) -> &[SubscriptionRootRecord] {
+        &self.roots
     }
 }
 

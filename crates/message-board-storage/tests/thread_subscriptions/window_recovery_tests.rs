@@ -33,8 +33,8 @@ async fn restore_clears_interrupted_selection_marks_and_keeps_draining_window_de
         .unwrap();
     let scope = SubscriptionScope::thread(fixture.root_message_id.clone());
     let before_restart = record(&mut fixture.store, &fixture.reader, &scope).await;
-    assert_eq!(before_restart.state, SubscriptionState::Draining);
-    assert_eq!(before_restart.roots.len(), 1);
+    assert_eq!(before_restart.state(), SubscriptionState::Draining);
+    assert_eq!(before_restart.roots().len(), 1);
 
     let interrupted_through = {
         let mut connection = raw_connection(&fixture.path).await;
@@ -73,10 +73,10 @@ async fn restore_clears_interrupted_selection_marks_and_keeps_draining_window_de
         .await
         .unwrap();
     assert_eq!(restored.len(), 1);
-    assert_eq!(restored[0].state, SubscriptionState::Draining);
+    assert_eq!(restored[0].state(), SubscriptionState::Draining);
     assert_eq!(
-        restored[0].roots[0].opened_at,
-        before_restart.roots[0].opened_at
+        restored[0].roots()[0].opened_at(),
+        before_restart.roots()[0].opened_at()
     );
 
     let mut connection = raw_connection(&fixture.path).await;
@@ -91,8 +91,8 @@ async fn restore_clears_interrupted_selection_marks_and_keeps_draining_window_de
     assert_eq!(row.1, None);
     assert_eq!(
         row.2,
-        before_restart.roots[0]
-            .opened_at
+        before_restart.roots()[0]
+            .opened_at()
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     );
     connection.close().await.unwrap();

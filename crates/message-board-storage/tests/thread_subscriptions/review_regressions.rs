@@ -389,7 +389,7 @@ async fn p6_topic_coverage_does_not_reactivate_an_explicitly_unwatched_thread() 
         .unwrap()
         .unwrap();
     assert_eq!(
-        cancelled.state,
+        cancelled.state(),
         SubscriptionState::Ended {
             reason: EndReason::Cancelled
         }
@@ -451,7 +451,7 @@ async fn p6_join_without_watch_writes_thread_override_over_topic_coverage() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        cancelled.state,
+        cancelled.state(),
         SubscriptionState::Ended {
             reason: EndReason::Cancelled
         }
@@ -514,8 +514,8 @@ async fn p7_drop_policy_processes_a_draining_subscription() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(record.state, SubscriptionState::Draining);
-    assert!(record.roots.is_empty());
+    assert_eq!(record.state(), SubscriptionState::Draining);
+    assert!(record.roots().is_empty());
     fixture.finish().await;
 }
 
@@ -571,7 +571,7 @@ async fn p8_rejoin_after_unsubscribe_starts_after_activity_while_unsubscribed() 
         .await
         .unwrap()
         .unwrap();
-    assert!(record.roots.is_empty());
+    assert!(record.roots().is_empty());
     fixture.finish().await;
 }
 
@@ -612,5 +612,118 @@ async fn p8_first_join_by_existing_watcher_starts_after_prior_activity() {
         .await
         .unwrap();
     assert!(due.is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn q1_rejoin_while_active_keeps_pending_window() {
+    let mut fixture = ThreadSubscriptionFixture::create("review-q1").await;
+    fixture
+        .post_reply_as(
+            human("review-q1-author"),
+            "pending before active rejoin",
+            fixture.now + chrono::Duration::seconds(1),
+        )
+        .await;
+    let due_at = fixture.now + chrono::Duration::seconds(200);
+    let due_before_rejoin = fixture
+        .store
+        .due_subscription_roots(&fixture.reader, due_at)
+        .await
+        .unwrap();
+    assert_eq!(due_before_rejoin, vec![fixture.root_message_id.clone()]);
+
+    fixture
+        .join_reader(
+            fixture.reader.clone(),
+            ParticipantRole::Participant,
+            true,
+            fixture.now + chrono::Duration::seconds(30),
+        )
+        .await;
+
+    let due_after_rejoin = fixture
+        .store
+        .due_subscription_roots(&fixture.reader, due_at)
+        .await
+        .unwrap();
+    assert_eq!(
+        due_after_rejoin,
+        vec![fixture.root_message_id.clone()],
+        "rejoining an already-active subscription must preserve pending activity"
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn q2_topic_subscribe_reactivates_previously_unwatched_root_without_thread_row() {
+    let mut fixture = ThreadSubscriptionFixture::create_without_participant("review-q2").await;
+    fixture
+        .store
+        .watch_thread(ThreadWatchRequest {
+            root_message_id: fixture.root_message_id.clone(),
+            actor: fixture.reader.clone(),
+            acting_for: None,
+        })
+        .await
+        .unwrap();
+    fixture
+        .store
+        .unwatch_thread(
+            ThreadUnwatchRequest {
+                root_message_id: fixture.root_message_id.clone(),
+                actor: fixture.reader.clone(),
+                acting_for: None,
+            },
+            fixture.now,
+        )
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .store
+            .get_thread_subscription_record(
+                &fixture.reader,
+                &SubscriptionScope::thread(fixture.root_message_id.clone()),
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    fixture
+        .store
+        .subscribe_thread_subscription(
+            ThreadSubscriptionSubscribeRequest {
+                reader: fixture.reader.clone(),
+                scope: SubscriptionScope::topic(fixture.topic_id.clone()),
+                policy: SubscriptionPolicyPatch::default(),
+            },
+            fixture.now + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    fixture
+        .post_reply_as(
+            human("review-q2-author"),
+            "reply after topic subscribe",
+            fixture.now + chrono::Duration::seconds(2),
+        )
+        .await;
+
+    let watch = fixture.watch_status(fixture.reader.clone()).await;
+    let due = fixture
+        .store
+        .due_subscription_roots(
+            &fixture.reader,
+            fixture.now + chrono::Duration::seconds(200),
+        )
+        .await
+        .unwrap();
+    assert!(
+        watch.watching && due == vec![fixture.root_message_id.clone()],
+        "explicit Topic subscribe must reactivate a previously inactive root Watch; watching={}, due={due:?}",
+        watch.watching
+    );
     fixture.finish().await;
 }

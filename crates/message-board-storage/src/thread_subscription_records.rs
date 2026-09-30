@@ -167,21 +167,21 @@ async fn save_subscription(
     let (policy, state, generation, last_outcome) = match existing.as_ref() {
         Some(record) => {
             let policy = record
-                .policy
+                .policy()
                 .apply_patch(props.reader, props.policy_patch)
                 .map_err(policy_error)?;
-            let state_changed = !matches!(record.state, SubscriptionState::Active);
-            let policy_changed = policy != record.policy;
+            let state_changed = !matches!(record.state(), SubscriptionState::Active);
+            let policy_changed = policy != *record.policy();
             let generation = if state_changed || policy_changed {
-                record.generation.next().map_err(policy_error)?
+                record.generation().next().map_err(policy_error)?
             } else {
-                record.generation
+                record.generation()
             };
             (
                 policy,
                 SubscriptionState::Active,
                 generation,
-                record.last_outcome.clone(),
+                record.last_outcome().cloned(),
             )
         }
         None => {
@@ -269,7 +269,7 @@ impl BoardStore {
                 &request.scope,
             )));
         };
-        if record.state.is_delivery_eligible() {
+        if record.state().is_delivery_eligible() {
             end_subscription(
                 &mut transaction,
                 &reader_key,
@@ -303,7 +303,7 @@ impl BoardStore {
         let record = load_subscription_record(&mut transaction, &reader_key, &scope)
             .await?
             .ok_or_else(|| BoardError::resource_not_found(subscription_resource(&scope)))?;
-        if record.state != SubscriptionState::Draining {
+        if record.state() != SubscriptionState::Draining {
             return Err(BoardError::invalid_field(
                 "state",
                 "only a draining Thread subscription can be completed",
@@ -407,8 +407,8 @@ impl BoardStore {
             transaction.commit().await.map_err(storage_error)?;
             return Ok(None);
         };
-        if record.state.is_delivery_eligible() {
-            let expires_at = expiry_at(now, record.policy.lifetime())?;
+        if record.state().is_delivery_eligible() {
+            let expires_at = expiry_at(now, record.policy().lifetime())?;
             let (scope_kind, scope_id) = encode_scope(scope);
             sqlx::query!(
                 "UPDATE thread_subscriptions SET renewed_at=?,expires_at=? \
@@ -419,7 +419,7 @@ impl BoardStore {
                 reader_key,
                 scope_kind,
                 scope_id,
-                stored_generation(record.generation)?,
+                stored_generation(record.generation())?,
             )
             .execute(&mut *transaction)
             .await

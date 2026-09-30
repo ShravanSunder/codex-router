@@ -249,7 +249,7 @@ async fn post_windows_exclude_author_and_topic_roots_keep_independent_timing() {
         &SubscriptionScope::thread(fixture.root_message_id.clone()),
     )
     .await;
-    assert!(thread_record.roots.is_empty());
+    assert!(thread_record.roots().is_empty());
     fixture.finish().await;
 
     let mut fixture = ThreadSubscriptionFixture::create_without_participant("topic-windows").await;
@@ -290,20 +290,20 @@ async fn post_windows_exclude_author_and_topic_roots_keep_independent_timing() {
         .await;
 
     let topic_record = record(&mut fixture.store, &topic_reader, &topic_scope).await;
-    assert_eq!(topic_record.roots.len(), 2);
+    assert_eq!(topic_record.roots().len(), 2);
     let first_window = topic_record
-        .roots
+        .roots()
         .iter()
-        .find(|window| window.root_message_id == fixture.root_message_id)
+        .find(|window| window.root_message_id() == &fixture.root_message_id)
         .unwrap();
     let second_window = topic_record
-        .roots
+        .roots()
         .iter()
-        .find(|window| window.root_message_id == second_root)
+        .find(|window| window.root_message_id() == &second_root)
         .unwrap();
-    assert_eq!(first_window.opened_at, persisted_time(first_arrival));
+    assert_eq!(first_window.opened_at(), persisted_time(first_arrival));
     assert_eq!(
-        second_window.opened_at,
+        second_window.opened_at(),
         persisted_time(fixture.now + chrono::Duration::seconds(30))
     );
 
@@ -355,14 +355,14 @@ async fn residual_arrival_opens_at_first_arrival_while_batch_is_in_flight() {
         .unwrap();
     let scope = SubscriptionScope::thread(fixture.root_message_id.clone());
     let residual = record(&mut fixture.store, &fixture.reader, &scope).await;
-    assert_eq!(residual.roots.len(), 1);
+    assert_eq!(residual.roots().len(), 1);
     let persisted_residual_arrival = persisted_time(residual_arrival);
-    assert_eq!(residual.roots[0].opened_at, persisted_residual_arrival);
+    assert_eq!(residual.roots()[0].opened_at(), persisted_residual_arrival);
     assert_eq!(
-        residual.roots[0].last_arrival_at,
+        residual.roots()[0].last_arrival_at(),
         persisted_residual_arrival
     );
-    assert_eq!(residual.roots[0].pending_count, 1);
+    assert_eq!(residual.roots()[0].pending_count(), 1);
     assert!(
         fixture
             .store
@@ -443,9 +443,12 @@ async fn residual_window_that_reaches_its_cap_is_due_immediately_after_settlemen
         &SubscriptionScope::thread(fixture.root_message_id.clone()),
     )
     .await;
-    assert_eq!(residual.roots[0].opened_at, persisted_time(first_residual));
     assert_eq!(
-        residual.roots[0].last_arrival_at,
+        residual.roots()[0].opened_at(),
+        persisted_time(first_residual)
+    );
+    assert_eq!(
+        residual.roots()[0].last_arrival_at(),
         persisted_time(last_residual)
     );
     assert_eq!(

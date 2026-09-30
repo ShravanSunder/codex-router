@@ -195,14 +195,16 @@ async fn backfill_requires_open_session_unresolved_thread_and_active_watch() {
             .await
             .unwrap();
     for record in [&eligible, &eligible_with_old_delivered] {
-        assert_eq!(record.state, SubscriptionState::Active);
+        assert_eq!(record.state(), SubscriptionState::Active);
         assert_eq!(
-            record.policy,
-            SubscriptionPolicy::defaults_for(&record.reader)
+            record.policy().clone(),
+            SubscriptionPolicy::defaults_for(record.reader())
         );
-        assert_eq!(record.roots.len(), 0);
+        assert_eq!(record.roots().len(), 0);
         assert_eq!(
-            record.expires_at.signed_duration_since(record.renewed_at),
+            record
+                .expires_at()
+                .signed_duration_since(record.renewed_at()),
             chrono::Duration::hours(24)
         );
     }

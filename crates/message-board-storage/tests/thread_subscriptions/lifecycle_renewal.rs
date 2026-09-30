@@ -15,7 +15,7 @@ async fn only_reader_posts_renew_the_subscription() {
     let after_other_post = get_record(&mut fixture.store, &fixture.reader, &scope)
         .await
         .unwrap();
-    assert_eq!(after_other_post.renewed_at, initial.renewed_at);
+    assert_eq!(after_other_post.renewed_at(), initial.renewed_at());
 
     let reader_post_at = fixture.now + chrono::Duration::minutes(10);
     fixture
@@ -24,7 +24,10 @@ async fn only_reader_posts_renew_the_subscription() {
     let after_reader_post = get_record(&mut fixture.store, &fixture.reader, &scope)
         .await
         .unwrap();
-    assert_eq!(after_reader_post.renewed_at, persisted_time(reader_post_at));
+    assert_eq!(
+        after_reader_post.renewed_at(),
+        persisted_time(reader_post_at)
+    );
     fixture.finish().await;
 }
 
@@ -39,9 +42,11 @@ async fn explicit_renewal_extends_policy_lifetime_and_off_rows_still_expire() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(renewed.renewed_at, persisted_time(renewed_at));
+    assert_eq!(renewed.renewed_at(), persisted_time(renewed_at));
     assert_eq!(
-        renewed.expires_at.signed_duration_since(renewed.renewed_at),
+        renewed
+            .expires_at()
+            .signed_duration_since(renewed.renewed_at()),
         chrono::Duration::hours(24)
     );
     assert_eq!(
@@ -79,7 +84,7 @@ async fn explicit_renewal_extends_policy_lifetime_and_off_rows_still_expire() {
         .await
         .unwrap();
     assert_eq!(
-        expired.state,
+        expired.state(),
         SubscriptionState::Ended {
             reason: EndReason::Expired
         }

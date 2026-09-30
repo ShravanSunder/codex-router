@@ -112,7 +112,6 @@ impl BoardStore {
             } else {
                 sqlx::query!(
                     "UPDATE subscription_windows SET \
-                       opened_at=COALESCE(residual_opened_at,opened_at), \
                        held_since=CASE WHEN ? IS NULL THEN COALESCE(held_since,?) ELSE NULL END, \
                        retry_not_before=?,retry_attempts=CASE WHEN ? IS NULL THEN retry_attempts ELSE retry_attempts+1 END, \
                        in_flight_through=NULL,residual_opened_at=NULL \

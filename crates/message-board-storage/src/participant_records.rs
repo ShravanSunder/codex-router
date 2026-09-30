@@ -316,7 +316,7 @@ impl BoardStore {
         )
         .await?;
         if request.watch {
-            upsert_join_subscription(
+            let subscription_started = upsert_join_subscription(
                 &mut transaction,
                 &actor_key,
                 &request.actor,
@@ -324,8 +324,10 @@ impl BoardStore {
                 now,
             )
             .await?;
-            if let Some(latest_message_activity) =
-                latest_message_activity_for_root(&mut transaction, &request.root_message_id).await?
+            if subscription_started
+                && let Some(latest_message_activity) =
+                    latest_message_activity_for_root(&mut transaction, &request.root_message_id)
+                        .await?
             {
                 let _ = write_delivered_position_if_valid(
                     &mut transaction,

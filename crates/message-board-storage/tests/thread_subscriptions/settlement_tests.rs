@@ -46,7 +46,7 @@ async fn held_mark_persists_hold_time_without_advancing_delivered() {
                     window_id: SubscriptionWindowId::try_from(window_id).unwrap(),
                     delivered_through: posted.message.activity_sequence,
                     subscription_scope: SubscriptionScope::thread(fixture.root_message_id.clone()),
-                    subscription_generation: initial_record.generation,
+                    subscription_generation: initial_record.generation(),
                 }],
             },
             held_at,
@@ -64,10 +64,10 @@ async fn held_mark_persists_hold_time_without_advancing_delivered() {
         &SubscriptionScope::thread(fixture.root_message_id.clone()),
     )
     .await;
-    assert_eq!(held.roots[0].held_since, Some(persisted_time(held_at)));
-    assert_eq!(held.roots[0].pending_count, 1);
+    assert_eq!(held.roots()[0].held_since(), Some(persisted_time(held_at)));
+    assert_eq!(held.roots()[0].pending_count(), 1);
     assert!(matches!(
-        held.last_outcome,
+        held.last_outcome(),
         Some(SubscriptionDeliveryOutcome::NotSubmitted {
             retryable: true,
             ..
@@ -89,6 +89,83 @@ async fn held_mark_persists_hold_time_without_advancing_delivered() {
             .unwrap();
     assert_eq!(still_fenced, None);
     connection.close().await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn arrivals_during_hold_do_not_restart_the_original_window_cap() {
+    let mut fixture = ThreadSubscriptionFixture::create("held-window-cap").await;
+    let first_arrival_at = fixture.now + chrono::Duration::seconds(1);
+    fixture
+        .post_reply_as(
+            human("hold-cap-author"),
+            "opens the window",
+            first_arrival_at,
+        )
+        .await;
+
+    let selection_at = fixture.now + chrono::Duration::seconds(122);
+    let due = fixture
+        .store
+        .due_subscription_roots(&fixture.reader, selection_at)
+        .await
+        .unwrap();
+    let (_, settlement) = fixture
+        .store
+        .select_subscription_notice(&fixture.reader, &due, selection_at)
+        .await
+        .unwrap();
+    fixture
+        .post_reply_as(
+            human("hold-cap-author"),
+            "arrives while selection is in flight",
+            fixture.now + chrono::Duration::seconds(2),
+        )
+        .await;
+    fixture
+        .store
+        .mark_subscription_batch_held(
+            &fixture.reader,
+            &settlement,
+            fixture.now + chrono::Duration::seconds(3),
+            SubscriptionDeliveryOutcome::NotSubmitted {
+                reason: "targetNotRunning".to_owned(),
+                retryable: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let held_record = record(
+        &mut fixture.store,
+        &fixture.reader,
+        &SubscriptionScope::thread(fixture.root_message_id.clone()),
+    )
+    .await;
+    assert_eq!(
+        held_record.roots()[0].opened_at(),
+        persisted_time(first_arrival_at),
+        "marking an in-flight window held must preserve its original opened_at"
+    );
+
+    fixture
+        .post_reply_as(
+            human("hold-cap-author"),
+            "continuous activity while held",
+            fixture.now + chrono::Duration::seconds(550),
+        )
+        .await;
+    let cap_deadline = first_arrival_at + chrono::Duration::seconds(600);
+    let due_at_cap = fixture
+        .store
+        .due_subscription_roots(&fixture.reader, cap_deadline)
+        .await
+        .unwrap();
+    assert_eq!(
+        due_at_cap,
+        vec![fixture.root_message_id.clone()],
+        "the original cap must make the held root due despite continuous arrivals"
+    );
     fixture.finish().await;
 }
 
@@ -117,8 +194,8 @@ async fn drop_storage_primitive_does_not_skip_hold_policy_activity() {
         &SubscriptionScope::thread(fixture.root_message_id.clone()),
     )
     .await;
-    assert_eq!(subscription.roots.len(), 1);
-    assert_eq!(subscription.roots[0].pending_count, 1);
+    assert_eq!(subscription.roots().len(), 1);
+    assert_eq!(subscription.roots()[0].pending_count(), 1);
     let mut connection = raw_connection(&fixture.path).await;
     let delivered_rows: i64 =
         sqlx::query_scalar("SELECT count(*) FROM thread_delivery_positions WHERE root_id=?")
@@ -335,19 +412,41 @@ async fn old_settlement_after_cancel_and_resubscribe_preserves_replacement_windo
         .await
         .unwrap();
     let after_old_settlement = record(&mut fixture.store, &fixture.reader, &scope).await;
-    let mut expected_replacement_roots = before_old_settlement.roots.clone();
-    expected_replacement_roots[0].pending_count = 1;
-    assert_eq!(after_old_settlement.roots, expected_replacement_roots);
     assert_eq!(
-        after_old_settlement.last_outcome,
-        before_old_settlement.last_outcome
+        after_old_settlement.roots().len(),
+        before_old_settlement.roots().len()
+    );
+    assert_eq!(
+        after_old_settlement.roots()[0].root_message_id(),
+        before_old_settlement.roots()[0].root_message_id()
+    );
+    assert_eq!(
+        after_old_settlement.roots()[0].opened_at(),
+        before_old_settlement.roots()[0].opened_at()
+    );
+    assert_eq!(
+        after_old_settlement.roots()[0].last_arrival_at(),
+        before_old_settlement.roots()[0].last_arrival_at()
+    );
+    assert_eq!(after_old_settlement.roots()[0].pending_count(), 1);
+    assert_eq!(
+        after_old_settlement.roots()[0].held_since(),
+        before_old_settlement.roots()[0].held_since()
+    );
+    assert_eq!(
+        after_old_settlement.roots()[0].next_retry_at(),
+        before_old_settlement.roots()[0].next_retry_at()
+    );
+    assert_eq!(
+        after_old_settlement.last_outcome(),
+        before_old_settlement.last_outcome()
     );
     assert!(matches!(
-        after_old_settlement.last_outcome,
+        after_old_settlement.last_outcome(),
         Some(SubscriptionDeliveryOutcome::Rejected { .. })
     ));
     assert_eq!(
-        after_old_settlement.roots[0].next_retry_at,
+        after_old_settlement.roots()[0].next_retry_at(),
         Some(persisted_time(retry_at))
     );
 
@@ -417,8 +516,8 @@ async fn settlement_failure_rolls_back_delivered_window_and_outcome_together() {
             .is_err()
     );
     let after_failure = record(&mut fixture.store, &fixture.reader, &scope).await;
-    assert_eq!(after_failure.roots, before.roots);
-    assert_eq!(after_failure.last_outcome, None);
+    assert_eq!(after_failure.roots(), before.roots());
+    assert_eq!(after_failure.last_outcome(), None);
     let mut connection = raw_connection(&fixture.path).await;
     let delivered_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM thread_delivery_positions WHERE root_id=?")
@@ -443,9 +542,9 @@ async fn settlement_failure_rolls_back_delivered_window_and_outcome_together() {
         .await
         .unwrap();
     let settled = record(&mut fixture.store, &fixture.reader, &scope).await;
-    assert!(settled.roots.is_empty());
+    assert!(settled.roots().is_empty());
     assert_eq!(
-        settled.last_outcome,
+        settled.last_outcome().cloned(),
         Some(SubscriptionDeliveryOutcome::Accepted)
     );
     let mut connection = raw_connection(&fixture.path).await;
@@ -503,7 +602,7 @@ async fn drop_advances_delivered_but_keeps_activity_unread() {
         .await
         .unwrap();
     let after_drop = record(&mut fixture.store, &fixture.reader, &scope).await;
-    assert!(after_drop.roots.is_empty());
+    assert!(after_drop.roots().is_empty());
     let unread = fixture
         .store
         .fetch_inbox(InboxFetchRequest {
@@ -576,7 +675,7 @@ async fn rescan_reopens_a_missing_window_from_pending_activity() {
         &SubscriptionScope::thread(fixture.root_message_id.clone()),
     )
     .await;
-    assert_eq!(record.roots.len(), 1);
-    assert_eq!(record.roots[0].opened_at, persisted_time(fixture.now));
+    assert_eq!(record.roots().len(), 1);
+    assert_eq!(record.roots()[0].opened_at(), persisted_time(fixture.now));
     fixture.finish().await;
 }
