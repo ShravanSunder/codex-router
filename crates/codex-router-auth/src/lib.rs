@@ -4,6 +4,7 @@
 pub mod credential_activation;
 pub mod live_quota;
 pub mod oauth;
+pub mod openai_oauth;
 pub mod quota_client;
 pub mod refresh_worker;
 pub mod resolver;

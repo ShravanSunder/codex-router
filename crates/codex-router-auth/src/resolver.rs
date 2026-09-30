@@ -26,13 +26,12 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio_util::task::TaskTracker;
 
+use crate::openai_oauth::OPENAI_OAUTH_CLIENT_ID;
+use crate::openai_oauth::OPENAI_OAUTH_TOKEN_ENDPOINT;
 use codex_router_secret_store::account_credential_lock::AccountCredentialLock;
 use codex_router_state::credential_maintenance::CredentialFailureClass;
 use codex_router_state::credential_maintenance::CredentialMaintenanceRecord;
 use codex_router_state::credential_maintenance::CredentialMaintenanceState;
-
-const DEFAULT_OPENAI_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
-const DEFAULT_OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 /// Credential resolver failure.
 #[derive(Debug, Error)]
@@ -243,8 +242,8 @@ impl OpenAiOAuthRefreshClient {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            token_endpoint: DEFAULT_OPENAI_OAUTH_TOKEN_ENDPOINT.to_owned(),
-            client_id: DEFAULT_OPENAI_OAUTH_CLIENT_ID.to_owned(),
+            token_endpoint: OPENAI_OAUTH_TOKEN_ENDPOINT.to_owned(),
+            client_id: OPENAI_OAUTH_CLIENT_ID.to_owned(),
         }
     }
 
