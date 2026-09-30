@@ -137,6 +137,9 @@ mod quota_observation_tests;
 #[path = "cli_contract_tests/quota_auth_tests.rs"]
 mod quota_auth_tests;
 
+#[path = "cli_contract_tests/claude_quota_auth_rejection_tests.rs"]
+mod claude_quota_auth_rejection_tests;
+
 #[path = "cli_contract_tests/quota_worker_tests.rs"]
 mod quota_worker_tests;
 

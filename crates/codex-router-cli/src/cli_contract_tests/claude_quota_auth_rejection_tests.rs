@@ -1,0 +1,319 @@
+use super::*;
+
+use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::WindowKind;
+use codex_router_secret_store::credential_bundle::CredentialBundle;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
+use codex_router_state::quota_snapshot::QuotaRefreshErrorClass;
+use codex_router_state::window_observation::WindowObservation;
+use codex_router_state::window_observation::WindowObservationProps;
+use std::io;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::mpsc;
+
+struct PersistingRecoveringClaudeCredentialResolver {
+    state_path: PathBuf,
+    secrets: EncryptedCredentialStore,
+}
+
+impl AsyncProviderCredentialResolver for PersistingRecoveringClaudeCredentialResolver {
+    async fn resolve_provider_credentials_async(
+        &self,
+        account_id: &AccountId,
+        expected_provider: Provider,
+    ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
+        if expected_provider != Provider::Claude {
+            return Err(CredentialResolverError::AccountProviderMismatch);
+        }
+        Ok(ResolvedProviderCredential::new(
+            account_id.clone(),
+            SecretString::new("claude-old-access-canary"),
+            1,
+        ))
+    }
+
+    async fn recover_unauthorized_credentials_async(
+        &self,
+        account_id: &AccountId,
+        expected_provider: Provider,
+        rejected_generation: u64,
+    ) -> Result<(ResolvedProviderCredential, bool), CredentialResolverError> {
+        if expected_provider != Provider::Claude || rejected_generation != 1 {
+            return Err(CredentialResolverError::AccountIneligible);
+        }
+        let state = AsyncSqliteStateStore::open(&self.state_path)
+            .await
+            .map_err(|_| CredentialResolverError::RefreshUnavailable)?;
+        let account = state
+            .load_account(account_id)
+            .await
+            .map_err(|_| CredentialResolverError::RefreshUnavailable)?
+            .ok_or(CredentialResolverError::AccountUnavailable)?;
+        state
+            .upsert_account(&account.with_active_credential_generation(2))
+            .await
+            .map_err(|_| CredentialResolverError::RefreshUnavailable)?;
+        state
+            .close()
+            .await
+            .map_err(|_| CredentialResolverError::RefreshUnavailable)?;
+
+        let replacement_bundle = CredentialBundle::new_claude(
+            SecretString::new("claude-recovered-access-canary"),
+            SecretString::new("claude-upkeep-refresh-canary"),
+            10_000_000,
+        )
+        .map_err(|_| CredentialResolverError::RefreshUnavailable)?;
+        let replacement_key =
+            codex_router_secret_store::account_tokens::provider_credential_bundle_key(
+                Provider::Claude,
+                account_id,
+                2,
+            )
+            .map_err(|_| CredentialResolverError::SecretUnavailable)?;
+        let serialized_bundle = replacement_bundle
+            .to_secret_string()
+            .map_err(|_| CredentialResolverError::SecretUnavailable)?;
+        self.secrets
+            .write_secret(&replacement_key, &serialized_bundle)
+            .map_err(|_| CredentialResolverError::SecretUnavailable)?;
+
+        Ok((
+            ResolvedProviderCredential::new(
+                account_id.clone(),
+                SecretString::new("claude-recovered-access-canary"),
+                2,
+            ),
+            true,
+        ))
+    }
+}
+
+struct AlwaysUnauthorizedClaudeQuotaProvider {
+    access_tokens: Mutex<Vec<String>>,
+}
+
+impl QuotaRefreshProvider for AlwaysUnauthorizedClaudeQuotaProvider {
+    async fn fetch_quota(
+        &self,
+        request: QuotaRefreshProviderRequest,
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+        self.access_tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.access_token().expose_secret().to_owned());
+        Err(crate::quota::QuotaCommandError::ProviderStatus { status: 401 })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingClaudeUpkeepRefreshClient {
+    observed_account_ids: mpsc::Sender<AccountId>,
+}
+
+impl CredentialRefreshClient for RecordingClaudeUpkeepRefreshClient {
+    fn refresh_credentials(
+        &self,
+        _account_id: &AccountId,
+        _refresh_token: &SecretString,
+    ) -> Result<AccountCredentialBundle, codex_router_auth::resolver::CredentialRefreshFailure>
+    {
+        Err(codex_router_auth::resolver::CredentialRefreshFailure::confirmed_unspent(
+            codex_router_state::credential_maintenance::CredentialFailureClass::LocalPersistence,
+            None,
+        ))
+    }
+
+    fn refresh_provider_credentials(
+        &self,
+        provider: Provider,
+        account_id: &AccountId,
+        refresh_token: &SecretString,
+    ) -> Result<CredentialBundle, codex_router_auth::resolver::CredentialRefreshFailure> {
+        assert_eq!(provider, Provider::Claude);
+        assert_eq!(
+            refresh_token.expose_secret(),
+            "claude-upkeep-refresh-canary"
+        );
+        self.observed_account_ids
+            .send(account_id.clone())
+            .expect("credential upkeep should observe the account");
+        CredentialBundle::new_claude(
+            SecretString::new("claude-next-access-canary"),
+            SecretString::new("claude-next-refresh-canary"),
+            10_000_000,
+        )
+        .map_err(|_| {
+            codex_router_auth::resolver::CredentialRefreshFailure::ambiguous(
+                codex_router_state::credential_maintenance::CredentialFailureClass::MalformedResponse,
+            )
+        })
+    }
+}
+
+#[derive(Clone)]
+struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for SharedLogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("log buffer lock poisoned"))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for SharedLogBuffer {
+    type Writer = Self;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[test]
+fn claude_usage_401_after_renewal_preserves_account_for_upkeep_and_records_failure() {
+    let test_root = TestRoot::new("claude-usage-401-after-renewal");
+    must_ok(fs::create_dir(test_root.path()));
+    let router_root = test_root.path().join("router");
+    must_ok(fs::create_dir_all(&router_root));
+    let state_path = router_root.join("state.sqlite");
+    let secret_root = router_root.join("secrets");
+    let account_id = account_id("acct_claude_usage_401");
+    let runtime = test_async_runtime();
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    must_ok(
+        runtime.block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "claude usage 401",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let credential_key = must_ok(
+        codex_router_secret_store::account_tokens::provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            1,
+        ),
+    );
+    let stored_bundle = must_ok(CredentialBundle::new_claude(
+        SecretString::new("claude-stored-access-canary"),
+        SecretString::new("claude-upkeep-refresh-canary"),
+        10_000_000,
+    ));
+    must_ok(secrets.write_secret(&credential_key, &must_ok(stored_bundle.to_secret_string())));
+    let existing_window = must_ok(WindowObservation::new(
+        WindowObservationProps::new(account_id.clone(), WindowKind::FiveHour, 6_000, 1_500)
+            .with_reset_unix_seconds(20_000)
+            .with_fresh_until_unix_seconds(2_100),
+    ));
+    must_ok(runtime.block_on(state.record_window_observation(&existing_window, || 2_000)));
+    must_ok(runtime.block_on(state.close()));
+
+    let resolver = PersistingRecoveringClaudeCredentialResolver {
+        state_path: state_path.clone(),
+        secrets: secrets.clone(),
+    };
+    let quota_provider = AlwaysUnauthorizedClaudeQuotaProvider {
+        access_tokens: Mutex::new(Vec::new()),
+    };
+    let log_bytes = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_writer(SharedLogBuffer(Arc::clone(&log_bytes)))
+        .finish();
+    let mut stdout = Vec::new();
+    let refresh_result = tracing::subscriber::with_default(subscriber, || {
+        runtime.block_on(refresh_quota_store_paths_with_dependencies_async(
+            &mut stdout,
+            &state_path,
+            &secret_root,
+            "unused-base-url".to_owned(),
+            &resolver,
+            &quota_provider,
+            2_000,
+        ))
+    });
+    assert!(
+        refresh_result.is_err(),
+        "the quota refresh should report the repeated provider 401"
+    );
+
+    assert_eq!(
+        *quota_provider
+            .access_tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        vec![
+            "claude-old-access-canary".to_owned(),
+            "claude-recovered-access-canary".to_owned(),
+        ]
+    );
+    let read_state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let account = must_ok(runtime.block_on(read_state.load_account(&account_id)))
+        .expect("renewed account should remain stored");
+    assert_eq!(account.status(), AccountStatus::Enabled);
+    assert_eq!(account.active_credential_generation(), Some(2));
+    let refresh_status = must_ok(
+        runtime.block_on(read_state.quota_refresh_statuses_for_route_band("claude_messages")),
+    )
+    .into_iter()
+    .find(|status| status.account_id() == &account_id)
+    .expect("Claude quota refresh failure should be recorded");
+    assert_eq!(
+        refresh_status.last_error_class(),
+        Some(QuotaRefreshErrorClass::AuthError)
+    );
+    let windows =
+        must_ok(runtime.block_on(read_state.window_observations_for_account(&account_id)));
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].remaining_basis_points(), 6_000);
+
+    let captured_logs = String::from_utf8(
+        log_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+    )
+    .expect("captured logs should be UTF-8");
+    assert!(captured_logs.contains("Claude usage endpoint rejected a freshly renewed credential"));
+    assert!(captured_logs.contains(account_id.as_str()));
+    assert!(captured_logs.contains("credential_generation=2"));
+    assert!(captured_logs.contains("http.status_code=401"));
+    assert!(captured_logs.contains("endpoint.path=\"/api/oauth/usage\""));
+    assert!(!captured_logs.contains("claude-old-access-canary"));
+    assert!(!captured_logs.contains("claude-recovered-access-canary"));
+    must_ok(runtime.block_on(read_state.close()));
+
+    let (observed_sender, observed_receiver) = mpsc::channel();
+    let upkeep_worker = must_ok(
+        crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
+            &state_path,
+            secrets,
+            RecordingClaudeUpkeepRefreshClient {
+                observed_account_ids: observed_sender,
+            },
+            || 2_000,
+        ),
+    );
+    assert_eq!(
+        must_ok(observed_receiver.recv_timeout(std::time::Duration::from_secs(2))),
+        account_id
+    );
+    drop(upkeep_worker);
+}

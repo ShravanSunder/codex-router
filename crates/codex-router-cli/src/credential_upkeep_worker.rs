@@ -26,6 +26,10 @@ use thiserror::Error;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+#[path = "credential_upkeep_worker/telemetry.rs"]
+mod telemetry;
+use telemetry::TelemetryCredentialUpkeepRefreshClient;
+
 const UPKEEP_CYCLE_SECONDS: u64 = 180;
 const LOCAL_FAILURE_RETRY_SECONDS: u64 = 60;
 const MAX_CONCURRENT_ACCOUNTS: usize = 4;
@@ -308,7 +312,7 @@ where
         let resolver = AsyncRouterCredentialResolver::new(
             state.clone(),
             secrets.clone(),
-            refresh_client.clone(),
+            TelemetryCredentialUpkeepRefreshClient::new(refresh_client.clone()),
             Some(observed_now),
         );
         let account_id = account.account_id().clone();

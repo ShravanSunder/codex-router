@@ -307,12 +307,14 @@ where
                         && renewed_for_retry
                         && let Some(retry_generation) = retry_generation
                     {
-                        quota_history_state
-                            .disable_account_if_credential_generation_current(
-                                account.account_id(),
-                                retry_generation,
-                            )
-                            .await?;
+                        tracing::warn!(
+                            account_id = account.account_id().as_str(),
+                            credential_generation = retry_generation,
+                            http.status_code = 401,
+                            endpoint.path = "/api/oauth/usage",
+                            "Claude usage endpoint rejected a freshly renewed credential"
+                        );
+                        record_claude_usage_auth_rejected_after_renewal();
                     }
                     let diagnostic_error_class = if provider_rejected_credentials {
                         "provider_auth_rejected"

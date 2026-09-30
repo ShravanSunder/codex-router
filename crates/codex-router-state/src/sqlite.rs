@@ -2014,13 +2014,13 @@ impl AsyncSqliteStateStore {
         account_id: &AccountId,
         route_band: &str,
     ) -> Result<Option<u64>, StateStoreError> {
-        let event_unix_seconds = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MAX(event_unix_seconds)
+        let event_unix_seconds = sqlx::query_scalar!(
+            "SELECT MAX(event_unix_seconds) AS \"event_unix_seconds?\"
                FROM active_session_events
               WHERE account_id = ?1 AND route_band = ?2",
+            account_id.as_str(),
+            route_band
         )
-        .bind(account_id.as_str())
-        .bind(route_band)
         .fetch_one(&self.pool)
         .await
         .map_err(sqlx_error)?;

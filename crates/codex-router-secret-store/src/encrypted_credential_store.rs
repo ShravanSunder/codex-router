@@ -297,7 +297,10 @@ impl SecretStore for EncryptedCredentialStore {
     }
 
     fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+        require_account_credential_key(key)?;
         let _ = self.ready_data_key()?;
+        let _store_lock =
+            CredentialStoreLock::acquire(self.file_store.root(), CredentialStoreLockMode::Shared)?;
         self.file_store.delete_credential_envelope(key)
     }
 

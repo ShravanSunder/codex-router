@@ -12,7 +12,7 @@ use crate::sqlite::sqlx_error;
 use crate::sqlite::u64_to_i64;
 
 const MAX_REMAINING_BASIS_POINTS: u32 = 10_000;
-const LEGACY_WINDOW_OBSERVATION_FRESHNESS_SECONDS: u64 = 300;
+pub(crate) const LEGACY_QUOTA_EVIDENCE_FRESHNESS_SECONDS: u64 = 300;
 
 /// Input values for one Claude quota observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -133,14 +133,14 @@ impl WindowObservation {
         self.fresh_until_unix_seconds
     }
 
-    /// Returns the explicit deadline, or the legacy 300 second deadline for old rows.
+    /// Returns the explicit deadline, or the legacy quota freshness deadline for old rows.
     #[must_use]
     pub const fn effective_fresh_until_unix_seconds(&self) -> u64 {
         match self.fresh_until_unix_seconds {
             Some(fresh_until_unix_seconds) => fresh_until_unix_seconds,
             None => self
                 .observation_started_at
-                .saturating_add(LEGACY_WINDOW_OBSERVATION_FRESHNESS_SECONDS),
+                .saturating_add(LEGACY_QUOTA_EVIDENCE_FRESHNESS_SECONDS),
         }
     }
 

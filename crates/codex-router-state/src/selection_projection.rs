@@ -33,9 +33,9 @@ use crate::sqlite::ActiveClientCount;
 use crate::sqlite::ActiveSessionRollup;
 use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
+use crate::window_observation::LEGACY_QUOTA_EVIDENCE_FRESHNESS_SECONDS;
 
 const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
-const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
 
 /// Projected selector inputs for one route band.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -655,7 +655,7 @@ async fn estimate_window_burn_rate(
         });
     };
     if now_unix_seconds.saturating_sub(latest_observation.observed_unix_seconds())
-        > QUOTA_HISTORY_FRESHNESS_SECONDS
+        > LEGACY_QUOTA_EVIDENCE_FRESHNESS_SECONDS
     {
         return Ok(ProjectedBurnRateEstimate {
             confidence: QuotaRunRateConfidence::Stale,
