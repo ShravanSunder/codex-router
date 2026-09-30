@@ -8,7 +8,9 @@ fn serve_command_reloads_token_rotation_without_restart() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let token_service = LocalRouterTokenService::new(secrets.clone());
     must_ok(token_service.rotate_with_token("token-a"));
     let account_id = account_id("acct_cli_rotate");
@@ -26,7 +28,7 @@ fn serve_command_reloads_token_rotation_without_restart() {
             .with_route_band("responses", 100);
     must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
     persist_effective_selector_window(&state, &account_id, "responses", 100);
-    let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let upstream_token_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let upstream_credential_bundle = must_ok(
         AccountCredentialBundle::imported_codex_auth(
             "cli-rotation-upstream-token",

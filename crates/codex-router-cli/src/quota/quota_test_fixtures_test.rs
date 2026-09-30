@@ -129,6 +129,7 @@ pub(super) fn quota_capture_report() -> QuotaStatusReport {
         preferred_next_account_id: Some(account_id("acct_ssdev")),
         selection_projection_source: SelectionProjectionSource::SqlxProjection,
         now_unix_seconds: NOW,
+        credential_store_availability: CredentialStoreAvailability::Ready,
         rows: vec![
             quota_capture_row(QuotaCaptureRowFixture {
                 account_id_value: "acct_ssdev",
@@ -240,6 +241,7 @@ pub(super) fn blocked_quota_capture_report() -> QuotaStatusReport {
         preferred_next_account_id: None,
         selection_projection_source: SelectionProjectionSource::SqlxProjection,
         now_unix_seconds: NOW,
+        credential_store_availability: CredentialStoreAvailability::Ready,
         rows: vec![
             quota_capture_row(QuotaCaptureRowFixture {
                 account_id_value: "acct_ssdev",

@@ -16,7 +16,7 @@ use codex_router_auth::resolver::NoopCredentialRefreshClient;
 #[cfg(not(test))]
 use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
 use codex_router_auth::resolver::current_unix_seconds;
-use codex_router_secret_store::file_backend::FileSecretStore;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::credential_maintenance::CredentialMaintenanceState;
@@ -106,19 +106,19 @@ pub enum CredentialUpkeepStartError {
 
 pub(crate) fn start_background_credential_upkeep_worker(
     state_db_path: &Path,
-    secret_root: &Path,
+    secret_store: EncryptedCredentialStore,
 ) -> Result<CredentialUpkeepWorker, CredentialUpkeepStartError> {
     #[cfg(test)]
     return start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
-        secret_root,
+        secret_store,
         NoopCredentialRefreshClient,
         || current_unix_seconds().unwrap_or(0),
     );
     #[cfg(not(test))]
     start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
-        secret_root,
+        secret_store,
         OpenAiOAuthRefreshClient::new(),
         || current_unix_seconds().unwrap_or(0),
     )
@@ -126,7 +126,7 @@ pub(crate) fn start_background_credential_upkeep_worker(
 
 pub(crate) fn start_background_credential_upkeep_worker_with_client_and_clock<C, F>(
     state_db_path: &Path,
-    secret_root: &Path,
+    secrets: EncryptedCredentialStore,
     refresh_client: C,
     observed_clock: F,
 ) -> Result<CredentialUpkeepWorker, CredentialUpkeepStartError>
@@ -142,7 +142,6 @@ where
     let state = runtime
         .block_on(AsyncSqliteStateStore::open(state_db_path))
         .map_err(CredentialUpkeepStartError::State)?;
-    let secrets = FileSecretStore::open(secret_root).map_err(CredentialUpkeepStartError::Secret)?;
     let (control_sender, control_receiver) = mpsc::channel();
     let (stopped_sender, stopped_receiver) = mpsc::channel();
     let stop_requested = CancellationToken::new();
@@ -249,7 +248,7 @@ fn bounded_upkeep_wait(
 #[cfg(test)]
 async fn run_upkeep_cycle<C>(
     state: &AsyncSqliteStateStore,
-    secrets: &FileSecretStore,
+    secrets: &EncryptedCredentialStore,
     refresh_client: C,
     observed_now: u64,
 ) -> UpkeepCycleResult
@@ -269,7 +268,7 @@ where
 
 async fn run_upkeep_cycle_until_stop<C>(
     state: &AsyncSqliteStateStore,
-    secrets: &FileSecretStore,
+    secrets: &EncryptedCredentialStore,
     refresh_client: C,
     observed_now: u64,
     stop_requested: &CancellationToken,
@@ -278,6 +277,12 @@ async fn run_upkeep_cycle_until_stop<C>(
 where
     C: CredentialRefreshClient + Clone + Send + Sync + 'static,
 {
+    if !matches!(
+        secrets.status(),
+        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::Ready
+    ) {
+        return UpkeepCycleResult::default();
+    }
     let accounts = match state.list_accounts().await {
         Ok(accounts) => accounts,
         Err(error) => {

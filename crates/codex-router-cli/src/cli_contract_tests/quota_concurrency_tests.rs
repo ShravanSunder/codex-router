@@ -8,7 +8,9 @@ fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked()
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let token_service = LocalRouterTokenService::new(secrets.clone());
     let local_token = must_ok(token_service.rotate_with_token("current-token"));
     let account_id = account_id("acct_background_served");
@@ -26,7 +28,7 @@ fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked()
             .with_route_band("responses", 91);
     must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
     persist_effective_selector_window(&state, &account_id, "responses", 91);
-    let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let upstream_token_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let upstream_credential_bundle = must_ok(
         AccountCredentialBundle::imported_codex_auth(
             "served-upstream-token",
@@ -74,7 +76,7 @@ fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked()
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config));
+    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets));
     let runtime_address = runtime.local_addr();
     assert_eq!(runtime_address.port(), router_port);
     let router_thread = thread::spawn(move || {
@@ -152,7 +154,9 @@ fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_bloc
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let token_service = LocalRouterTokenService::new(secrets.clone());
     let local_token = must_ok(token_service.rotate_with_token("current-token"));
     let account_id = account_id("acct_background_served_ws");
@@ -170,7 +174,7 @@ fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_bloc
             .with_route_band("responses", 91);
     must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
     persist_effective_selector_window(&state, &account_id, "responses", 91);
-    let upstream_token_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let upstream_token_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let upstream_credential_bundle = must_ok(
         AccountCredentialBundle::imported_codex_auth(
             "served-ws-upstream-token",
@@ -228,7 +232,7 @@ fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_bloc
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config));
+    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets));
     assert_eq!(runtime.local_addr().port(), router_port);
     let router_thread = thread::spawn(move || {
         if let Err(error) = runtime.serve_protocol_connections(1) {

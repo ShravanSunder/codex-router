@@ -175,18 +175,19 @@ fn quota_status_snapshot_rows_show_unknown_pace_until_window_metadata_exists() {
         lines[0],
         concat!("codex-router ", env!("CARGO_PKG_VERSION"))
     );
+    assert_eq!(lines[1], "pooled credentials\tready");
     assert_eq!(
-        lines[1],
+        lines[2],
         "account\tstatus\tOAuth\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
     );
-    assert!(lines[2].contains("burn unavailable"), "{}", lines[2]);
-    assert!(lines[2].contains("sample fresh 1m 40s"), "{}", lines[2]);
-    assert!(!lines[2].contains("safe pace"), "{}", lines[2]);
+    assert!(lines[3].contains("burn unavailable"), "{}", lines[3]);
+    assert!(lines[3].contains("sample fresh 1m 40s"), "{}", lines[3]);
+    assert!(!lines[3].contains("safe pace"), "{}", lines[3]);
     assert_eq!(
-        lines[3],
+        lines[4],
         "responses route\tnext: snapshot\twhy: fallback by quota: needs refresh limiting window: 5h 75% left"
     );
-    assert_eq!(lines.len(), 4);
+    assert_eq!(lines.len(), 5);
     assert!(output.stderr.is_empty());
 }
 
@@ -274,25 +275,26 @@ fn quota_status_shows_two_user_quota_windows_per_account() {
         lines[0],
         concat!("codex-router ", env!("CARGO_PKG_VERSION"))
     );
+    assert_eq!(lines[1], "pooled credentials\tready");
     assert_eq!(
-        lines[1],
+        lines[2],
         "account\tstatus\tOAuth\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
     );
-    assert!(lines[2].contains("###------- 25% left resets in 2h 30m"));
-    assert!(lines[2].contains("########-- 80% left resets in 6d 23h"));
+    assert!(lines[3].contains("###------- 25% left resets in 2h 30m"));
+    assert!(lines[3].contains("########-- 80% left resets in 6d 23h"));
     assert!(
-        lines[2].contains("reset pace") || lines[2].contains("burn unavailable"),
+        lines[3].contains("reset pace") || lines[3].contains("burn unavailable"),
         "{}",
-        lines[2]
+        lines[3]
     );
-    assert!(lines[2].contains("sample stale 16m 40s"));
-    assert!(!lines[2].contains("history unknown"));
-    assert!(!lines[2].contains("quota guard"));
+    assert!(lines[3].contains("sample stale 16m 40s"));
+    assert!(!lines[3].contains("history unknown"));
+    assert!(!lines[3].contains("quota guard"));
     assert_eq!(
-        lines[3],
+        lines[4],
         "responses route\tnext: primary\twhy: preferred by quota: idle far-reset allowance limiting window: 5h 25% left"
     );
-    assert_eq!(lines.len(), 4);
+    assert_eq!(lines.len(), 5);
     assert!(!output.stdout.contains("acct_primary"));
     assert!(!output.stdout.contains("score"));
     assert!(!output.stdout.contains("risk"));

@@ -43,7 +43,9 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let enabled_id = account_id("upkeep-enabled");
     let disabled_id = account_id("upkeep-disabled");
     for (account_id, status) in [
@@ -60,7 +62,7 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
             )
             .with_active_credential_generation(1),
         ));
-        let key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &key,
@@ -94,7 +96,7 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            &secret_root,
+            secrets,
             client,
             move || clock.load(Ordering::SeqCst),
         ),
@@ -162,7 +164,9 @@ fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let account_id = account_id("upkeep-shutdown");
     must_ok(AccountStateRepository::upsert_account(
         &state,
@@ -174,7 +178,7 @@ fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
         )
         .with_active_credential_generation(1),
     ));
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,
@@ -194,7 +198,7 @@ fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            &secret_root,
+            secrets,
             HeldUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),
@@ -254,7 +258,9 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let account_ids = (0..5)
         .map(|index| account_id(&format!("queued-upkeep-{index}")))
         .collect::<Vec<_>>();
@@ -269,7 +275,7 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
             )
             .with_active_credential_generation(1),
         ));
-        let active_key = must_ok(account_credential_bundle_key(account_id, 1));
+        let active_key = must_ok(openai_account_credential_bundle_key(account_id, 1));
         must_ok(
             secrets.write_secret(
                 &active_key,
@@ -285,6 +291,7 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
         );
     }
     drop(state);
+    let credential_store = secrets.clone();
     drop(secrets);
 
     let (entered_sender, entered_receiver) = mpsc::channel();
@@ -292,7 +299,7 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            &secret_root,
+            credential_store,
             HeldQueuedUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),

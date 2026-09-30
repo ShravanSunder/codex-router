@@ -6,7 +6,9 @@ async fn independent_async_resolvers_use_one_rotating_refresh_generation() {
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
     let state = must_ok(AsyncSqliteStateStore::open(&database_path).await);
-    let secrets = must_ok(FileSecretStore::open(&secret_path));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_path),
+    );
     let account_id = account_id("independent-async-account");
     must_ok(
         state
@@ -21,7 +23,7 @@ async fn independent_async_resolvers_use_one_rotating_refresh_generation() {
             )
             .await,
     );
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,
@@ -70,7 +72,11 @@ async fn orphaned_successor_is_skipped_and_unresolved_claim_blocks_old_token_reu
     let temp_dir = AuthTestTempDir::new("orphaned-successor-claim");
     let database_path = temp_dir.path().join("state.sqlite");
     let state = must_ok(AsyncSqliteStateStore::open(&database_path).await);
-    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let orphan_account_id = account_id("orphaned-successor-account");
     must_ok(
         state
@@ -86,7 +92,7 @@ async fn orphaned_successor_is_skipped_and_unresolved_claim_blocks_old_token_reu
             .await,
     );
     for (generation, access) in [(1, "expired-access-canary"), (2, "orphan-access-canary")] {
-        let key = must_ok(account_credential_bundle_key(
+        let key = must_ok(openai_account_credential_bundle_key(
             &orphan_account_id,
             generation,
         ));
@@ -141,7 +147,7 @@ async fn orphaned_successor_is_skipped_and_unresolved_claim_blocks_old_token_reu
             )
             .await,
     );
-    let key = must_ok(account_credential_bundle_key(&blocked_account_id, 1));
+    let key = must_ok(openai_account_credential_bundle_key(&blocked_account_id, 1));
     must_ok(
         secrets.write_secret(
             &key,
@@ -157,7 +163,13 @@ async fn orphaned_successor_is_skipped_and_unresolved_claim_blocks_old_token_reu
     );
     assert!(must_ok(
         state
-            .claim_credential_refresh(&blocked_account_id, 1, 3)
+            .claim_credential_refresh(
+                &blocked_account_id,
+                codex_router_core::provider::Provider::Openai,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                3
+            )
             .await
     ));
     let blocked_client = RecordingRefreshClient::new_for_account(
@@ -188,7 +200,11 @@ async fn claimed_staged_successor_activates_without_reusing_old_refresh_token() 
     let temp_dir = AuthTestTempDir::new("claimed-staged-successor");
     let database_path = temp_dir.path().join("state.sqlite");
     let state = must_ok(AsyncSqliteStateStore::open(&database_path).await);
-    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("claimed-staged-account");
     must_ok(
         state
@@ -207,7 +223,10 @@ async fn claimed_staged_successor_activates_without_reusing_old_refresh_token() 
         (1, "expired-access-canary", "old-refresh-canary"),
         (2, "staged-access-canary", "staged-refresh-canary"),
     ] {
-        let key = must_ok(account_credential_bundle_key(&account_id, generation));
+        let key = must_ok(openai_account_credential_bundle_key(
+            &account_id,
+            generation,
+        ));
         must_ok(
             secrets.write_secret(
                 &key,
@@ -223,7 +242,15 @@ async fn claimed_staged_successor_activates_without_reusing_old_refresh_token() 
         );
     }
     assert!(must_ok(
-        state.claim_credential_refresh(&account_id, 1, 2).await
+        state
+            .claim_credential_refresh(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                2
+            )
+            .await
     ));
     let refresh_client = RecordingRefreshClient::new_for_account(
         "claimed-staged-account",
@@ -252,7 +279,11 @@ async fn claimed_staged_successor_activates_without_reusing_old_refresh_token() 
 async fn expired_claimed_successor_is_renewed_before_provider_egress() {
     let temp_dir = AuthTestTempDir::new("expired-staged-successor");
     let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
-    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("expired-staged-account");
     must_ok(
         state
@@ -271,7 +302,10 @@ async fn expired_claimed_successor_is_renewed_before_provider_egress() {
         (1, "old-expired-canary", "old-refresh-canary"),
         (2, "staged-expired-canary", "staged-refresh-canary"),
     ] {
-        let key = must_ok(account_credential_bundle_key(&account_id, generation));
+        let key = must_ok(openai_account_credential_bundle_key(
+            &account_id,
+            generation,
+        ));
         must_ok(
             secrets.write_secret(
                 &key,
@@ -284,7 +318,15 @@ async fn expired_claimed_successor_is_renewed_before_provider_egress() {
         );
     }
     assert!(must_ok(
-        state.claim_credential_refresh(&account_id, 1, 2).await
+        state
+            .claim_credential_refresh(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                2
+            )
+            .await
     ));
     let refresh_client = RecordingRefreshClient::new_for_account(
         "expired-staged-account",
@@ -339,7 +381,11 @@ async fn typed_refresh_failures_persist_retry_or_reauth_without_reusing_ambiguou
         let temp_dir = AuthTestTempDir::new(name);
         let state =
             must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
-        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                temp_dir.path().join("secrets"),
+            ),
+        );
         let account_id = account_id(name);
         must_ok(
             state
@@ -354,7 +400,7 @@ async fn typed_refresh_failures_persist_retry_or_reauth_without_reusing_ambiguou
                 )
                 .await,
         );
-        let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &active_key,
@@ -417,7 +463,11 @@ async fn elapsed_retry_deadline_renews_even_when_ordinary_renewal_is_not_due() {
 
     let temp_dir = AuthTestTempDir::new("elapsed-retry-deadline");
     let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
-    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("elapsed-retry-account");
     must_ok(
         state
@@ -433,9 +483,17 @@ async fn elapsed_retry_deadline_renews_even_when_ordinary_renewal_is_not_due() {
             .await,
     );
     assert!(must_ok(
-        state.claim_credential_refresh(&account_id, 1, 2).await
+        state
+            .claim_credential_refresh(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                2
+            )
+            .await
     ));
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 2));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 2));
     must_ok(
         secrets.write_secret(
             &active_key,
@@ -451,7 +509,14 @@ async fn elapsed_retry_deadline_renews_even_when_ordinary_renewal_is_not_due() {
     );
     assert!(must_ok(
         state
-            .activate_claimed_credential_generation(&account_id, 1, 2, 1_000)
+            .activate_claimed_credential_generation(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                2,
+                1_000
+            )
             .await
     ));
     assert!(must_ok(
@@ -505,7 +570,11 @@ async fn confirmed_unspent_failure_retries_transient_sqlite_disposition_without_
     let temp_dir = AuthTestTempDir::new("transient-retry-disposition");
     let database_path = temp_dir.path().join("state.sqlite");
     let state = must_ok(AsyncSqliteStateStore::open(&database_path).await);
-    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("transient-disposition-account");
     must_ok(
         state
@@ -520,7 +589,7 @@ async fn confirmed_unspent_failure_retries_transient_sqlite_disposition_without_
             )
             .await,
     );
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,

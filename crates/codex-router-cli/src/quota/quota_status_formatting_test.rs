@@ -241,7 +241,7 @@ fn weekly_quota_floor_has_stable_json_plain_and_tui_observer_fields() {
     let selected = view_model
         .selected
         .unwrap_or_else(|| panic!("capture should include selected details"));
-    assert_eq!(selected.reason, "blocked: weekly quota floor");
+    assert_eq!(selected.reason, "weekly quota floor");
     assert!(selected.guards.contains("floor 15%"));
     assert!(selected.guards.contains("switches at 18%"));
 
