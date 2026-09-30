@@ -79,6 +79,9 @@ enum InventoryCommand {
         any: bool,
         #[arg(long, value_enum)]
         source: Option<InventorySource>,
+        /// Include sessions that have never received a user message.
+        #[arg(long)]
+        include_empty_sessions: bool,
         #[arg(long)]
         query: Option<String>,
         #[arg(long,default_value_t=100,value_parser=clap::value_parser!(u32).range(1..=100))]
@@ -106,6 +109,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
         repo,
         any,
         source,
+        include_empty_sessions,
         query,
         page_size,
         cursor,
@@ -207,7 +211,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
             InventoryEndpointKind::Codex => {
                 let source = source.ok_or(ClientError::InvalidRequest("--source is required for Codex sessions"))?;
                 serde_json::to_value(client.list_sessions(NativeSessionListParams {
-                    endpoint, view, scope, source, query, page_size, cursor,
+                    endpoint, view, scope, source, include_empty_sessions, query, page_size, cursor,
                 }).await?).map_err(|_| ClientError::Protocol("session inventory encoding failed"))
             }
             InventoryEndpointKind::Provider => serde_json::to_value(client.list_provider_sessions(ProviderSessionListParams {

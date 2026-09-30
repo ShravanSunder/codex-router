@@ -209,6 +209,10 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
             for session in live.sessions {
                 let session_id = String::from(session.session_id.clone());
                 let cwd = session.cwd.to_string_lossy().into_owned();
+                let target = SessionRef {
+                    endpoint: params.endpoint.clone(),
+                    session_id: session.session_id.clone(),
+                };
                 let Some(working_directory) = ProviderWorkingDirectory::try_from(cwd.clone()).ok()
                 else {
                     skipped = skipped.saturating_add(1);
@@ -227,15 +231,17 @@ pub(crate) async fn dispatch(id: Value, params: Value, identity: &ServiceIdentit
                 {
                     continue;
                 }
+                if let Some(name) = session.name.as_deref() {
+                    identity.display_names.remember(target.clone(), name);
+                } else {
+                    identity.display_names.forget(target.clone());
+                }
                 rows.push((
                     session.updated_at.saturating_mul(1_000),
                     session_id,
                     ProviderSessionSummary::ClaudeCodeInteractive {
                         origin: ClaudeCodeInteractiveOrigin::ClaudeCodeInteractive,
-                        target: SessionRef {
-                            endpoint: params.endpoint.clone(),
-                            session_id: session.session_id,
-                        },
+                        target,
                         name: session.name,
                         working_directory,
                         status: interactive_status(&session.status),
