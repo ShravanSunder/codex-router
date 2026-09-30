@@ -1,3 +1,8 @@
+#[cfg(not(feature = "keychain-test-support"))]
+compile_error!(
+    "compiled CLI Host acceptance tests require keychain-test-support so spawned binaries cannot use the production Keychain adapter"
+);
+
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -17,6 +22,46 @@ mod host_replacement_observation;
 use host_replacement_observation::{binary_version, observe_continuous_lock, verify_host_image};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[tokio::test]
+async fn compiled_cli_child_refuses_the_production_keychain_root()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new()?;
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
+
+    // Run the same compiled binary once before the guard probe to avoid cold macOS dyld startup.
+    binary_version(&binary).await?;
+
+    let port = 49_152 + (std::process::id() % 16_384) as u16;
+    let child = tokio::process::Command::new(&binary)
+        .args(["serve", "--listen-host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", directory.path())
+        .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
+        .env_remove("CODEX_ROUTER_DEBUG_ROUTER_ROOT")
+        .env("OTEL_SDK_DISABLED", "true")
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .map_err(|_elapsed| "compiled CLI child did not refuse the production key root")??;
+    let stderr = String::from_utf8(output.stderr)?;
+    check(
+        !output.status.success(),
+        "compiled CLI child unexpectedly opened the production default secret root",
+    )?;
+    check(
+        stderr.contains("encrypted credential store could not be opened"),
+        &stderr,
+    )?;
+    check(
+        !directory.path().join(".codex-router").exists(),
+        "test-key guard created the production default router root",
+    )?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn forged_home_default_root_never_invokes_launchctl() -> Result<(), Box<dyn std::error::Error>>
