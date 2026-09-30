@@ -111,10 +111,15 @@ impl ServiceInteractionBroker {
         drop(typed_operation);
         let broker = Arc::downgrade(self);
         let delivery = self.session_delivery.get().cloned();
+        let display_names = self
+            .display_names
+            .get_or_init(crate::SessionDisplayNameCache::default)
+            .clone();
         let request_id_for_notice = request_id.clone();
         let notice_task = tokio::spawn(async move {
             if typed_interaction_notice::deliver_approval_notice(
                 delivery.as_ref(),
+                &display_names,
                 &notice_requester,
                 &notice_approver,
                 &notice_request,
@@ -205,10 +210,15 @@ impl ServiceInteractionBroker {
         drop(pending);
         let broker = Arc::downgrade(self);
         let delivery = self.session_delivery.get().cloned();
+        let display_names = self
+            .display_names
+            .get_or_init(crate::SessionDisplayNameCache::default)
+            .clone();
         let request_id_for_notice = request_id.clone();
         let notice_task = tokio::spawn(async move {
             if typed_interaction_notice::deliver_question_notice(
                 delivery.as_ref(),
+                &display_names,
                 &notice_requester,
                 &notice_approver,
                 &notice_request,

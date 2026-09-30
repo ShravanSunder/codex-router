@@ -319,11 +319,6 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
             "firing was mistaken for native acceptance; delivery lacks an accepted receipt".into(),
         );
     }
-    let incoming_prefix = format!(
-        "Agent communication\nSelf-declared sender: {}\nIntended recipient: {}\n\n{reply_marker}",
-        serde_json::to_string(&beta)?,
-        serde_json::to_string(&alpha)?
-    );
     if !alpha_turns.iter().any(|turn| {
         turn.get("items")
             .and_then(Value::as_array)
@@ -338,7 +333,22 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
                                     input
                                         .get("text")
                                         .and_then(Value::as_str)
-                                        .is_some_and(|text| text.starts_with(&incoming_prefix))
+                                        .filter(|text| {
+                                            let identity_line =
+                                                text.lines().next().unwrap_or_default();
+                                            identity_line.contains(" ← ")
+                                                && text.starts_with(&format!(
+                                                    "{identity_line}\nAgent communication\n"
+                                                ))
+                                        })
+                                        .and_then(
+                                            collaboration_client::protocol::parse_agent_message_envelope,
+                                        )
+                                        .is_some_and(|envelope| {
+                                            envelope.sender == beta
+                                                && envelope.recipient == alpha
+                                                && envelope.body.contains(&reply_marker)
+                                        })
                                 })
                             });
                     incoming

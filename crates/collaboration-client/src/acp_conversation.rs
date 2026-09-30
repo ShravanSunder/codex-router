@@ -549,10 +549,9 @@ impl AcpConversation {
             .as_ref()
             .ok_or(ClientError::Protocol("ACP session not opened"))?;
         let message = MessageContent::from(request.message);
-        let rendered = render_message(target, &message)
-            .map_err(|_| ClientError::Protocol("conversation message rendering failed"))?;
+        let rendered = render_conversation_prompt(target, &message)?;
         self.prompt(
-            &rendered.text,
+            &rendered,
             request.effort.as_deref(),
             Duration::from_secs(request.timeout_seconds),
             cancel,
@@ -560,6 +559,7 @@ impl AcpConversation {
         )
         .await
     }
+
     async fn request(
         &mut self,
         method: &str,
@@ -733,6 +733,15 @@ impl AcpConversation {
             }
         }
     }
+}
+
+fn render_conversation_prompt(
+    target: &SessionRef,
+    message: &MessageContent,
+) -> Result<String, ClientError> {
+    render_message(target, message)
+        .map(|rendered| rendered.text)
+        .map_err(|_| ClientError::Protocol("conversation message rendering failed"))
 }
 
 fn validate_conversation_endpoint(

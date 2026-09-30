@@ -149,7 +149,7 @@ request=json.loads(sys.stdin.readline())
 assert request['method']=='session/prompt'
 assert len(request['params']['prompt'])==1, request['params']['prompt']
 assert request['params']['prompt'][0]['type']=='text'
-assert request['params']['prompt'][0]['text'].startswith('Router delivery\nIntended recipient: ')
+assert request['params']['prompt'][0]['text'].startswith('▶️ cursor-local/fixture- ← 🔔 Router notice\nRouter delivery\nIntended recipient: ')
 assert request['params']['prompt'][0]['text'].endswith('\n\nfirst')
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({:?})
@@ -244,6 +244,7 @@ pub(super) fn request(target: SessionRef, text: &str) -> DeliveryRequest {
         message: MessageContent::HumanUser {
             text: MessageText::try_from(text.to_owned()).expect("message"),
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode: MessageDelivery::Auto,
         load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,

@@ -85,6 +85,7 @@ pub struct ScheduledRunSubmission {
     pub run_id: RunId,
     pub target: SessionRef,
     pub message: MessageText,
+    pub header_context: collaboration_protocol::MessageHeaderContext,
     pub precondition: DeliveryPrecondition,
     pub inputs: CapturedRunInputs<SessionRef, EndpointRef>,
     pub recorded: RouteEffectEvidence<SessionRef, CodexGeneration>,

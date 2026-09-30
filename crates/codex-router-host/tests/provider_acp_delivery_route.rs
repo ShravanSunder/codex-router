@@ -259,6 +259,7 @@ fn request(target: SessionRef, text: &str) -> DeliveryRequest {
         message: MessageContent::HumanUser {
             text: MessageText::try_from(text.to_owned()).expect("message"),
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode: MessageDelivery::Auto,
         load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
@@ -327,6 +328,7 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
                 message: MessageContent::HumanUser {
                     text: MessageText::try_from("hello".to_owned()).expect("message"),
                 },
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
                 mode: MessageDelivery::Steer,
                 load_policy: collaboration_service::LoadPolicy::MayLoad,
                 precondition: DeliveryPrecondition::Unpinned,

@@ -183,7 +183,7 @@ async fn queued_loaded_only_item_not_submitted_if_close_happens_before_fifo_drai
     );
     let (sender, receiver) = mpsc::channel(1);
     sender
-        .send(ProviderQueuedPrompt::Message {
+        .send(ProviderQueuedPrompt::MessageWithHeader {
             request: ConversationPromptRequest {
                 operation_id: operation_id.clone(),
                 input_id: Some(input_id),
@@ -193,6 +193,7 @@ async fn queued_loaded_only_item_not_submitted_if_close_happens_before_fifo_drai
                 approver: target.clone().into(),
                 prompt,
             },
+            header_context: collaboration_protocol::MessageHeaderContext::default(),
             load_policy: LoadPolicy::LoadedOnly,
         })
         .await

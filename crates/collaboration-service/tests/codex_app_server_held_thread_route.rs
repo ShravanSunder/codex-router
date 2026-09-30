@@ -1,7 +1,7 @@
 use agent_automation::{RouteEffectEvidence, SubmissionEffect};
 use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageContent,
-    MessageDelivery, SessionRef, UuidIdentity,
+    MessageDelivery, MessageHeaderContext, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, CodexAppServerDeliveryRoute, DeliveryClientReceipt, DeliveryFuture,
@@ -516,6 +516,7 @@ async fn exercise_held_empty_thread(
         message: MessageContent::Router {
             text: message_text.clone(),
         },
+        header_context: MessageHeaderContext::default(),
         mode,
         load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,

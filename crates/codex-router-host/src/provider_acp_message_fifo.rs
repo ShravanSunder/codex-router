@@ -7,8 +7,8 @@ use crate::{
 };
 use collaboration_protocol::{
     ConversationOperationFailureKind, ConversationOperationWaitOutput,
-    ConversationOperationWaitRequest, ConversationPromptRequest, PositiveSeconds,
-    ProviderOperationStage, SessionRef,
+    ConversationOperationWaitRequest, ConversationPromptRequest, MessageHeaderContext,
+    PositiveSeconds, ProviderOperationStage, SessionRef,
 };
 use collaboration_service::{
     LoadPolicy, NOT_LOADED_REASON, ProviderConversationBackend, ProviderOperationStore,
@@ -32,8 +32,9 @@ const PROVIDER_RETIRED_REASON: &str = "providerRetired";
 
 #[derive(Clone)]
 pub(crate) enum ProviderQueuedPrompt {
-    Message {
+    MessageWithHeader {
         request: ConversationPromptRequest,
+        header_context: MessageHeaderContext,
         load_policy: LoadPolicy,
     },
     Contents {
@@ -45,14 +46,15 @@ pub(crate) enum ProviderQueuedPrompt {
 impl ProviderQueuedPrompt {
     fn operation_id(&self) -> &collaboration_protocol::OperationId {
         match self {
-            Self::Message { request, .. } => &request.operation_id,
+            Self::MessageWithHeader { request, .. } => &request.operation_id,
             Self::Contents { request, .. } => &request.operation_id,
         }
     }
 
     fn load_policy(&self) -> LoadPolicy {
         match self {
-            Self::Message { load_policy, .. } | Self::Contents { load_policy, .. } => *load_policy,
+            Self::MessageWithHeader { load_policy, .. }
+            | Self::Contents { load_policy, .. } => *load_policy,
         }
     }
 }
@@ -309,8 +311,16 @@ async fn run_provider_message_fifo(
                 },
                 submitted = async {
                     match request.clone() {
-                        ProviderQueuedPrompt::Message { request, .. } =>
-                            supervisor.submit_delivery_prompt(request).await,
+                        ProviderQueuedPrompt::MessageWithHeader {
+                            request,
+                            header_context,
+                            ..
+                        } => supervisor
+                            .submit_delivery_prompt_with_header_context(
+                                request,
+                                &header_context,
+                            )
+                            .await,
                         ProviderQueuedPrompt::Contents { request, .. } =>
                             supervisor.submit_delivery_prompt_contents(request).await,
                     }

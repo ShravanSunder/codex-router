@@ -9,7 +9,7 @@ use collaboration_protocol::{
     ConversationCancelRequest, ConversationPromptRequest, DeliveryClientReceipt,
     DeliveryNextAction, DeliveryOutcome, DeliveryReceipt, DeliveryRejection,
     DeliveryRejectionReason, MessageContent, OperationId, ProviderOperationEffect,
-    ProviderOperationStage, RunExecution, SessionReachability, render_message,
+    ProviderOperationStage, RunExecution, SessionReachability, render_message_with_context,
 };
 use collaboration_service::{
     DeliveryContractError, DeliveryPrecondition, LoadPolicy, ProviderConversationBackend,
@@ -92,7 +92,7 @@ impl ProviderAcpScheduledRuns {
             .map_err(|_| DeliveryContractError::ClientOperation)?
             .ok_or(DeliveryContractError::ClientOperation)?;
         let message = MessageContent::Router { text: run.message };
-        render_message(&run.target, &message)
+        render_message_with_context(&run.target, &message, &run.header_context)
             .map_err(|_| DeliveryContractError::ClientOperation)?;
         let operation_id = Self::operation_id(&effect)?;
         effect.submission = SubmissionEffect::Dispatching;
@@ -110,15 +110,18 @@ impl ProviderAcpScheduledRuns {
         };
         let submitted = self
             .supervisor
-            .submit_delivery_prompt(ConversationPromptRequest {
-                input_id: None,
-                operation_id: operation_id.clone(),
-                target: run.target.clone(),
-                generation: Some(binding.generation),
-                requested_by: record.created_by,
-                approver: record.approver,
-                prompt: message,
-            })
+            .submit_delivery_prompt_with_header_context(
+                ConversationPromptRequest {
+                    input_id: None,
+                    operation_id: operation_id.clone(),
+                    target: run.target.clone(),
+                    generation: Some(binding.generation),
+                    requested_by: record.created_by,
+                    approver: record.approver,
+                    prompt: message,
+                },
+                &run.header_context,
+            )
             .await;
         let result = match submitted {
             Ok(ProviderPromptDispatch::Submitted) => {

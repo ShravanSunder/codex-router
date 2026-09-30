@@ -7,8 +7,8 @@ use codex_native_integration::{
 };
 use collaboration_protocol::{
     AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageDelivery,
-    NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,
-    NativeSendReceipt, NonEmptyText, UuidIdentity,
+    MessageHeaderContext, NativeInputDisposition, NativeInputOperation, NativeSendAcceptance,
+    NativeSendParams, NativeSendReceipt, NonEmptyText, SessionRef, UuidIdentity,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -20,6 +20,11 @@ pub(crate) enum NativeThreadStatus {
     Idle,
     Active,
     Other,
+}
+
+pub(crate) struct NativeThreadSnapshot {
+    pub status: NativeThreadStatus,
+    pub thread: Value,
 }
 
 pub(crate) enum NativeThreadStatusReadError {
@@ -36,7 +41,7 @@ pub(crate) async fn read_native_thread_status(
     thread_id: &str,
     deadline: tokio::time::Instant,
     retired: &CancellationToken,
-) -> Result<NativeThreadStatus, NativeThreadStatusReadError> {
+) -> Result<NativeThreadSnapshot, NativeThreadStatusReadError> {
     if retired.is_cancelled() || tokio::time::Instant::now() >= deadline {
         return Err(NativeThreadStatusReadError::Unavailable);
     }
@@ -86,16 +91,20 @@ pub(crate) async fn read_native_thread_status(
     if response.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id) {
         return Err(NativeThreadStatusReadError::InvalidResponse);
     }
-    match response
-        .pointer("/thread/status/type")
+    let Some(thread) = response.get("thread").cloned() else {
+        return Err(NativeThreadStatusReadError::InvalidResponse);
+    };
+    let status = match thread
+        .pointer("/status/type")
         .and_then(Value::as_str)
     {
-        Some("notLoaded") => Ok(NativeThreadStatus::NotLoaded),
-        Some("idle") => Ok(NativeThreadStatus::Idle),
-        Some("active") => Ok(NativeThreadStatus::Active),
-        Some(_) => Ok(NativeThreadStatus::Other),
-        None => Err(NativeThreadStatusReadError::InvalidResponse),
-    }
+        Some("notLoaded") => NativeThreadStatus::NotLoaded,
+        Some("idle") => NativeThreadStatus::Idle,
+        Some("active") => NativeThreadStatus::Active,
+        Some(_) => NativeThreadStatus::Other,
+        None => return Err(NativeThreadStatusReadError::InvalidResponse),
+    };
+    Ok(NativeThreadSnapshot { status, thread })
 }
 
 pub(crate) struct NativeMessageRequest<'a> {
@@ -104,6 +113,8 @@ pub(crate) struct NativeMessageRequest<'a> {
     pub service_id: &'a UuidIdentity,
     pub backend: &'a NativeControlBackend,
     pub endpoints: &'a [EndpointDescription],
+    pub header_context: MessageHeaderContext,
+    pub display_names: &'a crate::SessionDisplayNameCache,
     pub held_connection: Option<&'a mut NativeProtocolConnection>,
     pub load_policy: LoadPolicy,
 }
@@ -152,8 +163,11 @@ pub(crate) async fn dispatch_message(
     {
         return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "queue"));
     }
-    let Ok(rendered) = collaboration_protocol::render_message(&params.target, &params.message)
-    else {
+    let Ok(rendered) = collaboration_protocol::render_message_with_context(
+        &params.target,
+        &params.message,
+        &request.header_context,
+    ) else {
         return NativeMessageOutcome::Failed(effects.failure("overloaded", "inspect"));
     };
     let correlation = match &params.client_user_message_id {
@@ -202,8 +216,9 @@ pub(crate) async fn dispatch_message(
     let result = session
         .deliver(
             &target_id,
-            params.delivery,
-            &rendered.text,
+            &params,
+            &request.header_context,
+            request.display_names,
             &correlation,
             held,
             load_policy,
@@ -290,7 +305,7 @@ impl MessageSession<'_> {
             }
         }
     }
-    async fn read_thread_status(&mut self, id: &str) -> Result<NativeThreadStatus, Value> {
+    async fn read_thread_status(&mut self, id: &str) -> Result<NativeThreadSnapshot, Value> {
         match read_native_thread_status(
             self.connection,
             self.schemas.as_ref(),
@@ -300,7 +315,7 @@ impl MessageSession<'_> {
         )
         .await
         {
-            Ok(status) => Ok(status),
+            Ok(snapshot) => Ok(snapshot),
             Err(NativeThreadStatusReadError::Missing) => Err(self
                 .effects
                 .failure("threadMissingOrUnmaterialized", "inspect")),
@@ -344,22 +359,41 @@ impl MessageSession<'_> {
     async fn deliver(
         &mut self,
         id: &str,
-        delivery: MessageDelivery,
-        text: &str,
+        params: &NativeSendParams,
+        header_context: &MessageHeaderContext,
+        display_names: &crate::SessionDisplayNameCache,
         correlation: &str,
         held_unmaterialized: bool,
         load_policy: LoadPolicy,
     ) -> Result<NativeSendAcceptance, Value> {
-        let status = if held_unmaterialized {
-            NativeThreadStatus::Idle
+        let thread_snapshot = if held_unmaterialized {
+            None
         } else {
-            self.read_thread_status(id).await?
+            Some(self.read_thread_status(id).await?)
         };
-        let input = json!([{"type":"text","text":text}]);
+        if let Some(snapshot) = thread_snapshot.as_ref() {
+            cache_thread_display_name(display_names, &params.target, &snapshot.thread);
+        }
+        let current_header_context = MessageHeaderContext::resolve(
+            &params.target,
+            &params.message,
+            display_names,
+            header_context.origin,
+        );
+        let rendered = collaboration_protocol::render_message_with_context(
+            &params.target,
+            &params.message,
+            &current_header_context,
+        )
+        .map_err(|_| self.effects.failure("overloaded", "inspect"))?;
+        let input = json!([{"type":"text","text":rendered.text}]);
+        let status = thread_snapshot
+            .as_ref()
+            .map_or(NativeThreadStatus::Idle, |snapshot| snapshot.status);
         if status == NativeThreadStatus::NotLoaded && load_policy == LoadPolicy::LoadedOnly {
             return Err(self.effects.failure(NOT_LOADED_REASON, "start"));
         }
-        if delivery == MessageDelivery::Queue {
+        if params.delivery == MessageDelivery::Queue {
             if status == NativeThreadStatus::NotLoaded {
                 return Err(self.effects.failure("threadNotLoaded", "queue"));
             }
@@ -385,7 +419,7 @@ impl MessageSession<'_> {
                 submission_id: None,
             });
         }
-        if delivery == MessageDelivery::Steer {
+        if params.delivery == MessageDelivery::Steer {
             return Err(self.effects.failure("noActiveTurn", "steer"));
         }
         if status == NativeThreadStatus::NotLoaded {
@@ -425,5 +459,20 @@ impl MessageSession<'_> {
             .and_then(Value::as_str)
             .and_then(|id| NonEmptyText::try_from(id.to_owned()).ok())
             .ok_or_else(|| self.effects.failure("outcomeUnknown", stage))
+    }
+}
+
+fn cache_thread_display_name(
+    display_names: &crate::SessionDisplayNameCache,
+    target: &SessionRef,
+    thread: &Value,
+) {
+    let name = thread
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    match name {
+        Some(name) => display_names.remember(target.clone(), name),
+        None => display_names.forget(target.clone()),
     }
 }

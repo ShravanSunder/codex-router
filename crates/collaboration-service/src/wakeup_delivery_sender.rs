@@ -9,7 +9,7 @@ use automation_storage::{
 };
 use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, MessageContent, MessageDelivery,
-    SessionRef,
+    MessageHeaderContext, MessageHeaderOrigin, RouterNoticeKind, SessionRef,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -25,6 +25,7 @@ mod tests;
 pub(crate) struct WakeDeliverySender {
     pub delivery: Arc<dyn SessionMessageDelivery>,
     pub configuration: crate::AutomationConfigurationHandle,
+    pub display_names: crate::SessionDisplayNameCache,
 }
 
 impl WakeDeliverySender {
@@ -61,9 +62,16 @@ impl WakeDeliverySender {
             attempt_id: claim.attempt_id.clone(),
             latest: Mutex::new(None),
         };
+        let header_context = MessageHeaderContext::resolve(
+            &claim.target,
+            &claim.content,
+            &self.display_names,
+            MessageHeaderOrigin::RouterNotice(RouterNoticeKind::Wake),
+        );
         let request = DeliveryRequest {
             target: claim.target,
             message: claim.content,
+            header_context,
             mode,
             load_policy: LoadPolicy::MayLoad,
             precondition: claim

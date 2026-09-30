@@ -3,13 +3,17 @@ use crate::{
     DeliveryPrecondition, DeliveryRequest, LoadPolicy, SessionMessageDelivery,
     session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
-use collaboration_protocol::{DeliveryOutcome, MessageContent, MessageDelivery, SessionRef};
+use collaboration_protocol::{
+    DeliveryOutcome, MessageContent, MessageDelivery, MessageHeaderContext, MessageHeaderOrigin,
+    RouterNoticeKind, SessionRef,
+};
 use message_board::{BatchSink, BatchSinkFailure, ListenDeliveryRecord, ThreadListenBatchSet};
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub(crate) struct SessionDeliverySink {
     pub(crate) delivery: Arc<dyn SessionMessageDelivery>,
+    pub(crate) display_names: crate::SessionDisplayNameCache,
     pub(crate) target: SessionRef,
 }
 
@@ -31,9 +35,16 @@ impl SessionDeliverySink {
         let message = MessageContent::Router {
             text: text.try_into().map_err(|_| BatchSinkFailure::Unavailable)?,
         };
+        let header_context = MessageHeaderContext::resolve(
+            &self.target,
+            &message,
+            &self.display_names,
+            MessageHeaderOrigin::RouterNotice(RouterNoticeKind::BoardListen),
+        );
         let request = DeliveryRequest {
             target: self.target.clone(),
             message,
+            header_context,
             mode: MessageDelivery::Auto,
             load_policy: LoadPolicy::MayLoad,
             precondition: DeliveryPrecondition::Unpinned,
@@ -152,6 +163,7 @@ mod tests {
         })).expect("fixture session");
         let sink = SessionDeliverySink {
             delivery: Arc::new(FakeDelivery(outcome)),
+            display_names: crate::SessionDisplayNameCache::default(),
             target,
         };
         sink.deliver(ListenDeliveryRecord::Heartbeat(ThreadListenHeartbeat {

@@ -14,6 +14,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
 fn fixture_record(root: &Path) -> PeerSessionRecord {
     PeerSessionRecord {
         session_id: SessionId::try_from("fixture-session".to_owned()).expect("session ID"),
+        name: None,
         process_id: PeerProcessId::try_from(std::process::id()).expect("process ID"),
         status: PeerSessionStatus::Busy,
         socket_path: root.join("peer.sock"),

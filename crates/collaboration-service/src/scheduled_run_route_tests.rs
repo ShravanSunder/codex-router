@@ -407,6 +407,7 @@ async fn provider_worker_fixture(
         execution: fake,
         backend: None,
         configuration: crate::AutomationConfigurationHandle::default(),
+        display_names: crate::SessionDisplayNameCache::default(),
     };
     Ok((root, store, worker, run_id))
 }
@@ -596,6 +597,7 @@ async fn provider_and_peer_routes_drive_run_show_without_native_turns() -> TestR
             execution: Arc::clone(&fake),
             backend: None,
             configuration: crate::AutomationConfigurationHandle::default(),
+            display_names: crate::SessionDisplayNameCache::default(),
         };
         for stage in 0..3 {
             if let Err(error) = worker.step(run_id.clone()).await {

@@ -31,6 +31,101 @@ fn missing_explicit_session_name_keeps_the_previous_display_fallback() {
     assert_eq!(picker_record.title, "previous title");
 }
 
+#[test]
+fn new_agent_envelope_title_uses_sender_identity_and_first_body_line() {
+    let sender = serde_json::json!({
+        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"claude-local"},
+        "sessionId":"sender-session"
+    });
+    let recipient = serde_json::json!({
+        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
+        "sessionId":"recipient-session"
+    });
+    let envelope = format!(
+        "🤖 Codex Main ← 🐒 Sidekick · PR2\nAgent communication\nSelf-declared sender: {sender}\nIntended recipient: {recipient}\n\nFix empty-session visibility.\nIgnore later body lines.",
+    );
+    let mut record = search_consistency_record(None, None);
+    record.title = Some(envelope);
+
+    let picker_record = SessionPickerRecord::from_record(&record);
+
+    assert_eq!(
+        picker_record.title,
+        "🐒 Sidekick · PR2: Fix empty-session visibility."
+    );
+}
+
+#[test]
+fn old_agent_envelope_title_uses_sender_fallback_and_preserves_renamed_session_name() {
+    let sender = serde_json::json!({
+        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"claude-local"},
+        "sessionId":"sender-session"
+    });
+    let recipient = serde_json::json!({
+        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
+        "sessionId":"recipient-session"
+    });
+    let envelope = format!(
+        "Agent communication\nSelf-declared sender: {sender}\nIntended recipient: {recipient}\n\nFix empty-session visibility.\nIgnore later body lines.",
+    );
+    let mut record = search_consistency_record(None, None);
+    record.name = Some("Renamed in Codex".to_owned());
+    record.title = Some(envelope);
+
+    let picker_record = SessionPickerRecord::from_record(&record);
+
+    assert_eq!(
+        picker_record.title,
+        "Renamed in Codex | ✳️ claude-local/sender-s: Fix empty-session visibility."
+    );
+}
+
+#[test]
+fn agent_envelope_in_first_user_message_overrides_a_generic_title_but_keeps_rename() {
+    let sender = serde_json::json!({
+        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"claude-local"},
+        "sessionId":"sender-session"
+    });
+    let recipient = serde_json::json!({
+        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
+        "sessionId":"recipient-session"
+    });
+    let envelope = format!(
+        "Agent communication\nSelf-declared sender: {sender}\nIntended recipient: {recipient}\n\nCheck the delivery record.\nLater body line.",
+    );
+    let mut record = search_consistency_record(None, None);
+    record.name = Some("Durable rename".to_owned());
+    record.title = Some("Agent communication".to_owned());
+    record.first_user_message = Some(envelope);
+
+    let picker_record = SessionPickerRecord::from_record(&record);
+
+    assert_eq!(
+        picker_record.title,
+        "Durable rename | ✳️ claude-local/sender-s: Check the delivery record."
+    );
+}
+
+#[test]
+fn scheduled_router_envelope_title_uses_router_identity_and_first_body_line() {
+    let recipient = serde_json::json!({
+        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
+        "sessionId":"recipient-session"
+    });
+    let envelope = format!(
+        "🤖 Codex Main ← ⏰ Router schedule\nRouter delivery\nIntended recipient: {recipient}\n\nReview the weekly summary.\nIgnore later lines.",
+    );
+    let mut record = search_consistency_record(None, None);
+    record.title = Some(envelope);
+
+    let picker_record = SessionPickerRecord::from_record(&record);
+
+    assert_eq!(
+        picker_record.title,
+        "⏰ Router schedule: Review the weekly summary."
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn picker_record_normalizes_existing_cwd_before_interactive_matching() {

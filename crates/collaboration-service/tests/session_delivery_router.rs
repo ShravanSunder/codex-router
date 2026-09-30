@@ -84,6 +84,7 @@ fn request_with_load_policy(
         message: MessageContent::Router {
             text: "hello".to_owned().try_into()?,
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode: MessageDelivery::Auto,
         load_policy,
         precondition: DeliveryPrecondition::Unpinned,
