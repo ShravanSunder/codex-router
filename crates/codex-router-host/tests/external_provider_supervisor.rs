@@ -142,10 +142,11 @@ assert request['method']=='session/new'
 current={'mode':'auto','model':'a'}
 def options(): return [option('mode',current['mode'],['auto','ask']),option('model',current['model'],['a','b'])]
 send({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'settings-session','configOptions':options()}})
-if mode=='invalid':
-    request=read()
-    assert request['method']=='session/close',request
-    send({'jsonrpc':'2.0','id':request['id'],'result':{}})
+if mode.startswith('invalid'):
+    if mode=='invalid':
+        request=read()
+        assert request['method']=='session/close',request
+        send({'jsonrpc':'2.0','id':request['id'],'result':{}})
 else:
     request=read()
     assert request['method']=='session/set_config_option' and request['params']['configId']=='mode'
@@ -201,15 +202,15 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
             backend
                 .create(ConversationCreateRequest {
                     settings: Some(ProviderRequestedSettings {
-                        mode: Some(
+                        mode: (!mode.starts_with("invalid")).then(|| "ask".to_owned()),
+                        model: Some(
                             if mode.starts_with("invalid") {
                                 "wrong"
                             } else {
-                                "ask"
+                                "b"
                             }
                             .to_owned(),
                         ),
-                        model: (!mode.starts_with("invalid")).then(|| "b".to_owned()),
                         effort: None,
                     }),
                     operation_id: operation_id.clone(),
@@ -343,11 +344,13 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                     failure.kind,
                     ConversationOperationFailureKind::InvalidSetting
                 );
+                let failure_message = String::from(failure.message.clone());
                 let detail = failure
                     .invalid_setting
                     .ok_or("missing invalid-setting detail")?;
+                ensure_eq!(detail.setting, ProviderSettingName::Model);
                 ensure_eq!(detail.value, "wrong");
-                ensure_eq!(detail.advertised, vec!["auto".to_owned(), "ask".to_owned()]);
+                ensure_eq!(detail.advertised, vec!["a".to_owned(), "b".to_owned()]);
                 let expected_disposition = if mode == "invalid" {
                     collaboration_protocol::InvalidSettingSessionDisposition::Closed
                 } else {
@@ -363,6 +366,20 @@ async fn provider_create_projects_effective_partial_and_invalid_settings() -> Te
                         .await,
                 )?;
                 ensure_eq!(shown.target.as_ref(), Some(&target));
+                ensure_eq!(shown.stage, ProviderOperationStage::Terminal);
+                ensure_eq!(shown.effect, ProviderOperationEffect::Applied);
+                ensure_eq!(shown.reconciliation, ProviderReconciliationState::Confirmed);
+                ensure_eq!(
+                    failure_message,
+                    format!(
+                        "invalid provider setting model=\"wrong\"; advertised: \"a\", \"b\"; {}",
+                        if mode == "invalid" {
+                            "new Session was closed"
+                        } else {
+                            "new Session remains created and idle"
+                        }
+                    )
+                );
                 let mut store =
                     ProviderOperationStore::open(&root.path().join("provider-operations.sqlite"))
                         .await?;
