@@ -150,7 +150,7 @@ jobs:
       # Compile every test binary once, then run both suites in parallel from
       # the built artifacts so they don't contend for cargo's build lock.
       - name: Build test binaries
-        run: cargo nextest run --profile ci --workspace --no-run
+        run: cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --no-run
       - name: Test quota-reset terminal integration
         id: quota_reset_terminal_integration
         background: true
@@ -158,7 +158,7 @@ jobs:
       - name: Test Rust workspace
         id: workspace_tests
         background: true
-        run: cargo nextest run --profile ci --workspace --exclude codex-router-quota-reset-test-harness
+        run: cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --exclude codex-router-quota-reset-test-harness
       - name: Wait for tests
         wait-all:
 

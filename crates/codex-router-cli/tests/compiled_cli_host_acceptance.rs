@@ -203,6 +203,10 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         prior_binary.as_deref().unwrap_or(&candidate_binary),
         &binary,
     )?;
+    let installed_binary_version = binary_version(&binary).await?;
+    eprintln!(
+        "compiled_cli_host_acceptance_installed_binary_warmed version={installed_binary_version}"
+    );
     let replacement_binary = if atomic_install {
         binary.clone()
     } else {
@@ -255,6 +259,14 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     .stdout(Stdio::from(std::fs::File::create(&host_stdout)?))
     .stderr(Stdio::from(std::fs::File::create(&host_stderr)?));
     let mut host = host.spawn()?;
+    eprintln!(
+        "compiled_cli_host_acceptance_fixture root={} router_endpoint=127.0.0.1:{} host_pid={:?} binary={} replacement_binary={}",
+        directory.path().display(),
+        port,
+        host.id(),
+        binary.display(),
+        replacement_binary.display(),
+    );
     // Always release owned children, including when an assertion below fails.
     let proof = async {
         wait_for_operator_socket(&mut host, &router_root.join("host.sock"), &host_stderr).await?;
@@ -357,6 +369,10 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         let old_inode = std::fs::metadata(&binary)?.ino();
         std::fs::rename(&candidate_install, &replacement_binary)?;
         check(std::fs::metadata(&replacement_binary)?.ino() != old_inode, "replacement must be a distinct executable identity")?;
+        let replacement_version = binary_version(&replacement_binary).await?;
+        eprintln!(
+            "compiled_cli_host_acceptance_replacement_binary_warmed version={replacement_version}"
+        );
 
         let (finish_sender, finish_receiver) = tokio::sync::oneshot::channel();
         let contention = tokio::spawn(observe_continuous_lock(lock_path.clone(), finish_receiver));
@@ -413,6 +429,20 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;
+
+    if let Err(error) = &proof {
+        eprintln!(
+            "compiled_cli_host_acceptance_failure error={error} root={} router_endpoint=127.0.0.1:{} host_pid={:?} host_status={:?} app_server_generations={} host_stderr={:?}",
+            directory.path().display(),
+            port,
+            host.id(),
+            host.try_wait(),
+            std::fs::read_to_string(&process_log)
+                .map(|contents| contents.lines().count())
+                .unwrap_or_default(),
+            std::fs::read_to_string(&host_stderr).unwrap_or_default(),
+        );
+    }
 
     if host.try_wait()?.is_none() {
         let host_process_id = host.id().ok_or("host process ID is unavailable")?;
