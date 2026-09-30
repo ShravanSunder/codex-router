@@ -100,7 +100,12 @@ async fn unavailable_credential_stores_skip_upkeep_without_health_changes() {
             NoopCredentialRefreshClient,
             Some(1_100),
         );
-        let resolution = resolver.resolve_provider_credentials(&account_id).await;
+        let resolution = resolver
+            .resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+            )
+            .await;
         assert_eq!(
             resolution,
             Err(codex_router_auth::resolver::CredentialResolverError::CredentialStoreUnavailable),

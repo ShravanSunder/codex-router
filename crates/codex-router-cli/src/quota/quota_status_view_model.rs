@@ -265,12 +265,14 @@ impl DisplayQuotaWindow {
                 codex_router_core::route_profile::WindowKind::FiveHour => V1_SHORT_WINDOW_SECONDS,
                 codex_router_core::route_profile::WindowKind::Weekly => V1_WEEKLY_WINDOW_SECONDS,
             },
-            status: if now_unix_seconds.saturating_sub(observation.observation_started_at())
-                <= codex_router_selection::burn_down::QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS
-            {
-                QuotaWindowStatus::Eligible
-            } else {
-                QuotaWindowStatus::Stale
+            status: match observation.freshness_at(now_unix_seconds) {
+                codex_router_selection::burn_down::QuotaEvidenceFreshness::Fresh => {
+                    QuotaWindowStatus::Eligible
+                }
+                codex_router_selection::burn_down::QuotaEvidenceFreshness::Stale
+                | codex_router_selection::burn_down::QuotaEvidenceFreshness::Unknown => {
+                    QuotaWindowStatus::Stale
+                }
             },
             remaining_headroom: observation.remaining_basis_points() / 100,
             reset_unix_seconds: observation.reset_unix_seconds(),
@@ -345,5 +347,34 @@ impl ActiveClientMirrorStatus {
             Self::MirrorFresh { .. } => "sqlx_mirror",
             Self::Unavailable => "unavailable",
         }
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    use codex_router_core::ids::AccountId;
+    use codex_router_core::route_profile::WindowKind;
+    use codex_router_state::window_observation::WindowObservation;
+    use codex_router_state::window_observation::WindowObservationProps;
+
+    #[test]
+    fn claude_status_uses_the_persisted_freshness_deadline() {
+        let account_id = AccountId::new("claude_status_freshness")
+            .unwrap_or_else(|error| panic!("test account id should validate: {error}"));
+        let observation = WindowObservation::new(
+            WindowObservationProps::new(account_id, WindowKind::FiveHour, 5_000, 100)
+                .with_fresh_until_unix_seconds(620),
+        )
+        .unwrap_or_else(|error| panic!("test observation should validate: {error}"));
+
+        assert_eq!(
+            DisplayQuotaWindow::from_claude_observation(&observation, 620).status,
+            QuotaWindowStatus::Eligible
+        );
+        assert_eq!(
+            DisplayQuotaWindow::from_claude_observation(&observation, 621).status,
+            QuotaWindowStatus::Stale
+        );
     }
 }

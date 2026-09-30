@@ -108,6 +108,101 @@ fn observation(
         .unwrap_or_else(|error| panic!("test observation should be valid: {error}"))
 }
 
+#[tokio::test]
+async fn observation_without_fresh_until_uses_legacy_three_hundred_second_window() {
+    let temp_dir = WindowStateTempDir::new();
+    let (state, account_id) =
+        store_with_claude_account(&temp_dir.database_path(), "legacy_freshness").await;
+    state
+        .record_window_observation(
+            &observation(
+                &account_id,
+                codex_router_core::route_profile::WindowKind::FiveHour,
+                5_000,
+                None,
+                100,
+            ),
+            || 100,
+        )
+        .await
+        .expect("legacy-shaped observation should persist");
+
+    let loaded_observation = state
+        .window_observations_for_account(&account_id)
+        .await
+        .expect("legacy-shaped observation should load")
+        .into_iter()
+        .next()
+        .expect("observation should exist");
+    assert_eq!(loaded_observation.fresh_until_unix_seconds(), None);
+    assert_eq!(loaded_observation.effective_fresh_until_unix_seconds(), 400);
+    assert_eq!(
+        loaded_observation.freshness_at(400),
+        codex_router_selection::burn_down::QuotaEvidenceFreshness::Fresh
+    );
+    assert_eq!(
+        loaded_observation.freshness_at(401),
+        codex_router_selection::burn_down::QuotaEvidenceFreshness::Stale
+    );
+}
+
+#[tokio::test]
+async fn persisted_non_default_freshness_deadline_drives_selector_status() {
+    use crate::selection_projection::project_route_band_selection_inputs_read_only;
+
+    let temp_dir = WindowStateTempDir::new();
+    let (state, account_id) =
+        store_with_claude_account(&temp_dir.database_path(), "configured_freshness").await;
+    let observation = WindowObservation::new(
+        WindowObservationProps::new(
+            account_id.clone(),
+            codex_router_core::route_profile::WindowKind::FiveHour,
+            5_000,
+            100,
+        )
+        .with_fresh_until_unix_seconds(620),
+    )
+    .expect("configured observation should validate");
+    state
+        .record_window_observation(&observation, || 100)
+        .await
+        .expect("configured observation should persist");
+
+    for (now_unix_seconds, expected_status) in [
+        (
+            620,
+            codex_router_selection::burn_down::QuotaWindowStatus::Eligible,
+        ),
+        (
+            621,
+            codex_router_selection::burn_down::QuotaWindowStatus::Stale,
+        ),
+    ] {
+        let projection = project_route_band_selection_inputs_read_only(
+            &state,
+            "claude_messages",
+            now_unix_seconds,
+            7_200,
+        )
+        .await
+        .expect("selector projection should read persisted freshness");
+        let account = projection
+            .accounts()
+            .iter()
+            .find(|account| account.account_id() == &account_id)
+            .expect("Claude account should project");
+        let window = account
+            .windows()
+            .iter()
+            .find(|window| {
+                window.window_seconds()
+                    == codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS
+            })
+            .expect("five-hour observation should project");
+        assert_eq!(window.status(), expected_status);
+    }
+}
+
 fn rejection(
     account_id: &codex_router_core::ids::AccountId,
     window_kind: codex_router_core::route_profile::WindowKind,
@@ -173,17 +268,19 @@ async fn poll_that_starts_after_rejection_but_lands_stale_cannot_clear_it() {
         .await
         .expect("window rejection should persist");
 
-    state
-        .record_window_observation(
-            &observation(
-                &account_id,
-                codex_router_core::route_profile::WindowKind::Weekly,
-                1_000,
-                Some(1_000),
-                250,
-            ),
-            || 1_000,
+    let stale_observation = WindowObservation::new(
+        WindowObservationProps::new(
+            account_id.clone(),
+            codex_router_core::route_profile::WindowKind::Weekly,
+            1_000,
+            250,
         )
+        .with_reset_unix_seconds(1_000)
+        .with_fresh_until_unix_seconds(770),
+    )
+    .expect("explicitly stale observation should validate");
+    state
+        .record_window_observation(&stale_observation, || 1_000)
         .await
         .expect("stale poll observation should persist");
 
@@ -825,6 +922,7 @@ async fn schema_contracts_include_both_d9_window_tables() {
                 "remaining_basis_points",
                 "reset_unix_seconds",
                 "observation_started_at",
+                "fresh_until_unix_seconds",
             ],
         ),
         (

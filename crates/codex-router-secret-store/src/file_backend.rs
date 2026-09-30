@@ -300,6 +300,12 @@ impl SecretStore for FileSecretStore {
 
         Ok(SecretString::new(value))
     }
+
+    fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+        Err(SecretStoreError::PooledCredentialRequiresEncryption {
+            key: key.as_str().to_owned(),
+        })
+    }
 }
 
 fn reject_pooled_credential_key(key: &SecretKey) -> Result<(), SecretStoreError> {

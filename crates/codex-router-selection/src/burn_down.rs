@@ -32,8 +32,6 @@ pub const ACTIVE_SESSION_IMBALANCE_THRESHOLD: u32 = 1;
 pub const USAGE_LIMIT_SUSPECT_TTL_SECONDS: u64 = 300;
 /// Fixed v1 active-session rollup bucket size.
 pub const ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS: u64 = 300;
-/// Maximum age at which quota evidence remains fresh for selection.
-pub const QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS: u64 = 300;
 /// Fixed v1 minimum weekly runway before asking Codex to reconnect.
 pub const REACTIVE_RECONNECT_MIN_RUNWAY_SECONDS: u64 = 900;
 /// Fixed v1 weekly reset horizon for the near-reset drain pool.

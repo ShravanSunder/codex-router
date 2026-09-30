@@ -45,17 +45,13 @@ pub enum AccountCommand {
     /// Prints account command help.
     Help(&'static str),
     /// Delegates device-code login to Codex, then imports the resulting auth.json.
-    LoginDeviceAuth {
+    Login {
         /// Router-owned root.
         router_root: PathBuf,
         /// Display label.
         label: String,
         /// Typed provider flow selected by the shared login dispatcher.
         provider_login_flow: ProviderLoginFlow,
-        /// Codex executable to run.
-        codex_bin: PathBuf,
-        /// Explicit plaintext file-backend acknowledgement.
-        allow_plaintext_file_secrets: bool,
     },
     /// Lists router-owned accounts.
     List {
@@ -83,10 +79,15 @@ pub enum AccountCommand {
 }
 
 /// Provider-specific OAuth flow selected by `account login --provider`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderLoginFlow {
     /// Existing Codex device-auth path, which PR5 will replace.
-    OpenAiDevice,
+    OpenAiDevice {
+        /// Codex executable to run.
+        codex_bin: PathBuf,
+        /// Explicit plaintext file-backend acknowledgement.
+        allow_plaintext_file_secrets: bool,
+    },
     /// Claude's hosted callback and pasted code#state flow.
     ClaudeOAuth,
 }
@@ -110,15 +111,41 @@ impl AccountCommand {
                     return Ok(Self::Help(ACCOUNT_LOGIN_HELP_TEXT));
                 }
                 let options = AccountLoginOptions::parse(parser)?;
-                Ok(Self::LoginDeviceAuth {
+                let provider = options.provider.unwrap_or(Provider::Openai);
+                let provider_login_flow = match provider {
+                    Provider::Openai => ProviderLoginFlow::OpenAiDevice {
+                        codex_bin: options
+                            .codex_bin
+                            .clone()
+                            .unwrap_or_else(|| PathBuf::from("codex")),
+                        allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
+                    },
+                    Provider::Claude => {
+                        if options.device_auth_option_present {
+                            return Err(AccountCommandError::OpenAiLoginOptionForClaude {
+                                option: "--device-auth",
+                            }
+                            .into());
+                        }
+                        if options.codex_bin.is_some() {
+                            return Err(AccountCommandError::OpenAiLoginOptionForClaude {
+                                option: "--codex-bin",
+                            }
+                            .into());
+                        }
+                        if options.allow_plaintext_file_secrets {
+                            return Err(AccountCommandError::OpenAiLoginOptionForClaude {
+                                option: "--allow-plaintext-file-secrets",
+                            }
+                            .into());
+                        }
+                        ProviderLoginFlow::ClaudeOAuth
+                    }
+                };
+                Ok(Self::Login {
                     router_root: options.router_root()?,
                     label: options.label()?,
-                    provider_login_flow: match options.provider.unwrap_or(Provider::Openai) {
-                        Provider::Openai => ProviderLoginFlow::OpenAiDevice,
-                        Provider::Claude => ProviderLoginFlow::ClaudeOAuth,
-                    },
-                    codex_bin: options.codex_bin.unwrap_or_else(|| PathBuf::from("codex")),
-                    allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
+                    provider_login_flow,
                 })
             }
             "list" => {
@@ -269,6 +296,12 @@ pub enum AccountCommandError {
         /// Duplicated option name.
         option: &'static str,
     },
+    /// An OpenAI-only login option was supplied for Claude OAuth.
+    #[error("account login option is only supported for OpenAI: {option}")]
+    OpenAiLoginOptionForClaude {
+        /// OpenAI-only option name.
+        option: &'static str,
+    },
     /// Claude OAuth flow could not safely produce account credentials.
     #[error(transparent)]
     ClaudeOAuth(#[from] LoginFlowError),
@@ -330,27 +363,42 @@ pub fn run_account_command(
     stdout: &mut impl Write,
     command: AccountCommand,
 ) -> Result<(), AccountCommandError> {
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    run_account_command_with_input(stdout, &mut reader, command)
+}
+
+pub(crate) fn run_account_command_with_input(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
+    command: AccountCommand,
+) -> Result<(), AccountCommandError> {
     match command {
         AccountCommand::Help(text) => stdout
             .write_all(text.as_bytes())
             .map_err(AccountCommandError::Stdout),
-        AccountCommand::LoginDeviceAuth {
+        AccountCommand::Login {
             router_root,
             label,
             provider_login_flow,
-            codex_bin,
-            allow_plaintext_file_secrets,
         } => match provider_login_flow {
-            ProviderLoginFlow::OpenAiDevice => login_with_codex_device_auth(
+            ProviderLoginFlow::OpenAiDevice {
+                codex_bin,
+                allow_plaintext_file_secrets,
+            } => login_with_codex_device_auth(
                 stdout,
                 router_root,
                 label,
                 codex_bin,
                 allow_plaintext_file_secrets,
             ),
-            ProviderLoginFlow::ClaudeOAuth => {
-                login_with_claude_oauth(stdout, router_root, label, &ClaudeOAuthLoginFlow::new())
-            }
+            ProviderLoginFlow::ClaudeOAuth => login_with_claude_oauth(
+                stdout,
+                reader,
+                router_root,
+                label,
+                &ClaudeOAuthLoginFlow::new(),
+            ),
         },
         AccountCommand::List { router_root } => list_accounts(stdout, router_root),
         AccountCommand::SetStatus {
@@ -523,15 +571,11 @@ fn login_with_codex_device_auth(
     import_codex_auth_text(stdout, router_root, label, &auth_text)
 }
 
-fn login_with_claude_oauth(
+fn collect_claude_oauth_bundle(
     stdout: &mut impl Write,
-    router_root: PathBuf,
-    label: String,
+    reader: &mut impl BufRead,
     flow: &impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin>,
-) -> Result<(), AccountCommandError> {
-    let label = normalize_label(&label)?;
-    ensure_account_label_available_at_router_root(&router_root, &label, Provider::Claude)?;
-    let account_id = account_id_from_label(&label)?;
+) -> Result<codex_router_secret_store::credential_bundle::CredentialBundle, AccountCommandError> {
     let pending = flow.begin_login()?;
     let authorization_url = flow.authorization_url(&pending)?;
     writeln!(stdout, "Open this URL and finish the Claude authorization:")
@@ -540,8 +584,31 @@ fn login_with_claude_oauth(
     write!(stdout, "Paste the returned code#state: ").map_err(AccountCommandError::Stdout)?;
     stdout.flush().map_err(AccountCommandError::Stdout)?;
     let mut pasted_callback = String::new();
-    std::io::stdin().lock().read_line(&mut pasted_callback)?;
-    let bundle = flow.finish_login(pending, &pasted_callback)?;
+    reader.read_line(&mut pasted_callback)?;
+    flow.finish_login(pending, &pasted_callback)
+        .map_err(Into::into)
+}
+
+fn map_credential_activation_error(error: CredentialActivationError) -> AccountCommandError {
+    match error {
+        CredentialActivationError::AccountProviderMismatch => {
+            AccountCommandError::AccountProviderMismatch
+        }
+        other => AccountCommandError::CredentialActivation(other),
+    }
+}
+
+fn login_with_claude_oauth(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
+    router_root: PathBuf,
+    label: String,
+    flow: &impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin>,
+) -> Result<(), AccountCommandError> {
+    let label = normalize_label(&label)?;
+    ensure_account_label_available_at_router_root(&router_root, &label, Provider::Claude)?;
+    let account_id = account_id_from_label(&label)?;
+    let bundle = collect_claude_oauth_bundle(stdout, reader, flow)?;
 
     create_router_root(&router_root)?;
     let runtime = account_command_runtime()?;
@@ -566,12 +633,7 @@ fn login_with_claude_oauth(
             &secret_store,
             activation_request,
         ))
-        .map_err(|error| match error {
-            CredentialActivationError::AccountProviderMismatch => {
-                AccountCommandError::AccountProviderMismatch
-            }
-            other => AccountCommandError::CredentialActivation(other),
-        })?;
+        .map_err(map_credential_activation_error)?;
 
     writeln!(stdout, "logged in Claude account: {label}").map_err(AccountCommandError::Stdout)?;
     writeln!(stdout, "account_id: {}", account_id.as_str()).map_err(AccountCommandError::Stdout)?;
@@ -1115,6 +1177,7 @@ struct AccountLoginOptions {
     provider: Option<Provider>,
     codex_bin: Option<PathBuf>,
     allow_plaintext_file_secrets: bool,
+    device_auth_option_present: bool,
 }
 
 impl AccountLoginOptions {
@@ -1145,7 +1208,7 @@ impl AccountLoginOptions {
                     }
                     .into());
                 }
-                "--device-auth" => {}
+                "--device-auth" => options.device_auth_option_present = true,
                 "--codex-bin" => {
                     options.codex_bin =
                         Some(PathBuf::from(parser.next_required_value("--codex-bin")?));
@@ -1172,6 +1235,110 @@ impl AccountLoginOptions {
         self.label
             .clone()
             .ok_or(CliError::MissingOption { option: "--label" })
+    }
+}
+
+#[cfg(test)]
+mod claude_login_glue_tests {
+    use super::*;
+    use codex_router_core::redaction::SecretString;
+    use codex_router_secret_store::credential_bundle::CredentialBundle;
+    use std::io::Cursor;
+    use std::sync::Mutex;
+
+    struct RecordingClaudeLoginFlow {
+        flow: ClaudeOAuthLoginFlow,
+        pasted_callbacks: Mutex<Vec<String>>,
+    }
+
+    impl RecordingClaudeLoginFlow {
+        fn new() -> Self {
+            Self {
+                flow: ClaudeOAuthLoginFlow::new(),
+                pasted_callbacks: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AccountLoginFlow for RecordingClaudeLoginFlow {
+        type PendingLogin = PendingClaudeOAuthLogin;
+
+        fn begin_login(&self) -> Result<Self::PendingLogin, LoginFlowError> {
+            self.flow.begin_login()
+        }
+
+        fn authorization_url(
+            &self,
+            pending: &Self::PendingLogin,
+        ) -> Result<String, LoginFlowError> {
+            self.flow.authorization_url(pending)
+        }
+
+        fn finish_login(
+            &self,
+            _pending: Self::PendingLogin,
+            pasted_callback: &str,
+        ) -> Result<CredentialBundle, LoginFlowError> {
+            self.pasted_callbacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(pasted_callback.to_owned());
+            if pasted_callback.trim().is_empty() {
+                return Err(LoginFlowError::InvalidCallback);
+            }
+            CredentialBundle::new_claude(
+                SecretString::new("glue-access-canary"),
+                SecretString::new("glue-refresh-canary"),
+                2_000,
+            )
+            .map_err(|_| LoginFlowError::InvalidTokenResponse)
+        }
+    }
+
+    #[test]
+    fn claude_login_glue_prints_prompt_and_passes_the_pasted_callback() {
+        let flow = RecordingClaudeLoginFlow::new();
+        let mut stdout = Vec::new();
+        let mut reader = Cursor::new(b"code-value#state-value\n".to_vec());
+
+        let bundle = collect_claude_oauth_bundle(&mut stdout, &mut reader, &flow)
+            .unwrap_or_else(|error| panic!("test login should finish: {error}"));
+
+        let prompt = String::from_utf8(stdout)
+            .unwrap_or_else(|error| panic!("test prompt should be UTF-8: {error}"));
+        assert!(prompt.contains("Open this URL and finish the Claude authorization:"));
+        assert!(prompt.contains("Paste the returned code#state: "));
+        assert_eq!(
+            *flow
+                .pasted_callbacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["code-value#state-value\n"]
+        );
+        assert_eq!(bundle.access_token().expose_secret(), "glue-access-canary");
+    }
+
+    #[test]
+    fn claude_login_glue_reports_eof_as_an_invalid_callback() {
+        let flow = RecordingClaudeLoginFlow::new();
+        let mut stdout = Vec::new();
+        let mut reader = Cursor::new(Vec::<u8>::new());
+
+        let error = collect_claude_oauth_bundle(&mut stdout, &mut reader, &flow)
+            .expect_err("EOF must not activate an empty callback");
+
+        assert!(matches!(
+            error,
+            AccountCommandError::ClaudeOAuth(LoginFlowError::InvalidCallback)
+        ));
+    }
+
+    #[test]
+    fn claude_login_glue_maps_provider_mismatch_from_activation() {
+        assert!(matches!(
+            map_credential_activation_error(CredentialActivationError::AccountProviderMismatch),
+            AccountCommandError::AccountProviderMismatch
+        ));
     }
 }
 

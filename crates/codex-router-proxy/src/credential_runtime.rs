@@ -86,6 +86,7 @@ where
     fn resolve_provider_credentials(
         &self,
         account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
         RouterCredentialResolver::new_with_refresh_leases(
             &self.state_store,
@@ -94,7 +95,7 @@ where
             current_unix_seconds().unwrap_or(self.fallback_now_unix_seconds),
             self.refresh_leases.clone(),
         )
-        .resolve_provider_credentials(account_id)
+        .resolve_provider_credentials(account_id, expected_provider)
     }
 }
 
@@ -233,8 +234,12 @@ impl AsyncProviderCredentialResolver for AsyncProxyCredentialResolver {
     fn resolve_provider_credentials<'a>(
         &'a self,
         account_id: &'a AccountId,
+        expected_provider: codex_router_core::provider::Provider,
     ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
-        Box::pin(async move { self.resolve_provider_credentials(account_id).await })
+        Box::pin(async move {
+            self.resolve_provider_credentials(account_id, expected_provider)
+                .await
+        })
     }
 }
 

@@ -296,28 +296,37 @@ impl SecretStore for EncryptedCredentialStore {
         EncryptedCredentialStore::write_staged(self, key, secret)
     }
 
+    fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+        let _ = self.ready_data_key()?;
+        self.file_store.delete_credential_envelope(key)
+    }
+
     fn prune_obsolete_generations(
         &self,
         provider: Provider,
         account_id: &AccountId,
-        active_generation: u64,
+        previously_active_generation: u64,
     ) -> Result<Vec<u64>, SecretStoreError> {
         let _ = self.ready_data_key()?;
-        let first_retained_generation = active_generation.saturating_sub(1);
-        if first_retained_generation <= 1 {
+        if previously_active_generation <= 1 {
             return Ok(Vec::new());
         }
         let _store_lock =
             CredentialStoreLock::acquire(self.file_store.root(), CredentialStoreLockMode::Shared)?;
-        let encrypted_keys = self.file_store.list_pooled_credential_files("v2")?;
+        let encrypted_keys = self.file_store.list_pooled_credential_files_for_pruning()?;
         let mut removed_generations = Vec::new();
         for secret_key in encrypted_keys {
-            let Some(credential_key) = AccountCredentialKey::parse(&secret_key)? else {
-                continue;
+            let credential_key = match AccountCredentialKey::parse(&secret_key) {
+                Ok(Some(credential_key)) => credential_key,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(reason = %error, "unparseable encrypted credential filename skipped during pruning");
+                    continue;
+                }
             };
             if credential_key.provider() == provider
                 && credential_key.account_id() == account_id
-                && credential_key.generation() < first_retained_generation
+                && credential_key.generation() < previously_active_generation
             {
                 self.file_store.delete_credential_envelope(&secret_key)?;
                 removed_generations.push(credential_key.generation());

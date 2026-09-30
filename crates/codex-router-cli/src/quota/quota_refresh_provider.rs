@@ -116,9 +116,32 @@ impl QuotaRefreshProviderResponse {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuotaRefreshProviderWindow {
     pub(crate) limit_window_seconds: u64,
-    pub(crate) remaining_headroom: u32,
+    pub(crate) headroom: QuotaWindowHeadroom,
     pub(crate) reset_unix_seconds: Option<u64>,
     pub(crate) effective: bool,
+}
+
+/// Explicit units for the remaining usage reported by different providers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QuotaWindowHeadroom {
+    Percent(u32),
+    BasisPoints(u32),
+}
+
+impl QuotaWindowHeadroom {
+    pub(crate) const fn percent(self) -> Option<u32> {
+        match self {
+            Self::Percent(value) => Some(value),
+            Self::BasisPoints(_) => None,
+        }
+    }
+
+    pub(crate) const fn basis_points(self) -> Option<u32> {
+        match self {
+            Self::Percent(_) => None,
+            Self::BasisPoints(value) => Some(value),
+        }
+    }
 }
 
 /// Provider egress dependency for quota refresh.
@@ -418,7 +441,7 @@ fn quota_provider_window_from_usage_window(
 
     Ok(QuotaRefreshProviderWindow {
         limit_window_seconds,
-        remaining_headroom,
+        headroom: QuotaWindowHeadroom::Percent(remaining_headroom),
         reset_unix_seconds,
         effective,
     })

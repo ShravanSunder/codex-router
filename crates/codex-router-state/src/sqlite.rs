@@ -2008,6 +2008,27 @@ impl AsyncSqliteStateStore {
         rows.into_iter().map(parse_active_session_event).collect()
     }
 
+    /// Returns the newest recorded activity event for one account and route band.
+    pub async fn latest_active_session_activity_unix_seconds(
+        &self,
+        account_id: &AccountId,
+        route_band: &str,
+    ) -> Result<Option<u64>, StateStoreError> {
+        let event_unix_seconds = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(event_unix_seconds)
+               FROM active_session_events
+              WHERE account_id = ?1 AND route_band = ?2",
+        )
+        .bind(account_id.as_str())
+        .bind(route_band)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+        event_unix_seconds
+            .map(|value| i64_to_u64(value, account_id.as_str(), "last_activity_unix_seconds"))
+            .transpose()
+    }
+
     /// Compacts completed active-session events whose terminal event predates the cutoff.
     ///
     /// An acquired event is retained until its matching released, retired, or stale-purged

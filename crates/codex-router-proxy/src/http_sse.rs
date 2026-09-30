@@ -19,6 +19,7 @@ use codex_router_core::audit::TransportKind;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::RequestId;
 use codex_router_core::local_auth::LocalAuthError;
+use codex_router_core::provider::Provider;
 use codex_router_core::redaction::SecretString;
 use codex_router_core::routes::RouteBand;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
@@ -101,6 +102,7 @@ pub trait AsyncProviderCredentialResolver {
     fn resolve_provider_credentials<'a>(
         &'a self,
         account_id: &'a AccountId,
+        expected_provider: Provider,
     ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>>;
 }
 
@@ -953,7 +955,7 @@ where
             let account_hash = redacted_account_hash(selected.account_id());
             let resolved = match self
                 .credential_resolver
-                .resolve_provider_credentials(selected.account_id())
+                .resolve_provider_credentials(selected.account_id(), Provider::Openai)
             {
                 Ok(resolved) => resolved,
                 Err(reason) => {
@@ -1080,7 +1082,7 @@ where
             let account_hash = redacted_account_hash(selected.account_id());
             let resolved = match self
                 .credential_resolver
-                .resolve_provider_credentials(selected.account_id())
+                .resolve_provider_credentials(selected.account_id(), Provider::Openai)
                 .await
             {
                 Ok(resolved) => resolved,
@@ -1217,7 +1219,7 @@ where
             let account_hash = redacted_account_hash(selected.account_id());
             let resolved = match self
                 .credential_resolver
-                .resolve_provider_credentials(selected.account_id())
+                .resolve_provider_credentials(selected.account_id(), Provider::Openai)
             {
                 Ok(resolved) => resolved,
                 Err(reason) => {

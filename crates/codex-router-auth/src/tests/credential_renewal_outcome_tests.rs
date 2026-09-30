@@ -2,6 +2,7 @@ use super::*;
 use crate::resolver::CredentialRefreshFailure;
 use codex_router_core::provider::Provider;
 use codex_router_secret_store::SecretStore;
+use codex_router_secret_store::account_tokens::provider_credential_bundle_key;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::model::SecretKey;
 use codex_router_secret_store::model::SecretStoreError;
@@ -68,6 +69,10 @@ impl SecretStore for ClaimReleasingSecretStore {
 
     fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError> {
         self.inner.read_secret(key)
+    }
+
+    fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+        self.inner.delete_staged(key)
     }
 
     fn write_staged(&self, key: &SecretKey, secret: &SecretString) -> Result<(), SecretStoreError> {
@@ -422,7 +427,9 @@ async fn independent_async_resolvers_use_one_rotating_refresh_generation() {
         );
         let account_id = account_id.clone();
         tasks.push(tokio::spawn(async move {
-            resolver.resolve_provider_credentials(&account_id).await
+            resolver
+                .resolve_provider_credentials(&account_id, Provider::Openai)
+                .await
         }));
     }
     for task in tasks {
@@ -492,7 +499,7 @@ async fn orphaned_successor_is_skipped_and_unresolved_claim_blocks_old_token_reu
     );
     let refreshed = must_ok(
         resolver
-            .resolve_provider_credentials(&orphan_account_id)
+            .resolve_provider_credentials(&orphan_account_id, Provider::Openai)
             .await,
     );
     assert_eq!(refreshed.credential_generation(), 3);
@@ -551,7 +558,7 @@ async fn orphaned_successor_is_skipped_and_unresolved_claim_blocks_old_token_reu
     );
     assert_eq!(
         resolver
-            .resolve_provider_credentials(&blocked_account_id)
+            .resolve_provider_credentials(&blocked_account_id, Provider::Openai)
             .await,
         Err(CredentialResolverError::RefreshUnavailable)
     );
@@ -630,7 +637,11 @@ async fn claimed_staged_successor_activates_without_reusing_old_refresh_token() 
         refresh_client.clone(),
         Some(1_000),
     );
-    let resolved = must_ok(resolver.resolve_provider_credentials(&account_id).await);
+    let resolved = must_ok(
+        resolver
+            .resolve_provider_credentials(&account_id, Provider::Openai)
+            .await,
+    );
     assert_eq!(resolved.credential_generation(), 2);
     assert_eq!(
         resolved.access_token().expose_secret(),
@@ -640,6 +651,193 @@ async fn claimed_staged_successor_activates_without_reusing_old_refresh_token() 
     let maintenance = must_ok(state.load_credential_maintenance(&account_id).await)
         .expect("maintenance should exist");
     assert_eq!(maintenance.state, CredentialMaintenanceState::Healthy);
+}
+
+#[tokio::test]
+async fn orphaned_login_claim_with_staged_bundle_activates_without_refresh() {
+    let temp_dir = AuthTestTempDir::new("orphaned-login-claim-with-staged-bundle");
+    let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
+    let account_id = account_id("orphaned-login-with-stage");
+    must_ok(
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "Claude staged login",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await,
+    );
+    for (generation, access_token, expires_at) in [
+        (1, "expired-old-access", 900),
+        (2, "staged-login-access", 2_000),
+    ] {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            generation,
+        ));
+        let bundle = must_ok(CredentialBundle::new_claude(
+            SecretString::new(access_token),
+            SecretString::new(format!("{access_token}-refresh")),
+            expires_at,
+        ));
+        must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+    }
+    assert!(must_ok(
+        state
+            .claim_credential_refresh(
+                &account_id,
+                Provider::Claude,
+                codex_router_state::credential_maintenance::ClaimPurpose::Login,
+                1,
+                2,
+                950,
+            )
+            .await
+    ));
+    assert!(
+        must_ok(state.load_account(&account_id).await).is_some(),
+        "account survives login claim creation"
+    );
+
+    let resolver = AsyncRouterCredentialResolver::new(
+        state.clone(),
+        secrets,
+        ProviderPruningRefreshClient,
+        Some(1_000),
+    );
+    let resolved = must_ok(
+        resolver
+            .resolve_provider_credentials(&account_id, Provider::Claude)
+            .await,
+    );
+
+    assert_eq!(resolved.credential_generation(), 2);
+    assert_eq!(
+        resolved.access_token().expose_secret(),
+        "staged-login-access"
+    );
+    let account =
+        must_ok(state.load_account(&account_id).await).expect("account remains registered");
+    assert_eq!(account.active_credential_generation(), Some(2));
+    assert_eq!(
+        must_ok(state.load_credential_maintenance(&account_id).await),
+        None,
+        "a login claim without prior maintenance leaves no transient row"
+    );
+}
+
+#[tokio::test]
+async fn orphaned_login_claim_without_staged_bundle_restores_prior_maintenance() {
+    use codex_router_state::credential_maintenance::CredentialRefreshClaimDisposition;
+
+    let temp_dir = AuthTestTempDir::new("orphaned-login-claim-without-staged-bundle");
+    let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
+    let account_id = account_id("orphaned-login-without-stage");
+    must_ok(
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "Claude interrupted login",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await,
+    );
+    let active_key = must_ok(provider_credential_bundle_key(
+        Provider::Claude,
+        &account_id,
+        1,
+    ));
+    let active_bundle = must_ok(CredentialBundle::new_claude(
+        SecretString::new("expired-old-access"),
+        SecretString::new("old-refresh-token"),
+        900,
+    ));
+    must_ok(secrets.write_secret(&active_key, &must_ok(active_bundle.to_secret_string())));
+    assert!(must_ok(
+        state
+            .claim_credential_refresh(
+                &account_id,
+                Provider::Claude,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                2,
+                700,
+            )
+            .await
+    ));
+    assert!(must_ok(
+        state
+            .finish_credential_refresh_claim(
+                &account_id,
+                Provider::Claude,
+                1,
+                2,
+                CredentialRefreshClaimDisposition::Retrying {
+                    failure_class:
+                        codex_router_state::credential_maintenance::CredentialFailureClass::TransportUnspent,
+                    next_attempt_unix_seconds: 2_000,
+                },
+            )
+            .await
+    ));
+    let prior_maintenance = must_ok(state.load_credential_maintenance(&account_id).await)
+        .expect("retrying maintenance should be recorded");
+    assert!(must_ok(
+        state
+            .claim_credential_refresh(
+                &account_id,
+                Provider::Claude,
+                codex_router_state::credential_maintenance::ClaimPurpose::Login,
+                1,
+                3,
+                1_000,
+            )
+            .await
+    ));
+    assert!(
+        must_ok(state.load_account(&account_id).await).is_some(),
+        "account survives orphaned login claim creation"
+    );
+    let in_progress = must_ok(state.load_credential_maintenance(&account_id).await)
+        .expect("login claim with prior retry state should decode");
+    assert_eq!(
+        in_progress.claim_prior_state,
+        Some(CredentialMaintenanceState::Retrying)
+    );
+    assert_eq!(in_progress.next_attempt_unix_seconds, Some(2_000));
+
+    let resolver = AsyncRouterCredentialResolver::new(
+        state.clone(),
+        secrets,
+        ProviderPruningRefreshClient,
+        Some(1_301),
+    );
+    let resolution = resolver
+        .resolve_provider_credentials(&account_id, Provider::Claude)
+        .await;
+    let restored_maintenance = must_ok(state.load_credential_maintenance(&account_id).await)
+        .expect("prior maintenance should be restored");
+    assert_eq!(restored_maintenance, prior_maintenance);
+    assert_eq!(resolution, Err(CredentialResolverError::RefreshUnavailable));
 }
 
 #[tokio::test]
@@ -712,7 +910,11 @@ async fn expired_claimed_successor_is_renewed_before_provider_egress() {
         Some(1_000),
     );
 
-    let resolved = must_ok(resolver.resolve_provider_credentials(&account_id).await);
+    let resolved = must_ok(
+        resolver
+            .resolve_provider_credentials(&account_id, Provider::Openai)
+            .await,
+    );
     assert_eq!(resolved.credential_generation(), 3);
     assert_eq!(
         resolved.access_token().expose_secret(),
@@ -793,7 +995,9 @@ async fn typed_refresh_failures_persist_retry_or_reauth_without_reusing_ambiguou
             Some(1_000),
         );
         assert_eq!(
-            resolver.resolve_provider_credentials(&account_id).await,
+            resolver
+                .resolve_provider_credentials(&account_id, Provider::Openai)
+                .await,
             Err(CredentialResolverError::RefreshUnavailable)
         );
         let maintenance = must_ok(state.load_credential_maintenance(&account_id).await)
@@ -803,7 +1007,9 @@ async fn typed_refresh_failures_persist_retry_or_reauth_without_reusing_ambiguou
         assert_eq!(maintenance.next_attempt_unix_seconds, expected_deadline);
         assert_eq!(refresh_client.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
-            resolver.resolve_provider_credentials(&account_id).await,
+            resolver
+                .resolve_provider_credentials(&account_id, Provider::Openai)
+                .await,
             Err(CredentialResolverError::RefreshUnavailable)
         );
         assert_eq!(refresh_client.calls.load(Ordering::SeqCst), 1);
@@ -815,7 +1021,9 @@ async fn typed_refresh_failures_persist_retry_or_reauth_without_reusing_ambiguou
                 expected_deadline,
             );
             assert_eq!(
-                due_resolver.resolve_provider_credentials(&account_id).await,
+                due_resolver
+                    .resolve_provider_credentials(&account_id, Provider::Openai)
+                    .await,
                 Err(CredentialResolverError::RefreshUnavailable)
             );
             assert_eq!(refresh_client.calls.load(Ordering::SeqCst), 2);
@@ -1019,7 +1227,7 @@ async fn confirmed_unspent_failure_retries_transient_sqlite_disposition_without_
     let result = must_ok(
         tokio::time::timeout(
             Duration::from_secs(3),
-            resolver.resolve_provider_credentials(&account_id),
+            resolver.resolve_provider_credentials(&account_id, Provider::Openai),
         )
         .await,
     );

@@ -80,10 +80,18 @@ impl codex_router_secret_store::SecretStore for FailingStagedCredentialStore {
 
     fn write_staged(
         &self,
-        _key: &codex_router_secret_store::model::SecretKey,
-        _secret: &codex_router_core::redaction::SecretString,
+        key: &codex_router_secret_store::model::SecretKey,
+        secret: &codex_router_core::redaction::SecretString,
     ) -> Result<(), codex_router_secret_store::model::SecretStoreError> {
+        self.0.write_staged(key, secret)?;
         Err(codex_router_secret_store::model::SecretStoreError::KeyUnavailable)
+    }
+
+    fn delete_staged(
+        &self,
+        key: &codex_router_secret_store::model::SecretKey,
+    ) -> Result<(), codex_router_secret_store::model::SecretStoreError> {
+        codex_router_secret_store::SecretStore::delete_staged(&self.0, key)
     }
 }
 
@@ -290,6 +298,112 @@ fn failed_login_staged_write_restores_healthy_maintenance() {
             "failed login activation leaves generation {generation} untouched"
         );
     }
+    let failed_login_key = must_ok(provider_credential_bundle_key(
+        Provider::Openai,
+        &account_id,
+        3,
+    ));
+    assert!(
+        secrets.read_secret(&failed_login_key).is_err(),
+        "a staged file is removed after its login claim is successfully restored"
+    );
+}
+
+#[test]
+fn login_activation_reclaims_fresh_orphaned_login_claim_under_account_lock() {
+    let temp_dir = AuthTestTempDir::new("login-reclaims-fresh-orphaned-claim");
+    let state_path = temp_dir.path().join("state.sqlite");
+    let secret_root = temp_dir.path().join("secrets");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build");
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let account_id = account_id("login-reclaims-fresh-claim");
+    must_ok(
+        runtime.block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "Claude account",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+    for generation in 1..=2 {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            generation,
+        ));
+        let bundle = must_ok(
+            codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                SecretString::new(format!("generation-{generation}-access")),
+                SecretString::new(format!("generation-{generation}-refresh")),
+                10_000,
+            ),
+        );
+        must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+    }
+    let claim_started_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after the Unix epoch")
+        .as_secs();
+    assert!(must_ok(runtime.block_on(state.claim_credential_refresh(
+        &account_id,
+        Provider::Claude,
+        codex_router_state::credential_maintenance::ClaimPurpose::Login,
+        1,
+        2,
+        claim_started_unix_seconds,
+    ))));
+
+    let activated_generation = must_ok(
+        runtime.block_on(CredentialActivation::activate_login(
+            &state,
+            &secrets,
+            CredentialActivationRequest::new(
+                Provider::Claude,
+                account_id.clone(),
+                "Claude account",
+                codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                    SecretString::new("replacement-access"),
+                    SecretString::new("replacement-refresh"),
+                    20_000,
+                )
+                .expect("Claude login bundle should validate"),
+            ),
+        )),
+    );
+
+    assert_eq!(activated_generation, 2);
+    let orphan_key = must_ok(provider_credential_bundle_key(
+        Provider::Claude,
+        &account_id,
+        2,
+    ));
+    let activated_bundle = must_ok(
+        codex_router_secret_store::credential_bundle::CredentialBundle::from_secret_string(
+            Provider::Claude,
+            must_ok(secrets.read_secret(&orphan_key)),
+        ),
+    );
+    assert_eq!(
+        activated_bundle.access_token().expose_secret(),
+        "replacement-access",
+        "the reclaimed generation is overwritten by the new login bundle"
+    );
+    assert_eq!(
+        must_ok(runtime.block_on(state.load_account(&account_id)))
+            .and_then(|account| account.active_credential_generation()),
+        Some(activated_generation)
+    );
 }
 
 #[test]
@@ -406,6 +520,86 @@ fn claude_login_activation_keeps_only_verified_active_and_previous_files_without
 }
 
 #[test]
+fn login_pruning_preserves_previously_active_generation_across_a_gap() {
+    let temp_dir = AuthTestTempDir::new("login-pruning-preserves-active-across-gap");
+    let state_path = temp_dir.path().join("state.sqlite");
+    let secret_root = temp_dir.path().join("secrets");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build");
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let account_id = account_id("login-pruning-gap");
+    must_ok(
+        runtime.block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "Claude login gap",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+
+    for (generation, access_token) in [(1, "active-access"), (2, "orphan-access")] {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            generation,
+        ));
+        let bundle = must_ok(
+            codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                SecretString::new(access_token),
+                SecretString::new(format!("{access_token}-refresh")),
+                10_000,
+            ),
+        );
+        must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+    }
+
+    let activated_generation = must_ok(
+        runtime.block_on(CredentialActivation::activate_login(
+            &state,
+            &secrets,
+            CredentialActivationRequest::new(
+                Provider::Claude,
+                account_id.clone(),
+                "Claude login gap",
+                codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                    SecretString::new("replacement-access"),
+                    SecretString::new("replacement-refresh"),
+                    20_000,
+                )
+                .expect("Claude login bundle should validate"),
+            ),
+        )),
+    );
+
+    assert_eq!(activated_generation, 3);
+    let previous_active_key = must_ok(provider_credential_bundle_key(
+        Provider::Claude,
+        &account_id,
+        1,
+    ));
+    let activated_key = must_ok(provider_credential_bundle_key(
+        Provider::Claude,
+        &account_id,
+        activated_generation,
+    ));
+    assert!(
+        secrets.read_secret(&previous_active_key).is_ok(),
+        "the previously active generation remains readable during pruning"
+    );
+    assert!(secrets.read_secret(&activated_key).is_ok());
+}
+
+#[test]
 fn login_activation_reenables_a_disabled_account_on_the_next_generation() {
     let temp_dir = AuthTestTempDir::new("login-activation-disabled-account");
     let state_path = temp_dir.path().join("state.sqlite");
@@ -515,4 +709,50 @@ fn login_activation_rejects_a_provider_mismatch_before_writing() {
         .expect("Claude account should remain registered");
     assert_eq!(account.provider(), Provider::Claude);
     assert_eq!(account.active_credential_generation(), None);
+}
+
+#[test]
+fn claude_bundle_under_openai_provider_is_rejected_before_state_or_secret_write() {
+    let temp_dir = AuthTestTempDir::new("claude-bundle-under-openai-provider");
+    let state_path = temp_dir.path().join("state.sqlite");
+    let secret_root = temp_dir.path().join("secrets");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build");
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let account_id = account_id("claude-bundle-under-openai-provider");
+    let claude_bundle = must_ok(
+        codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+            SecretString::new("must-not-write-claude-access"),
+            SecretString::new("must-not-write-claude-refresh"),
+            10_000,
+        ),
+    );
+
+    let result = runtime.block_on(CredentialActivation::activate_login(
+        &state,
+        &secrets,
+        CredentialActivationRequest::new(
+            Provider::Openai,
+            account_id.clone(),
+            "misrouted Claude bundle",
+            claude_bundle,
+        ),
+    ));
+
+    assert!(matches!(
+        result,
+        Err(crate::credential_activation::CredentialActivationError::CredentialProviderMismatch)
+    ));
+    assert!(must_ok(runtime.block_on(state.load_account(&account_id))).is_none());
+    let openai_key = must_ok(provider_credential_bundle_key(
+        Provider::Openai,
+        &account_id,
+        1,
+    ));
+    assert!(secrets.read_secret(&openai_key).is_err());
 }

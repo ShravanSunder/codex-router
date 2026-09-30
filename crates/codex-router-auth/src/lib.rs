@@ -82,6 +82,7 @@ mod tests {
     use crate::router_credentials::RouterCredentialBundle;
 
     mod credential_activation_tests;
+    mod credential_provider_mismatch_tests;
     mod credential_renewal_http_outcome_tests;
     mod credential_renewal_outcome_tests;
     mod credential_renewal_tests;
@@ -322,7 +323,10 @@ mod tests {
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
 
-        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
         assert_eq!(resolved.account_id(), &account_id);
         assert_eq!(
@@ -380,7 +384,10 @@ mod tests {
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
 
-        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
         assert_eq!(
             resolved.access_token().expose_secret(),
@@ -479,7 +486,10 @@ mod tests {
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
 
-        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
         assert_eq!(
             resolved.access_token().expose_secret(),
@@ -537,7 +547,10 @@ mod tests {
             .with_refresh_commit_failpoint(RefreshCommitFailpoint::AfterSecretWrite);
 
         assert_eq!(
-            resolver.resolve_provider_credentials(&account_id),
+            resolver.resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai
+            ),
             Err(CredentialResolverError::RefreshUnavailable)
         );
         let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))
@@ -608,13 +621,19 @@ mod tests {
                 .with_refresh_commit_failpoint(RefreshCommitFailpoint::AfterStateCommit);
 
         assert_eq!(
-            resolver.resolve_provider_credentials(&account_id),
+            resolver.resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai
+            ),
             Err(CredentialResolverError::RefreshUnavailable)
         );
 
         let retry_resolver =
             RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
-        let resolved = must_ok(retry_resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(retry_resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
         assert_eq!(
             resolved.access_token().expose_secret(),
             "new-state-access-token-canary"
@@ -696,10 +715,13 @@ mod tests {
                 );
                 start_barrier.wait();
 
-                must_ok(resolver.resolve_provider_credentials(&account_id))
-                    .access_token()
-                    .expose_secret()
-                    .to_owned()
+                must_ok(resolver.resolve_provider_credentials(
+                    &account_id,
+                    codex_router_core::provider::Provider::Openai,
+                ))
+                .access_token()
+                .expose_secret()
+                .to_owned()
             }));
         }
         start_barrier.wait();

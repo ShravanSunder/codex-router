@@ -123,12 +123,20 @@ where
     pub async fn resolve_provider_credentials(
         &self,
         account_id: &AccountId,
+        expected_provider: Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        let (active_generation, bundle) = self.read_active_bundle(account_id).await?;
+        let (active_generation, bundle) = self
+            .read_active_bundle(account_id, expected_provider)
+            .await?;
         let now_unix_seconds = self.observed_now_unix_seconds()?;
         if self.bundle_is_expired(&bundle, now_unix_seconds) {
             let (resolved_generation, refreshed, _provider_used) = self
-                .renew_credentials(account_id, now_unix_seconds, RenewalTrigger::ExpiredAccess)
+                .renew_credentials(
+                    account_id,
+                    expected_provider,
+                    now_unix_seconds,
+                    RenewalTrigger::ExpiredAccess,
+                )
                 .await?;
             return Ok(ResolvedProviderCredential::new(
                 account_id.clone(),
@@ -151,11 +159,20 @@ where
         &self,
         account_id: &AccountId,
     ) -> Result<(), CredentialResolverError> {
+        let account = self
+            .state_store
+            .load_account(account_id)
+            .await
+            .map_err(map_state_error)?
+            .ok_or(CredentialResolverError::AccountUnavailable)?;
         let now_unix_seconds = self.observed_now_unix_seconds()?;
-        let (generation, bundle, _) = self
-            .renew_credentials(account_id, now_unix_seconds, RenewalTrigger::Proactive)
-            .await?;
-        self.prune_obsolete_generations(account_id, bundle.provider(), generation)
+        let (_generation, _bundle, _) = self
+            .renew_credentials(
+                account_id,
+                account.provider(),
+                now_unix_seconds,
+                RenewalTrigger::Proactive,
+            )
             .await?;
         Ok(())
     }
@@ -198,7 +215,9 @@ where
                 return Ok(Some(deadline));
             }
         }
-        let (_, bundle) = self.read_active_bundle(account_id).await?;
+        let (_, bundle) = self
+            .read_active_bundle(account_id, account.provider())
+            .await?;
         Ok(Some(credential_renewal_due_at(
             &bundle,
             current_maintenance,
@@ -210,12 +229,16 @@ where
     pub async fn recover_unauthorized_credentials(
         &self,
         account_id: &AccountId,
+        expected_provider: Provider,
         rejected_generation: u64,
     ) -> Result<(ResolvedProviderCredential, bool), CredentialResolverError> {
+        self.read_active_bundle(account_id, expected_provider)
+            .await?;
         let now_unix_seconds = self.observed_now_unix_seconds()?;
         let (generation, bundle, provider_used) = self
             .renew_credentials(
                 account_id,
+                expected_provider,
                 now_unix_seconds,
                 RenewalTrigger::UnauthorizedGeneration(rejected_generation),
             )
@@ -240,6 +263,7 @@ where
     async fn renew_credentials(
         &self,
         account_id: &AccountId,
+        expected_provider: Provider,
         now_unix_seconds: u64,
         trigger: RenewalTrigger,
     ) -> Result<(u64, CredentialBundle, bool), CredentialResolverError> {
@@ -247,6 +271,7 @@ where
         for attempt in 0..2 {
             let owned_resolver = self.clone();
             let owned_account_id = account_id.clone();
+            let owned_expected_provider = expected_provider;
             let (generation, bundle, provider_used) = self
                 .refresh_tasks
                 .tasks
@@ -256,6 +281,7 @@ where
                     owned_resolver
                         .renew_bundle_under_lock(
                             &owned_account_id,
+                            owned_expected_provider,
                             now_unix_seconds,
                             current_trigger,
                         )
@@ -279,6 +305,7 @@ where
     async fn read_active_bundle(
         &self,
         account_id: &AccountId,
+        expected_provider: Provider,
     ) -> Result<(u64, CredentialBundle), CredentialResolverError> {
         let account = self
             .state_store
@@ -286,6 +313,9 @@ where
             .await
             .map_err(map_state_error)?
             .ok_or(CredentialResolverError::AccountUnavailable)?;
+        if account.provider() != expected_provider {
+            return Err(CredentialResolverError::AccountProviderMismatch);
+        }
         if account.status() != AccountStatus::Enabled {
             return Err(CredentialResolverError::AccountIneligible);
         }
@@ -372,6 +402,7 @@ where
     async fn renew_bundle_under_lock(
         &self,
         account_id: &AccountId,
+        expected_provider: Provider,
         now_unix_seconds: u64,
         trigger: RenewalTrigger,
     ) -> Result<(u64, CredentialBundle, bool), CredentialResolverError> {
@@ -393,7 +424,9 @@ where
                 return Err(CredentialResolverError::RefreshUnavailable);
             }
         };
-        let (current_generation, bundle) = self.read_active_bundle(account_id).await?;
+        let (current_generation, bundle) = self
+            .read_active_bundle(account_id, expected_provider)
+            .await?;
         let provider = bundle.provider();
         let now_unix_seconds = self.observed_now_unix_seconds()?.max(now_unix_seconds);
         if let RenewalTrigger::UnauthorizedGeneration(rejected_generation) = trigger
@@ -452,7 +485,7 @@ where
                         .map_err(map_state_error)?;
                     if activated {
                         if self
-                            .prune_obsolete_generations(account_id, provider, successor)
+                            .prune_obsolete_generations(account_id, provider, current_generation)
                             .await
                             .is_err()
                         {
@@ -716,7 +749,7 @@ where
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         if self
-            .prune_obsolete_generations(account_id, provider, successor_generation)
+            .prune_obsolete_generations(account_id, provider, current_generation)
             .await
             .is_err()
         {

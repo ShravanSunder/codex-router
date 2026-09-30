@@ -7,7 +7,6 @@ use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::WindowKind;
 use codex_router_selection::burn_down::ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS;
 use codex_router_selection::burn_down::BurnDownAccountInput;
-use codex_router_selection::burn_down::QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowRejectionFact;
@@ -36,7 +35,7 @@ use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
 
 const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
-const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
+const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = 300;
 
 /// Projected selector inputs for one route band.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -492,8 +491,7 @@ fn claude_window_facts_from_observations(
         .window_observations()
         .iter()
         .map(|observation| {
-            let freshness =
-                quota_observation_freshness(observation.observation_started_at(), now_unix_seconds);
+            let freshness = observation.freshness_at(now_unix_seconds);
             let status = match freshness {
                 QuotaEvidenceFreshness::Fresh => QuotaWindowStatus::Eligible,
                 QuotaEvidenceFreshness::Stale => QuotaWindowStatus::Stale,
@@ -532,7 +530,7 @@ fn selection_account_state_from_selector_input(
                     .reset_unix_seconds()
                     .map(HeadroomTimestamp::from_unix_seconds),
                 observation.observation_started_at(),
-                quota_observation_freshness(observation.observation_started_at(), now_unix_seconds),
+                observation.freshness_at(now_unix_seconds),
             )
         })
         .collect();
@@ -585,11 +583,7 @@ fn weekly_floor_hold_reason(
         else {
             return Some(SelectionHoldReason::WaitingForFreshWeeklyObservation);
         };
-        if quota_observation_freshness(
-            weekly_observation.observation_started_at(),
-            now_unix_seconds,
-        ) != QuotaEvidenceFreshness::Fresh
-        {
+        if weekly_observation.freshness_at(now_unix_seconds) != QuotaEvidenceFreshness::Fresh {
             return Some(SelectionHoldReason::WaitingForFreshWeeklyObservation);
         }
         weekly_observation.remaining_basis_points()
@@ -608,21 +602,6 @@ fn weekly_floor_hold_reason(
     };
 
     (current_weekly_basis_points <= floor_basis_points).then_some(SelectionHoldReason::HardFloor)
-}
-
-fn quota_observation_freshness(
-    observation_started_at: u64,
-    now_unix_seconds: u64,
-) -> QuotaEvidenceFreshness {
-    if now_unix_seconds < observation_started_at {
-        QuotaEvidenceFreshness::Unknown
-    } else if now_unix_seconds.saturating_sub(observation_started_at)
-        <= QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS
-    {
-        QuotaEvidenceFreshness::Fresh
-    } else {
-        QuotaEvidenceFreshness::Stale
-    }
 }
 
 const fn window_seconds_for_kind(window_kind: WindowKind) -> u64 {

@@ -75,7 +75,20 @@ async fn populated_native_baseline_requires_writable_upgrade_and_preserves_accou
         .find(|migration| migration.version == 202609300001)
         .expect("credential claim purpose migration")
         .version;
-    for migration_version in [maintenance_version, claim_purpose_version] {
+    let observation_fresh_until_version = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 202609300002)
+        .expect("window observation freshness migration")
+        .version;
+    sqlx::query("ALTER TABLE account_window_observations DROP COLUMN fresh_until_unix_seconds")
+        .execute(&mut connection)
+        .await
+        .expect("freshness column should be removed for baseline fixture");
+    for migration_version in [
+        maintenance_version,
+        claim_purpose_version,
+        observation_fresh_until_version,
+    ] {
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?1")
             .bind(migration_version)
             .execute(&mut connection)

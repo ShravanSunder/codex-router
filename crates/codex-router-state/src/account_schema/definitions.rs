@@ -180,6 +180,7 @@ pub(super) const ACCOUNT_WINDOW_OBSERVATIONS: &[ColumnSpec] = &[
     column!("remaining_basis_points", "INTEGER", true, 0),
     column!("reset_unix_seconds", "INTEGER", false, 0),
     column!("observation_started_at", "INTEGER", true, 0),
+    column!("fresh_until_unix_seconds", "INTEGER", false, 0),
 ];
 pub(super) const ACCOUNT_WINDOW_REJECTIONS: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 1),

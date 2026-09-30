@@ -83,7 +83,12 @@ async fn unavailable_credential_store_does_not_change_healthy_maintenance() {
             Some(1_100),
         );
 
-        let result = resolver.resolve_provider_credentials(&account_id).await;
+        let result = resolver
+            .resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+            )
+            .await;
         let maintenance_after = must_ok(state.load_credential_maintenance(&account_id).await)
             .expect("maintenance remains present");
 
@@ -144,7 +149,10 @@ async fn token_expiring_during_secret_read_cannot_be_emitted() {
     let resolved_account = account_id.clone();
     let resolution = tokio::spawn(async move {
         resolver
-            .resolve_provider_credentials(&resolved_account)
+            .resolve_provider_credentials(
+                &resolved_account,
+                codex_router_core::provider::Provider::Openai,
+            )
             .await
     });
     must_ok(
@@ -225,7 +233,10 @@ async fn replacement_expiring_during_held_refresh_cannot_be_emitted() {
     let resolved_account = account_id.clone();
     let resolution = tokio::spawn(async move {
         resolver
-            .resolve_provider_credentials(&resolved_account)
+            .resolve_provider_credentials(
+                &resolved_account,
+                codex_router_core::provider::Provider::Openai,
+            )
             .await
     });
     must_ok(
@@ -287,6 +298,10 @@ impl SecretStore for HeldActiveSecretReadStore {
         }
         self.inner.read_secret(key)
     }
+
+    fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+        self.inner.delete_staged(key)
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -344,7 +359,10 @@ async fn cancelled_waiter_does_not_cancel_provider_rotation_or_release_account_l
     let first_account = account_id.clone();
     let first_waiter = tokio::spawn(async move {
         first_resolver
-            .resolve_provider_credentials(&first_account)
+            .resolve_provider_credentials(
+                &first_account,
+                codex_router_core::provider::Provider::Openai,
+            )
             .await
     });
     must_ok(
@@ -366,7 +384,10 @@ async fn cancelled_waiter_does_not_cancel_provider_rotation_or_release_account_l
     let second_account = account_id.clone();
     let second_waiter = tokio::spawn(async move {
         second_resolver
-            .resolve_provider_credentials(&second_account)
+            .resolve_provider_credentials(
+                &second_account,
+                codex_router_core::provider::Provider::Openai,
+            )
             .await
     });
     assert_eq!(refresh_client.calls.load(Ordering::SeqCst), 1);
@@ -408,7 +429,10 @@ async fn separate_process_resolvers_use_one_rotating_refresh() {
         );
         let resolved = must_ok(
             resolver
-                .resolve_provider_credentials(&account_id("cross-process-account"))
+                .resolve_provider_credentials(
+                    &account_id("cross-process-account"),
+                    codex_router_core::provider::Provider::Openai,
+                )
                 .await,
         );
         assert_eq!(resolved.credential_generation(), 2);
@@ -476,7 +500,14 @@ async fn separate_process_resolvers_use_one_rotating_refresh() {
         Some(1_000),
     );
     must_ok(fs::write(root.join("start"), b"start"));
-    let resolved = must_ok(resolver.resolve_provider_credentials(&account_id).await);
+    let resolved = must_ok(
+        resolver
+            .resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+            )
+            .await,
+    );
     assert_eq!(resolved.credential_generation(), 2);
     assert!(
         must_ok(child.wait()).success(),
@@ -557,7 +588,10 @@ async fn cancelled_waiter_keeps_lock_until_blocking_secret_write_and_activation_
     let first_account = account_id.clone();
     let first_waiter = tokio::spawn(async move {
         first_resolver
-            .resolve_provider_credentials(&first_account)
+            .resolve_provider_credentials(
+                &first_account,
+                codex_router_core::provider::Provider::Openai,
+            )
             .await
     });
     must_ok(
@@ -576,7 +610,10 @@ async fn cancelled_waiter_keeps_lock_until_blocking_secret_write_and_activation_
     let second_account = account_id.clone();
     let second_waiter = tokio::spawn(async move {
         second_resolver
-            .resolve_provider_credentials(&second_account)
+            .resolve_provider_credentials(
+                &second_account,
+                codex_router_core::provider::Provider::Openai,
+            )
             .await
     });
     let still_active = must_ok(state.load_account(&account_id).await).expect("account");
@@ -653,7 +690,10 @@ async fn transient_secret_write_failure_retries_commit_without_second_provider_u
     let resolved = must_ok(
         tokio::time::timeout(
             Duration::from_secs(2),
-            resolver.resolve_provider_credentials(&account_id),
+            resolver.resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+            ),
         )
         .await,
     );
@@ -722,7 +762,12 @@ async fn inaccessible_successor_slot_records_local_retry_without_provider_use() 
     );
 
     assert_eq!(
-        resolver.resolve_provider_credentials(&account_id).await,
+        resolver
+            .resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai
+            )
+            .await,
         Err(CredentialResolverError::SecretUnavailable)
     );
     assert_eq!(refresh_client.calls(), 0);
@@ -748,7 +793,12 @@ async fn inaccessible_successor_slot_records_local_retry_without_provider_use() 
         Some(1_060),
     );
     assert_eq!(
-        due_resolver.resolve_provider_credentials(&account_id).await,
+        due_resolver
+            .resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai
+            )
+            .await,
         Err(CredentialResolverError::SecretUnavailable)
     );
     let after_retry =
@@ -776,6 +826,10 @@ impl SecretStore for UnreadableSuccessorSlotStore {
         }
         self.inner.read_secret(key)
     }
+
+    fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+        self.inner.delete_staged(key)
+    }
 }
 
 #[derive(Clone)]
@@ -797,6 +851,10 @@ impl SecretStore for FailOnceSecretWriteStore {
 
     fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError> {
         self.inner.read_secret(key)
+    }
+
+    fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+        self.inner.delete_staged(key)
     }
 }
 
@@ -824,6 +882,10 @@ impl SecretStore for HeldSecretWriteStore {
 
     fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError> {
         self.inner.read_secret(key)
+    }
+
+    fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+        self.inner.delete_staged(key)
     }
 }
 

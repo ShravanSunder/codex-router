@@ -443,32 +443,16 @@ mod tests {
     }
 
     #[test]
-    fn serve_quota_refresh_interval_must_fit_the_quota_freshness_window() {
-        for (value, expected) in [("300", Ok(300)), ("301", Err(301))] {
+    fn serve_quota_refresh_interval_accepts_values_above_three_hundred_seconds() {
+        for (value, expected) in [("300", 300), ("400", 400)] {
             let arguments = [
                 OsString::from("--quota-refresh-interval-seconds"),
                 OsString::from(value),
             ];
             let mut parser = ArgumentParser::new(arguments.into());
-            match expected {
-                Ok(seconds) => {
-                    let command = ServeCommand::parse(&mut parser)
-                        .unwrap_or_else(|error| panic!("interval should parse: {error}"));
-                    assert_eq!(command.quota_refresh_interval_seconds, seconds);
-                }
-                Err(seconds) => {
-                    let error = ServeCommand::parse(&mut parser)
-                        .expect_err("quota evidence must not become stale before the next poll");
-                    assert!(matches!(
-                        error,
-                        super::CliError::QuotaRefreshIntervalOutOfRange {
-                            option: "--quota-refresh-interval-seconds",
-                            value: actual,
-                            maximum: 300,
-                        } if actual == seconds
-                    ));
-                }
-            }
+            let command = ServeCommand::parse(&mut parser)
+                .unwrap_or_else(|error| panic!("interval should parse: {error}"));
+            assert_eq!(command.quota_refresh_interval_seconds, expected);
         }
     }
 

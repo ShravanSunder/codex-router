@@ -310,7 +310,7 @@ async fn provider_migration_preserves_copied_native_upgrade_rows_and_recreates_p
         .fetch_one(&mut migrated_connection)
         .await
         .expect("native migration history should read");
-    assert_eq!(history_rows, 5);
+    assert_eq!(history_rows, 6);
     migrated_connection
         .close()
         .await

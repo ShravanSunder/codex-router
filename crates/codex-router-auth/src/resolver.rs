@@ -46,6 +46,9 @@ pub enum CredentialResolverError {
     /// Account is disabled or has no active credential generation.
     #[error("provider credential account is ineligible")]
     AccountIneligible,
+    /// The selected account provider did not match persisted account identity.
+    #[error("provider credential account does not match the expected provider")]
+    AccountProviderMismatch,
     /// Secret material was unavailable or malformed.
     #[error("provider credential secret is unavailable")]
     SecretUnavailable,
@@ -62,6 +65,7 @@ impl Clone for CredentialResolverError {
         match self {
             Self::AccountUnavailable => Self::AccountUnavailable,
             Self::AccountIneligible => Self::AccountIneligible,
+            Self::AccountProviderMismatch => Self::AccountProviderMismatch,
             Self::SecretUnavailable => Self::SecretUnavailable,
             Self::CredentialStoreUnavailable => Self::CredentialStoreUnavailable,
             Self::RefreshUnavailable => Self::RefreshUnavailable,
@@ -75,6 +79,7 @@ impl PartialEq for CredentialResolverError {
             (self, other),
             (Self::AccountUnavailable, Self::AccountUnavailable)
                 | (Self::AccountIneligible, Self::AccountIneligible)
+                | (Self::AccountProviderMismatch, Self::AccountProviderMismatch)
                 | (Self::SecretUnavailable, Self::SecretUnavailable)
                 | (
                     Self::CredentialStoreUnavailable,
@@ -161,6 +166,7 @@ pub trait ProviderCredentialResolver {
     fn resolve_provider_credentials(
         &self,
         account_id: &AccountId,
+        expected_provider: Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError>;
 }
 
@@ -181,8 +187,9 @@ pub trait CredentialRefreshClient {
         refresh_token: &SecretString,
     ) -> Result<CredentialBundle, CredentialRefreshFailure> {
         if provider != Provider::Openai {
-            return Err(CredentialRefreshFailure::ambiguous(
-                CredentialFailureClass::ProviderOutcomeAmbiguous,
+            return Err(CredentialRefreshFailure::confirmed_unspent(
+                CredentialFailureClass::LocalPersistence,
+                None,
             ));
         }
         self.refresh_credentials(account_id, refresh_token)
@@ -618,16 +625,20 @@ where
     fn read_active_bundle(
         &self,
         account_id: &AccountId,
+        expected_provider: Provider,
     ) -> Result<(u64, AccountCredentialBundle), CredentialResolverError> {
         let account = self
             .state_repository
             .load_account(account_id)
             .map_err(map_state_error)?
             .ok_or(CredentialResolverError::AccountUnavailable)?;
+        if account.provider() != expected_provider {
+            return Err(CredentialResolverError::AccountProviderMismatch);
+        }
         if account.status() != AccountStatus::Enabled {
             return Err(CredentialResolverError::AccountIneligible);
         }
-        if account.provider() != Provider::Openai {
+        if expected_provider != Provider::Openai {
             return Err(CredentialResolverError::AccountIneligible);
         }
         let active_generation = account
@@ -662,10 +673,16 @@ where
         let refresh_token = bundle
             .refresh_token()
             .ok_or(CredentialResolverError::RefreshUnavailable)?;
-        let mut refreshed = self
+        let refreshed_bundle = self
             .refresh_client
-            .refresh_credentials(account_id, refresh_token)
+            .refresh_provider_credentials(Provider::Openai, account_id, refresh_token)
             .map_err(|_| CredentialResolverError::RefreshUnavailable)?;
+        let mut refreshed = match refreshed_bundle {
+            CredentialBundle::OpenAi(bundle) => bundle,
+            CredentialBundle::Claude { .. } => {
+                return Err(CredentialResolverError::RefreshUnavailable);
+            }
+        };
         if refreshed.chatgpt_account_id().is_none()
             && let Some(chatgpt_account_id) = bundle.chatgpt_account_id()
         {
@@ -713,14 +730,16 @@ where
     fn resolve_provider_credentials(
         &self,
         account_id: &AccountId,
+        expected_provider: Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        let (active_generation, bundle) = self.read_active_bundle(account_id)?;
+        let (active_generation, bundle) = self.read_active_bundle(account_id, expected_provider)?;
         if self.bundle_is_expired(&bundle) {
             let lease = self.refresh_leases.lease_for(account_id);
             let _guard = lease
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (current_generation, current_bundle) = self.read_active_bundle(account_id)?;
+            let (current_generation, current_bundle) =
+                self.read_active_bundle(account_id, expected_provider)?;
             let (resolved_generation, refreshed) = if self.bundle_is_expired(&current_bundle) {
                 self.refresh_expired_bundle(account_id, current_generation, &current_bundle)?
             } else {

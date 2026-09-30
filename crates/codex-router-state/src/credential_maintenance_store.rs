@@ -240,6 +240,67 @@ impl AsyncSqliteStateStore {
         Ok(deleted + restored != 0)
     }
 
+    /// Releases a login claim after the caller acquires its per-account file lock.
+    ///
+    /// The lock proves the previous login owner has exited, so an age delay would only
+    /// waste an authorization code. The returned claim is removed or restored atomically.
+    pub async fn release_in_progress_login_credential_claim(
+        &self,
+        account_id: &AccountId,
+        provider: Provider,
+        current_generation: u64,
+        successor_generation: u64,
+    ) -> Result<bool, StateStoreError> {
+        let current_generation = u64_to_i64(current_generation)?;
+        let successor_generation = u64_to_i64(successor_generation)?;
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        let deleted = sqlx::query(
+            "DELETE FROM credential_maintenance
+              WHERE account_id = ?1 AND credential_generation = ?2
+                AND claimed_successor_generation = ?3 AND state = 'in_progress'
+                AND claim_purpose = 'login' AND claim_prior_state IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM accounts
+                     WHERE accounts.account_id = credential_maintenance.account_id
+                       AND accounts.provider = ?4
+                )",
+        )
+        .bind(account_id.as_str())
+        .bind(current_generation)
+        .bind(successor_generation)
+        .bind(provider.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?
+        .rows_affected();
+        let restored = sqlx::query(
+            "UPDATE credential_maintenance
+                SET state = claim_prior_state,
+                    claimed_successor_generation = NULL,
+                    claim_purpose = NULL,
+                    claim_started_unix_seconds = NULL,
+                    claim_prior_state = NULL
+              WHERE account_id = ?1 AND credential_generation = ?2
+                AND claimed_successor_generation = ?3 AND state = 'in_progress'
+                AND claim_purpose = 'login' AND claim_prior_state IS NOT NULL
+                AND EXISTS (
+                    SELECT 1 FROM accounts
+                     WHERE accounts.account_id = credential_maintenance.account_id
+                       AND accounts.provider = ?4
+                )",
+        )
+        .bind(account_id.as_str())
+        .bind(current_generation)
+        .bind(successor_generation)
+        .bind(provider.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?
+        .rows_affected();
+        transaction.commit().await.map_err(sqlx_error)?;
+        Ok(deleted + restored != 0)
+    }
+
     /// Restores the prior maintenance row after a login's staged credential write fails.
     pub async fn restore_credential_maintenance_after_login_write_failure(
         &self,
@@ -569,7 +630,11 @@ fn decode_maintenance_row(
         || (claim_prior_state.is_some() && claim_purpose != Some(ClaimPurpose::Login))
         || claim_prior_state == Some(CredentialMaintenanceState::InProgress)
         || claimed_successor_generation.is_some_and(|successor| successor <= credential_generation)
-        || (state == CredentialMaintenanceState::Retrying) != next_attempt_unix_seconds.is_some()
+        || ((state == CredentialMaintenanceState::Retrying
+            || (state == CredentialMaintenanceState::InProgress
+                && claim_purpose == Some(ClaimPurpose::Login)
+                && claim_prior_state == Some(CredentialMaintenanceState::Retrying)))
+            != next_attempt_unix_seconds.is_some())
     {
         return Err(corrupt_maintenance(account_id, "state"));
     }

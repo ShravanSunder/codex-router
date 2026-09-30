@@ -2783,7 +2783,10 @@ mod tests {
                     .handle()
                     .spawn(async move {
                         resolver
-                            .resolve_provider_credentials(&account_for_task)
+                            .resolve_provider_credentials(
+                                &account_for_task,
+                                codex_router_core::provider::Provider::Openai,
+                            )
                             .await
                     });
             entered_receiver
@@ -2889,6 +2892,10 @@ mod tests {
             self.inner.write_secret(key, secret)
         }
 
+        fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+            self.inner.delete_staged(key)
+        }
+
         fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError> {
             self.inner.read_secret(key)
         }
@@ -2920,7 +2927,10 @@ mod tests {
             .handle()
             .spawn(async move {
                 resolver
-                    .resolve_provider_credentials(&account_for_task)
+                    .resolve_provider_credentials(
+                        &account_for_task,
+                        codex_router_core::provider::Provider::Openai,
+                    )
                     .await
             });
         entered_receiver

@@ -212,15 +212,20 @@ fn generation_pruning_keeps_active_and_previous_and_isolated_by_provider_and_acc
             .expect("credential generation should be encrypted");
     }
 
+    let malformed_key_path = root
+        .path()
+        .join("unknown_credential_bundle.acct_prune_generations.1.v2");
+    std::fs::write(&malformed_key_path, b"invalid envelope").expect("malformed v2 entry");
+
     let removed = store
         .prune_obsolete_generations(Provider::Openai, &account_id, 4)
         .expect("obsolete OpenAI generations should be pruned");
 
-    assert_eq!(removed, vec![1, 2]);
+    assert_eq!(removed, vec![1, 2, 3]);
     for (provider, owner, generation, should_remain) in [
         (Provider::Openai, &account_id, 1, false),
         (Provider::Openai, &account_id, 2, false),
-        (Provider::Openai, &account_id, 3, true),
+        (Provider::Openai, &account_id, 3, false),
         (Provider::Openai, &account_id, 4, true),
         (Provider::Claude, &account_id, 1, true),
         (Provider::Claude, &account_id, 2, true),
@@ -231,4 +236,8 @@ fn generation_pruning_keeps_active_and_previous_and_isolated_by_provider_and_acc
                 .expect("provider-scoped key");
         assert_eq!(store.read_secret(&key).is_ok(), should_remain);
     }
+    assert!(
+        malformed_key_path.is_file(),
+        "unparseable v2 names are skipped rather than deleted"
+    );
 }

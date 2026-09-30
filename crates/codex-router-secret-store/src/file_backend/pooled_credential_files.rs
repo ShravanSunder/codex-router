@@ -139,6 +139,60 @@ impl FileSecretStore {
         Ok(keys)
     }
 
+    /// Lists encrypted credential candidates for best-effort generation pruning.
+    ///
+    /// Unlike migration scans, pruning must not stop because an unrelated `.v2`
+    /// credential filename is malformed. The pruning caller parses each key and
+    /// warns before skipping any invalid credential identity.
+    pub(crate) fn list_pooled_credential_files_for_pruning(
+        &self,
+    ) -> Result<Vec<SecretKey>, SecretStoreError> {
+        let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {
+            path: self.root.clone(),
+            source,
+        })?;
+        let mut keys = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| SecretStoreError::Filesystem {
+                path: self.root.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(key_name) = file_name.strip_suffix(".v2") else {
+                continue;
+            };
+            if !key_name.contains("_credential_bundle") {
+                continue;
+            }
+            reject_symlink_path(&path)?;
+            if !entry
+                .file_type()
+                .map_err(|source| SecretStoreError::Filesystem {
+                    path: path.clone(),
+                    source,
+                })?
+                .is_file()
+            {
+                return Err(SecretStoreError::UnexpectedCredentialEntry { path });
+            }
+            match SecretKey::new(key_name.to_owned()) {
+                Ok(key) => keys.push(key),
+                Err(error) => {
+                    tracing::warn!(
+                        file_name,
+                        reason = %error,
+                        "unparseable encrypted credential filename skipped during pruning"
+                    );
+                }
+            }
+        }
+        keys.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(keys)
+    }
+
     /// Conservatively detects any v2 envelope before a missing-key decision.
     pub(crate) fn has_any_v2_files(&self) -> Result<bool, SecretStoreError> {
         let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {

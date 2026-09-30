@@ -99,6 +99,10 @@ impl SecretStore for FailingWriteOnlySecretStore {
             source: std::io::Error::from(std::io::ErrorKind::NotFound),
         })
     }
+
+    fn delete_staged(&self, _key: &SecretKey) -> Result<(), SecretStoreError> {
+        Err(SecretStoreError::KeyUnavailable)
+    }
 }
 
 #[test]
@@ -256,7 +260,11 @@ fn device_relogin_waits_for_claimed_refresh_then_wins_the_active_generation() {
             &refresh_secret_root,
             refresh_client,
         ));
-        must_ok(resolver.resolve_provider_credentials(&refresh_account)).credential_generation()
+        must_ok(resolver.resolve_provider_credentials(
+            &refresh_account,
+            codex_router_core::provider::Provider::Openai,
+        ))
+        .credential_generation()
     });
     must_ok(entered_receiver.recv_timeout(Duration::from_secs(2)));
     let login_state_path = state_path.clone();
@@ -359,7 +367,10 @@ fn refresh_claim_cannot_reenable_an_account_disabled_during_provider_refresh() {
             refresh_client,
         ));
         resolver
-            .resolve_provider_credentials(&refresh_account)
+            .resolve_provider_credentials(
+                &refresh_account,
+                codex_router_core::provider::Provider::Openai,
+            )
             .is_err()
     });
     must_ok(entered_receiver.recv_timeout(Duration::from_secs(2)));
@@ -732,12 +743,10 @@ fn account_login_defaults_to_device_auth_method() {
         Err(error) => panic!("account command should parse: {error}"),
     };
 
-    let AccountCommand::LoginDeviceAuth {
+    let AccountCommand::Login {
         router_root,
         label,
         provider_login_flow,
-        codex_bin,
-        allow_plaintext_file_secrets,
     } = command
     else {
         panic!("account login should default to device auth");
@@ -746,10 +755,11 @@ fn account_login_defaults_to_device_auth_method() {
     assert_eq!(label, "primary");
     assert_eq!(
         provider_login_flow,
-        crate::account::ProviderLoginFlow::OpenAiDevice
+        crate::account::ProviderLoginFlow::OpenAiDevice {
+            codex_bin: PathBuf::from("codex"),
+            allow_plaintext_file_secrets: false,
+        }
     );
-    assert_eq!(codex_bin, PathBuf::from("codex"));
-    assert!(!allow_plaintext_file_secrets);
 }
 
 #[test]
@@ -767,7 +777,7 @@ fn account_login_provider_dispatch_selects_claude_oauth_flow() {
         Err(error) => panic!("account command should parse: {error}"),
     };
 
-    let AccountCommand::LoginDeviceAuth {
+    let AccountCommand::Login {
         provider_login_flow,
         label,
         ..
@@ -780,4 +790,83 @@ fn account_login_provider_dispatch_selects_claude_oauth_flow() {
         crate::account::ProviderLoginFlow::ClaudeOAuth
     );
     assert_eq!(label, "primary-claude");
+}
+
+#[test]
+fn account_login_claude_rejects_openai_only_flags() {
+    for option in [
+        "--device-auth",
+        "--codex-bin",
+        "--allow-plaintext-file-secrets",
+    ] {
+        let mut arguments = vec![
+            OsString::from("account"),
+            OsString::from("login"),
+            OsString::from("--provider"),
+            OsString::from("claude"),
+            OsString::from("--label"),
+            OsString::from("primary-claude"),
+            OsString::from(option),
+        ];
+        if option == "--codex-bin" {
+            arguments.push(OsString::from("codex"));
+        }
+        let error =
+            CliCommand::parse(arguments).expect_err("Claude login must reject OpenAI-only options");
+        assert!(error.to_string().contains(option));
+    }
+}
+
+#[test]
+fn claude_login_label_guard_runs_before_prompt_or_oauth() {
+    use codex_router_core::provider::Provider;
+    use codex_router_state::sqlite::AsyncSqliteStateStore;
+    use std::io::Cursor;
+
+    let test_root = TestRoot::new("claude-login-label-guard");
+    must_ok(fs::create_dir(test_root.path()));
+    let router_root = test_root.path().join("router");
+    must_ok(fs::create_dir_all(&router_root));
+    let state_path = router_root.join("state.sqlite");
+    let state = must_ok(test_async_runtime().block_on(AsyncSqliteStateStore::open(&state_path)));
+    must_ok(
+        test_async_runtime().block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    Provider::Openai,
+                    account_id("claude-login-label-owner"),
+                    "shared-label",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+    must_ok(test_async_runtime().block_on(state.close()));
+
+    let command = match CliCommand::parse([
+        OsString::from("account"),
+        OsString::from("login"),
+        OsString::from("--provider"),
+        OsString::from("claude"),
+        OsString::from("--label"),
+        OsString::from("shared-label"),
+        OsString::from("--router-root"),
+        OsString::from(path_to_str(&router_root)),
+    ]) {
+        Ok(CliCommand::Account(command)) => command,
+        Ok(other) => panic!("account command should parse, got {other:?}"),
+        Err(error) => panic!("account command should parse: {error}"),
+    };
+    let mut stdout = Vec::new();
+    let mut reader = Cursor::new(b"callback-must-not-be-read".to_vec());
+    let error = crate::account::run_account_command_with_input(&mut stdout, &mut reader, command)
+        .expect_err("globally duplicate labels must be rejected before OAuth starts");
+
+    assert!(matches!(
+        error,
+        crate::account::AccountCommandError::DuplicateAccountLabel { .. }
+    ));
+    assert!(stdout.is_empty());
+    assert_eq!(reader.position(), 0);
 }

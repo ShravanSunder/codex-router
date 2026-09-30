@@ -161,7 +161,7 @@ fn parse_limit_window(
 
 #[derive(Clone, Copy)]
 struct ParsedClaudeUsageWindow {
-    remaining_headroom: u32,
+    remaining_basis_points: u32,
     reset_unix_seconds: Option<u64>,
 }
 
@@ -178,12 +178,12 @@ fn parse_percent_window(
     utilization_percent: f64,
     resets_at: Option<&str>,
 ) -> Result<ParsedClaudeUsageWindow, QuotaCommandError> {
-    if !utilization_percent.is_finite() || !(0.0..=100.0).contains(&utilization_percent) {
+    if !utilization_percent.is_finite() || utilization_percent < 0.0 {
         return Err(QuotaCommandError::ProviderResponse {
-            message: "Claude quota utilization percentage is outside 0 through 100".to_owned(),
+            message: "Claude quota utilization percentage is negative or not finite".to_owned(),
         });
     }
-    let remaining_headroom = ((100.0 - utilization_percent) * 100.0).round() as u32;
+    let remaining_basis_points = ((100.0 - utilization_percent.min(100.0)) * 100.0).round() as u32;
     let reset_unix_seconds = resets_at
         .map(|reset| {
             chrono::DateTime::parse_from_rfc3339(reset)
@@ -195,7 +195,7 @@ fn parse_percent_window(
         .transpose()?
         .and_then(|timestamp| u64::try_from(timestamp).ok());
     Ok(ParsedClaudeUsageWindow {
-        remaining_headroom,
+        remaining_basis_points,
         reset_unix_seconds,
     })
 }
@@ -206,7 +206,7 @@ fn quota_window_from_parsed(
 ) -> QuotaRefreshProviderWindow {
     QuotaRefreshProviderWindow {
         limit_window_seconds,
-        remaining_headroom: parsed.remaining_headroom,
+        headroom: QuotaWindowHeadroom::BasisPoints(parsed.remaining_basis_points),
         reset_unix_seconds: parsed.reset_unix_seconds,
         effective: true,
     }
@@ -284,12 +284,18 @@ mod tests {
             response.windows[0].limit_window_seconds,
             CLAUDE_FIVE_HOUR_WINDOW_SECONDS
         );
-        assert_eq!(response.windows[0].remaining_headroom, 7_500);
+        assert_eq!(
+            response.windows[0].headroom,
+            QuotaWindowHeadroom::BasisPoints(7_500)
+        );
         assert_eq!(
             response.windows[1].limit_window_seconds,
             CLAUDE_WEEKLY_WINDOW_SECONDS
         );
-        assert_eq!(response.windows[1].remaining_headroom, 2_000);
+        assert_eq!(
+            response.windows[1].headroom,
+            QuotaWindowHeadroom::BasisPoints(2_000)
+        );
         server.join().expect("fake usage server should finish");
     }
 
@@ -304,7 +310,10 @@ mod tests {
             legacy.windows[0].limit_window_seconds,
             CLAUDE_FIVE_HOUR_WINDOW_SECONDS
         );
-        assert_eq!(legacy.windows[0].remaining_headroom, 5_500);
+        assert_eq!(
+            legacy.windows[0].headroom,
+            QuotaWindowHeadroom::BasisPoints(5_500)
+        );
         assert_eq!(legacy.windows[0].reset_unix_seconds, Some(1_790_812_800));
 
         let limits = parse_claude_usage_response(
@@ -316,12 +325,18 @@ mod tests {
             limits.windows[0].limit_window_seconds,
             CLAUDE_FIVE_HOUR_WINDOW_SECONDS
         );
-        assert_eq!(limits.windows[0].remaining_headroom, 8_750);
+        assert_eq!(
+            limits.windows[0].headroom,
+            QuotaWindowHeadroom::BasisPoints(8_750)
+        );
         assert_eq!(
             limits.windows[1].limit_window_seconds,
             CLAUDE_WEEKLY_WINDOW_SECONDS
         );
-        assert_eq!(limits.windows[1].remaining_headroom, 2_000);
+        assert_eq!(
+            limits.windows[1].headroom,
+            QuotaWindowHeadroom::BasisPoints(2_000)
+        );
 
         let unknown = parse_claude_usage_response(r#"{"five_hour":null,"seven_day":null}"#)
             .expect("valid response with unknown windows remains unknown");
@@ -340,6 +355,22 @@ mod tests {
             usage.windows[0].limit_window_seconds,
             CLAUDE_FIVE_HOUR_WINDOW_SECONDS
         );
-        assert_eq!(usage.windows[0].remaining_headroom, 7_500);
+        assert_eq!(
+            usage.windows[0].headroom,
+            QuotaWindowHeadroom::BasisPoints(7_500)
+        );
+    }
+
+    #[test]
+    fn claude_utilization_above_one_hundred_percent_clamps_headroom_to_zero() {
+        let response = parse_claude_usage_response(
+            r#"{"five_hour":{"utilization":125,"resets_at":null},"seven_day":null}"#,
+        )
+        .expect("over-limit utilization should represent an exhausted window");
+
+        assert_eq!(
+            response.windows[0].headroom,
+            QuotaWindowHeadroom::BasisPoints(0)
+        );
     }
 }
