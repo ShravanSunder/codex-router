@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE thread_subscriptions SET state='ended',end_reason=?,ended_at=?,generation=? WHERE reader_key=? AND scope_kind=? AND scope_id=? AND state<>'ended'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "c9ef5b26d69030c7f730736d3bc86a858e7f090b32f2bf67c9dcd4f9fdece8cf"
+}

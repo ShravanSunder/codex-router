@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT position.root_id,position.delivered_through,watch.starts_after_activity, EXISTS(SELECT 1 FROM board_activity activity WHERE activity.activity_sequence=position.delivered_through AND activity.root_id=position.root_id AND activity.kind='threadMessageCreated') AS valid_scope FROM thread_delivery_positions position JOIN thread_watches watch ON watch.reader_key=position.reader_key AND watch.root_id=position.root_id JOIN board_messages message ON message.message_id=position.root_id JOIN project_boards board ON board.board_id=message.board_id WHERE position.reader_key=? AND board.project_id=? AND watch.active=1",
+  "query": "SELECT position.root_id,position.delivered_through,watch.starts_after_activity, EXISTS(SELECT 1 FROM board_activity activity WHERE activity.activity_sequence=position.delivered_through AND ((activity.root_id=position.root_id AND activity.kind='threadMessageCreated') OR (activity.message_id=position.root_id AND activity.kind='mainMessageCreated'))) AS valid_scope FROM thread_delivery_positions position JOIN thread_watches watch ON watch.reader_key=position.reader_key AND watch.root_id=position.root_id JOIN board_messages message ON message.message_id=position.root_id JOIN project_boards board ON board.board_id=message.board_id WHERE position.reader_key=? AND board.project_id=? AND watch.active=1",
   "describe": {
     "columns": [
       {
@@ -53,5 +53,5 @@
       false
     ]
   },
-  "hash": "17d8900430f1a2115afea413bb392e26ff988b7e10543a7defe0736abf126414"
+  "hash": "39b47782d25e20364982063a99efc5e491179b5c6de452e43717c19e0fae81a3"
 }

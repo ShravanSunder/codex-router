@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE subscription_windows SET in_flight_through=NULL,residual_opened_at=NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "285c3ea412be48c3c1ac02370af6ab254ceed376ae01ff5b5cb0df9dfaa5c7cf"
+}

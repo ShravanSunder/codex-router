@@ -86,6 +86,18 @@ pub struct Participant {
     pub replaced_by: Option<Identity>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParticipantProps {
+    pub identity: Identity,
+    pub role: ParticipantRole,
+    pub note: Option<ParticipantNote>,
+    pub joined_at_activity: ActivitySequence,
+    pub last_seen_activity: ActivitySequence,
+    pub closed_at_activity: Option<ActivitySequence>,
+    pub closed_reason: Option<ParticipantClosedReason>,
+    pub replaced_by: Option<Identity>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ParticipantWire {
@@ -102,57 +114,51 @@ struct ParticipantWire {
 impl<'de> Deserialize<'de> for Participant {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = ParticipantWire::deserialize(deserializer)?;
-        Self::new(
-            wire.identity,
-            wire.role,
-            wire.note,
-            wire.joined_at_activity,
-            wire.last_seen_activity,
-            wire.closed_at_activity,
-            wire.closed_reason,
-            wire.replaced_by,
-        )
+        Self::new(ParticipantProps {
+            identity: wire.identity,
+            role: wire.role,
+            note: wire.note,
+            joined_at_activity: wire.joined_at_activity,
+            last_seen_activity: wire.last_seen_activity,
+            closed_at_activity: wire.closed_at_activity,
+            closed_reason: wire.closed_reason,
+            replaced_by: wire.replaced_by,
+        })
         .map_err(serde::de::Error::custom)
     }
 }
 
 impl Participant {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        identity: Identity,
-        role: ParticipantRole,
-        note: Option<ParticipantNote>,
-        joined_at_activity: ActivitySequence,
-        last_seen_activity: ActivitySequence,
-        closed_at_activity: Option<ActivitySequence>,
-        closed_reason: Option<ParticipantClosedReason>,
-        replaced_by: Option<Identity>,
-    ) -> Result<Self, InvalidParticipantState> {
-        if last_seen_activity < joined_at_activity {
+    pub fn new(props: ParticipantProps) -> Result<Self, InvalidParticipantState> {
+        if props.last_seen_activity < props.joined_at_activity {
             return Err(InvalidParticipantState);
         }
-        match (closed_at_activity, closed_reason, replaced_by.as_ref()) {
+        match (
+            props.closed_at_activity,
+            props.closed_reason,
+            props.replaced_by.as_ref(),
+        ) {
             (None, None, None) => {}
             (Some(closed), Some(ParticipantClosedReason::Left), None)
             | (Some(closed), Some(ParticipantClosedReason::Resolved), None)
-                if closed == last_seen_activity => {}
+                if closed == props.last_seen_activity => {}
             (Some(closed), Some(ParticipantClosedReason::Replaced), Some(replacement))
                 if matches!(
-                    role,
+                    props.role,
                     ParticipantRole::Orchestrator | ParticipantRole::Implementer
-                ) && closed == last_seen_activity
-                    && *replacement != identity => {}
+                ) && closed == props.last_seen_activity
+                    && *replacement != props.identity => {}
             _ => return Err(InvalidParticipantState),
         }
         Ok(Self {
-            identity,
-            role,
-            note,
-            joined_at_activity,
-            last_seen_activity,
-            closed_at_activity,
-            closed_reason,
-            replaced_by,
+            identity: props.identity,
+            role: props.role,
+            note: props.note,
+            joined_at_activity: props.joined_at_activity,
+            last_seen_activity: props.last_seen_activity,
+            closed_at_activity: props.closed_at_activity,
+            closed_reason: props.closed_reason,
+            replaced_by: props.replaced_by,
         })
     }
 

@@ -64,6 +64,17 @@ pub(crate) async fn dispatch(
  match result { Ok(result)=>json!({"jsonrpc":"2.0","id":id,"result":result}),Err(error)=>failure(id,error) }
  }};
  }
+    // PR3 replaces these dispatch timestamps with the injected SubscriptionClock.
+    macro_rules! call_with_subscription_now {
+ ($request:ty,$method:ident)=>{{
+ let request=match serde_json::from_value::<$request>(params.clone()) {
+     Ok(request)=>request,
+     Err(_error)=>return failure(id,crate::board_request_validation::classify(method,&params)),
+ };
+ let result=store.lock().await.$method(request,chrono::Utc::now()).await;
+ match result { Ok(result)=>json!({"jsonrpc":"2.0","id":id,"result":result}),Err(error)=>failure(id,error) }
+ }};
+ }
     match method {
         "board/discoverySearch" => call!(DiscoverySearchRequest, search_discovery),
         "board/messageSearch" => call!(MessageSearchRequest, search_messages),
@@ -82,20 +93,20 @@ pub(crate) async fn dispatch(
         "board/topicCreate" => call!(TopicCreateRequest, create_topic),
         "board/topicUpdate" => call!(TopicUpdateRequest, update_topic),
         "board/topicList" => call!(TopicListRequest, list_topics),
-        "board/messagePost" => call!(MessagePostRequest, post_message),
+        "board/messagePost" => call_with_subscription_now!(MessagePostRequest, post_message),
         "board/messageShow" => call!(MessageShowRequest, show_message),
         "board/messageList" => call!(MessageListRequest, list_messages),
         "board/threadShow" => call!(ThreadShowRequest, show_thread),
-        "board/threadResolve" => call!(ThreadResolveRequest, resolve_thread),
+        "board/threadResolve" => call_with_subscription_now!(ThreadResolveRequest, resolve_thread),
         "board/threadUnresolve" => call!(ThreadUnresolveRequest, unresolve_thread),
         "board/threadWatch" => call!(ThreadWatchRequest, watch_thread),
-        "board/threadUnwatch" => call!(ThreadUnwatchRequest, unwatch_thread),
+        "board/threadUnwatch" => call_with_subscription_now!(ThreadUnwatchRequest, unwatch_thread),
         "board/topicWatch" => call!(TopicWatchRequest, watch_topic),
-        "board/topicUnwatch" => call!(TopicWatchRequest, unwatch_topic),
+        "board/topicUnwatch" => call_with_subscription_now!(TopicWatchRequest, unwatch_topic),
         "board/threadList" => call!(ThreadListRequest, list_threads),
-        "board/threadCreate" => call!(ThreadCreateRequest, create_thread),
-        "board/threadJoin" => call!(ThreadJoinRequest, join_thread),
-        "board/threadLeave" => call!(ThreadLeaveRequest, leave_thread),
+        "board/threadCreate" => call_with_subscription_now!(ThreadCreateRequest, create_thread),
+        "board/threadJoin" => call_with_subscription_now!(ThreadJoinRequest, join_thread),
+        "board/threadLeave" => call_with_subscription_now!(ThreadLeaveRequest, leave_thread),
         "board/threadParticipantList" => {
             call!(ThreadParticipantListRequest, list_thread_participants)
         }

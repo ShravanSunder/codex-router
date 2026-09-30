@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM thread_subscriptions WHERE reader_key=? AND scope_kind='thread' AND scope_id=?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS(SELECT 1 FROM thread_subscriptions WHERE reader_key=? AND scope_kind='thread' AND scope_id=?)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f42dc650794ef85eabca454a884661e49d2c7f25300bea92ec6a58f948b0d88e"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO subscription_windows(reader_key,root_id,opened_at,last_arrival_at, held_since,retry_not_before,retry_attempts,window_id,in_flight_through,residual_opened_at) VALUES(?,?,?,?,NULL,NULL,0,?,NULL,NULL) ON CONFLICT(reader_key,root_id) DO UPDATE SET last_arrival_at=excluded.last_arrival_at, residual_opened_at=CASE WHEN subscription_windows.in_flight_through IS NOT NULL AND subscription_windows.residual_opened_at IS NULL THEN excluded.last_arrival_at ELSE subscription_windows.residual_opened_at END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "e4191f7be9410a323479e54527426788660f0868701b0152277b94ba983d3525"
+}

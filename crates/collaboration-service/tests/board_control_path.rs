@@ -218,16 +218,19 @@ async fn control_thread_list_pages_escape_heavy_holders_without_skips_or_repeats
     let mut expected_roots = Vec::new();
     for index in 0..100 {
         let created = seed
-            .create_thread(ThreadCreateRequest {
-                message_id: MessageId::generate(),
-                topic_id: topic_id.clone(),
-                actor: maximum_escape_heavy_session(index)?,
-                acting_for: None,
-                text: MessageText::try_from("Root".to_owned())?,
-                references: MessageReferences::try_from(Vec::new())?,
-                role: Some(ParticipantRole::Orchestrator),
-                watch: false,
-            })
+            .create_thread(
+                ThreadCreateRequest {
+                    message_id: MessageId::generate(),
+                    topic_id: topic_id.clone(),
+                    actor: maximum_escape_heavy_session(index)?,
+                    acting_for: None,
+                    text: MessageText::try_from("Root".to_owned())?,
+                    references: MessageReferences::try_from(Vec::new())?,
+                    role: Some(ParticipantRole::Orchestrator),
+                    watch: false,
+                },
+                chrono::Utc::now(),
+            )
             .await?;
         expected_roots.push(created.message.message_id);
     }

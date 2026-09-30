@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(activity.activity_sequence) FROM board_activity activity LEFT JOIN thread_delivery_positions position ON position.reader_key=? AND position.root_id=? JOIN thread_watches watch ON watch.reader_key=? AND watch.root_id=? AND watch.active=1 WHERE ((activity.root_id=? AND activity.kind='threadMessageCreated') OR (activity.message_id=? AND activity.kind='mainMessageCreated')) AND activity.actor_key<>? AND activity.activity_sequence>COALESCE(position.delivered_through,watch.starts_after_activity)",
+  "describe": {
+    "columns": [
+      {
+        "name": "MAX(activity.activity_sequence)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "78243847b81fd5bbeb334ef442170072314023323d2f779abd6a2665894c8cc6"
+}
