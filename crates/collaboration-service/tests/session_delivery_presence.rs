@@ -171,7 +171,7 @@ async fn serve_thread_read_statuses(
         } else {
             socket
                 .send(Message::Text(
-                    json!({"id":read_id,"error":{"code":-32600,"message":"thread not found"}})
+                    json!({"id":read_id,"error":{"code":-32600,"message":"thread not loaded: thread-one"}})
                         .to_string()
                         .into(),
                 ))
@@ -204,10 +204,12 @@ async fn codex_presence_reads_status_and_never_mutates_the_thread()
         fixture.route.presence(&fixture.target).await?,
         RoutePresence::Wakeable
     );
-    assert!(matches!(
+    assert_eq!(
         fixture.route.presence(&fixture.target).await?,
-        RoutePresence::Unreachable { .. }
-    ));
+        RoutePresence::Unreachable {
+            reason: "Codex thread is missing".to_owned(),
+        }
+    );
     server.await??;
 
     let wrong_endpoint: SessionRef = serde_json::from_value(json!({

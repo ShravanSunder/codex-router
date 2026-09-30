@@ -1,8 +1,9 @@
 //! Selects one injected client route for an attempt, then keeps that choice fixed.
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryReceipt, DeliveryRequest, LoadPolicy,
-    RouteClaim, RoutePresence, SessionDeliveryRoute, SessionMessageDelivery, TargetPresence,
+    DeliveryContractError, DeliveryFuture, DeliveryReceipt, DeliveryRequest, RouteClaim,
+    RoutePresence, SessionDeliveryRoute, SessionMessageDelivery, TargetPresence,
+    TargetPresenceProbe,
 };
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
@@ -69,11 +70,9 @@ impl SessionDeliveryRouter {
                 client: None,
             });
         }
-        let loadable_index = claims
+        if let Some(index) = claims
             .iter()
-            .position(|claim| matches!(claim, RouteClaim::CanLoad));
-        if request.load_policy == LoadPolicy::MayLoad
-            && let Some(index) = loadable_index
+            .position(|claim| matches!(claim, RouteClaim::CanLoad))
         {
             return self.deliver_through(index, request, evidence).await;
         }
@@ -88,16 +87,6 @@ impl SessionDeliveryRouter {
                 outcome: DeliveryOutcome::NotSubmitted {
                     retryable: true,
                     reason: reason.reason.clone(),
-                },
-                reachability: None,
-                client: None,
-            });
-        }
-        if request.load_policy == LoadPolicy::LoadedOnly && loadable_index.is_some() {
-            return Ok(DeliveryReceipt {
-                outcome: DeliveryOutcome::NotSubmitted {
-                    retryable: true,
-                    reason: "notLoaded".into(),
                 },
                 reachability: None,
                 client: None,
@@ -183,16 +172,16 @@ impl SessionMessageDelivery for SessionDeliveryRouter {
     }
 }
 
-impl SessionDeliveryRouter {
-    pub async fn presence(
-        &self,
-        target: &SessionRef,
-    ) -> Result<TargetPresence, DeliveryContractError> {
-        let presences = join_all(self.routes.iter().map(|route| route.presence(target)))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(aggregate_presence(&presences))
+impl TargetPresenceProbe for SessionDeliveryRouter {
+    fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, TargetPresence> {
+        let target = target.clone();
+        Box::pin(async move {
+            let presences = join_all(self.routes.iter().map(|route| route.presence(&target)))
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(aggregate_presence(&presences))
+        })
     }
 }
 
@@ -204,13 +193,9 @@ fn aggregate_presence(presences: &[RoutePresence]) -> TargetPresence {
         return TargetPresence::Running;
     }
 
-    let live_elsewhere = presences
+    let has_live_elsewhere = presences
         .iter()
-        .filter_map(|presence| match presence {
-            RoutePresence::LiveElsewhere { detail } => Some(detail),
-            _ => None,
-        })
-        .count();
+        .any(|presence| matches!(presence, RoutePresence::LiveElsewhere { .. }));
     let mut unreachable_reasons = presences
         .iter()
         .filter_map(|presence| match presence {
@@ -219,16 +204,17 @@ fn aggregate_presence(presences: &[RoutePresence]) -> TargetPresence {
         })
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if live_elsewhere > 0 {
-        unreachable_reasons.push("live elsewhere".to_owned());
+    if has_live_elsewhere {
+        let mut reasons = vec!["live elsewhere".to_owned()];
         for detail in presences.iter().filter_map(|presence| match presence {
             RoutePresence::LiveElsewhere { detail } => detail.as_deref(),
             _ => None,
         }) {
-            unreachable_reasons.push(detail.to_owned());
+            reasons.push(detail.to_owned());
         }
+        reasons.extend(unreachable_reasons);
         return TargetPresence::Unreachable {
-            reason: unreachable_reasons.join("; "),
+            reason: reasons.join("; "),
         };
     }
 
@@ -240,7 +226,7 @@ fn aggregate_presence(presences: &[RoutePresence]) -> TargetPresence {
     }
 
     if unreachable_reasons.is_empty() {
-        unreachable_reasons.push("no delivery route serves this endpoint".to_owned());
+        unreachable_reasons.push("no route holds or can load this session".to_owned());
     }
     TargetPresence::Unreachable {
         reason: unreachable_reasons.join("; "),

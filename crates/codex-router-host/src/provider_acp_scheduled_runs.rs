@@ -1,7 +1,7 @@
 //! Provider ACP scheduled-run policy over recorded provider operations.
 use crate::{ExternalProviderSupervisor, LiveSessionOwnershipCheck};
 use collaboration_protocol::UuidIdentity;
-use collaboration_service::ProviderOperationStore;
+use collaboration_service::{LoadPolicy, ProviderOperationStore};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -213,11 +213,21 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
                     &self.store,
                     self.ownership.as_ref(),
                     &target,
+                    LoadPolicy::MayLoad,
                 )
                 .await
                 {
-                    ProviderSessionLoadOutcome::Ready => {
+                    ProviderSessionLoadOutcome::Ready
+                    | ProviderSessionLoadOutcome::AlreadyLoaded => {
                         SchedulePreparationOutcome::Prepared(PreparedTarget { target, evidence })
+                    }
+                    ProviderSessionLoadOutcome::NotLoaded => {
+                        SchedulePreparationOutcome::Failed(SchedulePreparationFailure {
+                            kind: ScheduleFailureKind::OutcomeUnknown,
+                            explanation: "Provider session is not loaded".into(),
+                            evidence,
+                            uncertain: false,
+                        })
                     }
                     ProviderSessionLoadOutcome::UnsupportedLoad => {
                         SchedulePreparationOutcome::Failed(SchedulePreparationFailure {
@@ -289,9 +299,10 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
                     &self.store,
                     self.ownership.as_ref(),
                     &target,
+                    LoadPolicy::MayLoad,
                 )
                 .await,
-                ProviderSessionLoadOutcome::Ready
+                ProviderSessionLoadOutcome::Ready | ProviderSessionLoadOutcome::AlreadyLoaded
             ) {
                 return Err(DeliveryContractError::ClientOperation);
             }

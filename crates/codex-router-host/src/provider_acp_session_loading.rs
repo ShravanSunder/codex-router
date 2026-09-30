@@ -4,13 +4,15 @@ use crate::{
     LiveSessionOwnership, LiveSessionOwnershipCheck, ProviderSessionActivity,
 };
 use collaboration_protocol::SessionRef;
-use collaboration_service::ProviderOperationStore;
+use collaboration_service::{LoadPolicy, ProviderOperationStore};
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderSessionLoadOutcome {
     Ready,
+    AlreadyLoaded,
+    NotLoaded,
     UnsupportedLoad,
     MissingRecord,
     LiveElsewhere,
@@ -64,6 +66,7 @@ pub(crate) async fn ensure_provider_session_loaded(
     store: &Arc<Mutex<ProviderOperationStore>>,
     ownership: &dyn LiveSessionOwnershipCheck,
     target: &SessionRef,
+    load_policy: LoadPolicy,
 ) -> ProviderSessionLoadOutcome {
     let Some(runtime) = supervisor.runtime_for(&target.endpoint) else {
         return unavailable("provider runtime is unavailable");
@@ -77,7 +80,15 @@ pub(crate) async fn ensure_provider_session_loaded(
     )
     .await
     {
-        ProviderSessionLoadability::AlreadyLoaded => return ProviderSessionLoadOutcome::Ready,
+        ProviderSessionLoadability::AlreadyLoaded => {
+            return match load_policy {
+                LoadPolicy::MayLoad => ProviderSessionLoadOutcome::Ready,
+                LoadPolicy::LoadedOnly => ProviderSessionLoadOutcome::AlreadyLoaded,
+            };
+        }
+        ProviderSessionLoadability::Loadable { .. } if load_policy == LoadPolicy::LoadedOnly => {
+            return ProviderSessionLoadOutcome::NotLoaded;
+        }
         ProviderSessionLoadability::Loadable { working_directory } => working_directory,
         ProviderSessionLoadability::UnsupportedLoad => {
             return ProviderSessionLoadOutcome::UnsupportedLoad;
@@ -302,6 +313,7 @@ sys.stdin.read()
             &store,
             &FixtureOwnership(LiveSessionOwnership::NotLive),
             &target,
+            LoadPolicy::MayLoad,
         )
         .await;
 
@@ -361,6 +373,7 @@ sys.stdin.read()
             &store,
             &FixtureOwnership(LiveSessionOwnership::LiveWritable),
             &target,
+            LoadPolicy::MayLoad,
         )
         .await;
 
@@ -414,6 +427,7 @@ sys.stdin.read()
             &store,
             &FixtureOwnership(LiveSessionOwnership::NotLive),
             &target,
+            LoadPolicy::MayLoad,
         )
         .await;
 

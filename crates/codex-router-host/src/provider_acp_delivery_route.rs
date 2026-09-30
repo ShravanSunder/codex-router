@@ -30,7 +30,8 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, DeliveryContractError, DeliveryPrecondition, DeliveryRequest,
-    EndpointDirectory, LoadPolicy, ProviderConversationBackend, ProviderOperationStore, RouteClaim,
+    EndpointDirectory, LoadPolicy, NOT_LOADED_REASON, ProviderConversationBackend,
+    ProviderOperationStore, RouteClaim,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -204,9 +205,6 @@ impl ProviderAcpDeliveryRoute {
         let claim = self.claim.claim(&request.target).await;
         match claim {
             RouteClaim::Holds => {}
-            RouteClaim::CanLoad if request.load_policy == LoadPolicy::LoadedOnly => {
-                return Ok(Self::not_submitted("notLoaded", true));
-            }
             RouteClaim::CanLoad => {}
             RouteClaim::Unavailable { reason, retryable } => {
                 return Ok(Self::not_submitted(reason.reason, retryable));
@@ -269,10 +267,16 @@ impl ProviderAcpDeliveryRoute {
             &self.store,
             self.ownership.as_ref(),
             &request.target,
+            request.load_policy,
         )
         .await
         {
-            ProviderSessionLoadOutcome::Ready => {}
+            ProviderSessionLoadOutcome::Ready | ProviderSessionLoadOutcome::AlreadyLoaded => {}
+            ProviderSessionLoadOutcome::NotLoaded => {
+                return self
+                    .finish_known_none(&request, sink, &mut effect, NOT_LOADED_REASON, true)
+                    .await;
+            }
             ProviderSessionLoadOutcome::UnsupportedLoad => {
                 return self
                     .finish_known_none(&request, sink, &mut effect, "unsupported: load", false)

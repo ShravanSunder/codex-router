@@ -22,7 +22,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, LoadPolicy,
+    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, LoadPolicy, NOT_LOADED_REASON,
     ProviderOperationAdmission, ProviderOperationStore, ProviderSessionRecord, RouteClaim,
     RoutePresence, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
 };
@@ -621,10 +621,15 @@ async fn provider_load_auth_rejection_is_typed_without_session_new() {
         DeliveryOutcome::NotSubmitted {
             retryable: true,
             ref reason,
-        } if reason == "notLoaded"
+        } if reason == NOT_LOADED_REASON
     ));
     assert!(!load_marker.exists());
-    assert!(loaded_only_evidence.0.lock().await.is_empty());
+    assert!(matches!(
+        loaded_only_evidence.0.lock().await.as_slice(),
+        [RouteEffectEvidence::ProviderAcp(before), RouteEffectEvidence::ProviderAcp(after)]
+            if before.submission == SubmissionEffect::Dispatching
+                && after.submission == SubmissionEffect::NotDispatched
+    ));
 
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
 

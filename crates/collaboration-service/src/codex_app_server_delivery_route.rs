@@ -1,16 +1,19 @@
 //! Codex app-server delivery owns native admission and its recorded effects.
+use crate::native_message_dispatch::{
+    NativeThreadStatus, NativeThreadStatusReadError, read_native_thread_status,
+};
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryClientReceipt, DeliveryContractError, DeliveryFuture, DeliveryPrecondition,
-    DeliveryReceipt, DeliveryRequest, EndpointDirectory, NativeControlBackend, RouteClaim,
-    RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
+    DeliveryReceipt, DeliveryRequest, EndpointDirectory, NOT_LOADED_REASON, NativeControlBackend,
+    RouteClaim, RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
 };
 use agent_automation::{
     CessationEvidence, NativeEffectEvidence, PreparationEffect, RouteEffectEvidence,
     SubmissionEffect,
 };
 use codex_acp_adapter::{HeldBindingCheckout, UnmaterializedBindingStore};
-use codex_native_integration::{NativeOperation, NativeProtocolConnection};
+use codex_native_integration::NativeProtocolConnection;
 use collaboration_protocol::{
     AcceptedResumeEffect, ChannelDescription, CodexGeneration, DeliveryNextAction, DeliveryOutcome,
     DeliveryRejection, DeliveryRejectionReason, MessageDelivery, NativeSendAcceptance,
@@ -256,43 +259,25 @@ impl CodexAppServerDeliveryRoute {
             };
         };
         let session_id = String::from(target.session_id.clone());
-        let response = tokio::time::timeout_at(deadline, async {
-            tokio::select! {
-                biased;
-                result = connection.request_validated(
-                    &schemas,
-                    NativeOperation::ReadThread,
-                    json!({"threadId":session_id,"includeTurns":false}),
-                ) => result,
-                _ = retired.cancelled() => Err(codex_native_integration::NativeConnectionError::Unavailable),
-            }
-        })
-        .await
-        .unwrap_or(Err(
-            codex_native_integration::NativeConnectionError::Unavailable,
-        ));
-        let Ok(response) = response else {
-            return RoutePresence::Unreachable {
-                reason: "Codex thread could not be read".to_owned(),
-            };
-        };
-        let thread = response.get("thread");
-        if thread
-            .and_then(|thread| thread.get("id"))
-            .and_then(Value::as_str)
-            != Some(session_id.as_str())
+        match read_native_thread_status(&mut connection, &schemas, &session_id, deadline, &retired)
+            .await
         {
-            return RoutePresence::Unreachable {
+            Ok(NativeThreadStatus::NotLoaded) => RoutePresence::Wakeable,
+            Ok(NativeThreadStatus::Idle | NativeThreadStatus::Active) => RoutePresence::Running,
+            Ok(NativeThreadStatus::Other) => RoutePresence::Unreachable {
+                reason: "Codex thread status is unavailable".to_owned(),
+            },
+            Err(NativeThreadStatusReadError::Missing) => RoutePresence::Unreachable {
                 reason: "Codex thread is missing".to_owned(),
-            };
-        }
-        match thread
-            .and_then(|thread| thread.pointer("/status/type"))
-            .and_then(Value::as_str)
-        {
-            Some("notLoaded") => RoutePresence::Wakeable,
-            Some("idle" | "active") => RoutePresence::Running,
-            _ => RoutePresence::Unreachable {
+            },
+            Err(
+                NativeThreadStatusReadError::Rejected { .. }
+                | NativeThreadStatusReadError::Unsupported
+                | NativeThreadStatusReadError::Unavailable,
+            ) => RoutePresence::Unreachable {
+                reason: "Codex thread could not be read".to_owned(),
+            },
+            Err(NativeThreadStatusReadError::InvalidResponse) => RoutePresence::Unreachable {
                 reason: "Codex thread status is unavailable".to_owned(),
             },
         }
@@ -454,11 +439,11 @@ fn interpret_native_response(
                     },
                     None,
                 )
-            } else if kind == "notLoaded" {
+            } else if kind == NOT_LOADED_REASON {
                 (
                     DeliveryOutcome::NotSubmitted {
                         retryable: true,
-                        reason: "notLoaded".into(),
+                        reason: NOT_LOADED_REASON.into(),
                     },
                     None,
                 )

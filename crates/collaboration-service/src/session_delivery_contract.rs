@@ -10,6 +10,8 @@ use std::{future::Future, pin::Pin, sync::Arc};
 pub type DeliveryFuture<'a, TValue> =
     Pin<Box<dyn Future<Output = Result<TValue, DeliveryContractError>> + Send + 'a>>;
 
+pub const NOT_LOADED_REASON: &str = "notLoaded";
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeliveryContractError {
     #[error("delivery evidence could not be recorded")]
@@ -130,6 +132,10 @@ pub trait SessionMessageDelivery: Send + Sync {
         &self,
         context: AttemptReconciliationContext,
     ) -> DeliveryFuture<'_, AttemptReconciliation>;
+}
+
+pub trait TargetPresenceProbe: Send + Sync {
+    fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, TargetPresence>;
 }
 
 pub trait SessionDeliveryRoute: Send + Sync {

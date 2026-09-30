@@ -78,10 +78,14 @@ impl ProviderAcpDeliveryRoute {
             &self.store,
             self.ownership.as_ref(),
             &target,
+            LoadPolicy::MayLoad,
         )
         .await
         {
-            ProviderSessionLoadOutcome::Ready => {}
+            ProviderSessionLoadOutcome::Ready | ProviderSessionLoadOutcome::AlreadyLoaded => {}
+            ProviderSessionLoadOutcome::NotLoaded => {
+                return Err(ProviderQueueAdmissionError::Unavailable.into());
+            }
             ProviderSessionLoadOutcome::MissingRecord => {
                 return Err(ProviderQueueAdmissionError::SessionNotFound.into());
             }
@@ -255,8 +259,8 @@ impl ProviderAcpDeliveryRoute {
                 input_id.clone(),
                 &contents,
             );
-        permit.send(ProviderQueuedPrompt::Contents(
-            ProviderPromptContentsRequest {
+        permit.send(ProviderQueuedPrompt::Contents {
+            request: ProviderPromptContentsRequest {
                 operation_id,
                 input_id,
                 target,
@@ -264,7 +268,8 @@ impl ProviderAcpDeliveryRoute {
                 approver: record.approver,
                 contents,
             },
-        ));
+            load_policy: LoadPolicy::MayLoad,
+        });
         Ok(queued)
     }
 }

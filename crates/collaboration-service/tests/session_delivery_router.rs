@@ -7,7 +7,7 @@ use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
     DeliveryPrecondition, DeliveryReceipt, DeliveryRequest, LoadPolicy, RouteClaim, RoutePresence,
     RouteUnavailableReason, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
-    TargetPresence,
+    TargetPresence, TargetPresenceProbe,
 };
 use std::sync::{
     Arc,
@@ -191,7 +191,9 @@ async fn presence_aggregation_uses_running_then_live_elsewhere_then_wakeable()
     let router = SessionDeliveryRouter::new(vec![wakeable, live_elsewhere]);
     assert!(matches!(
         router.presence(&target()?).await?,
-        TargetPresence::Unreachable { .. }
+        TargetPresence::Unreachable { ref reason }
+            if reason.starts_with("live elsewhere")
+                && reason.contains("peer is live but unsupported")
     ));
 
     let (unreachable, _) = fake_with_claim_and_presence(
@@ -255,14 +257,27 @@ async fn presence_aggregation_uses_running_then_live_elsewhere_then_wakeable()
             if reason.contains("Codex backend is down")
                 && reason.contains("provider runtime is unavailable")
     ));
+    let router = SessionDeliveryRouter::new(Vec::new());
+    assert!(matches!(
+        router.presence(&target()?).await?,
+        TargetPresence::Unreachable { reason }
+            if reason == "no route holds or can load this session"
+    ));
     Ok(())
 }
 
 #[tokio::test]
 #[allow(clippy::panic_in_result_fn)]
-async fn loaded_only_does_not_call_a_route_that_would_load()
+async fn loaded_only_delegates_loadability_inspection_to_the_route()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (loadable, load_calls) = fake(RouteClaim::CanLoad, SessionReachability::ProviderAcp);
+    let (loadable, route_calls) = fake_with_outcome(
+        RouteClaim::CanLoad,
+        SessionReachability::ProviderAcp,
+        DeliveryOutcome::NotSubmitted {
+            retryable: false,
+            reason: "unsupported: load".into(),
+        },
+    );
     let router = SessionDeliveryRouter::new(vec![loadable]);
 
     let receipt = router
@@ -275,11 +290,11 @@ async fn loaded_only_does_not_call_a_route_that_would_load()
     assert!(matches!(
         receipt.outcome,
         DeliveryOutcome::NotSubmitted {
-            retryable: true,
+            retryable: false,
             ref reason,
-        } if reason == "notLoaded"
+        } if reason == "unsupported: load"
     ));
-    assert_eq!(load_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(route_calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
