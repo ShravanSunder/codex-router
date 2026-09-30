@@ -68,6 +68,7 @@ pub struct PeerSessionInventory {
 struct PeerSessionCandidate {
     session_id: SessionId,
     lookup: PeerSessionLookup,
+    claim: PeerClaim,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,6 +78,14 @@ pub struct PeerSessionRecord {
     pub process_id: PeerProcessId,
     pub status: PeerSessionStatus,
     pub socket_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerClaim {
+    pub pid: u32,
+    pub name: Option<String>,
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +120,10 @@ impl ClaudeCodeSessionRegistry {
         self.lookup_with_probe(target, process_is_live)
     }
 
+    pub fn live_claims(&self, target: &SessionId) -> Result<Vec<PeerClaim>, PeerRegistryError> {
+        self.live_claims_with_probe(target, process_is_live)
+    }
+
     pub fn live_sessions(&self) -> Result<PeerSessionInventory, PeerRegistryError> {
         self.live_sessions_with_probe(process_is_live, None)
     }
@@ -139,6 +152,23 @@ impl ClaudeCodeSessionRegistry {
             None if inventory.has_unreadable_live_record => Err(PeerRegistryError::LiveUnreadable),
             None => Ok(PeerSessionLookup::Absent),
         }
+    }
+
+    fn live_claims_with_probe(
+        &self,
+        target: &SessionId,
+        is_process_live: impl FnMut(u32) -> Result<bool, PeerRegistryError>,
+    ) -> Result<Vec<PeerClaim>, PeerRegistryError> {
+        let inventory = self.live_sessions_with_probe(is_process_live, Some(target))?;
+        if inventory.has_unreadable_live_record {
+            return Err(PeerRegistryError::LiveUnreadable);
+        }
+        Ok(inventory
+            .candidates
+            .into_iter()
+            .filter(|candidate| candidate.session_id == *target)
+            .map(|candidate| candidate.claim)
+            .collect())
     }
 
     fn live_sessions_with_probe(
@@ -260,7 +290,21 @@ impl ClaudeCodeSessionRegistry {
             } else {
                 skipped_records = skipped_records.saturating_add(1);
             }
-            candidates.push(PeerSessionCandidate { session_id, lookup });
+            candidates.push(PeerSessionCandidate {
+                session_id,
+                lookup,
+                claim: PeerClaim {
+                    pid: process_id,
+                    name: envelope
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    cwd: envelope
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from),
+                },
+            });
         }
         let mut claims_by_session = HashMap::<SessionId, usize>::new();
         for candidate in &candidates {
@@ -412,10 +456,118 @@ fn unsupported(reason: &str) -> PeerSessionLookup {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaudeCodeSessionRegistry, PeerRegistryError, PeerSessionLookup};
+    use super::{ClaudeCodeSessionRegistry, PeerClaim, PeerRegistryError, PeerSessionLookup};
     use collaboration_protocol::SessionId;
     use rustix::io::Errno;
     use serde_json::json;
+
+    #[test]
+    fn live_claims_collects_every_live_record_for_only_the_exact_session() {
+        let root = tempfile::tempdir().expect("registry directory");
+        for (process_id, record) in [
+            (
+                501,
+                json!({
+                    "pid": 501,
+                    "sessionId": "fixture-target",
+                    "name": "target-terminal-one",
+                    "cwd": "/workspace/one",
+                    "peerProtocol": 1,
+                    "messagingSocketPath": "/private/tmp/peer-one.sock"
+                }),
+            ),
+            (
+                502,
+                json!({
+                    "pid": 502,
+                    "sessionId": "fixture-target",
+                    "peerProtocol": 99
+                }),
+            ),
+            (
+                503,
+                json!({
+                    "pid": 503,
+                    "sessionId": "other-session",
+                    "name": "unrelated-terminal",
+                    "cwd": "/workspace/other",
+                    "peerProtocol": 1,
+                    "messagingSocketPath": "/private/tmp/peer-other.sock"
+                }),
+            ),
+            (
+                504,
+                json!({
+                    "pid": 504,
+                    "sessionId": "fixture-target",
+                    "name": "stale-terminal",
+                    "cwd": "/workspace/stale",
+                    "peerProtocol": 1,
+                    "messagingSocketPath": "/private/tmp/peer-stale.sock"
+                }),
+            ),
+        ] {
+            std::fs::write(
+                root.path().join(format!("{process_id}.json")),
+                record.to_string(),
+            )
+            .expect("registry record");
+        }
+        let target = SessionId::try_from("fixture-target".to_owned()).expect("target ID");
+        let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+
+        let claims = registry
+            .live_claims_with_probe(&target, |process_id| Ok(matches!(process_id, 501..=503)))
+            .expect("live claims");
+
+        let mut claims_by_pid = claims
+            .into_iter()
+            .map(|claim| (claim.pid, claim))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            claims_by_pid.remove(&501),
+            Some(PeerClaim {
+                pid: 501,
+                name: Some("target-terminal-one".to_owned()),
+                cwd: Some("/workspace/one".into()),
+            })
+        );
+        assert_eq!(
+            claims_by_pid.remove(&502),
+            Some(PeerClaim {
+                pid: 502,
+                name: None,
+                cwd: None,
+            })
+        );
+        assert!(claims_by_pid.is_empty());
+    }
+
+    #[test]
+    fn live_claims_fails_when_an_unreadable_live_record_makes_results_incomplete() {
+        let root = tempfile::tempdir().expect("registry directory");
+        std::fs::write(
+            root.path().join("501.json"),
+            json!({
+                "pid": 501,
+                "sessionId": "fixture-target",
+                "name": "target-terminal",
+                "cwd": "/workspace/one",
+                "peerProtocol": 1,
+                "messagingSocketPath": "/private/tmp/peer.sock"
+            })
+            .to_string(),
+        )
+        .expect("target registry record");
+        std::fs::write(root.path().join("502.json"), "not json")
+            .expect("unreadable registry record");
+        let target = SessionId::try_from("fixture-target".to_owned()).expect("target ID");
+        let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+
+        let result = registry.live_claims_with_probe(&target, |_| Ok(true));
+
+        assert!(matches!(result, Err(PeerRegistryError::LiveUnreadable)));
+    }
 
     #[test]
     fn liveness_probe_error_is_preserved_for_the_target() {
