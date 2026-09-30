@@ -1,7 +1,7 @@
 use agent_automation::{RouteEffectEvidence, SubmissionEffect};
 use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageContent,
-    MessageDelivery, SessionRef, UuidIdentity,
+    MessageDelivery, MessageHeaderContext, MessageHeaderOrigin, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, CodexAppServerDeliveryRoute, DeliveryClientReceipt, DeliveryFuture,
@@ -116,6 +116,7 @@ async fn stale_strict_generation_stops_before_evidence_or_native_io()
         message: MessageContent::Router {
             text: "hello".to_owned().try_into()?,
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode: MessageDelivery::Auto,
         precondition: DeliveryPrecondition::EndpointGeneration { expected: stale },
         correlation: DeliveryCorrelationId::generate(),
@@ -150,6 +151,22 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
         "sessionId":"thread-one"
     }))?;
+    let sender: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":service_id,"endpointId":"claude-local"},
+        "sessionId":"sidekick-session"
+    }))?;
+    let display_names = collaboration_service::SessionDisplayNameCache::default();
+    display_names.remember(sender.clone(), "🐒 Sidekick");
+    let message = MessageContent::Agent {
+        sender,
+        text: "hello".to_owned().try_into()?,
+    };
+    let header_context = MessageHeaderContext::resolve(
+        &target,
+        &message,
+        &display_names,
+        MessageHeaderOrigin::Agent,
+    );
     let generation: CodexGeneration =
         serde_json::from_value(json!({"serviceEpoch":service_id,"generation":1}))?;
     let mut definitions = serde_json::Map::new();
@@ -192,7 +209,8 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
             codex_home: root.clone(),
         },
         std::sync::Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
-    );
+    )
+    .with_display_names(display_names);
     let sink = Arc::new(RecordingEvidenceSink(Mutex::new(Vec::new())));
     let observed = Arc::clone(&sink);
     let server = tokio::spawn(async move {
@@ -234,13 +252,16 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
         if read["method"] != "thread/read" {
             return Err("unexpected native inspection".into());
         }
-        socket.send(Message::Text(json!({"id":read["id"],"result":{"thread":{"id":"thread-one","status":{"type":"idle"}}}}).to_string().into())).await?;
+        socket.send(Message::Text(json!({"id":read["id"],"result":{"thread":{"id":"thread-one","name":"🤖 Codex Main","status":{"type":"idle"}}}}).to_string().into())).await?;
         let start: Value =
             serde_json::from_str(socket.next().await.ok_or("missing start")??.to_text()?)?;
         if start["method"] != "turn/start"
             || start["params"]["clientUserMessageId"] != "caller-correlation"
+            || !start["params"]["input"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("🤖 Codex Main ← 🐒 Sidekick\n"))
         {
-            return Err("native start lost caller correlation".into());
+            return Err("native start lost caller correlation or cached display names".into());
         }
         socket
             .send(Message::Text(
@@ -256,9 +277,8 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
         route.deliver(
             DeliveryRequest {
                 target,
-                message: MessageContent::Router {
-                    text: "hello".to_owned().try_into()?,
-                },
+                message,
+                header_context,
                 mode: MessageDelivery::Auto,
                 precondition: DeliveryPrecondition::Unpinned,
                 correlation: DeliveryCorrelationId::try_from("caller-correlation".to_owned())?,
@@ -619,6 +639,7 @@ async fn exercise_held_empty_thread(
                     run_id,
                     target: target.clone(),
                     message: "scheduled hello".to_owned().try_into()?,
+                    header_context: collaboration_protocol::MessageHeaderContext::default(),
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs,
                     recorded: prepared.evidence,
@@ -684,6 +705,7 @@ async fn exercise_held_empty_thread(
         message: MessageContent::Router {
             text: message_text.clone(),
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::generate(),

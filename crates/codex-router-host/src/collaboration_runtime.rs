@@ -375,13 +375,16 @@ impl CollaborationRuntime {
         ));
         let message_routes =
             crate::session_message_route_composition::compose_session_message_routes(
-                provider_endpoints,
-                identity.endpoint_directory(),
-                native_backend.clone(),
-                std::sync::Arc::clone(&unmaterialized_threads),
-                external_provider_supervisor.clone(),
-                provider_store.clone(),
-                peer_registry_directory,
+                crate::session_message_route_composition::SessionMessageRouteInputs {
+                    provider_endpoints,
+                    directory: identity.endpoint_directory(),
+                    native_backend: native_backend.clone(),
+                    unmaterialized_threads: std::sync::Arc::clone(&unmaterialized_threads),
+                    provider_supervisor: external_provider_supervisor.clone(),
+                    provider_store: provider_store.clone(),
+                    peer_registry_directory,
+                    display_names: identity.session_display_name_cache(),
+                },
             )?;
         let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
             message_routes.router.clone();
@@ -389,10 +392,8 @@ impl CollaborationRuntime {
             dyn collaboration_service::ScheduledRunExecution,
         > = message_routes.router;
         let provider_delivery_route = message_routes.provider_route;
-        approval_broker
-            .install_session_delivery(std::sync::Arc::clone(&session_delivery))
-            .map_err(io::Error::other)?;
         if let Some(supervisor) = &external_provider_supervisor {
+            supervisor.install_display_names(identity.session_display_name_cache());
             supervisor
                 .install_approval_broker(std::sync::Arc::clone(&approval_broker))
                 .await;
@@ -401,6 +402,12 @@ impl CollaborationRuntime {
             .with_session_delivery(session_delivery)
             .with_scheduled_run_execution(scheduled_run_execution)
             .with_native_backend(native_backend)
+            .map_err(io::Error::other)?;
+        let delivery_for_approvals = identity
+            .session_message_delivery()
+            .ok_or_else(|| io::Error::other("session delivery unavailable"))?;
+        approval_broker
+            .install_session_delivery(delivery_for_approvals)
             .map_err(io::Error::other)?;
         let identity = identity.with_approval_broker(std::sync::Arc::clone(&approval_broker));
         let endpoint_directory = identity.endpoint_directory();

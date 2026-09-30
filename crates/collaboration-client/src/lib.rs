@@ -12,7 +12,10 @@ pub use collaboration_protocol::{
 };
 pub use collaboration_protocol::{ControlInitializationResult, EndpointInventory, ProtocolVersion};
 pub use control_connection::{ClientError, ControlClient};
-pub use message_operation::{MessageSendError, MessageSendRequest, PublicMessageContent};
+pub use message_operation::{
+    MessageReplyError, MessageReplyRequest, MessageSendError, MessageSendRequest,
+    PublicMessageContent,
+};
 pub use operation_error::{OperationError, operation_failure_from_client_error};
 static OBSERVED_SERVICE_VERSION: std::sync::OnceLock<std::sync::Mutex<String>> =
     std::sync::OnceLock::new();

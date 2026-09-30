@@ -4,8 +4,12 @@
 use crate::StorageError;
 use sqlx::{Row, Sqlite, Transaction};
 
-const CURRENT_TARGET_DEFINITION_SOURCE: &str =
-    include_str!("../migrations/20260910000000_automation_v1.sql");
+const CURRENT_TARGET_DEFINITION_SOURCE: &str = concat!(
+    include_str!("../migrations/20260910000000_automation_v1.sql"),
+    "\n",
+    include_str!("../migrations/20260928000000_latest_agent_sender.sql"),
+);
+const LATEST_AGENT_SENDER_TABLE: &str = "latest_agent_senders";
 
 struct TableSpec {
     name: &'static str,
@@ -13,7 +17,7 @@ struct TableSpec {
     foreign_keys: &'static str,
 }
 
-const TABLE_SPECS: [TableSpec; 10] = [
+const TABLE_SPECS: [TableSpec; 11] = [
     TableSpec {
         name: "automation_events",
         columns: "event_sequence,INTEGER,0,<NULL>,1;event_id,TEXT,1,<NULL>,0;subject_kind,TEXT,1,<NULL>,0;subject_id,TEXT,1,<NULL>,0;event_kind,TEXT,1,<NULL>,0;event_body_json,TEXT,1,<NULL>,0;recorded_at_ms,INTEGER,1,<NULL>,0",
@@ -28,6 +32,11 @@ const TABLE_SPECS: [TableSpec; 10] = [
         name: "instruction_revisions",
         columns: "revision_id,TEXT,0,<NULL>,1;instruction_id,TEXT,1,<NULL>,0;instruction_text,TEXT,1,<NULL>,0;source_revision_id,TEXT,0,<NULL>,0;recorded_at_ms,INTEGER,1,<NULL>,0",
         foreign_keys: "0,0,instruction_documents,instruction_id,instruction_id,NO ACTION,NO ACTION,NONE",
+    },
+    TableSpec {
+        name: "latest_agent_senders",
+        columns: "recipient_service_id,TEXT,1,<NULL>,1;recipient_endpoint_id,TEXT,1,<NULL>,2;recipient_session_id,TEXT,1,<NULL>,3;sender_service_id,TEXT,1,<NULL>,0;sender_endpoint_id,TEXT,1,<NULL>,0;sender_session_id,TEXT,1,<NULL>,0;delivered_at_ms,INTEGER,1,<NULL>,0",
+        foreign_keys: "",
     },
     TableSpec {
         name: "mailbox_deliveries",
@@ -66,13 +75,15 @@ const TABLE_SPECS: [TableSpec; 10] = [
     },
 ];
 
-const INDEX_SPECS: [&str; 22] = [
+const INDEX_SPECS: [&str; 24] = [
     "automation_events,event_cleanup,0,c,0,recorded_at_ms:0:BINARY:1,event_sequence:0:BINARY:1",
     "automation_events,event_history,0,c,0,subject_kind:0:BINARY:1,subject_id:0:BINARY:1,event_sequence:0:BINARY:1",
     "automation_events,_,1,u,0,event_id:0:BINARY:1",
     "instruction_documents,_,1,pk,0,instruction_id:0:BINARY:1",
     "instruction_revisions,_,1,u,0,instruction_id:0:BINARY:1,revision_id:0:BINARY:1",
     "instruction_revisions,_,1,pk,0,revision_id:0:BINARY:1",
+    "latest_agent_senders,latest_agent_senders_retention,0,c,0,delivered_at_ms:0:BINARY:1",
+    "latest_agent_senders,_,1,pk,0,recipient_service_id:0:BINARY:1,recipient_endpoint_id:0:BINARY:1,recipient_session_id:0:BINARY:1",
     "mailbox_deliveries,delivery_eligibility,0,c,0,delivery_status:0:BINARY:1,eligible_at_ms:0:BINARY:1",
     "mailbox_deliveries,_,1,u,0,wakeup_id:0:BINARY:1,delivery_id:0:BINARY:1",
     "mailbox_deliveries,_,1,u,0,occurrence_id:0:BINARY:1",
@@ -118,18 +129,22 @@ async fn validate_schema(
     transaction: &mut Transaction<'_, Sqlite>,
     legacy: bool,
 ) -> Result<(), StorageError> {
-    validate_object_inventory(transaction).await?;
-    for table in &TABLE_SPECS {
+    validate_object_inventory(transaction, legacy).await?;
+    for table in TABLE_SPECS
+        .iter()
+        .filter(|table| !legacy || table.name != LATEST_AGENT_SENDER_TABLE)
+    {
         validate_columns(transaction, table, legacy).await?;
         validate_foreign_keys(transaction, table).await?;
     }
-    validate_indexes(transaction).await?;
+    validate_indexes(transaction, legacy).await?;
     validate_known_definitions(transaction, legacy).await?;
     Ok(())
 }
 
 async fn validate_object_inventory(
     transaction: &mut Transaction<'_, Sqlite>,
+    legacy: bool,
 ) -> Result<(), StorageError> {
     let rows = sqlx::query(
         "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' ORDER BY type,name",
@@ -147,14 +162,29 @@ async fn validate_object_inventory(
             _ => return Err(StorageError::InvalidSchema),
         }
     }
-    let expected_tables: Vec<&str> = TABLE_SPECS.iter().map(|table| table.name).collect();
-    let expected_indexes = [
-        "delivery_eligibility",
-        "event_cleanup",
-        "event_history",
-        "run_admission_lookup",
-        "run_history",
-    ];
+    let expected_tables: Vec<&str> = TABLE_SPECS
+        .iter()
+        .filter(|table| !legacy || table.name != LATEST_AGENT_SENDER_TABLE)
+        .map(|table| table.name)
+        .collect();
+    let expected_indexes = if legacy {
+        vec![
+            "delivery_eligibility",
+            "event_cleanup",
+            "event_history",
+            "run_admission_lookup",
+            "run_history",
+        ]
+    } else {
+        vec![
+            "delivery_eligibility",
+            "event_cleanup",
+            "event_history",
+            "latest_agent_senders_retention",
+            "run_admission_lookup",
+            "run_history",
+        ]
+    };
     if actual_tables != expected_tables || actual_named_indexes != expected_indexes {
         return Err(StorageError::InvalidSchema);
     }
@@ -232,9 +262,15 @@ async fn validate_foreign_keys(
     Ok(())
 }
 
-async fn validate_indexes(transaction: &mut Transaction<'_, Sqlite>) -> Result<(), StorageError> {
+async fn validate_indexes(
+    transaction: &mut Transaction<'_, Sqlite>,
+    legacy: bool,
+) -> Result<(), StorageError> {
     let mut actual = Vec::new();
-    for table in &TABLE_SPECS {
+    for table in TABLE_SPECS
+        .iter()
+        .filter(|table| !legacy || table.name != LATEST_AGENT_SENDER_TABLE)
+    {
         let indexes = sqlx::query(
             "SELECT name,\"unique\",origin,partial FROM pragma_index_list(?1) ORDER BY seq",
         )
@@ -273,7 +309,11 @@ async fn validate_indexes(transaction: &mut Transaction<'_, Sqlite>) -> Result<(
         }
     }
     actual.sort();
-    let mut expected = INDEX_SPECS.to_vec();
+    let mut expected = INDEX_SPECS
+        .iter()
+        .filter(|index| !legacy || !index.starts_with("latest_agent_senders,"))
+        .copied()
+        .collect::<Vec<_>>();
     expected.sort();
     if actual != expected {
         return Err(StorageError::InvalidSchema);
@@ -285,7 +325,10 @@ async fn validate_known_definitions(
     transaction: &mut Transaction<'_, Sqlite>,
     legacy: bool,
 ) -> Result<(), StorageError> {
-    for table in &TABLE_SPECS {
+    for table in TABLE_SPECS
+        .iter()
+        .filter(|table| !legacy || table.name != LATEST_AGENT_SENDER_TABLE)
+    {
         let sql: String =
             sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name=?1")
                 .bind(table.name)
@@ -297,12 +340,16 @@ async fn validate_known_definitions(
             return Err(StorageError::InvalidSchema);
         }
     }
-    for index in INDEX_SPECS.iter().filter_map(|index| {
-        let mut fields = index.split(',');
-        fields.next();
-        let name = fields.next()?;
-        (name != "_").then_some(name)
-    }) {
+    for index in INDEX_SPECS
+        .iter()
+        .filter(|index| !legacy || !index.starts_with("latest_agent_senders,"))
+        .filter_map(|index| {
+            let mut fields = index.split(',');
+            fields.next();
+            let name = fields.next()?;
+            (name != "_").then_some(name)
+        })
+    {
         let sql: String =
             sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='index' AND name=?1")
                 .bind(index)

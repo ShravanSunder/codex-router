@@ -181,6 +181,7 @@ impl SessionsPickerModel {
             source: self.source,
             sort: self.sort,
             search: self.search.clone(),
+            include_empty_sessions: self.request.include_empty_sessions,
         }
     }
 

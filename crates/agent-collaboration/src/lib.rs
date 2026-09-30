@@ -36,6 +36,10 @@ pub fn command_help() -> String {
         "  message send --to ADDRESS --from ADDRESS",
         "  message send --to ADDRESS [--from ADDRESS]",
     )
+    .replace(
+        "  whoami [--json]",
+        "  message reply --text TEXT|--text-file PATH [--expect-sender SESSIONREF_JSON] --json (reply to the most recent Agent sender delivered here; prints the selected target)\n  whoami [--json]",
+    )
 }
 
 /// Usage for the standalone session picker executable.

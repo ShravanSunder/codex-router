@@ -33,6 +33,7 @@ pub(crate) fn picker_request() -> SessionsPickerRequest {
         },
         current_provider: Some("codex-router".to_owned()),
         new_session_args_display: String::new(),
+        include_empty_sessions: false,
         records: vec![
             picker_record(
                 "thread-a",

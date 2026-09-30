@@ -7,8 +7,8 @@ use crate::{
 };
 use collaboration_protocol::{
     ConversationOperationFailureKind, ConversationOperationWaitOutput,
-    ConversationOperationWaitRequest, ConversationPromptRequest, PositiveSeconds,
-    ProviderOperationStage, SessionRef,
+    ConversationOperationWaitRequest, ConversationPromptRequest, MessageHeaderContext,
+    PositiveSeconds, ProviderOperationStage, SessionRef,
 };
 use collaboration_service::{ProviderConversationBackend, ProviderOperationStore};
 use std::{
@@ -30,14 +30,17 @@ const PROVIDER_RETIRED_REASON: &str = "providerRetired";
 
 #[derive(Clone)]
 pub(crate) enum ProviderQueuedPrompt {
-    Message(ConversationPromptRequest),
+    MessageWithHeader {
+        request: ConversationPromptRequest,
+        header_context: MessageHeaderContext,
+    },
     Contents(ProviderPromptContentsRequest),
 }
 
 impl ProviderQueuedPrompt {
     fn operation_id(&self) -> &collaboration_protocol::OperationId {
         match self {
-            Self::Message(request) => &request.operation_id,
+            Self::MessageWithHeader { request, .. } => &request.operation_id,
             Self::Contents(request) => &request.operation_id,
         }
     }
@@ -285,8 +288,15 @@ async fn run_provider_message_fifo(
                 },
                 submitted = async {
                     match request.clone() {
-                        ProviderQueuedPrompt::Message(message) =>
-                            supervisor.submit_delivery_prompt(message).await,
+                        ProviderQueuedPrompt::MessageWithHeader {
+                            request,
+                            header_context,
+                        } => supervisor
+                            .submit_delivery_prompt_with_header_context(
+                                request,
+                                &header_context,
+                            )
+                            .await,
                         ProviderQueuedPrompt::Contents(contents) =>
                             supervisor.submit_delivery_prompt_contents(contents).await,
                     }

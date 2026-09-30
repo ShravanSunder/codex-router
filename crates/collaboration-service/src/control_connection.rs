@@ -156,6 +156,20 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request) if request.method == "message/reply" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::session_message_reply_dispatch::dispatch(
+                            json!(id),
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request) if request.method == "provider/sessionListen" => {
                     admission.complete(&request.id);
                     let id = request.id.clone();
@@ -579,6 +593,7 @@ pub async fn serve_control_connection(
                                 params: request.params,
                                 id: json!(id),
                                 service_id: &identity.service_id,
+                                display_names: &identity.display_names,
                                 backend: identity.native_backend.as_ref(),
                                 endpoints: &endpoints,
                                 stored_observation: identity.journal.as_deref().map(|store| {

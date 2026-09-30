@@ -25,7 +25,7 @@ use collaboration_protocol::{
     CodexGeneration, ConversationPromptRequest, DeliveryClientReceipt, DeliveryNextAction,
     DeliveryOutcome, DeliveryReceipt, DeliveryRejection, DeliveryRejectionReason, MessageContent,
     MessageDelivery, OperationId, ProviderIdentity, ProviderOperationEffect,
-    ProviderOperationStage, SessionReachability, SessionRef, UuidIdentity, render_message,
+    ProviderOperationStage, SessionReachability, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
@@ -319,7 +319,11 @@ impl ProviderAcpDeliveryRoute {
                 .await;
         }
         if capabilities.supports_steering {
-            let prompt = match render_message(&request.target, &request.message) {
+            let prompt = match collaboration_protocol::render_message_with_context(
+                &request.target,
+                &request.message,
+                &request.header_context,
+            ) {
                 Ok(prompt) => prompt,
                 Err(_) => {
                     return self
@@ -413,15 +417,18 @@ impl ProviderAcpDeliveryRoute {
         };
         let dispatch = self
             .supervisor
-            .submit_delivery_prompt(ConversationPromptRequest {
-                operation_id: operation_id.clone(),
-                input_id: Some(input_id),
-                target: request.target.clone(),
-                generation: Some(binding.generation),
-                requested_by,
-                approver: record.approver,
-                prompt: request.message.clone(),
-            })
+            .submit_delivery_prompt_with_header_context(
+                ConversationPromptRequest {
+                    operation_id: operation_id.clone(),
+                    input_id: Some(input_id),
+                    target: request.target.clone(),
+                    generation: Some(binding.generation),
+                    requested_by,
+                    approver: record.approver,
+                    prompt: request.message.clone(),
+                },
+                &request.header_context,
+            )
             .await;
         match dispatch {
             Ok(ProviderPromptDispatch::Submitted) => {

@@ -187,10 +187,10 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
                     ));
                 }
             };
-            let rendered = Self::render_peer_message(
-                &run.target,
-                &MessageContent::Router { text: run.message },
-            )?;
+            let message = MessageContent::Router { text: run.message };
+            let header_context =
+                self.header_context_for_delivery(&run.target, &message, &run.header_context);
+            let rendered = Self::render_peer_message(&run.target, &message, &header_context)?;
             let dispatch = Self::evidence(&peer, PeerWriteEffect::Dispatching)?;
             if matches!(
                 sink.record(dispatch).await?,

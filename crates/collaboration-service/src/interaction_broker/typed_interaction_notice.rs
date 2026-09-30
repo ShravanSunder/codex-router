@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 pub(super) async fn deliver_approval_notice(
     delivery: Option<&Arc<dyn SessionMessageDelivery>>,
+    display_names: &crate::SessionDisplayNameCache,
     requester: &SessionRef,
     approver: &Identity,
     request: &ApprovalRequest,
@@ -57,11 +58,12 @@ pub(super) async fn deliver_approval_notice(
         "request": request,
         "decideCommands": commands,
     });
-    deliver_notice(delivery, requester, approver_session, notice).await
+    deliver_notice(delivery, display_names, requester, approver_session, notice).await
 }
 
 pub(super) async fn deliver_question_notice(
     delivery: Option<&Arc<dyn SessionMessageDelivery>>,
+    display_names: &crate::SessionDisplayNameCache,
     requester: &SessionRef,
     approver: &Identity,
     request: &QuestionRequest,
@@ -87,11 +89,12 @@ pub(super) async fn deliver_question_notice(
         "request": request,
         "answerCommand": answer_command,
     });
-    deliver_notice(delivery, requester, approver_session, notice).await
+    deliver_notice(delivery, display_names, requester, approver_session, notice).await
 }
 
 async fn deliver_notice(
     delivery: Option<&Arc<dyn SessionMessageDelivery>>,
+    display_names: &crate::SessionDisplayNameCache,
     requester: &SessionRef,
     approver: &SessionRef,
     notice: serde_json::Value,
@@ -102,7 +105,7 @@ async fn deliver_notice(
     let delivery = delivery.ok_or(InteractionHistoryError::Unavailable)?;
     tokio::time::timeout(
         APPROVAL_TIMEOUT,
-        deliver_message_via(delivery.as_ref(), requester, approver, text),
+        deliver_message_via(delivery.as_ref(), display_names, requester, approver, text),
     )
     .await
     .map_err(|_| InteractionHistoryError::Unavailable)?
