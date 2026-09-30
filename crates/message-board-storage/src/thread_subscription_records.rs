@@ -6,6 +6,7 @@ use crate::storage_support::{
     BoardTransaction, current_activity_sequence, ensure_identity, identity_key, invalid_record,
     storage_error,
 };
+use crate::thread_batch_selection::pending_message_count;
 use crate::thread_subscription_lifecycle_records::{
     activate_scope_watch, end_expired_rows, end_subscription,
 };
@@ -67,7 +68,7 @@ pub(super) async fn upsert_subscription(
     } else {
         None
     };
-    let expires_at = expiry_at(write.now, write.policy.lifetime)?;
+    let expires_at = expiry_at(write.now, write.policy.lifetime())?;
     let last_outcome = encode_outcome(write.last_outcome)?;
     sqlx::query!(
         "INSERT INTO thread_subscriptions(reader_key,scope_kind,scope_id,mode,when_idle, \
@@ -82,11 +83,11 @@ pub(super) async fn upsert_subscription(
         write.reader_key,
         scope_kind,
         scope_id,
-        write.policy.mode.as_str(),
-        write.policy.when_idle.as_str(),
-        i64::try_from(write.policy.timing.quiet_seconds).map_err(|_| invalid_record())?,
-        i64::try_from(write.policy.timing.cap_seconds).map_err(|_| invalid_record())?,
-        i64::try_from(write.policy.lifetime.seconds()).map_err(|_| invalid_record())?,
+        write.policy.mode().as_str(),
+        write.policy.when_idle().as_str(),
+        i64::try_from(write.policy.timing().quiet_seconds()).map_err(|_| invalid_record())?,
+        i64::try_from(write.policy.timing().cap_seconds()).map_err(|_| invalid_record())?,
+        i64::try_from(write.policy.lifetime().seconds()).map_err(|_| invalid_record())?,
         encode_utc_timestamp(write.now),
         encode_utc_timestamp(expires_at),
         encode_state(write.state),
@@ -148,23 +149,26 @@ pub(super) async fn delete_scope_windows(
     }
     Ok(())
 }
-#[allow(clippy::too_many_arguments)]
-async fn save_subscription(
-    transaction: &mut BoardTransaction<'_>,
-    reader_key: &str,
-    reader: &Identity,
-    scope: &SubscriptionScope,
-    policy_patch: &SubscriptionPolicyPatch,
+struct SaveSubscriptionProps<'a> {
+    reader_key: &'a str,
+    reader: &'a Identity,
+    scope: &'a SubscriptionScope,
+    policy_patch: &'a SubscriptionPolicyPatch,
     now: DateTime<Utc>,
     activate_watch: bool,
+}
+
+async fn save_subscription(
+    transaction: &mut BoardTransaction<'_>,
+    props: SaveSubscriptionProps<'_>,
 ) -> Result<ThreadSubscriptionRecord, BoardError> {
     let latest = current_activity_sequence(transaction).await?;
-    let mut existing = load_subscription_record(transaction, reader_key, scope).await?;
+    let mut existing = load_subscription_record(transaction, props.reader_key, props.scope).await?;
     let (policy, state, generation, last_outcome) = match existing.as_ref() {
         Some(record) => {
             let policy = record
                 .policy
-                .apply_patch(reader, policy_patch)
+                .apply_patch(props.reader, props.policy_patch)
                 .map_err(policy_error)?;
             let state_changed = !matches!(record.state, SubscriptionState::Active);
             let policy_changed = policy != record.policy;
@@ -181,8 +185,8 @@ async fn save_subscription(
             )
         }
         None => {
-            let policy = SubscriptionPolicy::defaults_for(reader)
-                .apply_patch(reader, policy_patch)
+            let policy = SubscriptionPolicy::defaults_for(props.reader)
+                .apply_patch(props.reader, props.policy_patch)
                 .map_err(policy_error)?;
             (
                 policy,
@@ -192,23 +196,23 @@ async fn save_subscription(
             )
         }
     };
-    if activate_watch {
-        activate_scope_watch(transaction, reader_key, scope, latest).await?;
+    if props.activate_watch {
+        activate_scope_watch(transaction, props.reader_key, props.scope, latest).await?;
     }
     upsert_subscription(
         transaction,
         SubscriptionWrite {
-            reader_key,
-            scope,
+            reader_key: props.reader_key,
+            scope: props.scope,
             policy: &policy,
             state,
-            now,
+            now: props.now,
             generation,
             last_outcome: last_outcome.as_ref(),
         },
     )
     .await?;
-    existing = load_subscription_record(transaction, reader_key, scope).await?;
+    existing = load_subscription_record(transaction, props.reader_key, props.scope).await?;
     existing.ok_or_else(invalid_record)
 }
 impl BoardStore {
@@ -231,12 +235,14 @@ impl BoardStore {
         }
         let record = save_subscription(
             &mut transaction,
-            &reader_key,
-            &request.reader,
-            &request.scope,
-            &request.policy,
-            now,
-            true,
+            SaveSubscriptionProps {
+                reader_key: &reader_key,
+                reader: &request.reader,
+                scope: &request.scope,
+                policy_patch: &request.policy,
+                now,
+                activate_watch: true,
+            },
         )
         .await?;
         transaction.commit().await.map_err(storage_error)?;
@@ -255,6 +261,7 @@ impl BoardStore {
             .await
             .map_err(storage_error)?;
         let reader_key = ensure_identity(&mut transaction, &request.reader).await?;
+        let _ = end_expired_rows(&mut transaction, now, Some(&reader_key)).await?;
         let Some(record) =
             load_subscription_record(&mut transaction, &reader_key, &request.scope).await?
         else {
@@ -277,6 +284,61 @@ impl BoardStore {
             .ok_or_else(invalid_record)?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(record)
+    }
+
+    /// Complete R20 after a resolved Thread subscription has drained every pending window.
+    pub async fn complete_thread_subscription_drain(
+        &mut self,
+        reader: &Identity,
+        root_message_id: &MessageId,
+        now: DateTime<Utc>,
+    ) -> Result<ThreadSubscriptionRecord, BoardError> {
+        let mut transaction = self
+            .connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let reader_key = ensure_identity(&mut transaction, reader).await?;
+        let scope = SubscriptionScope::thread(root_message_id.clone());
+        let record = load_subscription_record(&mut transaction, &reader_key, &scope)
+            .await?
+            .ok_or_else(|| BoardError::resource_not_found(subscription_resource(&scope)))?;
+        if record.state != SubscriptionState::Draining {
+            return Err(BoardError::invalid_field(
+                "state",
+                "only a draining Thread subscription can be completed",
+            ));
+        }
+        let latest = current_activity_sequence(&mut transaction).await?;
+        let pending_count =
+            pending_message_count(&mut transaction, &reader_key, root_message_id, latest).await?;
+        let has_windows = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM subscription_windows WHERE reader_key=? AND root_id=?)",
+            reader_key,
+            root_message_id.as_str(),
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if pending_count > 0 || has_windows != 0 {
+            return Err(BoardError::invalid_field(
+                "windows",
+                "the draining Thread subscription still has pending activity or a window",
+            ));
+        }
+        end_subscription(
+            &mut transaction,
+            &reader_key,
+            &scope,
+            EndReason::Resolved,
+            now,
+        )
+        .await?;
+        let completed = load_subscription_record(&mut transaction, &reader_key, &scope)
+            .await?
+            .ok_or_else(invalid_record)?;
+        transaction.commit().await.map_err(storage_error)?;
+        Ok(completed)
     }
 
     /// Read one subscription record, including an ended record if present.
@@ -346,7 +408,7 @@ impl BoardStore {
             return Ok(None);
         };
         if record.state.is_delivery_eligible() {
-            let expires_at = expiry_at(now, record.policy.lifetime)?;
+            let expires_at = expiry_at(now, record.policy.lifetime())?;
             let (scope_kind, scope_id) = encode_scope(scope);
             sqlx::query!(
                 "UPDATE thread_subscriptions SET renewed_at=?,expires_at=? \

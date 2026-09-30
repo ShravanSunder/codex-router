@@ -3,6 +3,10 @@
 mod lifecycle;
 #[path = "thread_subscriptions/migration.rs"]
 mod migration;
+#[path = "thread_subscriptions/review_minor_regressions.rs"]
+mod review_minor_regressions;
+#[path = "thread_subscriptions/review_regressions.rs"]
+mod review_regressions;
 #[path = "thread_subscriptions/windows.rs"]
 mod windows;
 

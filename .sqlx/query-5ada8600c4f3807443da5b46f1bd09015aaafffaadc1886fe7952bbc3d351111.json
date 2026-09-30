@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO thread_watches(reader_key,root_id,active,starts_after_activity) VALUES(?,?,1,?) ON CONFLICT(reader_key,root_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5ada8600c4f3807443da5b46f1bd09015aaafffaadc1886fe7952bbc3d351111"
+}

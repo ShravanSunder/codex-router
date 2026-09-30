@@ -14,7 +14,9 @@ use crate::storage_support::{
     decode_cursor as decode_signed_cursor, decode_identity, encode_cursor, ensure_identity,
     invalid_cursor, invalid_record, recompute_project_unread, storage_error,
 };
-use crate::thread_subscription_lifecycle_records::end_subscription;
+use crate::thread_subscription_lifecycle_records::{
+    end_subscription, end_thread_subscription_for_unwatch,
+};
 use chrono::{DateTime, Utc};
 use message_board::*;
 use serde::{Deserialize, Serialize};
@@ -269,11 +271,11 @@ impl BoardStore {
         .execute(&mut *transaction)
         .await
         .map_err(storage_error)?;
-        end_subscription(
+        end_thread_subscription_for_unwatch(
             &mut transaction,
             &reader_key,
-            &SubscriptionScope::thread(request.root_message_id.clone()),
-            EndReason::Cancelled,
+            &request.actor,
+            &request.root_message_id,
             now,
         )
         .await?;

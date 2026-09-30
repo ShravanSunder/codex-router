@@ -7,6 +7,7 @@ use crate::storage_support::{
 };
 use crate::subscription_window_records::load_window;
 use crate::thread_batch_selection::pending_message_count;
+use crate::thread_delivery_position_writer::write_delivered_position_if_valid;
 use crate::thread_subscription_lifecycle_records::get_covering_subscription;
 use crate::thread_subscription_row_decoding::encode_utc_timestamp;
 use chrono::{DateTime, Utc};
@@ -95,20 +96,10 @@ impl BoardStore {
         let outcome_json =
             serde_json::to_string(&outcome).map_err(|_| BoardError::board_unavailable())?;
         for root in &settlement.roots {
-            if !subscription_generation_matches(
-                &mut transaction,
-                &reader_key,
-                &root.subscription_scope,
-                root.subscription_generation,
-            )
-            .await?
-            {
-                continue;
-            }
             let pending_count =
                 pending_message_count(&mut transaction, &reader_key, &root.root_message_id, latest)
                     .await?;
-            if pending_count <= 0 {
+            let window_write = if pending_count <= 0 {
                 sqlx::query!(
                     "DELETE FROM subscription_windows WHERE reader_key=? AND root_id=? AND window_id=?",
                     reader_key,
@@ -117,9 +108,9 @@ impl BoardStore {
                 )
                 .execute(&mut *transaction)
                 .await
-                .map_err(storage_error)?;
+                .map_err(storage_error)?
             } else {
-                let update_result = sqlx::query!(
+                sqlx::query!(
                     "UPDATE subscription_windows SET \
                        opened_at=COALESCE(residual_opened_at,opened_at), \
                        held_since=CASE WHEN ? IS NULL THEN COALESCE(held_since,?) ELSE NULL END, \
@@ -136,17 +127,25 @@ impl BoardStore {
                 )
                 .execute(&mut *transaction)
                 .await
-                .map_err(storage_error)?;
-                if update_result.rows_affected() > 0 {
-                    set_subscription_outcome(
-                        &mut transaction,
-                        &reader_key,
-                        &root.subscription_scope,
-                        root.subscription_generation,
-                        outcome_json.as_str(),
-                    )
-                    .await?;
-                }
+                .map_err(storage_error)?
+            };
+            if window_write.rows_affected() > 0
+                && subscription_generation_matches(
+                    &mut transaction,
+                    &reader_key,
+                    &root.subscription_scope,
+                    root.subscription_generation,
+                )
+                .await?
+            {
+                set_subscription_outcome(
+                    &mut transaction,
+                    &reader_key,
+                    &root.subscription_scope,
+                    root.subscription_generation,
+                    outcome_json.as_str(),
+                )
+                .await?;
             }
         }
         transaction.commit().await.map_err(storage_error)
@@ -174,7 +173,7 @@ impl BoardStore {
             };
             if subscription.mode != SubscriptionMode::Deliver
                 || subscription.when_idle != WhenIdle::Drop
-                || !matches!(subscription.state, SubscriptionState::Active)
+                || !subscription.state.is_delivery_eligible()
             {
                 continue;
             }
@@ -285,46 +284,27 @@ async fn settle_root_in_transaction(
     outcome: &SubscriptionDeliveryOutcome,
 ) -> Result<(), BoardError> {
     let latest = current_activity_sequence(transaction).await?;
-    let delivered_value =
-        i64::try_from(root.delivered_through.get()).map_err(|_| invalid_record())?;
-    if delivered_value > latest {
-        return Err(BoardError::invalid_record(ResourceIdentity::Thread {
-            root_message_id: root.root_message_id.clone(),
-        }));
-    }
-    sqlx::query!(
-        "INSERT INTO thread_delivery_positions(reader_key,root_id,delivered_through) VALUES(?,?,?) \
-         ON CONFLICT(reader_key,root_id) DO UPDATE SET \
-           delivered_through=MAX(thread_delivery_positions.delivered_through,excluded.delivered_through)",
-        reader_key,
-        root.root_message_id.as_str(),
-        delivered_value,
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(storage_error)?;
-    advance_participant_last_seen(
+    let delivered_position_advanced = write_delivered_position_if_valid(
         transaction,
         reader_key,
         &root.root_message_id,
-        delivered_value,
+        root.delivered_through,
     )
     .await?;
-    let outcome_json =
-        serde_json::to_string(outcome).map_err(|_| BoardError::board_unavailable())?;
-    let window_matches = subscription_generation_matches(
-        transaction,
-        reader_key,
-        &root.subscription_scope,
-        root.subscription_generation,
-    )
-    .await?;
-    if !window_matches {
-        return Ok(());
+    if delivered_position_advanced {
+        let delivered_value =
+            i64::try_from(root.delivered_through.get()).map_err(|_| invalid_record())?;
+        advance_participant_last_seen(
+            transaction,
+            reader_key,
+            &root.root_message_id,
+            delivered_value,
+        )
+        .await?;
     }
     let pending_count =
         pending_message_count(transaction, reader_key, &root.root_message_id, latest).await?;
-    if pending_count == 0 {
+    let window_write = if pending_count == 0 {
         sqlx::query!(
             "DELETE FROM subscription_windows WHERE reader_key=? AND root_id=? AND window_id=?",
             reader_key,
@@ -333,7 +313,7 @@ async fn settle_root_in_transaction(
         )
         .execute(&mut **transaction)
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error)?
     } else {
         sqlx::query!(
             "UPDATE subscription_windows SET \
@@ -346,14 +326,28 @@ async fn settle_root_in_transaction(
         )
         .execute(&mut **transaction)
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error)?
+    };
+    if window_write.rows_affected() > 0 {
+        let outcome_json =
+            serde_json::to_string(outcome).map_err(|_| BoardError::board_unavailable())?;
+        if subscription_generation_matches(
+            transaction,
+            reader_key,
+            &root.subscription_scope,
+            root.subscription_generation,
+        )
+        .await?
+        {
+            set_subscription_outcome(
+                transaction,
+                reader_key,
+                &root.subscription_scope,
+                root.subscription_generation,
+                outcome_json.as_str(),
+            )
+            .await?;
+        }
     }
-    set_subscription_outcome(
-        transaction,
-        reader_key,
-        &root.subscription_scope,
-        root.subscription_generation,
-        outcome_json.as_str(),
-    )
-    .await
+    Ok(())
 }

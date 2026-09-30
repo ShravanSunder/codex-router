@@ -85,18 +85,18 @@ pub(crate) fn decode_thread_subscription_record(
         u64::try_from(row.generation).map_err(|_| corrupt_subscription("generation"))?;
     let generation = SubscriptionGeneration::new(generation_value)
         .map_err(|error| corrupt_subscription(error.field))?;
-    ThreadSubscriptionRecord::new(
+    ThreadSubscriptionRecord::new(ThreadSubscriptionRecordProps {
         reader,
         scope,
         policy,
         state,
-        decode_utc_timestamp("renewedAt", row.renewed_at.as_str())?,
-        decode_utc_timestamp("expiresAt", row.expires_at.as_str())?,
+        renewed_at: decode_utc_timestamp("renewedAt", row.renewed_at.as_str())?,
+        expires_at: decode_utc_timestamp("expiresAt", row.expires_at.as_str())?,
         ended_at,
         generation,
         last_outcome,
-        windows,
-    )
+        roots: windows,
+    })
     .map_err(|error| corrupt_subscription(error.field))
 }
 
@@ -120,7 +120,7 @@ fn decode_subscription_root_record(
     let retry_attempts =
         u32::try_from(row.retry_attempts).map_err(|_| corrupt_subscription("retryAttempts"))?;
     SubscriptionWindowId::try_from(row.window_id).map_err(|_| corrupt_subscription("windowId"))?;
-    SubscriptionRootRecord::new(
+    SubscriptionRootRecord::new(SubscriptionRootRecordProps {
         root_message_id,
         opened_at,
         last_arrival_at,
@@ -128,7 +128,7 @@ fn decode_subscription_root_record(
         held_since,
         next_retry_at,
         retry_attempts,
-    )
+    })
     .map_err(|error| corrupt_subscription(error.field))
 }
 
@@ -184,7 +184,10 @@ fn decode_state(
                 Some(decode_utc_timestamp("endedAt", ended_at)?),
             ))
         }
-        ("active" | "draining" | "ended", _, _) => Err(corrupt_subscription("endReason")),
+        ("ended", Some(_), None) => Err(corrupt_subscription("endedAt")),
+        ("ended", None, _) => Err(corrupt_subscription("endReason")),
+        ("active" | "draining", Some(_), _) => Err(corrupt_subscription("endReason")),
+        ("active" | "draining", None, Some(_)) => Err(corrupt_subscription("endedAt")),
         _ => Err(corrupt_subscription("state")),
     }
 }

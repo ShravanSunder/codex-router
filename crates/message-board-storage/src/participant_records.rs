@@ -11,6 +11,9 @@ use crate::storage_support::{
     decode_cursor as decode_signed_cursor, encode_cursor, ensure_identity, identity_key,
     invalid_cursor, invalid_record, recompute_project_unread, storage_error,
 };
+use crate::thread_delivery_position_writer::{
+    latest_message_activity_for_root, write_delivered_position_if_valid,
+};
 use crate::thread_subscription_lifecycle_records::{
     end_thread_subscription_for_join_without_watch, end_thread_subscription_for_leave,
     resolve_thread_subscriptions, upsert_join_subscription,
@@ -321,10 +324,22 @@ impl BoardStore {
                 now,
             )
             .await?;
+            if let Some(latest_message_activity) =
+                latest_message_activity_for_root(&mut transaction, &request.root_message_id).await?
+            {
+                let _ = write_delivered_position_if_valid(
+                    &mut transaction,
+                    &actor_key,
+                    &request.root_message_id,
+                    latest_message_activity,
+                )
+                .await?;
+            }
         } else {
             end_thread_subscription_for_join_without_watch(
                 &mut transaction,
                 &actor_key,
+                &request.actor,
                 &request.root_message_id,
                 now,
             )

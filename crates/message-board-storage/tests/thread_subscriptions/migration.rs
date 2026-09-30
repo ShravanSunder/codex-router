@@ -129,7 +129,9 @@ async fn backfill_requires_open_session_unresolved_thread_and_active_watch() {
             .await
             .unwrap();
     let latest_activity: i64 = sqlx::query_scalar(
-        "SELECT MAX(activity_sequence) FROM board_activity WHERE root_id=? OR message_id=?",
+        "SELECT MAX(activity_sequence) FROM board_activity \
+         WHERE (root_id=? AND kind='threadMessageCreated') \
+           OR (message_id=? AND kind='mainMessageCreated')",
     )
     .bind(root_message_id.as_str())
     .bind(root_message_id.as_str())
@@ -253,4 +255,102 @@ async fn backfill_requires_open_session_unresolved_thread_and_active_watch() {
     assert_eq!(subscription_count, 2);
     connection.close().await.unwrap();
     std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn p1_backfill_delivered_stays_at_message_activity_when_join_is_latest() {
+    let mut fixture = ThreadSubscriptionFixture::create_without_participant("review-p1").await;
+    fixture
+        .post_reply_as(
+            human("review-p1-author"),
+            "reply before participant joined",
+            fixture.now + chrono::Duration::seconds(1),
+        )
+        .await;
+    fixture
+        .join_reader(
+            fixture.reader.clone(),
+            ParticipantRole::Participant,
+            true,
+            fixture.now + chrono::Duration::seconds(2),
+        )
+        .await;
+
+    let path = fixture.path.clone();
+    let reader = fixture.reader.clone();
+    let project_id = fixture.project_id.clone();
+    fixture.store.close().await.unwrap();
+    let mut connection = raw_connection(&path).await;
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM thread_delivery_positions")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE subscription_windows")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE thread_subscriptions")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=202609170001")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    fixture.store = BoardStore::open(&path).await.unwrap();
+    fixture
+        .store
+        .fetch_inbox(InboxFetchRequest {
+            scope: InboxScope::Project { project_id },
+            reader: reader.clone(),
+            read_mode: InboxReadMode::Unread,
+            page: PageRequest {
+                limit: 100_u32.try_into().unwrap(),
+                cursor: None,
+            },
+        })
+        .await
+        .unwrap();
+    let own_post = fixture
+        .post_reply_as(
+            reader.clone(),
+            "reader post after upgrade",
+            fixture.now + chrono::Duration::seconds(5),
+        )
+        .await;
+    let other_post = fixture
+        .post_reply_as(
+            human("review-p1-author"),
+            "other post after upgrade",
+            fixture.now + chrono::Duration::seconds(6),
+        )
+        .await;
+    let due = fixture
+        .store
+        .due_subscription_roots(&reader, fixture.now + chrono::Duration::seconds(200))
+        .await
+        .unwrap();
+    assert_eq!(due, vec![fixture.root_message_id.clone()]);
+    let (notice, _) = fixture
+        .store
+        .select_subscription_notice(&reader, &due, fixture.now + chrono::Duration::seconds(200))
+        .await
+        .unwrap();
+    assert_eq!(notice.roots[0].message_count, 1);
+    assert_eq!(
+        notice.roots[0].from_sequence,
+        other_post.message.activity_sequence
+    );
+    assert_eq!(
+        notice.roots[0].through_sequence,
+        other_post.message.activity_sequence
+    );
+    assert!(own_post.message.activity_sequence < other_post.message.activity_sequence);
+    fixture.finish().await;
 }

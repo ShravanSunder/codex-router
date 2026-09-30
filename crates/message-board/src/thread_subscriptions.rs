@@ -116,10 +116,29 @@ impl WhenIdle {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "RawBatchTiming"
+)]
 pub struct BatchTiming {
-    pub quiet_seconds: u64,
-    pub cap_seconds: u64,
+    quiet_seconds: u64,
+    cap_seconds: u64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawBatchTiming {
+    quiet_seconds: u64,
+    cap_seconds: u64,
+}
+
+impl TryFrom<RawBatchTiming> for BatchTiming {
+    type Error = InvalidSubscriptionField;
+
+    fn try_from(raw: RawBatchTiming) -> Result<Self, Self::Error> {
+        Self::new(raw.quiet_seconds, raw.cap_seconds)
+    }
 }
 
 impl BatchTiming {
@@ -151,11 +170,35 @@ impl BatchTiming {
             cap_seconds: DEFAULT_SUBSCRIPTION_CAP_SECONDS,
         }
     }
+
+    #[must_use]
+    pub const fn quiet_seconds(self) -> u64 {
+        self.quiet_seconds
+    }
+
+    #[must_use]
+    pub const fn cap_seconds(self) -> u64 {
+        self.cap_seconds
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
+#[serde(try_from = "u64", into = "u64")]
 pub struct SubscriptionLifetime(u64);
+
+impl TryFrom<u64> for SubscriptionLifetime {
+    type Error = InvalidSubscriptionField;
+
+    fn try_from(seconds: u64) -> Result<Self, Self::Error> {
+        Self::new(seconds)
+    }
+}
+
+impl From<SubscriptionLifetime> for u64 {
+    fn from(lifetime: SubscriptionLifetime) -> Self {
+        lifetime.0
+    }
+}
 
 impl SubscriptionLifetime {
     pub fn new(seconds: u64) -> Result<Self, InvalidSubscriptionField> {
@@ -182,12 +225,33 @@ impl SubscriptionLifetime {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "RawSubscriptionPolicy"
+)]
 pub struct SubscriptionPolicy {
-    pub mode: SubscriptionMode,
-    pub when_idle: WhenIdle,
-    pub timing: BatchTiming,
-    pub lifetime: SubscriptionLifetime,
+    mode: SubscriptionMode,
+    when_idle: WhenIdle,
+    timing: BatchTiming,
+    lifetime: SubscriptionLifetime,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawSubscriptionPolicy {
+    mode: SubscriptionMode,
+    when_idle: WhenIdle,
+    timing: BatchTiming,
+    lifetime: SubscriptionLifetime,
+}
+
+impl TryFrom<RawSubscriptionPolicy> for SubscriptionPolicy {
+    type Error = InvalidSubscriptionField;
+
+    fn try_from(raw: RawSubscriptionPolicy) -> Result<Self, Self::Error> {
+        Self::validated_for_reader(None, raw.mode, raw.when_idle, raw.timing, raw.lifetime)
+    }
 }
 
 impl SubscriptionPolicy {
@@ -198,7 +262,19 @@ impl SubscriptionPolicy {
         timing: BatchTiming,
         lifetime: SubscriptionLifetime,
     ) -> Result<Self, InvalidSubscriptionField> {
-        if matches!(reader, Identity::Human { .. }) && mode == SubscriptionMode::Deliver {
+        Self::validated_for_reader(Some(reader), mode, when_idle, timing, lifetime)
+    }
+
+    fn validated_for_reader(
+        reader: Option<&Identity>,
+        mode: SubscriptionMode,
+        when_idle: WhenIdle,
+        timing: BatchTiming,
+        lifetime: SubscriptionLifetime,
+    ) -> Result<Self, InvalidSubscriptionField> {
+        if reader.is_some_and(|value| matches!(value, Identity::Human { .. }))
+            && mode == SubscriptionMode::Deliver
+        {
             return Err(invalid_subscription_field(
                 "mode",
                 "deliver requires a session Reader",
@@ -210,6 +286,37 @@ impl SubscriptionPolicy {
             timing,
             lifetime,
         })
+    }
+
+    pub fn validate_reader(&self, reader: &Identity) -> Result<(), InvalidSubscriptionField> {
+        Self::validated_for_reader(
+            Some(reader),
+            self.mode,
+            self.when_idle,
+            self.timing,
+            self.lifetime,
+        )
+        .map(|_| ())
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> SubscriptionMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub const fn when_idle(&self) -> WhenIdle {
+        self.when_idle
+    }
+
+    #[must_use]
+    pub const fn timing(&self) -> BatchTiming {
+        self.timing
+    }
+
+    #[must_use]
+    pub const fn lifetime(&self) -> SubscriptionLifetime {
+        self.lifetime
     }
 
     #[must_use]
@@ -291,8 +398,22 @@ impl EndReason {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
+#[serde(try_from = "u64", into = "u64")]
 pub struct SubscriptionGeneration(u64);
+
+impl TryFrom<u64> for SubscriptionGeneration {
+    type Error = InvalidSubscriptionField;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<SubscriptionGeneration> for u64 {
+    fn from(generation: SubscriptionGeneration) -> Self {
+        generation.0
+    }
+}
 
 impl SubscriptionGeneration {
     pub fn new(value: u64) -> Result<Self, InvalidSubscriptionField> {
@@ -423,7 +544,11 @@ pub enum SubscriptionDeliveryOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "RawSubscriptionRootRecord"
+)]
 pub struct SubscriptionRootRecord {
     pub root_message_id: MessageId,
     pub opened_at: DateTime<Utc>,
@@ -434,38 +559,72 @@ pub struct SubscriptionRootRecord {
     pub retry_attempts: u32,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawSubscriptionRootRecord {
+    root_message_id: MessageId,
+    opened_at: DateTime<Utc>,
+    last_arrival_at: DateTime<Utc>,
+    pending_count: u64,
+    held_since: Option<DateTime<Utc>>,
+    next_retry_at: Option<DateTime<Utc>>,
+    retry_attempts: u32,
+}
+
+impl TryFrom<RawSubscriptionRootRecord> for SubscriptionRootRecord {
+    type Error = InvalidSubscriptionField;
+
+    fn try_from(raw: RawSubscriptionRootRecord) -> Result<Self, Self::Error> {
+        Self::new(SubscriptionRootRecordProps {
+            root_message_id: raw.root_message_id,
+            opened_at: raw.opened_at,
+            last_arrival_at: raw.last_arrival_at,
+            pending_count: raw.pending_count,
+            held_since: raw.held_since,
+            next_retry_at: raw.next_retry_at,
+            retry_attempts: raw.retry_attempts,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionRootRecordProps {
+    pub root_message_id: MessageId,
+    pub opened_at: DateTime<Utc>,
+    pub last_arrival_at: DateTime<Utc>,
+    pub pending_count: u64,
+    pub held_since: Option<DateTime<Utc>>,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub retry_attempts: u32,
+}
+
 impl SubscriptionRootRecord {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        root_message_id: MessageId,
-        opened_at: DateTime<Utc>,
-        last_arrival_at: DateTime<Utc>,
-        pending_count: u64,
-        held_since: Option<DateTime<Utc>>,
-        next_retry_at: Option<DateTime<Utc>>,
-        retry_attempts: u32,
-    ) -> Result<Self, InvalidSubscriptionField> {
-        if last_arrival_at < opened_at {
+    pub fn new(props: SubscriptionRootRecordProps) -> Result<Self, InvalidSubscriptionField> {
+        if props.last_arrival_at < props.opened_at {
             return Err(invalid_subscription_field(
                 "lastArrivalAt",
                 "must not be earlier than openedAt",
             ));
         }
         Ok(Self {
-            root_message_id,
-            opened_at,
-            last_arrival_at,
-            pending_count,
-            held_since,
-            next_retry_at,
-            retry_attempts,
+            root_message_id: props.root_message_id,
+            opened_at: props.opened_at,
+            last_arrival_at: props.last_arrival_at,
+            pending_count: props.pending_count,
+            held_since: props.held_since,
+            next_retry_at: props.next_retry_at,
+            retry_attempts: props.retry_attempts,
         })
     }
 }
 
 /// Stored subscription facts plus the windows currently covered by its scope.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "RawThreadSubscriptionRecord"
+)]
 pub struct ThreadSubscriptionRecord {
     pub reader: Identity,
     pub scope: SubscriptionScope,
@@ -479,49 +638,86 @@ pub struct ThreadSubscriptionRecord {
     pub roots: Vec<SubscriptionRootRecord>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawThreadSubscriptionRecord {
+    reader: Identity,
+    scope: SubscriptionScope,
+    policy: SubscriptionPolicy,
+    state: SubscriptionState,
+    renewed_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    generation: SubscriptionGeneration,
+    last_outcome: Option<SubscriptionDeliveryOutcome>,
+    roots: Vec<SubscriptionRootRecord>,
+}
+
+impl TryFrom<RawThreadSubscriptionRecord> for ThreadSubscriptionRecord {
+    type Error = InvalidSubscriptionField;
+
+    fn try_from(raw: RawThreadSubscriptionRecord) -> Result<Self, Self::Error> {
+        Self::new(ThreadSubscriptionRecordProps {
+            reader: raw.reader,
+            scope: raw.scope,
+            policy: raw.policy,
+            state: raw.state,
+            renewed_at: raw.renewed_at,
+            expires_at: raw.expires_at,
+            ended_at: raw.ended_at,
+            generation: raw.generation,
+            last_outcome: raw.last_outcome,
+            roots: raw.roots,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadSubscriptionRecordProps {
+    pub reader: Identity,
+    pub scope: SubscriptionScope,
+    pub policy: SubscriptionPolicy,
+    pub state: SubscriptionState,
+    pub renewed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub generation: SubscriptionGeneration,
+    pub last_outcome: Option<SubscriptionDeliveryOutcome>,
+    pub roots: Vec<SubscriptionRootRecord>,
+}
+
 impl ThreadSubscriptionRecord {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        reader: Identity,
-        scope: SubscriptionScope,
-        policy: SubscriptionPolicy,
-        state: SubscriptionState,
-        renewed_at: DateTime<Utc>,
-        expires_at: DateTime<Utc>,
-        ended_at: Option<DateTime<Utc>>,
-        generation: SubscriptionGeneration,
-        last_outcome: Option<SubscriptionDeliveryOutcome>,
-        roots: Vec<SubscriptionRootRecord>,
-    ) -> Result<Self, InvalidSubscriptionField> {
-        if expires_at <= renewed_at {
+    pub fn new(props: ThreadSubscriptionRecordProps) -> Result<Self, InvalidSubscriptionField> {
+        props.policy.validate_reader(&props.reader)?;
+        if props.expires_at <= props.renewed_at {
             return Err(invalid_subscription_field(
                 "expiresAt",
                 "must be later than renewedAt",
             ));
         }
-        if state.end_reason().is_some() != ended_at.is_some() {
+        if props.state.end_reason().is_some() != props.ended_at.is_some() {
             return Err(invalid_subscription_field(
                 "endedAt",
                 "must be set exactly when state is ended",
             ));
         }
-        if matches!(scope, SubscriptionScope::Thread { .. }) && roots.len() > 1 {
+        if matches!(props.scope, SubscriptionScope::Thread { .. }) && props.roots.len() > 1 {
             return Err(invalid_subscription_field(
                 "roots",
                 "a Thread subscription can contain at most one root window",
             ));
         }
         Ok(Self {
-            reader,
-            scope,
-            policy,
-            state,
-            renewed_at,
-            expires_at,
-            ended_at,
-            generation,
-            last_outcome,
-            roots,
+            reader: props.reader,
+            scope: props.scope,
+            policy: props.policy,
+            state: props.state,
+            renewed_at: props.renewed_at,
+            expires_at: props.expires_at,
+            ended_at: props.ended_at,
+            generation: props.generation,
+            last_outcome: props.last_outcome,
+            roots: props.roots,
         })
     }
 }

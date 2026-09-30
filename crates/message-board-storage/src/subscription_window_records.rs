@@ -127,6 +127,26 @@ pub(crate) async fn rescan_missing_windows_in_transaction(
     .map_err(storage_error)?;
     let mut opened_count = 0_u64;
     let latest = current_activity_sequence(transaction).await?;
+    let existing_roots = sqlx::query_scalar!(
+        "SELECT root_id FROM subscription_windows WHERE reader_key=? ORDER BY root_id",
+        reader_key,
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    for root_id in existing_roots {
+        let root_message_id = MessageId::try_from(root_id).map_err(|_| invalid_record())?;
+        if pending_message_count(transaction, reader_key, &root_message_id, latest).await? <= 0 {
+            sqlx::query!(
+                "DELETE FROM subscription_windows WHERE reader_key=? AND root_id=?",
+                reader_key,
+                root_message_id.as_str(),
+            )
+            .execute(&mut **transaction)
+            .await
+            .map_err(storage_error)?;
+        }
+    }
     for scope_row in scopes {
         let roots = match scope_row.scope_kind.as_str() {
             "thread" => vec![

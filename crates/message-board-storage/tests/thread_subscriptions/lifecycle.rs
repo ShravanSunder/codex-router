@@ -222,9 +222,9 @@ async fn thread_subscribe_checks_participant_validates_patch_and_activates_watch
         )
         .await
         .unwrap();
-    assert_eq!(record.policy.mode, SubscriptionMode::Poll);
-    assert_eq!(record.policy.timing.quiet_seconds, 60);
-    assert_eq!(record.policy.timing.cap_seconds, 600);
+    assert_eq!(record.policy.mode(), SubscriptionMode::Poll);
+    assert_eq!(record.policy.timing().quiet_seconds(), 60);
+    assert_eq!(record.policy.timing().cap_seconds(), 600);
     assert!(fixture.watch_status(fixture.reader.clone()).await.watching);
 
     let invalid = fixture

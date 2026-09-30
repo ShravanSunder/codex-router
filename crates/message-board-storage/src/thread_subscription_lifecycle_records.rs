@@ -158,11 +158,11 @@ async fn load_covering_subscription(
         }
         return Ok(Some(CoveringSubscriptionRow {
             scope: decoded.scope,
-            mode: decoded.policy.mode,
-            when_idle: decoded.policy.when_idle,
-            quiet_seconds: decoded.policy.timing.quiet_seconds,
-            cap_seconds: decoded.policy.timing.cap_seconds,
-            lifetime_seconds: decoded.policy.lifetime.seconds(),
+            mode: decoded.policy.mode(),
+            when_idle: decoded.policy.when_idle(),
+            quiet_seconds: decoded.policy.timing().quiet_seconds(),
+            cap_seconds: decoded.policy.timing().cap_seconds(),
+            lifetime_seconds: decoded.policy.lifetime().seconds(),
             generation: decoded.generation,
             state: decoded.state,
         }));
@@ -186,11 +186,11 @@ async fn load_covering_subscription(
     }
     Ok(Some(CoveringSubscriptionRow {
         scope: decoded.scope,
-        mode: decoded.policy.mode,
-        when_idle: decoded.policy.when_idle,
-        quiet_seconds: decoded.policy.timing.quiet_seconds,
-        cap_seconds: decoded.policy.timing.cap_seconds,
-        lifetime_seconds: decoded.policy.lifetime.seconds(),
+        mode: decoded.policy.mode(),
+        when_idle: decoded.policy.when_idle(),
+        quiet_seconds: decoded.policy.timing().quiet_seconds(),
+        cap_seconds: decoded.policy.timing().cap_seconds(),
+        lifetime_seconds: decoded.policy.lifetime().seconds(),
         generation: decoded.generation,
         state: decoded.state,
     }))
@@ -277,14 +277,23 @@ pub(crate) async fn ensure_topic_root_watch(
     if root_topic.as_deref() != Some(topic_id.as_str()) {
         return Err(invalid_record());
     }
-    activate_watch(
+    crate::storage_support::ensure_project_reader_state(
         transaction,
         reader_key,
-        project_id,
-        root_message_id,
+        project_id.as_str(),
+    )
+    .await?;
+    sqlx::query!(
+        "INSERT INTO thread_watches(reader_key,root_id,active,starts_after_activity) \
+         VALUES(?,?,1,?) ON CONFLICT(reader_key,root_id) DO NOTHING",
+        reader_key,
+        root_message_id.as_str(),
         boundary,
     )
+    .execute(&mut **transaction)
     .await
+    .map_err(storage_error)?;
+    Ok(())
 }
 
 pub(super) async fn activate_scope_watch(
@@ -353,18 +362,66 @@ pub(crate) async fn upsert_join_subscription(
 pub(crate) async fn end_thread_subscription_for_join_without_watch(
     transaction: &mut BoardTransaction<'_>,
     reader_key: &str,
+    reader: &Identity,
     root_message_id: &MessageId,
     now: DateTime<Utc>,
 ) -> Result<(), BoardError> {
-    end_subscription(
-        transaction,
-        reader_key,
-        &SubscriptionScope::thread(root_message_id.clone()),
-        EndReason::Cancelled,
-        now,
-    )
-    .await?;
+    cancel_thread_subscription_for_unwatch(transaction, reader_key, reader, root_message_id, now)
+        .await?;
     Ok(())
+}
+
+pub(crate) async fn end_thread_subscription_for_unwatch(
+    transaction: &mut BoardTransaction<'_>,
+    reader_key: &str,
+    reader: &Identity,
+    root_message_id: &MessageId,
+    now: DateTime<Utc>,
+) -> Result<(), BoardError> {
+    cancel_thread_subscription_for_unwatch(transaction, reader_key, reader, root_message_id, now)
+        .await
+}
+
+async fn cancel_thread_subscription_for_unwatch(
+    transaction: &mut BoardTransaction<'_>,
+    reader_key: &str,
+    reader: &Identity,
+    root_message_id: &MessageId,
+    now: DateTime<Utc>,
+) -> Result<(), BoardError> {
+    let scope = SubscriptionScope::thread(root_message_id.clone());
+    if load_subscription_record(transaction, reader_key, &scope)
+        .await?
+        .is_some()
+    {
+        end_subscription(transaction, reader_key, &scope, EndReason::Cancelled, now).await?;
+        return Ok(());
+    }
+    let Some(topic_coverage) =
+        load_covering_subscription(transaction, reader_key, root_message_id, now).await?
+    else {
+        return Ok(());
+    };
+    if !matches!(topic_coverage.scope, SubscriptionScope::Topic { .. }) {
+        return Ok(());
+    }
+    let policy = SubscriptionPolicy::defaults_for(reader);
+    let generation = SubscriptionGeneration::new(1).map_err(policy_error)?;
+    upsert_subscription(
+        transaction,
+        SubscriptionWrite {
+            reader_key,
+            scope: &scope,
+            policy: &policy,
+            state: SubscriptionState::Ended {
+                reason: EndReason::Cancelled,
+            },
+            now,
+            generation,
+            last_outcome: None,
+        },
+    )
+    .await
 }
 
 pub(crate) async fn end_thread_subscription_for_leave(
@@ -404,7 +461,7 @@ pub(crate) async fn resolve_thread_subscriptions(
         let record = load_subscription_record(transaction, reader_key.as_str(), &scope)
             .await?
             .ok_or_else(invalid_record)?;
-        if record.policy.mode == SubscriptionMode::Off {
+        if record.policy.mode() == SubscriptionMode::Off {
             end_subscription(
                 transaction,
                 reader_key.as_str(),
@@ -413,8 +470,8 @@ pub(crate) async fn resolve_thread_subscriptions(
                 now,
             )
             .await?;
-        } else if record.policy.mode == SubscriptionMode::Deliver
-            || record.policy.mode == SubscriptionMode::Poll
+        } else if record.policy.mode() == SubscriptionMode::Deliver
+            || record.policy.mode() == SubscriptionMode::Poll
         {
             let next_generation =
                 stored_generation(record.generation.next().map_err(policy_error)?)?;
