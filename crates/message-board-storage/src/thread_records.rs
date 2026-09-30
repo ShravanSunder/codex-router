@@ -14,6 +14,10 @@ use crate::storage_support::{
     decode_cursor as decode_signed_cursor, decode_identity, encode_cursor, ensure_identity,
     invalid_cursor, invalid_record, recompute_project_unread, storage_error,
 };
+use crate::thread_subscription_lifecycle_records::{
+    end_subscription, end_thread_subscription_for_unwatch,
+};
+use chrono::{DateTime, Utc};
 use message_board::*;
 use serde::{Deserialize, Serialize};
 use sqlx::Connection;
@@ -85,6 +89,7 @@ impl BoardStore {
     pub async fn unwatch_topic(
         &mut self,
         request: TopicWatchRequest,
+        now: DateTime<Utc>,
     ) -> Result<TopicWatchResult, BoardError> {
         let mut transaction = self
             .connection
@@ -103,6 +108,14 @@ impl BoardStore {
         .execute(&mut *transaction)
         .await
         .map_err(storage_error)?;
+        end_subscription(
+            &mut transaction,
+            &reader_key,
+            &SubscriptionScope::topic(request.topic_id.clone()),
+            EndReason::Cancelled,
+            now,
+        )
+        .await?;
         recompute_project_unread(&mut transaction, &reader_key, board.project_id.as_str()).await?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(TopicWatchResult {
@@ -143,12 +156,13 @@ impl BoardStore {
     pub async fn resolve_thread(
         &mut self,
         request: ThreadResolveRequest,
+        now: DateTime<Utc>,
     ) -> Result<ThreadResolveResult, BoardError> {
         let (thread, sequence, changed) = set_thread_state(
             &mut self.connection,
             &request.root_message_id,
             &request.actor,
-            ThreadState::Resolved,
+            ThreadStateTransition::Resolve { now },
         )
         .await?;
         if changed {
@@ -174,7 +188,7 @@ impl BoardStore {
             &mut self.connection,
             &request.root_message_id,
             &request.actor,
-            ThreadState::Unresolved,
+            ThreadStateTransition::Unresolve,
         )
         .await?;
         if changed {
@@ -238,6 +252,7 @@ impl BoardStore {
     pub async fn unwatch_thread(
         &mut self,
         request: ThreadUnwatchRequest,
+        now: DateTime<Utc>,
     ) -> Result<ThreadUnwatchResult, BoardError> {
         let mut transaction = self
             .connection
@@ -254,6 +269,14 @@ impl BoardStore {
         .execute(&mut *transaction)
         .await
         .map_err(storage_error)?;
+        end_thread_subscription_for_unwatch(
+            &mut transaction,
+            &reader_key,
+            &request.actor,
+            &request.root_message_id,
+            now,
+        )
+        .await?;
         recompute_project_unread(&mut transaction, &reader_key, location.project_id.as_str())
             .await?;
         let watch_status =
@@ -387,8 +410,12 @@ async fn set_thread_state(
     connection: &mut sqlx::SqliteConnection,
     root: &MessageId,
     actor: &Identity,
-    requested: ThreadState,
+    transition: ThreadStateTransition,
 ) -> Result<(Thread, Option<ActivitySequence>, bool), BoardError> {
+    let requested = match &transition {
+        ThreadStateTransition::Resolve { .. } => ThreadState::Resolved,
+        ThreadStateTransition::Unresolve => ThreadState::Unresolved,
+    };
     let mut transaction = connection
         .begin_with("BEGIN IMMEDIATE")
         .await
@@ -448,11 +475,11 @@ async fn set_thread_state(
             false,
         ));
     }
-    let sequence = match requested {
-        ThreadState::Resolved => {
-            resolve_in_transaction(&mut transaction, &location, &actor_key).await?
+    let sequence = match transition {
+        ThreadStateTransition::Resolve { now } => {
+            resolve_in_transaction(&mut transaction, &location, &actor_key, now).await?
         }
-        ThreadState::Unresolved => {
+        ThreadStateTransition::Unresolve => {
             sqlx::query!(
                 "UPDATE board_threads SET state='unresolved' WHERE root_id=?",
                 root.as_str(),
@@ -507,6 +534,11 @@ async fn set_thread_state(
         Some(activity_sequence(sequence)?),
         true,
     ))
+}
+
+enum ThreadStateTransition {
+    Resolve { now: DateTime<Utc> },
+    Unresolve,
 }
 
 fn decode_thread(row: StoredThreadRow) -> Result<Thread, BoardError> {

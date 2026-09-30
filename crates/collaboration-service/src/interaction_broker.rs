@@ -1,7 +1,7 @@
 //! Service-owned routing for client-exposed Codex approval callbacks.
 use crate::{
-    DeliveryPrecondition, DeliveryRequest, NativeControlBackend, SessionMessageDelivery,
-    session_delivery_contract::UnstoredAttemptEvidenceSink,
+    DeliveryPrecondition, DeliveryRequest, LoadPolicy, NativeControlBackend,
+    SessionMessageDelivery, session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
 use codex_acp_adapter::{
     ApprovalBroker, ApprovalBrokerError, ApprovalRoute, BrokeredApprovalOutcome,
@@ -843,6 +843,7 @@ async fn deliver_message_via(
         message,
         header_context,
         mode: MessageDelivery::Auto,
+        load_policy: LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
         attempt: agent_automation::AttemptId::generate(),

@@ -53,6 +53,7 @@ impl ProviderAcpDeliveryRoute {
                     approver: record.approver,
                     prompt: request.message.clone(),
                 },
+                load_policy: request.load_policy,
             },
         );
         Ok(Self::receipt(

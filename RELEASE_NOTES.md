@@ -2,6 +2,7 @@
 
 ## Unreleased - 2026-09-24
 
+- Persist thread and topic subscription policies, lifecycle, per-root batching windows, and backfill eligible existing participants. This is storage groundwork; session-target delivery arrives in the next release. Migration `202609170001` was rewritten in place: local or debug board databases that applied the earlier branch version fail with `InvalidSchema` and may need to be deleted; production databases are unaffected.
 - Provider setting rejection errors now name the setting, requested value, and advertised choices; display truncation is marked with an ellipsis.
 - Add recipient-first emoji identity headers and `agent-collaboration message reply --expect-sender`; hide empty sessions from the picker by default.
 - Encrypt pooled account credentials with a Router-owned Keychain key. After upgrading, authorize Router once at the first Host restart; refreshes in that running Host do not prompt. The Host migrates existing pooled credential files to encrypted envelopes, reads each credential back for verification, then removes the plaintext file. If migration stops early, the Host still starts, Claude requests report the incomplete migration, Codex requests keep the existing credential-unavailable response, and `account list` and `quota` identify accounts still to convert; the next Host restart resumes migration without marking accounts as needing login.
@@ -22,6 +23,10 @@
 - Use one CLI and MCP conversation surface for Codex, Claude, and Cursor, including create, prompt, load, and operation inspection. Claude and Cursor can cancel one exact operation; Codex directs callers to turn interrupt. Provider operations retain caller IDs and report completed or pending work.
 - Route messages, wakes, listen pushes, approvals, and scheduled runs through the selected Codex, provider ACP, or live Claude Code peer route. Delivery receipts expose the observed outcome and reachability; `peerMessageWritten` confirms a socket write, not a peer reply.
 - Preserve Codex create-then-message across frontend closure while the Host remains running. Provider schedules run on existing sessions and finish from provider settlement without a summary.
+
+## 0.1.54 - 2026-09-30
+
+- Add target presence reporting and loaded-only delivery policy as internal groundwork for thread subscriptions.
 
 ## 0.1.29 - 2026-09-17
 

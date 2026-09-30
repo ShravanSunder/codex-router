@@ -667,11 +667,14 @@ async fn reactivated_watch_reinitializes_delivered_position_at_its_new_start() {
     );
     fixture
         .store
-        .unwatch_thread(ThreadUnwatchRequest {
-            root_message_id: fixture.root_message_id.clone(),
-            actor: fixture.reader.clone(),
-            acting_for: None,
-        })
+        .unwatch_thread(
+            ThreadUnwatchRequest {
+                root_message_id: fixture.root_message_id.clone(),
+                actor: fixture.reader.clone(),
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     fixture.reply("writer", "While inactive").await;
@@ -829,14 +832,17 @@ async fn post(
     body: &str,
 ) -> MessagePostResult {
     store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement,
-            actor: author,
-            acting_for: None,
-            text: MessageText::try_from(body.to_owned()).unwrap(),
-            references: MessageReferences::try_from(Vec::new()).unwrap(),
-        })
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement,
+                actor: author,
+                acting_for: None,
+                text: MessageText::try_from(body.to_owned()).unwrap(),
+                references: MessageReferences::try_from(Vec::new()).unwrap(),
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap()
 }

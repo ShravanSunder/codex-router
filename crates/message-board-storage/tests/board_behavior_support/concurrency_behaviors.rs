@@ -41,11 +41,14 @@ async fn competing_top_level_posts_for_one_actor_commit_only_once() {
             task_store
                 .lock()
                 .await
-                .post_message(post_request(
-                    message_id,
-                    Placement::Topic { topic_id },
-                    actor("same-actor"),
-                ))
+                .post_message(
+                    post_request(
+                        message_id,
+                        Placement::Topic { topic_id },
+                        actor("same-actor"),
+                    ),
+                    chrono::Utc::now(),
+                )
                 .await
         }));
     }
@@ -111,11 +114,14 @@ async fn run_archive_post_order(archive_first: bool) {
                 .map(|_| true)
         } else {
             guard
-                .post_message(post_request(
-                    first_message_id,
-                    Placement::Topic { topic_id },
-                    actor("poster"),
-                ))
+                .post_message(
+                    post_request(
+                        first_message_id,
+                        Placement::Topic { topic_id },
+                        actor("poster"),
+                    ),
+                    chrono::Utc::now(),
+                )
                 .await
                 .map(|_| true)
         }
@@ -130,13 +136,16 @@ async fn run_archive_post_order(archive_first: bool) {
         let mut guard = second_store.lock().await;
         if archive_first {
             guard
-                .post_message(post_request(
-                    second_message_id,
-                    Placement::Topic {
-                        topic_id: second_topic_id,
-                    },
-                    actor("poster"),
-                ))
+                .post_message(
+                    post_request(
+                        second_message_id,
+                        Placement::Topic {
+                            topic_id: second_topic_id,
+                        },
+                        actor("poster"),
+                    ),
+                    chrono::Utc::now(),
+                )
                 .await
                 .map(|_| true)
         } else {
@@ -220,22 +229,28 @@ async fn run_resolve_post_order(resolve_first: bool) {
         first_release.notified().await;
         if resolve_first {
             guard
-                .resolve_thread(ThreadResolveRequest {
-                    root_message_id: first_root_id,
-                    actor: actor("resolver"),
-                    acting_for: None,
-                })
+                .resolve_thread(
+                    ThreadResolveRequest {
+                        root_message_id: first_root_id,
+                        actor: actor("resolver"),
+                        acting_for: None,
+                    },
+                    chrono::Utc::now(),
+                )
                 .await
                 .map(|_| true)
         } else {
             guard
-                .post_message(post_request(
-                    first_reply_id,
-                    Placement::Thread {
-                        root_message_id: first_root_id,
-                    },
-                    actor("replier"),
-                ))
+                .post_message(
+                    post_request(
+                        first_reply_id,
+                        Placement::Thread {
+                            root_message_id: first_root_id,
+                        },
+                        actor("replier"),
+                    ),
+                    chrono::Utc::now(),
+                )
                 .await
                 .map(|_| true)
         }
@@ -248,22 +263,28 @@ async fn run_resolve_post_order(resolve_first: bool) {
         let mut guard = second_store.lock().await;
         if resolve_first {
             guard
-                .post_message(post_request(
-                    second_reply_id,
-                    Placement::Thread {
-                        root_message_id: second_root_id,
-                    },
-                    actor("replier"),
-                ))
+                .post_message(
+                    post_request(
+                        second_reply_id,
+                        Placement::Thread {
+                            root_message_id: second_root_id,
+                        },
+                        actor("replier"),
+                    ),
+                    chrono::Utc::now(),
+                )
                 .await
                 .map(|_| true)
         } else {
             guard
-                .resolve_thread(ThreadResolveRequest {
-                    root_message_id: second_root_id,
-                    actor: actor("resolver"),
-                    acting_for: None,
-                })
+                .resolve_thread(
+                    ThreadResolveRequest {
+                        root_message_id: second_root_id,
+                        actor: actor("resolver"),
+                        acting_for: None,
+                    },
+                    chrono::Utc::now(),
+                )
                 .await
                 .map(|_| true)
         }
@@ -341,11 +362,14 @@ async fn rewatch_boundaries_and_acknowledgements_keep_summary_equal_to_inbox() {
     )
     .await;
     store
-        .unwatch_thread(ThreadUnwatchRequest {
-            root_message_id: root.message.message_id.clone(),
-            actor: bob.clone(),
-            acting_for: None,
-        })
+        .unwatch_thread(
+            ThreadUnwatchRequest {
+                root_message_id: root.message.message_id.clone(),
+                actor: bob.clone(),
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert_summary_matches_inbox(&mut store, &fixture.project_id, &bob, false).await;

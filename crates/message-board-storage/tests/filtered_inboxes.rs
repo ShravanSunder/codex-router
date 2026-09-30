@@ -177,11 +177,14 @@ async fn topic_filter_keeps_global_watches_without_subscribing_to_topic_threads(
     )
     .await;
     store
-        .resolve_thread(ThreadResolveRequest {
-            root_message_id: watched_root.message_id.clone(),
-            actor: actor("resolver"),
-            acting_for: None,
-        })
+        .resolve_thread(
+            ThreadResolveRequest {
+                root_message_id: watched_root.message_id.clone(),
+                actor: actor("resolver"),
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
 

@@ -1,0 +1,45 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT participant.reader_key AS \"reader_key!: String\", participant.root_id AS \"root_id!: String\", MAX(activity.activity_sequence) AS \"latest_message_activity!: i64\" FROM thread_participants participant JOIN board_identities identity ON identity.identity_key=participant.reader_key JOIN board_threads thread ON thread.root_id=participant.root_id JOIN thread_watches watch ON watch.reader_key=participant.reader_key AND watch.root_id=participant.root_id AND watch.active=1 JOIN board_activity activity ON (activity.root_id=participant.root_id AND activity.kind='threadMessageCreated') OR (activity.message_id=participant.root_id AND activity.kind='mainMessageCreated') WHERE participant.closed_at_activity IS NULL AND identity.kind='session' AND thread.state='unresolved' GROUP BY participant.reader_key,participant.root_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "reader_key!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "reader_key"
+          }
+        }
+      },
+      {
+        "name": "root_id!: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_participants",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "latest_message_activity!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "5352096c8d0ecb453fffed759c617898959161cca931f32dd70220591125e146"
+}

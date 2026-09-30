@@ -89,14 +89,17 @@ pub(super) async fn post(
     references: Vec<ReferenceTarget>,
 ) -> MessagePostResult {
     store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement,
-            actor: author,
-            acting_for: None,
-            text: text(body),
-            references: MessageReferences::try_from(references).unwrap(),
-        })
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement,
+                actor: author,
+                acting_for: None,
+                text: text(body),
+                references: MessageReferences::try_from(references).unwrap(),
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap()
 }

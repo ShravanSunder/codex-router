@@ -20,16 +20,19 @@ async fn malformed_cooldown_timestamps_are_rejected_as_attributed_invalid_record
         let mut store = BoardStore::open(&path).await.unwrap();
 
         let failure = store
-            .post_message(MessagePostRequest {
-                message_id: MessageId::generate(),
-                placement: Placement::Topic {
-                    topic_id: fixture.topic_id,
+            .post_message(
+                MessagePostRequest {
+                    message_id: MessageId::generate(),
+                    placement: Placement::Topic {
+                        topic_id: fixture.topic_id,
+                    },
+                    actor: actor("cooldown-reader"),
+                    acting_for: None,
+                    text: text("must reject corrupt cooldown"),
+                    references: no_references(),
                 },
-                actor: actor("cooldown-reader"),
-                acting_for: None,
-                text: text("must reject corrupt cooldown"),
-                references: no_references(),
-            })
+                chrono::Utc::now(),
+            )
             .await
             .unwrap_err();
 
@@ -57,16 +60,19 @@ async fn cooldown_allows_a_top_level_post_at_the_sixty_second_boundary() {
     let mut store = BoardStore::open(&path).await.unwrap();
 
     let posted = store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Topic {
-                topic_id: fixture.topic_id,
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Topic {
+                    topic_id: fixture.topic_id,
+                },
+                actor: actor("cooldown-reader"),
+                acting_for: None,
+                text: text("allowed at boundary"),
+                references: no_references(),
             },
-            actor: actor("cooldown-reader"),
-            acting_for: None,
-            text: text("allowed at boundary"),
-            references: no_references(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
 
@@ -81,16 +87,19 @@ async fn thirty_seconds_is_still_inside_the_board_cooldown() {
     overwrite_cooldown(&path, current_time_millis() - 30_000).await;
     let mut store = BoardStore::open(&path).await.unwrap();
     let failure = store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Topic {
-                topic_id: fixture.topic_id,
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Topic {
+                    topic_id: fixture.topic_id,
+                },
+                actor: actor("cooldown-reader"),
+                acting_for: None,
+                text: text("still too soon"),
+                references: no_references(),
             },
-            actor: actor("cooldown-reader"),
-            acting_for: None,
-            text: text("still too soon"),
-            references: no_references(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
     assert_eq!(failure.kind, BoardFailureKind::TopLevelMessageCooldown);
@@ -108,16 +117,19 @@ async fn prepared_cooldown(label: &str) -> (std::path::PathBuf, board_behavior_s
     let mut store = BoardStore::open(&path).await.unwrap();
     let fixture = create_fixture(&mut store).await;
     store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement: Placement::Topic {
-                topic_id: fixture.topic_id.clone(),
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement: Placement::Topic {
+                    topic_id: fixture.topic_id.clone(),
+                },
+                actor: actor("cooldown-reader"),
+                acting_for: None,
+                text: text("establish cooldown"),
+                references: no_references(),
             },
-            actor: actor("cooldown-reader"),
-            acting_for: None,
-            text: text("establish cooldown"),
-            references: no_references(),
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     store.close().await.unwrap();
