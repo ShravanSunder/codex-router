@@ -454,6 +454,23 @@ fn legacy_presentation_maps_only_fields_retained_by_typed_subjects() {
     );
 }
 
+fn interaction_records_without_timestamps(
+    bytes: &[u8],
+) -> std::collections::BTreeMap<String, crate::interaction_broker::InteractionHistoryRecord> {
+    let mut values: serde_json::Value =
+        serde_json::from_slice(bytes).expect("interaction history JSON");
+    let records = values
+        .as_object_mut()
+        .expect("interaction history map");
+    for record in records.values_mut() {
+        record
+            .as_object_mut()
+            .expect("interaction record object")
+            .remove("createdAt");
+    }
+    serde_json::from_value(values).expect("typed interaction history records")
+}
+
 fn select_typed(option_id: &str) -> crate::interaction_broker::TypedInteractionDecision {
     crate::interaction_broker::TypedInteractionDecision::SelectApproval {
         option_id: option_id.to_owned(),
@@ -980,10 +997,7 @@ async fn populated_old_approval_reader_survives_human_interaction_history() {
     let new_bytes = tokio::fs::read(directory.join("interaction-history.json"))
         .await
         .expect("new interaction history");
-    let new_records: std::collections::BTreeMap<
-        String,
-        crate::interaction_broker::InteractionHistoryRecord,
-    > = serde_json::from_slice(&new_bytes).expect("typed interaction history");
+    let new_records = interaction_records_without_timestamps(&new_bytes);
     assert!(matches!(
         new_records["human-approval-1"].approval_state(),
         Some(crate::interaction_broker::InteractionHistoryState::Decided { option_id })
@@ -1689,15 +1703,11 @@ async fn restart_cancels_populated_pending_interaction_history() {
             .is_empty()
     );
     assert!(broker_after_restart.list_questions(true).await.is_empty());
-    let records: std::collections::BTreeMap<
-        String,
-        crate::interaction_broker::InteractionHistoryRecord,
-    > = serde_json::from_slice(
+    let records = interaction_records_without_timestamps(
         &tokio::fs::read(directory.join("interaction-history.json"))
             .await
             .expect("history"),
-    )
-    .expect("persisted rows");
+    );
     assert!(matches!(records["restart-approval"].approval_state(),
         Some(crate::interaction_broker::InteractionHistoryState::Cancelled { reason }) if reason.as_str() == "hostRestarted"));
     assert!(matches!(&records["restart-question"],

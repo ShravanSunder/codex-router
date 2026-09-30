@@ -247,7 +247,7 @@ async fn fresh_database_runs_native_baseline_and_reopens() -> Result<(), Box<dyn
     let database = TestDatabase::new("fresh");
     AutomationStore::open(&database.path).await?.close().await?;
     let history = migration_history(&database.path).await?;
-    ensure_eq!(history.len(), 3);
+    ensure_eq!(history.len(), 4);
     ensure!(history[0].1);
     ensure!(!history[0].2.is_empty());
     AutomationStore::open(&database.path).await?.close().await?;
@@ -264,7 +264,7 @@ async fn exact_v1_is_adopted_without_changing_domain_state()
     AutomationStore::open(&database.path).await?.close().await?;
     assert_preserved_domain_state(&database.path).await?;
     let history = migration_history(&database.path).await?;
-    ensure_eq!(history.len(), 3);
+    ensure_eq!(history.len(), 4);
     AutomationStore::open(&database.path).await?.close().await?;
     assert_preserved_domain_state(&database.path).await?;
     ensure_eq!(migration_history(&database.path).await?, history);
@@ -295,7 +295,7 @@ async fn receipt_column_migration_preserves_existing_rows() -> Result<(), Box<dy
     .await?;
     ensure_eq!(retained, "{\"legacy\":true}");
     connection.close().await?;
-    ensure_eq!(migration_history(&database.path).await?.len(), 3);
+    ensure_eq!(migration_history(&database.path).await?.len(), 4);
 
     let valid_delivery_id = agent_automation::DeliveryId::generate();
     let mut connection = connect(&database.path).await?;
@@ -547,7 +547,7 @@ async fn held_writer_returns_database_error_without_partial_history_then_retry_s
     lock.close().await?;
     ensure!(!has_migration_history_table(&database.path).await?);
     AutomationStore::open(&database.path).await?.close().await?;
-    ensure_eq!(migration_history(&database.path).await?.len(), 3);
+    ensure_eq!(migration_history(&database.path).await?.len(), 4);
     Ok(())
 }
 
@@ -561,6 +561,6 @@ async fn concurrent_fresh_openers_converge_on_one_history_row()
     );
     first?.close().await?;
     second?.close().await?;
-    ensure_eq!(migration_history(&database.path).await?.len(), 3);
+    ensure_eq!(migration_history(&database.path).await?.len(), 4);
     Ok(())
 }

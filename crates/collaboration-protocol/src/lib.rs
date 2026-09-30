@@ -90,6 +90,7 @@ mod delivery_rejection;
 mod delivery_route_evidence;
 mod message_content;
 mod push_line;
+mod push_record;
 #[cfg(test)]
 #[path = "push_line_tests.rs"]
 mod push_line_tests;
@@ -129,6 +130,13 @@ pub use push_line::{
     ParsedPushLineHeader, PushHeaderFacts, PushId, PushIdError, PushKind, PushLineError,
     PushLineInput, PushOrigin, RouterLink, escape_push_line_field, parse_push_line_header,
     render_push_line,
+};
+pub use push_record::{
+    MAX_DIRECT_MESSAGE_BODY_BYTES, MAX_PUSH_ACTIVITY_RANGES, PushActivityRange,
+    PushActivityRangeRead, PushActivitySnapshot, PushDeliveryState, PushMessageSendResult,
+    PushRecord, PushRecordDraft, PushRecordHistoryParams, PushRecordListParams,
+    PushRecordListResult, PushRecordNotice, PushRecordShowParams, PushRecordShowResult,
+    PushRecordValidationError,
 };
 mod control_initialization;
 mod endpoint_inventory;

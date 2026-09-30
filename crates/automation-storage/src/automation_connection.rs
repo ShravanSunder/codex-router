@@ -27,6 +27,14 @@ pub enum StorageError {
         "attempt cursor must preserve its observation time, latest attempt and last emitted identity"
     )]
     InvalidAttemptCursor,
+    #[error("push record id already exists")]
+    PushAlreadyExists,
+    #[error("push record was not found in this automation database")]
+    PushNotFound,
+    #[error("push record delivery state does not permit this transition")]
+    PushStateConflict,
+    #[error("push record is not permitted for this caller")]
+    PushNotPermitted,
     #[error("workflow Run was not found in this automation database")]
     RunNotFound,
     #[error("delivery was not found in this automation database")]

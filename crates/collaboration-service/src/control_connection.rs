@@ -170,6 +170,48 @@ pub async fn serve_control_connection(
                     });
                     continue;
                 }
+                Ok(request) if request.method == "router/show" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::push_record_resolver::show(
+                            json!(id),
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request) if request.method == "message/inbox" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::push_record_resolver::inbox(
+                            json!(id),
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
+                Ok(request) if request.method == "message/history" => {
+                    let identity = identity.clone();
+                    pending.spawn(async move {
+                        let id = request.id.clone();
+                        let response = crate::push_record_resolver::history(
+                            json!(id),
+                            request.params,
+                            &identity,
+                        )
+                        .await;
+                        (id, response)
+                    });
+                    continue;
+                }
                 Ok(request) if request.method == "provider/sessionListen" => {
                     admission.complete(&request.id);
                     let id = request.id.clone();

@@ -1,10 +1,14 @@
-//! Descriptive message submission through the public Rust client.
-use crate::message_input_arguments::{SendArguments, prepare};
+//! CLI commands for direct messages and stored Router push records.
+use crate::message_input_arguments::{MessageSendArguments, prepare_message_send};
 use clap::{Parser, Subcommand};
-use collaboration_client::protocol::{DeliveryOutcome, DeliveryReceipt, MessageText};
+use collaboration_client::protocol::{
+    DeliveryOutcome, MessageText, PushRecordHistoryParams, PushRecordListParams,
+    PushRecordListResult, PushRecordShowParams, PushRecordShowResult, SessionRef,
+};
 use collaboration_client::{
     ClientError, ControlClient, MessageReplyError, MessageReplyRequest, MessageSendError,
     MessageSendRequest, OperationEffect, OperationFailure, OperationFailureKind,
+    operation_failure_from_client_error,
 };
 use serde_json::json;
 use std::{
@@ -22,18 +26,48 @@ struct MessageArguments {
     #[command(subcommand)]
     command: MessageCommand,
 }
+
 #[derive(Subcommand)]
 enum MessageCommand {
     /// Submit information. Acceptance is not completion or a peer reply.
-    Send(SendArguments),
-    /// Reply to the most recent Agent sender delivered to this session.
+    Send(MessageSendArguments),
+    /// List unread direct-message notices for this session.
+    Inbox(InboxArguments),
+    /// List retained direct-message notices with one session.
+    History(HistoryArguments),
+    /// Reply to one stored direct message by push id or Router link.
     Reply(ReplyArguments),
 }
 
 #[derive(clap::Args)]
+struct InboxArguments {
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+    limit: u32,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct HistoryArguments {
+    /// Exact SessionRef JSON for the other participant.
+    #[arg(long = "with")]
+    other_session: String,
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+    limit: u32,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
 struct ReplyArguments {
+    #[arg(value_name = "PUSH_ID_OR_LINK")]
+    reference: String,
     #[arg(
-        long,
+        value_name = "TEXT",
         required_unless_present = "text_file",
         conflicts_with = "text_file"
     )]
@@ -41,26 +75,69 @@ struct ReplyArguments {
     /// Read reply text from a file; '-' reads stdin. Content is never shell-interpolated.
     #[arg(long)]
     text_file: Option<PathBuf>,
-    /// Refuse unless this SessionRef JSON still matches the latest Agent sender.
-    #[arg(long)]
-    expect_sender: Option<String>,
     #[arg(long)]
     service_directory: Option<PathBuf>,
     #[arg(long)]
     json: bool,
 }
+
+#[derive(Parser)]
+#[command(
+    name = "agent-collaboration show",
+    bin_name = "agent-collaboration show",
+    about = "Fetch one stored Router push record"
+)]
+struct PushRecordShowArguments {
+    #[arg(value_name = "PUSH_ID_OR_LINK")]
+    reference: String,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+enum PushRecordQuery {
+    Show(String),
+    Inbox { limit: u32 },
+    History { with: SessionRef, limit: u32 },
+}
+
+enum PushRecordReadResult {
+    Show(PushRecordShowResult),
+    List(PushRecordListResult),
+}
+
 pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
     let parsed =
         match crate::automation_argument_feedback::parse_arguments::<MessageArguments>(arguments) {
             Ok(value) => value,
             Err(code) => return code,
         };
-    let args = match parsed.command {
-        MessageCommand::Send(args) => args,
-        MessageCommand::Reply(args) => return run_message_reply(args),
+    match parsed.command {
+        MessageCommand::Send(args) => run_message_send(args),
+        MessageCommand::Inbox(args) => run_message_inbox(args),
+        MessageCommand::History(args) => run_message_history(args),
+        MessageCommand::Reply(args) => run_message_reply(args),
+    }
+}
+
+pub fn run_push_record_show_command(arguments: Vec<OsString>) -> i32 {
+    let args = match crate::automation_argument_feedback::parse_arguments::<PushRecordShowArguments>(
+        arguments,
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
     };
+    run_push_record_query(
+        args.service_directory,
+        args.json,
+        PushRecordQuery::Show(args.reference),
+    )
+}
+
+fn run_message_send(args: MessageSendArguments) -> i32 {
     let machine = args.json;
-    let prepared = prepare(&args);
+    let prepared = prepare_message_send(&args);
     let (directory, prepared) = match prepared {
         Ok(value) => value,
         Err(message) => {
@@ -101,7 +178,6 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
                 .map_err(|error| MessageSendError::Preparation(Box::new(error)))?,
             delivery: saved.delivery,
             generation_guard: saved.generation_guard,
-            correlation: None,
         };
         let result = client.send_message(request).await;
         let _closed = client.close().await;
@@ -110,24 +186,189 @@ pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
     report(outcome, machine)
 }
 
-fn run_message_reply(args: ReplyArguments) -> i32 {
-    let machine = args.json;
-    let expect_sender = match args
-        .expect_sender
-        .as_deref()
-        .map(serde_json::from_str::<collaboration_client::protocol::SessionRef>)
-        .transpose()
-    {
+fn run_message_inbox(args: InboxArguments) -> i32 {
+    run_push_record_query(
+        args.service_directory,
+        args.json,
+        PushRecordQuery::Inbox { limit: args.limit },
+    )
+}
+
+fn run_message_history(args: HistoryArguments) -> i32 {
+    let with = match serde_json::from_str::<SessionRef>(&args.other_session) {
         Ok(value) => value,
         Err(_) => {
             return crate::endpoint_commands::report_failure(
                 "invalidField",
-                &crate::message_input_arguments::session_ref_guidance("--expect-sender"),
+                "--with must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId",
+                2,
+                args.json,
+            );
+        }
+    };
+    run_push_record_query(
+        args.service_directory,
+        args.json,
+        PushRecordQuery::History {
+            with,
+            limit: args.limit,
+        },
+    )
+}
+
+fn run_push_record_query(
+    service_directory: Option<PathBuf>,
+    machine: bool,
+    query: PushRecordQuery,
+) -> i32 {
+    let harness_identity = match crate::current_session_identity::read_harness_session_identity() {
+        Ok(identity) => identity,
+        Err(error) => {
+            return crate::endpoint_commands::report_failure(
+                "currentSessionUnavailable",
+                &format!("{}; run agent-collaboration whoami --json", error),
                 2,
                 machine,
             );
         }
     };
+    let directory = match crate::endpoint_commands::resolve_directory(service_directory) {
+        Ok(directory) => directory,
+        Err(message) => {
+            return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return crate::endpoint_commands::report_failure(
+                "unavailable",
+                "Client runtime unavailable",
+                3,
+                machine,
+            );
+        }
+    };
+    let outcome = runtime.block_on(async {
+        let mut client =
+            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
+                .await?;
+        let caller = harness_identity
+            .session_ref(&client.identity().service_id)
+            .map_err(|_| ClientError::InvalidRequest("invalid current session identity"))?;
+        let result = match query {
+            PushRecordQuery::Show(reference) => client
+                .router_show(PushRecordShowParams { caller, reference })
+                .await
+                .map(PushRecordReadResult::Show),
+            PushRecordQuery::Inbox { limit } => client
+                .message_inbox(PushRecordListParams { caller, limit })
+                .await
+                .map(PushRecordReadResult::List),
+            PushRecordQuery::History { with, limit } => client
+                .message_history(PushRecordHistoryParams {
+                    caller,
+                    with,
+                    limit,
+                })
+                .await
+                .map(PushRecordReadResult::List),
+        };
+        let _closed = client.close().await;
+        result
+    });
+    report_push_record_read(outcome, machine)
+}
+
+fn report_push_record_read(
+    result: Result<PushRecordReadResult, ClientError>,
+    machine: bool,
+) -> i32 {
+    if let Err(error) = &result
+        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+            error,
+            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+            machine,
+        )
+    {
+        return code;
+    }
+    match result {
+        Ok(PushRecordReadResult::Show(show)) => {
+            let written = if machine {
+                writeln!(io::stdout(), "{}", push_record_show_envelope(show))
+            } else {
+                writeln!(
+                    io::stdout(),
+                    "{}",
+                    serde_json::to_string_pretty(&show)
+                        .unwrap_or_else(|_| "Output unavailable".to_owned())
+                )
+            };
+            if written.is_ok() { 0 } else { 3 }
+        }
+        Ok(PushRecordReadResult::List(list)) => {
+            if machine {
+                if writeln!(
+                    io::stdout(),
+                    "{}",
+                    crate::endpoint_commands::result_envelope(json!(list))
+                )
+                .is_ok()
+                {
+                    0
+                } else {
+                    3
+                }
+            } else {
+                let mut output = io::stdout().lock();
+                for record in list.records {
+                    if writeln!(output, "{}", record.line).is_err() {
+                        return 3;
+                    }
+                }
+                0
+            }
+        }
+        Err(error) => {
+            let failure = operation_failure_from_client_error(error, OperationEffect::None);
+            let exit_code = operation_failure_exit(&failure);
+            let record = json!({"kind":"error","error":failure});
+            let written = if machine {
+                writeln!(io::stdout(), "{record}")
+            } else {
+                writeln!(
+                    io::stdout(),
+                    "{}",
+                    serde_json::to_string_pretty(&record)
+                        .unwrap_or_else(|_| "Output unavailable".to_owned())
+                )
+            };
+            if written.is_ok() { exit_code } else { 5 }
+        }
+    }
+}
+
+fn push_record_show_envelope(show: PushRecordShowResult) -> serde_json::Value {
+    let link = show.link;
+    let activity_ranges = show.activity_ranges;
+    let mut envelope = crate::endpoint_commands::result_envelope(json!(show.record));
+    if let Some(result) = envelope
+        .get_mut("result")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        result.insert("link".to_owned(), json!(link));
+        result.insert("activityRanges".to_owned(), json!(activity_ranges));
+    }
+    envelope
+}
+
+fn run_message_reply(args: ReplyArguments) -> i32 {
+    let machine = args.json;
+    let reference = args.reference.clone();
     let reply_text = match read_reply_text(&args) {
         Ok(text) => text,
         Err(message) => {
@@ -139,7 +380,7 @@ fn run_message_reply(args: ReplyArguments) -> i32 {
         Err(error) => {
             return crate::endpoint_commands::report_failure(
                 "currentSessionUnavailable",
-                &error.to_string(),
+                &format!("{}; run agent-collaboration whoami --json", error),
                 2,
                 machine,
             );
@@ -178,9 +419,9 @@ fn run_message_reply(args: ReplyArguments) -> i32 {
                 )))
             })?;
         let result = client
-            .reply_to_latest_agent_sender(MessageReplyRequest {
+            .reply_to_push(MessageReplyRequest {
                 caller,
-                expect_sender,
+                reference,
                 text: reply_text,
             })
             .await;
@@ -262,17 +503,23 @@ fn reply_confirmation_line(
     reply: &collaboration_client::protocol::SessionMessageReplyResult,
 ) -> String {
     format!(
-        "replied to {} {}",
+        "replied to {} {} (push {} {}): {}",
         reply.target_identity,
-        session_ref_text(reply)
+        session_ref_text(reply),
+        reply.push_id.as_str(),
+        reply.link,
+        delivery_outcome_label(&reply.receipt.outcome)
     )
 }
 
 fn reply_target_line(reply: &collaboration_client::protocol::SessionMessageReplyResult) -> String {
     format!(
-        "reply target: {} {}",
+        "reply target: {} {} (push {} {}): {}",
         reply.target_identity,
-        session_ref_text(reply)
+        session_ref_text(reply),
+        reply.push_id.as_str(),
+        reply.link,
+        delivery_outcome_label(&reply.receipt.outcome)
     )
 }
 
@@ -280,7 +527,10 @@ fn session_ref_text(reply: &collaboration_client::protocol::SessionMessageReplyR
     serde_json::to_string(&reply.target).unwrap_or_else(|_| "SessionRef unavailable".to_owned())
 }
 
-fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i32 {
+fn report(
+    result: Result<collaboration_client::protocol::PushMessageSendResult, MessageSendError>,
+    machine: bool,
+) -> i32 {
     if let Err(MessageSendError::Preparation(error)) = &result
         && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
             error,
@@ -290,14 +540,12 @@ fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i
     {
         return code;
     }
-    let (record, code, write_failure_code) = match result {
-        Ok(receipt) => {
-            let exit = receipt_exit_status(&receipt.outcome);
-            (
-                crate::endpoint_commands::result_envelope(json!(receipt)),
-                exit,
-                5,
-            )
+    let (record, code, confirmation, write_failure_code) = match result {
+        Ok(push) => {
+            let exit = receipt_exit_status(&push.receipt.outcome);
+            let confirmation = send_confirmation_line(&push);
+            let record = crate::endpoint_commands::result_envelope(json!(push));
+            (record, exit, Some(confirmation), 5)
         }
         Err(error) => {
             let (failure, target) = error.into_operation_failure_and_target();
@@ -310,12 +558,15 @@ fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i
             (
                 json!({"kind":"error","target":target,"error":failure}),
                 exit,
+                None,
                 write_failure,
             )
         }
     };
     let written = if machine {
         writeln!(io::stdout(), "{record}")
+    } else if let Some(confirmation) = confirmation {
+        writeln!(io::stdout(), "{confirmation}")
     } else {
         writeln!(
             io::stdout(),
@@ -328,6 +579,33 @@ fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i
         write_failure_code
     } else {
         code
+    }
+}
+
+fn send_confirmation_line(push: &collaboration_client::protocol::PushMessageSendResult) -> String {
+    format!(
+        "push {} to {} {}: {}; {}",
+        push.push_id.as_str(),
+        push.target_identity,
+        serde_json::to_string(&push.target).unwrap_or_else(|_| "SessionRef unavailable".to_owned()),
+        delivery_outcome_label(&push.receipt.outcome),
+        push.link
+    )
+}
+
+fn delivery_outcome_label(outcome: &DeliveryOutcome) -> String {
+    match outcome {
+        DeliveryOutcome::Started => "started".to_owned(),
+        DeliveryOutcome::Steered => "steered".to_owned(),
+        DeliveryOutcome::StartedOrSteered => "started or steered".to_owned(),
+        DeliveryOutcome::Queued => "queued".to_owned(),
+        DeliveryOutcome::PeerMessageWritten => "peer message written".to_owned(),
+        DeliveryOutcome::NotSubmitted { retryable, reason } => format!(
+            "not submitted{}: {reason}",
+            if *retryable { " (retryable)" } else { "" }
+        ),
+        DeliveryOutcome::Rejected(_) => "rejected".to_owned(),
+        DeliveryOutcome::Unknown => "outcome unknown".to_owned(),
     }
 }
 
@@ -379,30 +657,37 @@ fn operation_failure_exit(failure: &OperationFailure) -> i32 {
 
 #[cfg(test)]
 mod reply_argument_tests {
-    use super::{MessageArguments, MessageCommand, ReplyArguments, reply_confirmation_line};
+    use super::{
+        HistoryArguments, InboxArguments, MessageArguments, MessageCommand, ReplyArguments,
+        reply_confirmation_line,
+    };
     use clap::Parser;
 
     #[test]
-    fn message_reply_requires_text_or_a_text_file() {
+    fn reply_requires_a_reference_and_keeps_text_file_input() {
+        const PUSH_ID: &str = "019f0000-0000-7000-8000-000000000101";
+
         let text_request = MessageArguments::try_parse_from([
             "agent-collaboration message",
             "reply",
-            "--text",
+            PUSH_ID,
             "hello",
         ])
-        .expect("text reply arguments parse");
+        .expect("positional reply arguments parse");
         assert!(matches!(
             text_request.command,
             MessageCommand::Reply(ReplyArguments {
+                reference,
                 text: Some(ref text),
                 text_file: None,
                 ..
-            }) if text == "hello"
+            }) if reference == PUSH_ID && text == "hello"
         ));
 
         let file_request = MessageArguments::try_parse_from([
             "agent-collaboration message",
             "reply",
+            PUSH_ID,
             "--text-file",
             "reply.md",
         ])
@@ -410,36 +695,61 @@ mod reply_argument_tests {
         assert!(matches!(
             file_request.command,
             MessageCommand::Reply(ReplyArguments {
+                reference,
                 text: None,
                 text_file: Some(_),
                 ..
-            })
-        ));
-
-        let guarded_request = MessageArguments::try_parse_from([
-            "agent-collaboration message",
-            "reply",
-            "--text",
-            "hello",
-            "--expect-sender",
-            "{\"endpoint\":{},\"sessionId\":\"sender\"}",
-        ])
-        .expect("guarded reply arguments parse");
-        assert!(matches!(
-            guarded_request.command,
-            MessageCommand::Reply(ReplyArguments {
-                expect_sender: Some(ref expected),
-                ..
-            }) if expected.contains("sender")
+            }) if reference == PUSH_ID
         ));
 
         assert!(
-            MessageArguments::try_parse_from(["agent-collaboration message", "reply"]).is_err()
+            MessageArguments::try_parse_from([
+                "agent-collaboration message",
+                "reply",
+                "--text",
+                "hello",
+            ])
+            .is_err()
+        );
+
+        assert!(
+            MessageArguments::try_parse_from([
+                "agent-collaboration message",
+                "reply",
+                PUSH_ID,
+                "hello",
+                "--expect-sender",
+                "{\"endpoint\":{},\"sessionId\":\"sender\"}",
+            ])
+            .is_err()
         );
     }
 
     #[test]
-    fn reply_confirmation_prints_the_resolved_identity_and_session_ref() {
+    fn inbox_and_history_are_message_subcommands() {
+        assert!(matches!(
+            MessageArguments::try_parse_from(["agent-collaboration message", "inbox"])
+                .expect("inbox arguments parse")
+                .command,
+            MessageCommand::Inbox(InboxArguments { .. })
+        ));
+        assert!(matches!(
+            MessageArguments::try_parse_from([
+                "agent-collaboration message",
+                "history",
+                "--with",
+                "{\"endpoint\":{},\"sessionId\":\"other\"}",
+            ])
+            .expect("history arguments parse")
+            .command,
+            MessageCommand::History(HistoryArguments { .. })
+        ));
+    }
+
+    #[test]
+    fn reply_confirmation_names_the_recipient_push_and_delivery_outcome() {
+        const PUSH_ID: &str = "019f0000-0000-7000-8000-000000000101";
+        const PUSH_LINK: &str = "router://00000000-0000-4000-8000-000000000001/push/019f0000-0000-7000-8000-000000000101";
         let target: collaboration_client::protocol::SessionRef = serde_json::from_value(
             serde_json::json!({
                 "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
@@ -450,6 +760,8 @@ mod reply_argument_tests {
         let reply = collaboration_client::protocol::SessionMessageReplyResult {
             target: target.clone(),
             target_identity: "✳️ Claude Main".to_owned(),
+            push_id: PUSH_ID.to_owned().try_into().expect("push id"),
+            link: PUSH_LINK.to_owned(),
             receipt: collaboration_client::protocol::DeliveryReceipt {
                 outcome: collaboration_client::protocol::DeliveryOutcome::PeerMessageWritten,
                 reachability: Some(
@@ -462,8 +774,8 @@ mod reply_argument_tests {
         assert_eq!(
             reply_confirmation_line(&reply),
             format!(
-                "replied to ✳️ Claude Main {}",
-                serde_json::to_string(&target).expect("target JSON")
+                "replied to ✳️ Claude Main {} (push {PUSH_ID} {PUSH_LINK}): peer message written",
+                serde_json::to_string(&target).expect("target JSON"),
             ),
         );
     }

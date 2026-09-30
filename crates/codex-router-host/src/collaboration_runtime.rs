@@ -247,6 +247,8 @@ impl CollaborationRuntime {
             &String::from(service_epoch.clone()),
             &String::from(control_schema.digest().clone()),
         )
+        .map_err(io::Error::other)?
+        .with_machine_identity(machine_identity.clone())
         .map_err(io::Error::other)?;
         if let Some(journal) = &journal {
             identity = identity.with_journal(std::sync::Arc::clone(journal));

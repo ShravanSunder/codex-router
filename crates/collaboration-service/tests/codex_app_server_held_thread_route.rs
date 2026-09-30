@@ -140,10 +140,8 @@ async fn exercise_held_empty_thread(
             Box::pin(async { Ok(json!({"sessions":[]})) })
         }
     }
-    let root = std::path::PathBuf::from("/tmp").join(format!(
-        "held-route-{}",
-        agent_automation::RunId::generate().as_str()
-    ));
+    let run_id = agent_automation::RunId::generate();
+    let root = std::env::temp_dir().join(format!("held-{}", &run_id.as_str()[24..]));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     let scratch_scope = "session-00000000-0000-4000-8000-000000000099";
     let scratch_parent = root.join("scratch");
@@ -543,12 +541,16 @@ async fn exercise_held_empty_thread(
         Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
             routed,
         ]));
+    let automation_store = Arc::new(tokio::sync::Mutex::new(
+        automation_storage::AutomationStore::open(&root.join("automation.sqlite")).await?,
+    ));
     let identity = collaboration_service::ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000001",
         &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
+    .with_automation_store(Arc::clone(&automation_store))
     .with_endpoints(vec![description])
     .map_err(std::io::Error::other)?
     .with_session_delivery(delivery);
@@ -568,12 +570,11 @@ async fn exercise_held_empty_thread(
             },
             delivery: MessageDelivery::Auto,
             generation_guard: None,
-            correlation: None,
         })
         .await?;
-    if !matches!(started.outcome, DeliveryOutcome::Started)
+    if !matches!(started.receipt.outcome, DeliveryOutcome::Started)
         || !matches!(
-            started.client,
+            started.receipt.client,
             Some(DeliveryClientReceipt::CodexAppServer(_))
         )
         || holder.contains("empty-thread")
@@ -583,6 +584,11 @@ async fn exercise_held_empty_thread(
     control.close().await?;
     control_task.await??;
     backend.await??;
+    let automation_store = Arc::try_unwrap(automation_store)
+        .map_err(|_| std::io::Error::other("service retained automation store"))?
+        .into_inner();
+    automation_store.close().await?;
+    std::fs::remove_file(root.join("automation.sqlite"))?;
     std::fs::remove_file(socket_path)?;
     std::fs::remove_dir(scratch)?;
     std::fs::remove_dir(scratch_parent)?;

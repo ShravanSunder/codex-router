@@ -8,14 +8,16 @@ use collaboration_client::{
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
     ApprovalListResponse, ConversationCloseRequest, ConversationCreateOutcome,
-    ConversationOperationSubmission, ConversationResumeRequest, DeliveryOutcome, DeliveryReceipt,
-    EndpointInventory, JournalPage, JournalReadParams, JournalStatus, NativeInspectParams,
-    NativeInspectResult, NativeInterruptParams, NativeInterruptResult, NativeRenameParams,
-    NativeRenameResult, NativeSessionListParams, NativeSessionListResult, OperationId,
-    ProviderInspectFailure, ProviderSessionInspectRequest, ProviderSessionInspectResult,
-    ProviderSessionListParams, ProviderSessionListResult, ProviderSettingsAcceptRequest,
-    ProviderSettingsFailure, ProviderSettingsResult, ProviderSettingsSetRequest,
-    RouterExecutableRelation, SessionMessageReplyResult, router_build_warning,
+    ConversationOperationSubmission, ConversationResumeRequest, DeliveryOutcome, EndpointInventory,
+    JournalPage, JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
+    NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
+    NativeSessionListParams, NativeSessionListResult, OperationId, ProviderInspectFailure,
+    ProviderSessionInspectRequest, ProviderSessionInspectResult, ProviderSessionListParams,
+    ProviderSessionListResult, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
+    ProviderSettingsResult, ProviderSettingsSetRequest, PushMessageSendResult,
+    PushRecordHistoryParams, PushRecordListParams, PushRecordListResult, PushRecordShowParams,
+    PushRecordShowResult, RouterExecutableRelation, SessionMessageReplyResult,
+    router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -365,7 +367,7 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::Unknown)
     }
 
-    #[tool(name = "message_send", description = "Submits one agent-authored or explicit human message with exact auto, queue, or steer semantics. The receipt reports the selected route and strongest observed outcome; accepted input or a peer write does not prove completion or an agent reply. Router-authored content is not a public caller input, and uncertain dispatch is never replayed automatically.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<DeliveryReceipt>>())]
+    #[tool(name = "message_send", description = "Submits one agent-authored or explicit human message with exact auto, queue, or steer semantics. Agent sender identity is reported by the request's client, not authenticated. The result includes the stored push id, link, target and delivery receipt; accepted input or a peer write does not prove completion or an agent reply. Router-authored content is not a public caller input, and uncertain dispatch is never replayed automatically.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushMessageSendResult>>())]
     async fn message_send(
         &self,
         Parameters(request): Parameters<MessageSendRequest>,
@@ -379,7 +381,49 @@ impl CollaborationMcpServer {
         message_tool_result(result)
     }
 
-    #[tool(name = "message_reply", description = "Replies to the most recent Agent sender delivered to the supplied caller session. Router deliveries do not change the reply address. Optionally refuses unless expectSender matches the resolved recipient; returns the selected target.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<SessionMessageReplyResult>>())]
+    #[tool(name = "router_show", description = "Shows one stored Router push by id or router link, including its full body or expanded thread activity. The caller is reported by the MCP request, not authenticated; the service uses it as a confusion guard. A direct-message show by its target marks the message read.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushRecordShowResult>>())]
+    async fn router_show(
+        &self,
+        Parameters(request): Parameters<PushRecordShowParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.router_show(request).await;
+        let _closed = client.close().await;
+        structured_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "message_inbox", description = "Lists retained unread direct messages for the reported caller session. Caller identity is supplied by the MCP request and is not authenticated; the service uses it as a confusion guard.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushRecordListResult>>())]
+    async fn message_inbox(
+        &self,
+        Parameters(request): Parameters<PushRecordListParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.message_inbox(request).await;
+        let _closed = client.close().await;
+        structured_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "message_history", description = "Lists retained direct messages between the reported caller session and the explicit with session. Caller identity is supplied by the MCP request and is not authenticated; the service uses it as a confusion guard.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushRecordListResult>>())]
+    async fn message_history(
+        &self,
+        Parameters(request): Parameters<PushRecordHistoryParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.message_history(request).await;
+        let _closed = client.close().await;
+        structured_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "message_reply", description = "Replies to one direct message by its stored push id or router link, and records that reference on the reply. Caller identity is reported by the MCP request, not authenticated; the service uses it as a confusion guard. The result names the selected recipient.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<SessionMessageReplyResult>>())]
     async fn message_reply(
         &self,
         Parameters(request): Parameters<MessageReplyRequest>,
@@ -388,7 +432,7 @@ impl CollaborationMcpServer {
             Ok(value) => value,
             Err(error) => return failure(error, OperationEffect::None),
         };
-        let result = client.reply_to_latest_agent_sender(request).await;
+        let result = client.reply_to_push(request).await;
         let _closed = client.close().await;
         message_reply_tool_result(result)
     }
@@ -916,10 +960,10 @@ fn operation_error_result(
         .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))
 }
 
-fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> CallToolResult {
+fn message_tool_result(result: Result<PushMessageSendResult, MessageSendError>) -> CallToolResult {
     match result {
-        Ok(receipt) => {
-            let (kind, message, effect) = match &receipt.outcome {
+        Ok(push) => {
+            let (kind, message, effect) = match &push.receipt.outcome {
                 DeliveryOutcome::NotSubmitted { reason, .. } => {
                     ("notSubmitted", reason.clone(), OperationEffect::None)
                 }
@@ -936,9 +980,9 @@ fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> Cal
                     "Delivery acceptance is unknown".to_owned(),
                     OperationEffect::Unknown,
                 ),
-                _ => return structured_result(Ok(receipt), OperationEffect::None),
+                _ => return structured_result(Ok(push), OperationEffect::None),
             };
-            serde_json::to_value(receipt)
+            serde_json::to_value(push)
                 .map(|mut value| {
                     if let Some(fields) = value.as_object_mut() {
                         fields.insert("kind".to_owned(), serde_json::json!(kind));
@@ -947,7 +991,7 @@ fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> Cal
                     }
                     structured_tool_error(value)
                 })
-                .unwrap_or_else(|_| validation_failure("delivery receipt encoding failed"))
+                .unwrap_or_else(|_| validation_failure("push result encoding failed"))
         }
         Err(error) => {
             let (failure, target) = error.into_operation_failure_and_target();

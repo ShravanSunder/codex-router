@@ -66,7 +66,7 @@ impl JsonSchema for MachineLabel {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct MachineId(String);
 
@@ -98,7 +98,7 @@ impl MachineId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PushId(String);
 
@@ -130,7 +130,7 @@ impl PushId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct RouterLink {
     machine_id: MachineId,
     push_id: PushId,
@@ -179,7 +179,7 @@ impl fmt::Display for RouterLink {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PushKind {
     DirectMessage,
@@ -191,7 +191,7 @@ pub enum PushKind {
     SubscriptionExpiry,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PushOrigin {
     Session(SessionRef),
@@ -199,8 +199,13 @@ pub enum PushOrigin {
     Router(PushKind),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum PushHeaderFacts {
     DirectMessage {
         sender_display_name: Option<SessionDisplayName>,

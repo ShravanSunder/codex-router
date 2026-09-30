@@ -1,0 +1,242 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND delivery_state='held' ORDER BY created_at,push_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "push_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "push_id"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "origin_kind",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "origin_kind"
+          }
+        }
+      },
+      {
+        "name": "origin_service_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "origin_service_id"
+          }
+        }
+      },
+      {
+        "name": "origin_endpoint_id",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "origin_endpoint_id"
+          }
+        }
+      },
+      {
+        "name": "origin_session_id",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "origin_session_id"
+          }
+        }
+      },
+      {
+        "name": "origin_router_ref",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "origin_router_ref"
+          }
+        }
+      },
+      {
+        "name": "target_service_id",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "target_service_id"
+          }
+        }
+      },
+      {
+        "name": "target_endpoint_id",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "target_endpoint_id"
+          }
+        }
+      },
+      {
+        "name": "target_session_id",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "target_session_id"
+          }
+        }
+      },
+      {
+        "name": "reply_to_push_id",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "reply_to_push_id"
+          }
+        }
+      },
+      {
+        "name": "header_facts_json",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "header_facts_json"
+          }
+        }
+      },
+      {
+        "name": "body",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "body"
+          }
+        }
+      },
+      {
+        "name": "ranges_json",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "ranges_json"
+          }
+        }
+      },
+      {
+        "name": "delivery_state",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "delivery_state"
+          }
+        }
+      },
+      {
+        "name": "last_outcome_json",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "last_outcome_json"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "settled_at",
+        "ordinal": 17,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "settled_at"
+          }
+        }
+      },
+      {
+        "name": "read_at",
+        "ordinal": 18,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "read_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "2f8412de166fc9543deebda75dcf7828252993689b7de46771fd62ae204110a6"
+}

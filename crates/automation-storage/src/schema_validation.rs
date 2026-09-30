@@ -8,8 +8,10 @@ const CURRENT_TARGET_DEFINITION_SOURCE: &str = concat!(
     include_str!("../migrations/20260910000000_automation_v1.sql"),
     "\n",
     include_str!("../migrations/20260928000000_latest_agent_sender.sql"),
+    "\n",
+    include_str!("../migrations/20260930000000_router_pushes.sql"),
 );
-const LATEST_AGENT_SENDER_TABLE: &str = "latest_agent_senders";
+const ROUTER_PUSH_TABLE: &str = "router_pushes";
 
 struct TableSpec {
     name: &'static str,
@@ -34,11 +36,6 @@ const TABLE_SPECS: [TableSpec; 11] = [
         foreign_keys: "0,0,instruction_documents,instruction_id,instruction_id,NO ACTION,NO ACTION,NONE",
     },
     TableSpec {
-        name: "latest_agent_senders",
-        columns: "recipient_service_id,TEXT,1,<NULL>,1;recipient_endpoint_id,TEXT,1,<NULL>,2;recipient_session_id,TEXT,1,<NULL>,3;sender_service_id,TEXT,1,<NULL>,0;sender_endpoint_id,TEXT,1,<NULL>,0;sender_session_id,TEXT,1,<NULL>,0;delivered_at_ms,INTEGER,1,<NULL>,0",
-        foreign_keys: "",
-    },
-    TableSpec {
         name: "mailbox_deliveries",
         columns: "delivery_id,TEXT,0,<NULL>,1;wakeup_id,TEXT,1,<NULL>,0;occurrence_id,TEXT,1,<NULL>,0;due_at_ms,INTEGER,1,<NULL>,0;fired_at_ms,INTEGER,1,<NULL>,0;target_json,TEXT,1,<NULL>,0;message_json,TEXT,1,<NULL>,0;delivery_mode,TEXT,1,<NULL>,0;generation_guard_json,TEXT,0,<NULL>,0;delivery_status,TEXT,1,<NULL>,0;eligible_at_ms,INTEGER,1,<NULL>,0;expires_at_ms,INTEGER,0,<NULL>,0;latest_attempt_json,TEXT,0,<NULL>,0;accepted_receipt_json,TEXT,0,<NULL>,0;created_at_ms,INTEGER,1,<NULL>,0",
         foreign_keys: "0,0,wakeup_definitions,wakeup_id,wakeup_id,NO ACTION,NO ACTION,NONE",
@@ -47,6 +44,11 @@ const TABLE_SPECS: [TableSpec; 11] = [
         name: "operation_receipts",
         columns: "operation_id,TEXT,0,<NULL>,1;method_name,TEXT,1,<NULL>,0;canonical_request,BLOB,1,<NULL>,0;resource_id,TEXT,1,<NULL>,0;operation_status,TEXT,1,<NULL>,0;effect_evidence_json,TEXT,1,<NULL>,0;final_result_json,TEXT,0,<NULL>,0;final_error_json,TEXT,0,<NULL>,0;committed_at_ms,INTEGER,1,<NULL>,0",
         foreign_keys: "",
+    },
+    TableSpec {
+        name: "router_pushes",
+        columns: "push_id,TEXT,1,<NULL>,1;kind,TEXT,1,<NULL>,0;origin_kind,TEXT,1,<NULL>,0;origin_service_id,TEXT,0,<NULL>,0;origin_endpoint_id,TEXT,0,<NULL>,0;origin_session_id,TEXT,0,<NULL>,0;origin_router_ref,TEXT,0,<NULL>,0;target_service_id,TEXT,1,<NULL>,0;target_endpoint_id,TEXT,1,<NULL>,0;target_session_id,TEXT,1,<NULL>,0;reply_to_push_id,TEXT,0,<NULL>,0;header_facts_json,TEXT,1,<NULL>,0;body,TEXT,0,<NULL>,0;ranges_json,TEXT,0,<NULL>,0;delivery_state,TEXT,1,<NULL>,0;last_outcome_json,TEXT,0,<NULL>,0;created_at,TEXT,1,<NULL>,0;settled_at,TEXT,0,<NULL>,0;read_at,TEXT,0,<NULL>,0",
+        foreign_keys: "0,0,router_pushes,reply_to_push_id,push_id,NO ACTION,SET NULL,NONE",
     },
     TableSpec {
         name: "schedule_definitions",
@@ -75,20 +77,21 @@ const TABLE_SPECS: [TableSpec; 11] = [
     },
 ];
 
-const INDEX_SPECS: [&str; 24] = [
+const INDEX_SPECS: [&str; 25] = [
     "automation_events,event_cleanup,0,c,0,recorded_at_ms:0:BINARY:1,event_sequence:0:BINARY:1",
     "automation_events,event_history,0,c,0,subject_kind:0:BINARY:1,subject_id:0:BINARY:1,event_sequence:0:BINARY:1",
     "automation_events,_,1,u,0,event_id:0:BINARY:1",
     "instruction_documents,_,1,pk,0,instruction_id:0:BINARY:1",
     "instruction_revisions,_,1,u,0,instruction_id:0:BINARY:1,revision_id:0:BINARY:1",
     "instruction_revisions,_,1,pk,0,revision_id:0:BINARY:1",
-    "latest_agent_senders,latest_agent_senders_retention,0,c,0,delivered_at_ms:0:BINARY:1",
-    "latest_agent_senders,_,1,pk,0,recipient_service_id:0:BINARY:1,recipient_endpoint_id:0:BINARY:1,recipient_session_id:0:BINARY:1",
     "mailbox_deliveries,delivery_eligibility,0,c,0,delivery_status:0:BINARY:1,eligible_at_ms:0:BINARY:1",
     "mailbox_deliveries,_,1,u,0,wakeup_id:0:BINARY:1,delivery_id:0:BINARY:1",
     "mailbox_deliveries,_,1,u,0,occurrence_id:0:BINARY:1",
     "mailbox_deliveries,_,1,pk,0,delivery_id:0:BINARY:1",
     "operation_receipts,_,1,pk,0,operation_id:0:BINARY:1",
+    "router_pushes,router_pushes_created,0,c,0,created_at:0:BINARY:1",
+    "router_pushes,router_pushes_target_state,0,c,0,target_service_id:0:BINARY:1,target_endpoint_id:0:BINARY:1,target_session_id:0:BINARY:1,delivery_state:0:BINARY:1,created_at:0:BINARY:1",
+    "router_pushes,_,1,pk,0,push_id:0:BINARY:1",
     "schedule_definitions,_,1,pk,0,schedule_id:0:BINARY:1",
     "schedule_timing_state,_,1,pk,0,schedule_id:0:BINARY:1",
     "thread_bindings,_,1,u,0,schedule_id:0:BINARY:1,thread_binding_id:0:BINARY:1",
@@ -132,7 +135,7 @@ async fn validate_schema(
     validate_object_inventory(transaction, legacy).await?;
     for table in TABLE_SPECS
         .iter()
-        .filter(|table| !legacy || table.name != LATEST_AGENT_SENDER_TABLE)
+        .filter(|table| !legacy || table.name != ROUTER_PUSH_TABLE)
     {
         validate_columns(transaction, table, legacy).await?;
         validate_foreign_keys(transaction, table).await?;
@@ -164,7 +167,7 @@ async fn validate_object_inventory(
     }
     let expected_tables: Vec<&str> = TABLE_SPECS
         .iter()
-        .filter(|table| !legacy || table.name != LATEST_AGENT_SENDER_TABLE)
+        .filter(|table| !legacy || table.name != ROUTER_PUSH_TABLE)
         .map(|table| table.name)
         .collect();
     let expected_indexes = if legacy {
@@ -180,7 +183,8 @@ async fn validate_object_inventory(
             "delivery_eligibility",
             "event_cleanup",
             "event_history",
-            "latest_agent_senders_retention",
+            "router_pushes_created",
+            "router_pushes_target_state",
             "run_admission_lookup",
             "run_history",
         ]
@@ -269,7 +273,7 @@ async fn validate_indexes(
     let mut actual = Vec::new();
     for table in TABLE_SPECS
         .iter()
-        .filter(|table| !legacy || table.name != LATEST_AGENT_SENDER_TABLE)
+        .filter(|table| !legacy || table.name != ROUTER_PUSH_TABLE)
     {
         let indexes = sqlx::query(
             "SELECT name,\"unique\",origin,partial FROM pragma_index_list(?1) ORDER BY seq",
@@ -311,7 +315,7 @@ async fn validate_indexes(
     actual.sort();
     let mut expected = INDEX_SPECS
         .iter()
-        .filter(|index| !legacy || !index.starts_with("latest_agent_senders,"))
+        .filter(|index| !legacy || !index.starts_with("router_pushes,"))
         .copied()
         .collect::<Vec<_>>();
     expected.sort();
@@ -327,7 +331,7 @@ async fn validate_known_definitions(
 ) -> Result<(), StorageError> {
     for table in TABLE_SPECS
         .iter()
-        .filter(|table| !legacy || table.name != LATEST_AGENT_SENDER_TABLE)
+        .filter(|table| !legacy || table.name != ROUTER_PUSH_TABLE)
     {
         let sql: String =
             sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name=?1")
@@ -342,7 +346,7 @@ async fn validate_known_definitions(
     }
     for index in INDEX_SPECS
         .iter()
-        .filter(|index| !legacy || !index.starts_with("latest_agent_senders,"))
+        .filter(|index| !legacy || !index.starts_with("router_pushes,"))
         .filter_map(|index| {
             let mut fields = index.split(',');
             fields.next();

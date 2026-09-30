@@ -371,28 +371,46 @@ pub fn control_schema_document(
             "nameMismatch",
         ],
     )?;
-    assembly.add_method::<SessionMessageSendParams, DeliveryReceipt>(
+    assembly.add_method::<SessionMessageSendParams, PushMessageSendResult>(
         "message/send",
         &[
             "wrongService",
             "unavailable",
-            "replyUnavailable",
-            "outcomeUnknown",
-            "overloaded",
-            "threadNotLoaded",
-            "noActiveTurn",
+            "invalidField",
         ],
     )?;
     assembly.add_method::<SessionMessageReplyParams, SessionMessageReplyResult>(
         "message/reply",
         &[
             "wrongService",
-            "replyUnavailable",
-            "latestSenderUnknown",
-            "latestSenderMismatch",
+            "unavailable",
+            "invalidField",
+            "notFound",
+            "notPermitted",
+            "foreignMachine",
+            "notDirectMessage",
+            "ownerReplyUnsupported",
             "outcomeUnknown",
-            "overloaded",
         ],
+    )?;
+    assembly.add_method::<PushRecordShowParams, PushRecordShowResult>(
+        "router/show",
+        &[
+            "wrongService",
+            "unavailable",
+            "invalidField",
+            "notFound",
+            "notPermitted",
+            "foreignMachine",
+        ],
+    )?;
+    assembly.add_method::<PushRecordListParams, PushRecordListResult>(
+        "message/inbox",
+        &["wrongService", "unavailable", "invalidField"],
+    )?;
+    assembly.add_method::<PushRecordHistoryParams, PushRecordListResult>(
+        "message/history",
+        &["wrongService", "unavailable", "invalidField"],
     )?;
     assembly.add_method::<NativeInterruptParams, NativeInterruptResult>(
         "codex/turnInterrupt",

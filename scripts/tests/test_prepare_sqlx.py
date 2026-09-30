@@ -98,20 +98,22 @@ class PrepareSqlxTests(unittest.TestCase):
         ]
         self.assertEqual(
             ["--ignore-missing" in command for command, _ in migration_calls],
-            [False, False, False, True],
+            [False, False, False, False, True, True],
         )
         self.assertEqual(
             [command[command.index("--source") + 1] for command, _ in migration_calls],
             [
+                "crates/automation-storage/migrations",
                 "crates/codex-router-state/migrations",
                 "crates/message-board-storage/migrations",
                 "crates/message-board-storage/migrations",
                 "crates/collaboration-service/migrations",
+                "crates/automation-storage/migrations",
             ],
         )
         self.assertEqual(
             [command[command.index("--package") + 1] for command, _ in prepare_calls],
-            ["codex-router-state", "message-board-storage", "collaboration-service"],
+            ["automation-storage", "codex-router-state", "message-board-storage", "collaboration-service"],
         )
         self.assertEqual(
             [
@@ -119,6 +121,7 @@ class PrepareSqlxTests(unittest.TestCase):
                 for _, environment in prepare_calls
             ],
             [
+                "automation-schema.sqlite",
                 "account-schema.sqlite",
                 "message-board-schema.sqlite",
                 "provider-operation-schema.sqlite",
@@ -135,6 +138,7 @@ class PrepareSqlxTests(unittest.TestCase):
         self.assertEqual(
             sorted(path.name for path in self.metadata_directory.glob("query-*.json")),
             [
+                "query-automation-storage.json",
                 "query-codex-router-state.json",
                 "query-collaboration-service.json",
                 "query-message-board-storage.json",
@@ -190,7 +194,7 @@ class PrepareSqlxTests(unittest.TestCase):
             for command, _ in calls
             if command[:4] == ["cargo", "sqlx", "prepare", "--workspace"]
         ]
-        self.assertEqual(len(prepare_calls), 3)
+        self.assertEqual(len(prepare_calls), 4)
         self.assertTrue(all("--check" in command for command in prepare_calls))
         self.assertEqual(existing_metadata.read_text(), "existing")
 

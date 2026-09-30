@@ -18,8 +18,8 @@ pub(crate) enum DeliveryChoice {
 pub(crate) struct SendArguments {
     #[command(flatten)]
     pub(crate) target: crate::session_target_arguments::SessionTargetArguments,
-    /// Use the supplied self address as SessionRef JSON; this is not authenticated identity.
-    #[arg(long = "from", conflicts_with = "human_user")]
+    /// Test-only sender identity override; normal callers use their harness identity.
+    #[arg(long = "from", hide = true, conflicts_with = "human_user")]
     pub(crate) sender: Option<String>,
     /// Explicit human input; omit the agent declaration.
     #[arg(long)]
@@ -46,18 +46,94 @@ pub(crate) struct SendArguments {
     pub(crate) json: bool,
 }
 
+#[derive(Args)]
+pub(crate) struct MessageSendArguments {
+    #[command(flatten)]
+    pub(crate) target: crate::session_target_arguments::SessionTargetArguments,
+    /// Test-only sender identity override; normal callers use their harness identity.
+    #[arg(long = "from", hide = true, conflicts_with = "human_user")]
+    pub(crate) sender: Option<String>,
+    /// Explicit human input; Agent sender identity comes from the current CLI harness.
+    #[arg(long)]
+    pub(crate) human_user: bool,
+    /// Auto steers active work or starts/resumes. Queue requires loaded; steer requires active.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub(crate) delivery: DeliveryChoice,
+    #[arg(
+        long,
+        required_unless_present = "text_file",
+        conflicts_with = "text_file"
+    )]
+    pub(crate) text: Option<String>,
+    /// Read content from a file; '-' reads stdin. Content is never shell-interpolated.
+    #[arg(long)]
+    pub(crate) text_file: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) service_directory: Option<PathBuf>,
+    #[arg(long, requires = "expected_generation")]
+    pub(crate) expected_service_epoch: Option<String>,
+    #[arg(long, requires = "expected_service_epoch")]
+    pub(crate) expected_generation: Option<u64>,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
 pub(crate) fn prepare(args: &SendArguments) -> Result<(PathBuf, PreparedMessage), String> {
-    let target = args.target.parse()?;
-    if let Some(epoch) = &args.expected_service_epoch {
+    prepare_message_input(MessageInputOptions {
+        target: &args.target,
+        sender: args.sender.as_deref(),
+        human_user: args.human_user,
+        delivery: args.delivery,
+        text: args.text.as_deref(),
+        text_file: args.text_file.as_deref(),
+        service_directory: args.service_directory.as_deref(),
+        expected_service_epoch: args.expected_service_epoch.as_deref(),
+        expected_generation: args.expected_generation,
+    })
+}
+
+pub(crate) fn prepare_message_send(
+    args: &MessageSendArguments,
+) -> Result<(PathBuf, PreparedMessage), String> {
+    prepare_message_input(MessageInputOptions {
+        target: &args.target,
+        sender: args.sender.as_deref(),
+        human_user: args.human_user,
+        delivery: args.delivery,
+        text: args.text.as_deref(),
+        text_file: args.text_file.as_deref(),
+        service_directory: args.service_directory.as_deref(),
+        expected_service_epoch: args.expected_service_epoch.as_deref(),
+        expected_generation: args.expected_generation,
+    })
+}
+
+struct MessageInputOptions<'a> {
+    target: &'a crate::session_target_arguments::SessionTargetArguments,
+    sender: Option<&'a str>,
+    human_user: bool,
+    delivery: DeliveryChoice,
+    text: Option<&'a str>,
+    text_file: Option<&'a std::path::Path>,
+    service_directory: Option<&'a std::path::Path>,
+    expected_service_epoch: Option<&'a str>,
+    expected_generation: Option<u64>,
+}
+
+fn prepare_message_input(
+    options: MessageInputOptions<'_>,
+) -> Result<(PathBuf, PreparedMessage), String> {
+    let target = options.target.parse()?;
+    if let Some(epoch) = options.expected_service_epoch {
         let _: collaboration_client::protocol::CodexGeneration = serde_json::from_value(
-            json!({"serviceEpoch":epoch,"generation":args.expected_generation}),
+            json!({"serviceEpoch":epoch,"generation":options.expected_generation}),
         )
         .map_err(|_| "Invalid expected generation")?;
     }
-    let text = if let Some(text) = &args.text {
-        text.clone()
+    let text = if let Some(text) = options.text {
+        text.to_owned()
     } else {
-        let path = args.text_file.as_ref().ok_or("Message content required")?;
+        let path = options.text_file.ok_or("Message content required")?;
         let mut reader: Box<dyn Read> = if path.as_os_str() == "-" {
             Box::new(io::stdin())
         } else {
@@ -74,25 +150,21 @@ pub(crate) fn prepare(args: &SendArguments) -> Result<(PathBuf, PreparedMessage)
     let text = text
         .try_into()
         .map_err(|_| "Invalid or oversized message text")?;
-    let content = if args.human_user {
+    let content = if options.human_user {
         PreparedMessageContent::HumanUser { text }
     } else {
-        let sender = args
+        let sender = options
             .sender
-            .as_deref()
             .map(serde_json::from_str)
             .transpose()
             .map_err(|_| session_ref_guidance("--from"))?;
         if sender.is_none() {
-            crate::current_session_identity::read_harness_session_identity().map_err(|error| {
-                format!(
-                    "{error}; run agent-collaboration whoami --json or pass --from SessionRef JSON"
-                )
-            })?;
+            crate::current_session_identity::read_harness_session_identity()
+                .map_err(|error| format!("{error}; run agent-collaboration whoami --json"))?;
         }
         PreparedMessageContent::Agent { sender, text }
     };
-    let generation_guard = match (&args.expected_service_epoch, args.expected_generation) {
+    let generation_guard = match (options.expected_service_epoch, options.expected_generation) {
         (Some(epoch), Some(generation)) => Some(
             serde_json::from_value(json!({"serviceEpoch":epoch,"generation":generation}))
                 .map_err(|_| "Invalid expected generation")?,
@@ -100,13 +172,15 @@ pub(crate) fn prepare(args: &SendArguments) -> Result<(PathBuf, PreparedMessage)
         (None, None) => None,
         _ => return Err("Provide both expected service epoch and generation".into()),
     };
-    let directory = crate::endpoint_commands::resolve_directory(args.service_directory.clone())?;
+    let directory = crate::endpoint_commands::resolve_directory(
+        options.service_directory.map(std::path::Path::to_path_buf),
+    )?;
     Ok((
         directory,
         PreparedMessage {
             target,
             content,
-            delivery: match args.delivery {
+            delivery: match options.delivery {
                 DeliveryChoice::Auto => MessageDelivery::Auto,
                 DeliveryChoice::Queue => MessageDelivery::Queue,
                 DeliveryChoice::Steer => MessageDelivery::Steer,
@@ -171,13 +245,9 @@ fn resolve_sender_ref(
         return Ok(sender);
     }
     read_harness()
-        .map_err(|error| {
-            format!("{error}; run agent-collaboration whoami --json or pass --from SessionRef JSON")
-        })?
+        .map_err(|error| format!("{error}; run agent-collaboration whoami --json"))?
         .session_ref(service_id)
-        .map_err(|error| {
-            format!("{error}; run agent-collaboration whoami --json or pass --from SessionRef JSON")
-        })
+        .map_err(|error| format!("{error}; run agent-collaboration whoami --json"))
 }
 
 #[cfg(test)]
@@ -186,10 +256,10 @@ mod tests {
     use collaboration_client::protocol::UuidIdentity;
 
     #[test]
-    fn sender_uses_harness_identity_and_fails_with_whoami_guidance_when_absent() {
+    fn sender_comes_from_harness_identity_and_fails_with_whoami_guidance_when_absent() {
         let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
             .expect("service identity");
-        let resolved = resolve_sender_ref(&service_id, None, || {
+        let resolved = resolve_sender_ref(&service_id, || {
             crate::current_session_identity::resolve_harness_session_identity(|name| {
                 (name == "CURSOR_CONVERSATION_ID").then(|| "cursor-1".into())
             })
@@ -198,11 +268,10 @@ mod tests {
         assert_eq!(String::from(resolved.endpoint.endpoint_id), "cursor-local");
         assert_eq!(String::from(resolved.session_id), "cursor-1");
 
-        let error = resolve_sender_ref(&service_id, None, || {
+        let error = resolve_sender_ref(&service_id, || {
             crate::current_session_identity::resolve_harness_session_identity(|_| None)
         })
         .expect_err("sender must fail closed");
         assert!(error.contains("agent-collaboration whoami --json"));
-        assert!(error.contains("--from SessionRef JSON"));
     }
 }

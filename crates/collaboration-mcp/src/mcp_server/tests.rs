@@ -1,9 +1,399 @@
 use super::{
     CollaborationMcpServer, ConversationCreateToolRequest, conversation_create_tool_result,
 };
-use collaboration_protocol::{ConversationCreateOutcome, DeliveryReceipt, OperationId};
+use collaboration_protocol::{ConversationCreateOutcome, OperationId};
 use serde_json::Value;
 use std::collections::BTreeSet;
+
+const FIXTURE_SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
+const FIXTURE_SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
+const FIXTURE_PUSH_ID: &str = "018f1f12-3456-7abc-8def-0123456789ab";
+
+fn fixture_session(endpoint_id: &str, session_id: &str) -> Value {
+    serde_json::json!({
+        "endpoint":{"serviceId":FIXTURE_SERVICE_ID,"endpointId":endpoint_id},
+        "sessionId":session_id
+    })
+}
+
+fn start_control_response_fixture(
+    service_directory: &std::path::Path,
+    expected_method: &'static str,
+    result: Result<Value, Value>,
+) -> tokio::task::JoinHandle<Value> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let digest = format!("sha256:{}", "a".repeat(64));
+    std::fs::write(
+        service_directory.join("service.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version":2,
+            "serviceId":FIXTURE_SERVICE_ID,
+            "serviceEpoch":FIXTURE_SERVICE_EPOCH,
+            "machineLabel":"fixture-host",
+            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "controlSchemaDigest":digest,
+            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+        }))
+        .expect("manifest JSON"),
+    )
+    .expect("manifest fixture");
+    let listener = tokio::net::UnixListener::bind(service_directory.join("control.sock"))
+        .expect("Control fixture socket");
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("Control accept");
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let initialize: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read initialize")
+                .expect("initialize frame"),
+        )
+        .expect("initialize JSON");
+        assert_eq!(initialize["method"], "control/initialize");
+        let initialized = serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":initialize["id"],
+            "result":{
+                "version":{"major":1,"minor":0},
+                "serviceId":FIXTURE_SERVICE_ID,
+                "serviceEpoch":FIXTURE_SERVICE_EPOCH,
+                "controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
+            }
+        });
+        write
+            .write_all(format!("{initialized}\n").as_bytes())
+            .await
+            .expect("write initialize response");
+
+        let request: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read tool request")
+                .expect("tool request frame"),
+        )
+        .expect("tool request JSON");
+        assert_eq!(request["method"], expected_method);
+        let response_id = request["id"].clone();
+        let response = match result {
+            Ok(result) => serde_json::json!({
+                "jsonrpc":"2.0","id":response_id,"result":result
+            }),
+            Err(error) => serde_json::json!({
+                "jsonrpc":"2.0","id":response_id,"error":error
+            }),
+        };
+        write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .expect("write tool response");
+        request
+    })
+}
+
+async fn finish_control_fixture(peer: tokio::task::JoinHandle<Value>) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(2), peer)
+        .await
+        .expect("Control fixture traffic deadline")
+        .expect("Control fixture task")
+}
+
+fn direct_message_show_result(target: Value) -> Value {
+    serde_json::json!({
+        "record":{
+            "pushId":FIXTURE_PUSH_ID,
+            "kind":"direct-message",
+            "origin":{"session":fixture_session("claude-local", "sender-session")},
+            "originRouterRef":null,
+            "target":target,
+            "replyToPushId":null,
+            "headerFacts":{"kind":"directMessage","senderDisplayName":null},
+            "body":"stored body",
+            "activity":null,
+            "deliveryState":"delivered",
+            "lastOutcome":{
+                "outcome":{"kind":"peerMessageWritten"},
+                "reachability":"claudeCodePeer",
+                "client":{"kind":"claudeCodePeer"}
+            },
+            "createdAt":"2026-09-30T16:00:00Z",
+            "settledAt":"2026-09-30T16:00:01Z",
+            "readAt":"2026-09-30T16:00:02Z"
+        },
+        "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
+        "activityRanges":[]
+    })
+}
+
+#[test]
+fn router_push_tools_expose_reported_caller_and_reference_contracts() {
+    let server = CollaborationMcpServer::new(std::env::temp_dir());
+    let tools = server.resolved_tools();
+
+    for (name, required_fields) in [
+        ("router_show", &["caller", "reference"][..]),
+        ("message_inbox", &["caller", "limit"][..]),
+        ("message_history", &["caller", "with", "limit"][..]),
+        ("message_reply", &["caller", "reference", "text"][..]),
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("missing {name} tool"));
+        let input_schema = Value::Object((*tool.input_schema).clone());
+        let required = input_schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} required input fields"));
+        for field in required_fields {
+            assert!(
+                required.contains(&serde_json::json!(field)),
+                "{name} must require {field}"
+            );
+        }
+        assert!(
+            input_schema["properties"].get("expectSender").is_none(),
+            "{name} must not retain expectSender"
+        );
+        let description = tool.description.as_deref().unwrap_or_default();
+        assert!(description.contains("reported"), "{name}: {description}");
+        assert!(
+            description.contains("not authenticated"),
+            "{name}: {description}"
+        );
+    }
+
+    let message_send = tools
+        .iter()
+        .find(|tool| tool.name == "message_send")
+        .expect("message_send tool");
+    let description = message_send.description.as_deref().unwrap_or_default();
+    assert!(description.contains("reported"), "{description}");
+    assert!(description.contains("not authenticated"), "{description}");
+    let output_schema = Value::Object(
+        (**message_send
+            .output_schema
+            .as_ref()
+            .expect("message_send output schema"))
+        .clone(),
+    );
+    let success_definition = output_schema["anyOf"][0]["$ref"]
+        .as_str()
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .expect("message_send success definition");
+    let required = output_schema["$defs"][success_definition]["required"]
+        .as_array()
+        .expect("message_send success fields");
+    for field in ["pushId", "link", "target", "receipt"] {
+        assert!(
+            required.contains(&serde_json::json!(field)),
+            "message_send result must require {field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn message_send_returns_push_identity_and_forwards_the_reported_agent_sender() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let target = fixture_session("claude-local", "target-session");
+    let sender = fixture_session("codex-local", "reported-sender");
+    let expected_result = serde_json::json!({
+        "pushId":FIXTURE_PUSH_ID,
+        "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
+        "target":target,
+        "targetIdentity":"✳️ claude-local/target-s",
+        "receipt":{
+            "outcome":{"kind":"peerMessageWritten"},
+            "reachability":"claudeCodePeer",
+            "client":{"kind":"claudeCodePeer"}
+        }
+    });
+    let peer = start_control_response_fixture(
+        temporary.path(),
+        "message/send",
+        Ok(expected_result.clone()),
+    );
+    let request: collaboration_client::MessageSendRequest =
+        serde_json::from_value(serde_json::json!({
+            "target":target,
+            "message":{"kind":"agent","sender":sender,"text":"reporting identity"},
+            "delivery":"auto",
+            "generationGuard":null
+        }))
+        .expect("message_send input");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+
+    let result = server.message_send(super::Parameters(request)).await;
+    let control_request = finish_control_fixture(peer).await;
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(control_request["params"]["message"]["sender"], sender);
+    let structured = result.structured_content.expect("push result");
+    assert_eq!(structured, expected_result);
+    assert_eq!(structured["pushId"], FIXTURE_PUSH_ID);
+    assert_eq!(structured["link"], expected_result["link"]);
+    assert_eq!(structured["target"], target);
+    assert_eq!(
+        structured["receipt"]["outcome"]["kind"],
+        "peerMessageWritten"
+    );
+}
+
+#[tokio::test]
+async fn router_show_forwards_caller_and_preserves_control_read_state() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let caller = fixture_session("codex-local", "target-session");
+    let expected_result = direct_message_show_result(caller.clone());
+    let peer = start_control_response_fixture(
+        temporary.path(),
+        "router/show",
+        Ok(expected_result.clone()),
+    );
+    let request: collaboration_protocol::PushRecordShowParams =
+        serde_json::from_value(serde_json::json!({"caller":caller,"reference":FIXTURE_PUSH_ID}))
+            .expect("router_show input");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+
+    let result = server.router_show(super::Parameters(request)).await;
+    let control_request = finish_control_fixture(peer).await;
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(control_request["params"]["caller"], caller);
+    assert_eq!(control_request["params"]["reference"], FIXTURE_PUSH_ID);
+    let structured = result.structured_content.expect("shown record");
+    assert_eq!(structured, expected_result);
+    assert_eq!(structured["record"]["readAt"], "2026-09-30T16:00:02Z");
+}
+
+#[tokio::test]
+async fn router_show_preserves_not_permitted_control_error() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let caller = fixture_session("cursor-local", "unrelated-session");
+    let peer = start_control_response_fixture(
+        temporary.path(),
+        "router/show",
+        Err(serde_json::json!({
+            "code":-32050,
+            "message":"not permitted",
+            "data":{
+                "kind":"notPermitted",
+                "stage":"inspect",
+                "message":"only a direct-message participant may read this record"
+            }
+        })),
+    );
+    let request: collaboration_protocol::PushRecordShowParams =
+        serde_json::from_value(serde_json::json!({"caller":caller,"reference":FIXTURE_PUSH_ID}))
+            .expect("router_show input");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+
+    let result = server.router_show(super::Parameters(request)).await;
+    let control_request = finish_control_fixture(peer).await;
+
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(control_request["params"]["caller"], caller);
+    let structured = result.structured_content.expect("typed read error");
+    assert_eq!(structured["serviceKind"], "notPermitted");
+    assert_eq!(structured["stage"], "inspect");
+    assert_eq!(
+        structured["message"],
+        "only a direct-message participant may read this record"
+    );
+}
+
+#[tokio::test]
+async fn message_inbox_forwards_reported_caller_and_returns_unread_records() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let caller = fixture_session("codex-local", "target-session");
+    let expected_result = serde_json::json!({"records":[]});
+    let peer = start_control_response_fixture(
+        temporary.path(),
+        "message/inbox",
+        Ok(expected_result.clone()),
+    );
+    let request: collaboration_protocol::PushRecordListParams =
+        serde_json::from_value(serde_json::json!({"caller":caller,"limit":20}))
+            .expect("message_inbox input");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+
+    let result = server.message_inbox(super::Parameters(request)).await;
+    let control_request = finish_control_fixture(peer).await;
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(control_request["params"]["caller"], caller);
+    assert_eq!(control_request["params"]["limit"], 20);
+    assert_eq!(result.structured_content, Some(expected_result));
+}
+
+#[tokio::test]
+async fn message_history_forwards_both_reported_sessions() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let caller = fixture_session("codex-local", "target-session");
+    let with = fixture_session("claude-local", "sender-session");
+    let expected_result = serde_json::json!({"records":[]});
+    let peer = start_control_response_fixture(
+        temporary.path(),
+        "message/history",
+        Ok(expected_result.clone()),
+    );
+    let request: collaboration_protocol::PushRecordHistoryParams =
+        serde_json::from_value(serde_json::json!({"caller":caller,"with":with,"limit":20}))
+            .expect("message_history input");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+
+    let result = server.message_history(super::Parameters(request)).await;
+    let control_request = finish_control_fixture(peer).await;
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(control_request["params"]["caller"], caller);
+    assert_eq!(control_request["params"]["with"], with);
+    assert_eq!(control_request["params"]["limit"], 20);
+    assert_eq!(result.structured_content, Some(expected_result));
+}
+
+#[tokio::test]
+async fn message_reply_targets_the_referenced_push_without_expect_sender() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let caller = fixture_session("codex-local", "target-session");
+    let recipient = fixture_session("claude-local", "sender-session");
+    let reply_push_id = "018f1f12-3456-7abc-8def-0123456789ac";
+    let expected_result = serde_json::json!({
+        "target":recipient,
+        "targetIdentity":"✳️ claude-local/sender-s",
+        "pushId":reply_push_id,
+        "link":format!("router://{FIXTURE_SERVICE_ID}/push/{reply_push_id}"),
+        "receipt":{
+            "outcome":{"kind":"peerMessageWritten"},
+            "reachability":"claudeCodePeer",
+            "client":{"kind":"claudeCodePeer"}
+        }
+    });
+    let peer = start_control_response_fixture(
+        temporary.path(),
+        "message/reply",
+        Ok(expected_result.clone()),
+    );
+    let reference = format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}");
+    let request: collaboration_client::MessageReplyRequest = serde_json::from_value(
+        serde_json::json!({"caller":caller,"reference":reference,"text":"reply by id"}),
+    )
+    .expect("message_reply input");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+
+    let result = server.message_reply(super::Parameters(request)).await;
+    let control_request = finish_control_fixture(peer).await;
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(control_request["params"]["caller"], caller);
+    assert_eq!(control_request["params"]["reference"], reference);
+    assert_eq!(control_request["params"]["text"], "reply by id");
+    assert!(control_request["params"].get("expectSender").is_none());
+    let structured = result.structured_content.expect("reply result");
+    assert_eq!(structured, expected_result);
+}
 
 #[tokio::test]
 async fn native_sessions_list_routes_claude_to_provider_tool_without_changing_schema() {
@@ -23,7 +413,7 @@ async fn native_sessions_list_routes_claude_to_provider_tool_without_changing_sc
 }
 
 #[test]
-fn message_send_route_receipts_match_advertised_output_schema() {
+fn message_send_route_push_results_match_advertised_output_schema() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let schema = server
@@ -40,10 +430,7 @@ fn message_send_route_receipts_match_advertised_output_schema() {
         "error branch must have an exclusive discriminator"
     );
     let validator = jsonschema::validator_for(&schema).expect("message_send JSON Schema");
-    let target = serde_json::json!({
-        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-        "sessionId":"thread-a"
-    });
+    let target = fixture_session("codex-local", "thread-a");
     let generation = serde_json::json!({
         "serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":1
     });
@@ -92,10 +479,18 @@ fn message_send_route_receipts_match_advertised_output_schema() {
             }),
         ),
     ];
-    for (route, value) in cases {
-        let receipt: DeliveryReceipt = serde_json::from_value(value.clone())
-            .unwrap_or_else(|error| panic!("{route} receipt fixture: {error}"));
-        let result = super::message_tool_result(Ok(receipt));
+    for (route, receipt) in cases {
+        let value = serde_json::json!({
+            "pushId":FIXTURE_PUSH_ID,
+            "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
+            "target":target,
+            "targetIdentity":"✳️ codex-local/threa",
+            "receipt":receipt
+        });
+        let push_result: collaboration_protocol::PushMessageSendResult =
+            serde_json::from_value(value.clone())
+                .unwrap_or_else(|error| panic!("{route} push result fixture: {error}"));
+        let result = super::message_tool_result(Ok(push_result));
         assert_ne!(result.is_error, Some(true), "{route} tool result");
         let structured = result.structured_content.expect("structured receipt");
         assert_eq!(structured, value, "{route} success wire shape changed");
@@ -106,7 +501,7 @@ fn message_send_route_receipts_match_advertised_output_schema() {
 }
 
 #[test]
-fn message_reply_is_advertised_with_caller_text_and_optional_sender_guard() {
+fn message_reply_is_by_reference_and_has_no_latest_sender_compatibility_fields() {
     let server = super::CollaborationMcpServer::new(std::env::temp_dir());
     let tool = server
         .resolved_tools()
@@ -119,9 +514,20 @@ fn message_reply_is_advertised_with_caller_text_and_optional_sender_guard() {
         .and_then(serde_json::Value::as_array)
         .expect("reply required fields");
     assert!(required.iter().any(|field| field == "caller"));
+    assert!(required.iter().any(|field| field == "reference"));
     assert!(required.iter().any(|field| field == "text"));
-    assert!(!required.iter().any(|field| field == "expectSender"));
-    assert!(input_schema["properties"].get("expectSender").is_some());
+    assert!(input_schema["properties"].get("expectSender").is_none());
+    let stale_latest_sender_input =
+        serde_json::from_value::<collaboration_client::MessageReplyRequest>(serde_json::json!({
+            "caller":fixture_session("codex-local", "target-session"),
+            "reference":FIXTURE_PUSH_ID,
+            "text":"reply",
+            "expectSender":fixture_session("claude-local", "sender-session")
+        }));
+    assert!(
+        stale_latest_sender_input.is_err(),
+        "message_reply must reject expectSender instead of retaining a compatibility path"
+    );
 
     let output_schema = serde_json::Value::Object(
         (**tool.output_schema.as_ref().expect("reply output schema")).clone(),
@@ -130,6 +536,8 @@ fn message_reply_is_advertised_with_caller_text_and_optional_sender_guard() {
     let valid_reply_result = serde_json::json!({
         "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},"sessionId":"sender-session"},
         "targetIdentity":"✳️ claude-local/sender-s",
+        "pushId":FIXTURE_PUSH_ID,
+        "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
         "receipt":{"outcome":{"kind":"peerMessageWritten"},
             "reachability":"claudeCodePeer",
             "client":{"kind":"claudeCodePeer"}}
@@ -182,18 +590,23 @@ fn message_send_unknown_delivery_retains_outcome_in_typed_error() {
         .expect("advertised message_send output schema");
     let schema = Value::Object((*schema).clone());
     let validator = jsonschema::validator_for(&schema).expect("message_send JSON Schema");
-    let receipt = DeliveryReceipt {
-        outcome: collaboration_protocol::DeliveryOutcome::Unknown,
-        reachability: None,
-        client: None,
-    };
-    let result = super::message_tool_result(Ok(receipt));
+    let push_result: collaboration_protocol::PushMessageSendResult =
+        serde_json::from_value(serde_json::json!({
+            "pushId":FIXTURE_PUSH_ID,
+            "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
+            "target":fixture_session("codex-local", "thread-a"),
+            "targetIdentity":"✳️ codex-local/thread-a",
+            "receipt":{"outcome":{"kind":"unknown"},"reachability":null,"client":null}
+        }))
+        .expect("typed unknown push result");
+    let result = super::message_tool_result(Ok(push_result));
     assert_eq!(result.is_error, Some(true));
     let structured = result.structured_content.expect("structured error receipt");
     assert_eq!(structured["mcpResult"], "error");
     assert_eq!(structured["kind"], "outcomeUnknown");
     assert_eq!(structured["effect"], "unknown");
-    assert_eq!(structured["outcome"]["kind"], "unknown");
+    assert_eq!(structured["pushId"], FIXTURE_PUSH_ID);
+    assert_eq!(structured["receipt"]["outcome"]["kind"], "unknown");
     validator.validate(&structured).expect("typed error schema");
 }
 
@@ -209,22 +622,33 @@ fn message_send_foreign_writer_rejection_has_typed_action_in_mcp_error() {
         .expect("advertised message_send output schema");
     let validator = jsonschema::validator_for(&Value::Object((*schema).clone()))
         .expect("message_send JSON Schema");
-    let receipt: DeliveryReceipt = serde_json::from_value(serde_json::json!({
-        "outcome":{
-            "kind":"rejected","reason":"heldByAnotherClient",
-            "nextAction":"messageFromHoldingCodexClient","clientCode":-32600,
-            "detail":"Message it from the Codex client that holds it."
-        },
-        "reachability":"codexAppServer","client":null
-    }))
-    .expect("typed delivery receipt");
-    let result = super::message_tool_result(Ok(receipt));
+    let push_result: collaboration_protocol::PushMessageSendResult =
+        serde_json::from_value(serde_json::json!({
+            "pushId":FIXTURE_PUSH_ID,
+            "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
+            "target":fixture_session("codex-local", "thread-a"),
+            "targetIdentity":"✳️ codex-local/thread-a",
+            "receipt":{
+                "outcome":{
+                    "kind":"rejected","reason":"heldByAnotherClient",
+                    "nextAction":"messageFromHoldingCodexClient","clientCode":-32600,
+                    "detail":"Message it from the Codex client that holds it."
+                },
+                "reachability":"codexAppServer","client":null
+            }
+        }))
+        .expect("typed rejected push result");
+    let result = super::message_tool_result(Ok(push_result));
     assert_eq!(result.is_error, Some(true));
     let structured = result.structured_content.expect("structured MCP error");
     assert_eq!(structured["mcpResult"], "error");
-    assert_eq!(structured["outcome"]["reason"], "heldByAnotherClient");
+    assert_eq!(structured["pushId"], FIXTURE_PUSH_ID);
     assert_eq!(
-        structured["outcome"]["nextAction"],
+        structured["receipt"]["outcome"]["reason"],
+        "heldByAnotherClient"
+    );
+    assert_eq!(
+        structured["receipt"]["outcome"]["nextAction"],
         "messageFromHoldingCodexClient"
     );
     assert_eq!(
@@ -343,14 +767,14 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let tools = server.resolved_tools();
-    assert_eq!(tools.len(), 104);
+    assert_eq!(tools.len(), 107);
     let mut names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 104);
+    assert_eq!(names.len(), 107);
     assert!(names.contains(&"conversation_resume"));
     assert!(names.contains(&"conversation_close"));
     assert!(names.contains(&"provider_sessions_list"));
@@ -738,7 +1162,36 @@ fn representative_catalog_descriptions_explain_operation_specific_behavior() {
     }
     for (name, required_phrases) in [
         ("endpoints_list", &["Read-only"][..]),
-        ("message_send", &["accepted", "replayed"][..]),
+        (
+            "message_send",
+            &["accepted", "replayed", "reported", "not authenticated"][..],
+        ),
+        (
+            "router_show",
+            &["reported", "not authenticated", "confusion guard", "read"][..],
+        ),
+        (
+            "message_inbox",
+            &["reported", "not authenticated", "confusion guard", "unread"][..],
+        ),
+        (
+            "message_history",
+            &[
+                "reported",
+                "not authenticated",
+                "confusion guard",
+                "between",
+            ][..],
+        ),
+        (
+            "message_reply",
+            &[
+                "reported",
+                "not authenticated",
+                "confusion guard",
+                "reference",
+            ][..],
+        ),
         (
             "conversation_create_and_prompt",
             &["advertised client", "completed turn", "peer reply"][..],
@@ -1080,7 +1533,7 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
         .into_iter()
         .filter_map(|tool| tool.output_schema.map(|schema| (tool.name, schema)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(advertised.len(), 104);
+    assert_eq!(advertised.len(), 107);
 
     let message = serde_json::json!({
         "messageId":"019f0000-0000-7000-8000-000000000001",
@@ -1524,7 +1977,7 @@ fn expected_tool_name(method: &str) -> String {
 }
 #[test]
 fn success_schema_branches_match_main_golden_snapshot() {
-    // Reply adds a resolved target and optional sender guard while keeping the tool itself stable.
+    // Router push tools expose the typed record and reply-by-reference contracts.
     let expected: std::collections::BTreeMap<String, Value> =
         serde_json::from_str(include_str!("snapshots/main_success_schemas.json"))
             .expect("main success schema snapshot");
@@ -1570,8 +2023,8 @@ fn success_schema_branches_match_main_golden_snapshot() {
             })
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(actual.len(), 104);
-    assert_eq!(expected.len(), 104);
+    assert_eq!(actual.len(), 107);
+    assert_eq!(expected.len(), 107);
     for (name, success) in actual {
         assert_eq!(success, expected[&name], "{name} success schema drifted");
     }

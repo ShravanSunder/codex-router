@@ -194,13 +194,15 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
     let directory = shell_quote(&proof.service_directory.to_string_lossy());
     let alpha_address = shell_quote(&serde_json::to_string(&alpha)?);
     let beta_address = shell_quote(&serde_json::to_string(&beta)?);
+    let alpha_harness_id = shell_quote(&String::from(alpha.session_id.clone()));
+    let beta_harness_id = shell_quote(&String::from(beta.session_id.clone()));
     let reply = format!(
         "{reply_marker}. This is the requested explicit peer reply. Do not call any tools or send another message. Output exactly {acknowledgement}."
     );
     let reply_file = proof.workspace.join("peer-reply-message.txt");
     std::fs::write(&reply_file, &reply)?;
     let reply_command = format!(
-        "{cli} message send --from {beta_address} --to {alpha_address} --text-file {} --service-directory {directory} --json",
+        "env -u CLAUDE_CODE_SESSION_ID -u CURSOR_CONVERSATION_ID CODEX_THREAD_ID={beta_harness_id} {cli} message send --to {alpha_address} --text-file {} --service-directory {directory} --json",
         shell_quote(&reply_file.to_string_lossy())
     );
     let beta_task = format!(
@@ -209,7 +211,7 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
     let wake_file = proof.workspace.join("peer-wake-message.txt");
     std::fs::write(&wake_file, &beta_task)?;
     let wake_command = format!(
-        "{cli} wake send --from {alpha_address} --to {beta_address} --text-file {} --after 1s --wait-until-first-fire --operation-id {} --service-directory {directory} --json",
+        "env -u CLAUDE_CODE_SESSION_ID -u CURSOR_CONVERSATION_ID CODEX_THREAD_ID={alpha_harness_id} {cli} wake send --to {beta_address} --text-file {} --after 1s --wait-until-first-fire --operation-id {} --service-directory {directory} --json",
         shell_quote(&wake_file.to_string_lossy()),
         identity.as_str()
     );

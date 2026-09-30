@@ -1,5 +1,5 @@
 //! One public message request carries caller intent without selecting a client.
-use crate::{CodexGeneration, DeliveryCorrelationId, MessageContent, MessageDelivery, SessionRef};
+use crate::{CodexGeneration, MessageContent, MessageDelivery, SessionRef};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -11,5 +11,4 @@ pub struct SessionMessageSendParams {
     #[serde(default)]
     pub mode: MessageDelivery,
     pub generation_guard: Option<CodexGeneration>,
-    pub correlation: Option<DeliveryCorrelationId>,
 }

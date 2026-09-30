@@ -1,4 +1,5 @@
 //! Real socket fixture with scripted native responses; never a live model backend.
+use automation_storage::AutomationStore;
 use collaboration_client::{ClientError, ControlClient};
 use collaboration_protocol::{
     CodexGeneration, DeliveryReceipt, EndpointDescription, MessageContent, MessageDelivery,
@@ -12,6 +13,7 @@ use collaboration_service::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
+use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
 pub enum NativeReply {
@@ -33,12 +35,11 @@ type FixtureError = Box<dyn std::error::Error + Send + Sync>;
 pub async fn exercise(
     scenario: MessageScenario,
 ) -> Result<(Result<DeliveryReceipt, ClientError>, Vec<Value>), FixtureError> {
-    let root = std::path::PathBuf::from("/tmp").join(format!(
-        "message-fixture-{}",
-        String::from(new_service_uuid()?)
-    ));
+    let fixture_id = String::from(new_service_uuid()?);
+    // Keep the Unix socket path below SUN_LEN even when the host temp prefix is long.
+    let root = std::env::temp_dir().join(format!("mf-{}", &fixture_id[24..]));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
-    let socket_path = root.join("native.sock");
+    let socket_path = root.join("n.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let service_id = "00000000-0000-4000-8000-000000000001";
     let generation: CodexGeneration =
@@ -78,11 +79,15 @@ pub async fn exercise(
         endpoint: target.endpoint.clone(),
         gate,
     };
+    let automation_store = Arc::new(Mutex::new(
+        AutomationStore::open(&root.join("automation.sqlite")).await?,
+    ));
     let identity = ServiceIdentity::new(
         service_id,
         service_id,
         &format!("sha256:{}", "a".repeat(64)),
     )?
+    .with_automation_store(Arc::clone(&automation_store))
     .with_endpoints(vec![description])?
     .with_native_backend(native_backend.clone())?;
     let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
@@ -185,13 +190,17 @@ pub async fn exercise(
                 text: "A finding".to_owned().try_into()?,
             },
             mode: scenario.delivery,
-            correlation: None,
         }),
     )
     .await?;
     client.close().await?;
     service.await??;
     let requests = backend.await??;
+    let automation_store = Arc::try_unwrap(automation_store)
+        .map_err(|_| std::io::Error::other("service retained automation store"))?
+        .into_inner();
+    automation_store.close().await?;
+    std::fs::remove_file(root.join("automation.sqlite"))?;
     std::fs::remove_file(socket_path)?;
     std::fs::remove_dir(root)?;
     Ok((result, requests))

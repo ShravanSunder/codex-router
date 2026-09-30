@@ -30,15 +30,15 @@ pub fn command_help() -> String {
     )
     .replace(
         "  wake send --to ADDRESS --from ADDRESS",
-        "  wake send --to ADDRESS [--from ADDRESS]",
+        "  wake send --to ADDRESS",
     )
     .replace(
         "  message send --to ADDRESS --from ADDRESS",
-        "  message send --to ADDRESS [--from ADDRESS]",
+        "  message send --to ADDRESS",
     )
     .replace(
         "  whoami [--json]",
-        "  message reply --text TEXT|--text-file PATH [--expect-sender SESSIONREF_JSON] --json (reply to the most recent Agent sender delivered here; prints the selected target)\n  whoami [--json]",
+        "  show <PUSH_ID_OR_LINK> [--service-directory PATH] [--json]\n  message inbox [--limit 50] [--service-directory PATH] [--json]\n  message history --with SESSIONREF_JSON [--limit 50] [--service-directory PATH] [--json]\n  message reply <PUSH_ID_OR_LINK> [TEXT] [--text-file PATH] [--json]\n  whoami [--json]",
     )
 }
 
@@ -69,7 +69,7 @@ mod native_session_commands;
 pub use native_session_commands::run_native_session_command;
 
 mod message_commands;
-pub use message_commands::run_message_command;
+pub use message_commands::{run_message_command, run_push_record_show_command};
 
 mod event_commands;
 pub use event_commands::run_event_command;

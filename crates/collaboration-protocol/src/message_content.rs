@@ -74,6 +74,21 @@ impl SessionDisplayName {
     }
 }
 
+impl JsonSchema for SessionDisplayName {
+    fn schema_name() -> Cow<'static, str> {
+        "SessionDisplayName".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type":"string",
+            "minLength":1,
+            "maxLength":120,
+            "pattern":"^[^\\u0000-\\u001F]+$"
+        })
+    }
+}
+
 impl From<SessionDisplayName> for String {
     fn from(value: SessionDisplayName) -> Self {
         value.0

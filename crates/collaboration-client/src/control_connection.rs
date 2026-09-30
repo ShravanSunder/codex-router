@@ -144,7 +144,9 @@ impl ControlClient {
         ) {
             return Err(ClientError::InvalidRequest("agent message required"));
         }
-        self.submit_message(params).await
+        self.submit_message_with_push(params)
+            .await
+            .map(|result| result.receipt)
     }
     /// Explicit human input; does not manufacture an authenticated human identity.
     pub async fn send_human_input(
@@ -157,9 +159,11 @@ impl ControlClient {
         ) {
             return Err(ClientError::InvalidRequest("human input required"));
         }
-        self.submit_message(params).await
+        self.submit_message_with_push(params)
+            .await
+            .map(|result| result.receipt)
     }
-    /// Replies to the latest accepted Agent message delivered to the supplied caller session.
+    /// Replies to one stored direct message using its push id or Router link.
     pub async fn message_reply(
         &mut self,
         params: collaboration_protocol::SessionMessageReplyParams,
@@ -175,41 +179,44 @@ impl ControlClient {
             ClientError::Protocol("invalid message reply result; acceptance unknown")
         })
     }
-    async fn submit_message(
+    pub(crate) async fn submit_message_with_push(
         &mut self,
         params: collaboration_protocol::SessionMessageSendParams,
-    ) -> Result<collaboration_protocol::DeliveryReceipt, ClientError> {
+    ) -> Result<collaboration_protocol::PushMessageSendResult, ClientError> {
         use collaboration_protocol::{
-            AcceptedResumeEffect, DeliveryClientReceipt, DeliveryOutcome, MessageContent,
-            MessageDelivery, MessageInputKind, MessageRepresentation, NativeInputOperation,
-            NativeSendAcceptance, SessionReachability,
+            AcceptedResumeEffect, DeliveryClientReceipt, DeliveryOutcome, MessageDelivery,
+            MessageInputKind, MessageRepresentation, NativeInputOperation, NativeSendAcceptance,
+            SessionReachability,
         };
         let value = self.connection.call("message/send", json!(params)).await?;
-        let decoded = serde_json::from_value::<collaboration_protocol::DeliveryReceipt>(value);
+        let decoded =
+            serde_json::from_value::<collaboration_protocol::PushMessageSendResult>(value);
         let Ok(receipt) = decoded else {
             self.connection.failed = true;
             return Err(ClientError::Protocol(
                 "invalid message receipt; acceptance unknown",
             ));
         };
-        let (kind, representation) = match params.message {
-            MessageContent::Agent { .. } | MessageContent::Router { .. } => (
-                MessageInputKind::Agent,
-                MessageRepresentation::DeclaredAgentText,
-            ),
-            MessageContent::HumanUser { .. } => (
-                MessageInputKind::HumanUser,
-                MessageRepresentation::HumanUserText,
-            ),
-        };
-        let consistent = match (&receipt.reachability, &receipt.client) {
+        // The service turns either caller input kind into a Router-authored
+        // push line. Native delivery renders that line as declared agent text.
+        let kind = MessageInputKind::Agent;
+        let representation = MessageRepresentation::DeclaredAgentText;
+        let delivery_receipt = &receipt.receipt;
+        let expected_link = collaboration_protocol::RouterLink::new(
+            collaboration_protocol::MachineId::from(self.identity.service_id.clone()),
+            receipt.push_id.clone(),
+        )
+        .to_string();
+        let consistent = receipt.target == params.target
+            && receipt.link == expected_link
+            && match (&delivery_receipt.reachability, &delivery_receipt.client) {
             (None, None) => true,
             (
                 Some(SessionReachability::CodexAppServer),
                 Some(DeliveryClientReceipt::CodexAppServer(native)),
             ) => {
                 let acceptance_matches = matches!(
-                    (&params.mode, &receipt.outcome, &native.acceptance),
+                    (&params.mode, &delivery_receipt.outcome, &native.acceptance),
                     (
                         MessageDelivery::Auto,
                         DeliveryOutcome::Started,
@@ -245,16 +252,15 @@ impl ControlClient {
                     && acceptance_matches
                     && (params.mode == MessageDelivery::Auto
                         || native.resume_effect == AcceptedResumeEffect::NotRequested)
-                    && params.correlation.as_ref().is_none_or(|correlation| {
-                        correlation.as_str() == String::from(native.client_user_message_id.clone())
-                    })
+                    && String::from(native.client_user_message_id.clone())
+                        == receipt.push_id.as_str()
             }
             (
                 Some(SessionReachability::ProviderAcp),
                 Some(DeliveryClientReceipt::ProviderAcp { .. }),
             ) => {
                 matches!(
-                    receipt.outcome,
+                    delivery_receipt.outcome,
                     DeliveryOutcome::Started | DeliveryOutcome::Steered | DeliveryOutcome::Queued
                 )
             }
@@ -262,10 +268,13 @@ impl ControlClient {
                 Some(SessionReachability::ClaudeCodePeer),
                 Some(DeliveryClientReceipt::ClaudeCodePeer),
             ) => {
-                matches!(receipt.outcome, DeliveryOutcome::PeerMessageWritten)
+                matches!(
+                    delivery_receipt.outcome,
+                    DeliveryOutcome::PeerMessageWritten
+                )
             }
             (Some(_), None) => matches!(
-                receipt.outcome,
+                delivery_receipt.outcome,
                 DeliveryOutcome::NotSubmitted { .. }
                     | DeliveryOutcome::Rejected(_)
                     | DeliveryOutcome::Unknown

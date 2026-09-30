@@ -7,15 +7,13 @@ pub struct ServiceIdentity {
     pub(crate) board: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
     pub(crate) thread_listens: crate::thread_listen_registry::ThreadListenRegistry,
     pub(crate) service_id: UuidIdentity,
+    pub(crate) machine_identity: crate::MachineIdentity,
     pub(crate) configuration: crate::AutomationConfigurationHandle,
     pub(crate) configuration_backend:
         Option<std::sync::Arc<dyn crate::AutomationConfigurationBackend>>,
     pub(crate) service_epoch: UuidIdentity,
     pub(crate) schema_digest: collaboration_protocol::SchemaDigest,
     pub(crate) display_names: crate::SessionDisplayNameCache,
-    pub(crate) latest_sender_unknown: std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashSet<collaboration_protocol::SessionRef>>,
-    >,
     pub(crate) directory: EndpointDirectory,
     pub(crate) wake_wait_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) journal: Option<std::sync::Arc<lifecycle_observation::LifecycleStore>>,
@@ -36,6 +34,17 @@ pub struct ServiceIdentity {
         Option<std::sync::Arc<dyn crate::ProviderConversationBackend>>,
 }
 impl ServiceIdentity {
+    pub fn with_machine_identity(
+        mut self,
+        machine_identity: crate::MachineIdentity,
+    ) -> Result<Self, String> {
+        if machine_identity.service_id() != &self.service_id {
+            return Err("machine identity belongs to another service".into());
+        }
+        self.machine_identity = machine_identity;
+        Ok(self)
+    }
+
     pub fn with_board_store(
         mut self,
         store: std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>,
@@ -44,9 +53,13 @@ impl ServiceIdentity {
         self
     }
     pub fn automation_retention_worker(&self) -> Option<crate::AutomationRetentionWorker> {
-        self.automation
-            .as_ref()
-            .map(|store| crate::AutomationRetentionWorker::new(std::sync::Arc::clone(store)))
+        self.automation.as_ref().map(|store| {
+            let worker = crate::AutomationRetentionWorker::new(std::sync::Arc::clone(store));
+            match self.approval_broker.as_ref() {
+                Some(broker) => worker.with_interaction_broker(std::sync::Arc::clone(broker)),
+                None => worker,
+            }
+        })
     }
     pub fn with_automation_configuration(
         mut self,
@@ -234,18 +247,19 @@ impl ServiceIdentity {
     pub fn new(service_id: &str, service_epoch: &str, schema_digest: &str) -> Result<Self, String> {
         let digest = collaboration_protocol::SchemaDigest::try_from(schema_digest.to_owned())
             .map_err(str::to_owned)?;
+        let service_id =
+            UuidIdentity::try_from(service_id.to_owned()).map_err(|error| error.to_string())?;
+        let machine_identity = crate::MachineIdentity::new(service_id.clone(), None)
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             configuration: crate::AutomationConfigurationHandle::default(),
             configuration_backend: None,
-            service_id: UuidIdentity::try_from(service_id.to_owned())
-                .map_err(|error| error.to_string())?,
+            service_id: service_id.clone(),
+            machine_identity,
             service_epoch: UuidIdentity::try_from(service_epoch.to_owned())
                 .map_err(|error| error.to_string())?,
             schema_digest: digest,
             display_names: crate::SessionDisplayNameCache::default(),
-            latest_sender_unknown: std::sync::Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
             journal: None,
             native_backend: None,
             session_delivery: None,
@@ -260,9 +274,7 @@ impl ServiceIdentity {
             provider_conversations: None,
             board: None,
             thread_listens: crate::thread_listen_registry::ThreadListenRegistry::new(),
-            directory: EndpointDirectory::new(
-                UuidIdentity::try_from(service_id.to_owned()).map_err(|error| error.to_string())?,
-            ),
+            directory: EndpointDirectory::new(service_id),
         })
     }
 }
