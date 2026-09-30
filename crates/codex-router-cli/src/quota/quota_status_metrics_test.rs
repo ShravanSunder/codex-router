@@ -80,7 +80,7 @@ fn claude_post_renewal_auth_rejection_has_a_provider_scoped_counter() {
         panic!("Claude post-renewal auth rejection metric helper should exist");
     };
 
-    assert!(source.contains("codex_router.claude.usage_auth_rejected_after_renewal"));
+    assert!(source.contains("codex_router_claude_usage_auth_rejected_after_renewal_total"));
     assert!(after_metric.contains("provider"));
     assert!(after_metric.contains("route_band"));
     assert!(!after_metric.contains("account_id"));

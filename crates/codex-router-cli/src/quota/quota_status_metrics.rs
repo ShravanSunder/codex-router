@@ -129,7 +129,7 @@ pub(super) fn record_quota_refresh_metric(
 
 pub(super) fn record_claude_usage_auth_rejected_after_renewal() {
     global::meter("codex-router")
-        .u64_counter("codex_router.claude.usage_auth_rejected_after_renewal")
+        .u64_counter("codex_router_claude_usage_auth_rejected_after_renewal_total")
         .build()
         .add(
             1,

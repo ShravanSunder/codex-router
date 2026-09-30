@@ -4,7 +4,6 @@ use codex_router_core::route_profile::WindowKind;
 use codex_router_state::window_observation::WindowObservation;
 use codex_router_state::window_observation::WindowObservationProps;
 
-const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 180;
 const QUOTA_OBSERVATION_FRESHNESS_MARGIN_SECONDS: u64 = 120;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,7 +32,7 @@ pub(crate) enum QuotaRefreshSchedule {
 impl QuotaRefreshSchedule {
     const fn interval_seconds(self) -> u64 {
         match self {
-            Self::Manual => DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
+            Self::Manual => crate::DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
             Self::Background { interval_seconds } => interval_seconds,
         }
     }
@@ -308,7 +307,7 @@ where
                         && let Some(retry_generation) = retry_generation
                     {
                         tracing::warn!(
-                            account_id = account.account_id().as_str(),
+                            account.hash = telemetry_hash(account.account_id().as_str()),
                             credential_generation = retry_generation,
                             http.status_code = 401,
                             endpoint.path = "/api/oauth/usage",

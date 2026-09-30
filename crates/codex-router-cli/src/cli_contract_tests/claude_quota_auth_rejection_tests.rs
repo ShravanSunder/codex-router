@@ -292,7 +292,8 @@ fn claude_usage_401_after_renewal_preserves_account_for_upkeep_and_records_failu
     )
     .expect("captured logs should be UTF-8");
     assert!(captured_logs.contains("Claude usage endpoint rejected a freshly renewed credential"));
-    assert!(captured_logs.contains(account_id.as_str()));
+    assert!(captured_logs.contains("account.hash="));
+    assert!(!captured_logs.contains(account_id.as_str()));
     assert!(captured_logs.contains("credential_generation=2"));
     assert!(captured_logs.contains("http.status_code=401"));
     assert!(captured_logs.contains("endpoint.path=\"/api/oauth/usage\""));
