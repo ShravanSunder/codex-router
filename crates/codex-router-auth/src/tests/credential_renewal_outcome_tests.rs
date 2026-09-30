@@ -10,6 +10,53 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+#[tokio::test]
+async fn claude_providerless_refresh_is_confirmed_unspent_without_maintenance_write() {
+    let temp_dir = AuthTestTempDir::new("claude-providerless-refresh");
+    let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
+    let account_id = account_id("claude-providerless-refresh");
+    must_ok(
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "Claude providerless refresh",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await,
+    );
+    assert!(must_ok(
+        state
+            .record_pre_provider_local_failure(&account_id, 1, 1_000)
+            .await
+    ));
+    let maintenance_before = must_ok(state.load_credential_maintenance(&account_id).await)
+        .expect("the fixture should have a maintenance row");
+
+    let refresh_client = crate::claude_oauth::ClaudeOAuthRefreshClient::new();
+    let failure = CredentialRefreshClient::refresh_credentials(
+        &refresh_client,
+        &account_id,
+        &SecretString::new("unused-providerless-refresh-canary"),
+    );
+
+    assert_eq!(
+        failure,
+        Err(CredentialRefreshFailure::confirmed_unspent(
+            codex_router_state::credential_maintenance::CredentialFailureClass::LocalPersistence,
+            None,
+        ))
+    );
+    assert_eq!(
+        must_ok(state.load_credential_maintenance(&account_id).await),
+        Some(maintenance_before),
+        "the provider-less refusal must not write credential maintenance"
+    );
+}
+
 #[derive(Clone)]
 struct ProviderPruningRefreshClient;
 

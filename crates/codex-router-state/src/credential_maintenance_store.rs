@@ -254,7 +254,7 @@ impl AsyncSqliteStateStore {
         let current_generation = u64_to_i64(current_generation)?;
         let successor_generation = u64_to_i64(successor_generation)?;
         let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
-        let deleted = sqlx::query(
+        let deleted = sqlx::query!(
             "DELETE FROM credential_maintenance
               WHERE account_id = ?1 AND credential_generation = ?2
                 AND claimed_successor_generation = ?3 AND state = 'in_progress'
@@ -264,16 +264,16 @@ impl AsyncSqliteStateStore {
                      WHERE accounts.account_id = credential_maintenance.account_id
                        AND accounts.provider = ?4
                 )",
+            account_id.as_str(),
+            current_generation,
+            successor_generation,
+            provider.as_str(),
         )
-        .bind(account_id.as_str())
-        .bind(current_generation)
-        .bind(successor_generation)
-        .bind(provider.as_str())
         .execute(&mut *transaction)
         .await
         .map_err(sqlx_error)?
         .rows_affected();
-        let restored = sqlx::query(
+        let restored = sqlx::query!(
             "UPDATE credential_maintenance
                 SET state = claim_prior_state,
                     claimed_successor_generation = NULL,
@@ -288,11 +288,11 @@ impl AsyncSqliteStateStore {
                      WHERE accounts.account_id = credential_maintenance.account_id
                        AND accounts.provider = ?4
                 )",
+            account_id.as_str(),
+            current_generation,
+            successor_generation,
+            provider.as_str(),
         )
-        .bind(account_id.as_str())
-        .bind(current_generation)
-        .bind(successor_generation)
-        .bind(provider.as_str())
         .execute(&mut *transaction)
         .await
         .map_err(sqlx_error)?

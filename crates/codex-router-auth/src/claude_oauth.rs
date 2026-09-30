@@ -360,8 +360,9 @@ impl CredentialRefreshClient for ClaudeOAuthRefreshClient {
         codex_router_secret_store::account_tokens::AccountCredentialBundle,
         CredentialRefreshFailure,
     > {
-        Err(CredentialRefreshFailure::ambiguous(
-            CredentialFailureClass::ProviderOutcomeAmbiguous,
+        Err(CredentialRefreshFailure::confirmed_unspent(
+            CredentialFailureClass::LocalPersistence,
+            None,
         ))
     }
 
