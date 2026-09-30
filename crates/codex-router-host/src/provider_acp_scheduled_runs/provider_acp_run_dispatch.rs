@@ -12,8 +12,8 @@ use collaboration_protocol::{
     ProviderOperationStage, RunExecution, SessionReachability, render_message_with_context,
 };
 use collaboration_service::{
-    DeliveryContractError, DeliveryPrecondition, ProviderConversationBackend, RunAcceptance,
-    RunEvidenceDisposition, RunEvidenceSink, RunObservationContext, RunSubmission,
+    DeliveryContractError, DeliveryPrecondition, LoadPolicy, ProviderConversationBackend,
+    RunAcceptance, RunEvidenceDisposition, RunEvidenceSink, RunObservationContext, RunSubmission,
     ScheduledRunSubmission, StopRequestOutcome,
 };
 
@@ -66,9 +66,10 @@ impl ProviderAcpScheduledRuns {
                         &self.store,
                         self.ownership.as_ref(),
                         &run.target,
+                        LoadPolicy::MayLoad,
                     )
                     .await,
-                    ProviderSessionLoadOutcome::Ready
+                    ProviderSessionLoadOutcome::Ready | ProviderSessionLoadOutcome::AlreadyLoaded
                 ) {
                     return Ok(RunSubmission::NotStartedBusy);
                 }

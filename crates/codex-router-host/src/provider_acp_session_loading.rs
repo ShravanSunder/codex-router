@@ -1,16 +1,18 @@
 //! Load a recorded provider session only after checking live peer ownership.
 use crate::{
-    ExternalProviderRuntimeError, ExternalProviderSupervisor, LiveSessionOwnership,
-    LiveSessionOwnershipCheck, ProviderSessionActivity,
+    ExternalProviderRuntime, ExternalProviderRuntimeError, ExternalProviderSupervisor,
+    LiveSessionOwnership, LiveSessionOwnershipCheck, ProviderSessionActivity,
 };
 use collaboration_protocol::SessionRef;
-use collaboration_service::ProviderOperationStore;
+use collaboration_service::{LoadPolicy, ProviderOperationStore};
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderSessionLoadOutcome {
     Ready,
+    AlreadyLoaded,
+    NotLoaded,
     UnsupportedLoad,
     MissingRecord,
     LiveElsewhere,
@@ -20,6 +22,16 @@ pub(crate) enum ProviderSessionLoadOutcome {
     Unavailable {
         reason: String,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderSessionLoadability {
+    AlreadyLoaded,
+    Loadable { working_directory: PathBuf },
+    UnsupportedLoad,
+    MissingRecord,
+    LiveElsewhere,
+    Unavailable { reason: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,42 +66,45 @@ pub(crate) async fn ensure_provider_session_loaded(
     store: &Arc<Mutex<ProviderOperationStore>>,
     ownership: &dyn LiveSessionOwnershipCheck,
     target: &SessionRef,
+    load_policy: LoadPolicy,
 ) -> ProviderSessionLoadOutcome {
     let Some(runtime) = supervisor.runtime_for(&target.endpoint) else {
         return unavailable("provider runtime is unavailable");
     };
     let provider_session_id = String::from(target.session_id.clone());
-    match runtime.session_activity(provider_session_id.clone()).await {
-        Ok(ProviderSessionActivity::Idle | ProviderSessionActivity::Running) => {
-            return ProviderSessionLoadOutcome::Ready;
-        }
-        Ok(ProviderSessionActivity::NotLoaded) => {}
-        Err(error) => return unavailable(error.to_string()),
-    }
-    if !runtime
-        .capability_report(&provider_session_id)
-        .await
-        .supports_load
+    let working_directory = match inspect_provider_session_loadability(
+        runtime.as_ref(),
+        store,
+        ownership,
+        target,
+    )
+    .await
     {
-        return ProviderSessionLoadOutcome::UnsupportedLoad;
-    }
-    let record = match store.lock().await.session_record(target).await {
-        Ok(Some(record)) => record,
-        Ok(None) => return ProviderSessionLoadOutcome::MissingRecord,
-        Err(error) => return unavailable(error.to_string()),
-    };
-    match ownership.check(target).await {
-        Ok(LiveSessionOwnership::NotLive) => {}
-        Ok(LiveSessionOwnership::LiveWritable | LiveSessionOwnership::LiveUnsupported) => {
+        ProviderSessionLoadability::AlreadyLoaded => {
+            return match load_policy {
+                LoadPolicy::MayLoad => ProviderSessionLoadOutcome::Ready,
+                LoadPolicy::LoadedOnly => ProviderSessionLoadOutcome::AlreadyLoaded,
+            };
+        }
+        ProviderSessionLoadability::Loadable { .. } if load_policy == LoadPolicy::LoadedOnly => {
+            return ProviderSessionLoadOutcome::NotLoaded;
+        }
+        ProviderSessionLoadability::Loadable { working_directory } => working_directory,
+        ProviderSessionLoadability::UnsupportedLoad => {
+            return ProviderSessionLoadOutcome::UnsupportedLoad;
+        }
+        ProviderSessionLoadability::MissingRecord => {
+            return ProviderSessionLoadOutcome::MissingRecord;
+        }
+        ProviderSessionLoadability::LiveElsewhere => {
             return ProviderSessionLoadOutcome::LiveElsewhere;
         }
-        Err(error) => return unavailable(error.to_string()),
-    }
+        ProviderSessionLoadability::Unavailable { reason } => {
+            return ProviderSessionLoadOutcome::Unavailable { reason };
+        }
+    };
     match runtime
-        .load_session(
-            provider_session_id,
-            PathBuf::from(String::from(record.working_directory)),
-        )
+        .load_session(provider_session_id, working_directory)
         .await
     {
         Ok(()) => ProviderSessionLoadOutcome::Ready,
@@ -108,8 +123,52 @@ pub(crate) async fn ensure_provider_session_loaded(
     }
 }
 
+pub(crate) async fn inspect_provider_session_loadability(
+    runtime: &ExternalProviderRuntime,
+    store: &Arc<Mutex<ProviderOperationStore>>,
+    ownership: &dyn LiveSessionOwnershipCheck,
+    target: &SessionRef,
+) -> ProviderSessionLoadability {
+    let provider_session_id = String::from(target.session_id.clone());
+    match runtime.session_activity(provider_session_id.clone()).await {
+        Ok(ProviderSessionActivity::Idle | ProviderSessionActivity::Running) => {
+            return ProviderSessionLoadability::AlreadyLoaded;
+        }
+        Ok(ProviderSessionActivity::NotLoaded) => {}
+        Err(error) => return unavailable_loadability(error.to_string()),
+    }
+    if !runtime
+        .capability_report(&provider_session_id)
+        .await
+        .supports_load
+    {
+        return ProviderSessionLoadability::UnsupportedLoad;
+    }
+    let record = match store.lock().await.session_record(target).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return ProviderSessionLoadability::MissingRecord,
+        Err(error) => return unavailable_loadability(error.to_string()),
+    };
+    match ownership.check(target).await {
+        Ok(LiveSessionOwnership::NotLive) => {}
+        Ok(LiveSessionOwnership::LiveWritable | LiveSessionOwnership::LiveUnsupported) => {
+            return ProviderSessionLoadability::LiveElsewhere;
+        }
+        Err(error) => return unavailable_loadability(error.to_string()),
+    }
+    ProviderSessionLoadability::Loadable {
+        working_directory: PathBuf::from(String::from(record.working_directory)),
+    }
+}
+
 fn unavailable(reason: impl Into<String>) -> ProviderSessionLoadOutcome {
     ProviderSessionLoadOutcome::Unavailable {
+        reason: reason.into(),
+    }
+}
+
+fn unavailable_loadability(reason: impl Into<String>) -> ProviderSessionLoadability {
+    ProviderSessionLoadability::Unavailable {
         reason: reason.into(),
     }
 }
@@ -254,6 +313,7 @@ sys.stdin.read()
             &store,
             &FixtureOwnership(LiveSessionOwnership::NotLive),
             &target,
+            LoadPolicy::MayLoad,
         )
         .await;
 
@@ -313,6 +373,7 @@ sys.stdin.read()
             &store,
             &FixtureOwnership(LiveSessionOwnership::LiveWritable),
             &target,
+            LoadPolicy::MayLoad,
         )
         .await;
 
@@ -366,6 +427,7 @@ sys.stdin.read()
             &store,
             &FixtureOwnership(LiveSessionOwnership::NotLive),
             &target,
+            LoadPolicy::MayLoad,
         )
         .await;
 

@@ -195,6 +195,7 @@ async fn idle_explicit_queue_is_accepted_and_drains_for_both_providers() {
                     },
                     header_context: collaboration_protocol::MessageHeaderContext::default(),
                     mode: MessageDelivery::Queue,
+                    load_policy: collaboration_service::LoadPolicy::MayLoad,
                     precondition: DeliveryPrecondition::Unpinned,
                     correlation: DeliveryCorrelationId::generate(),
                     attempt: attempt.clone(),

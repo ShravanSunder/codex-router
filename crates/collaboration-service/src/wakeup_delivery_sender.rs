@@ -1,7 +1,7 @@
 //! Timed wake attempts use the injected delivery seam and persist effect intent first.
 use crate::{
     AttemptEvidenceSink, DeliveryContractError, DeliveryFuture, DeliveryPrecondition,
-    DeliveryRequest, SessionMessageDelivery,
+    DeliveryRequest, LoadPolicy, SessionMessageDelivery,
 };
 use agent_automation::{DeliveryId, RouteEffectEvidence};
 use automation_storage::{
@@ -73,6 +73,7 @@ impl WakeDeliverySender {
             message: claim.content,
             header_context,
             mode,
+            load_policy: LoadPolicy::MayLoad,
             precondition: claim
                 .generation_guard
                 .map_or(DeliveryPrecondition::Unpinned, |expected| {
