@@ -10,6 +10,7 @@ workspace = true
 
 [features]
 sync-rusqlite-fixtures = ["codex-router-state/sync-rusqlite-fixtures"]
+test-support = []
 
 [dependencies]
 base64.workspace = true
