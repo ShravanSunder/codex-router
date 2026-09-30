@@ -302,7 +302,8 @@ fn base_serve_runtime_config(
         command.state_db.clone(),
         command.secret_root.clone(),
     )
-    .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds)))
+    .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
+    .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent))
 }
 
 #[cfg(test)]
@@ -331,7 +332,36 @@ mod session_pin_idle_ttl_tests {
             command.state_db,
             command.secret_root,
         )
-        .with_session_pin_idle_ttl(Duration::from_secs(1_800));
+        .with_session_pin_idle_ttl(Duration::from_secs(1_800))
+        .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
+
+        assert_eq!(runtime_config, expected_config);
+    }
+
+    #[test]
+    fn claude_five_hour_reserve_percent_reaches_route_profile_configuration() {
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--claude-five-hour-reserve-percent"),
+            OsString::from("90"),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+
+        let runtime_config = base_serve_runtime_config(&command)
+            .unwrap_or_else(|error| panic!("serve runtime config should build: {error}"));
+        let expected_config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new(&command.listen_host, command.port)
+                .expect("serve bind address should be valid"),
+            UpstreamEndpoint::new(command.upstream_base_url.clone())
+                .expect("serve upstream endpoint should be valid"),
+            command.state_db,
+            command.secret_root,
+        )
+        .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
+        .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
 
         assert_eq!(runtime_config, expected_config);
     }

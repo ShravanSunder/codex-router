@@ -71,6 +71,58 @@ fn quota_status_reads_sqlite_rows_without_provider_io() {
 }
 
 #[test]
+fn quota_status_openai_view_filters_claude_accounts() {
+    let test_root = TestRoot::new("quota-status-openai-provider-filter");
+    must_ok(fs::create_dir(test_root.path()));
+    let router_root = test_root.path().join("router");
+    must_ok(fs::create_dir_all(&router_root));
+    let runtime = test_async_runtime();
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(
+        &router_root.join("state.sqlite"),
+    )));
+    for (provider, id, label) in [
+        (
+            codex_router_core::provider::Provider::Openai,
+            "acct_openai_view",
+            "openai-view-account",
+        ),
+        (
+            codex_router_core::provider::Provider::Claude,
+            "acct_claude_view",
+            "claude-view-account",
+        ),
+    ] {
+        must_ok(
+            runtime.block_on(
+                state.upsert_account(
+                    &AccountRecord::new(provider, account_id(id), label, AccountStatus::Enabled)
+                        .with_active_credential_generation(1),
+                ),
+            ),
+        );
+    }
+    must_ok(runtime.block_on(state.close()));
+
+    let output = run_cli(
+        [
+            "codex-router",
+            "quota",
+            "status",
+            "--router-root",
+            path_to_str(&router_root),
+            "--format",
+            "plain",
+            "--no-refresh",
+        ],
+        CliContext::new(Vec::new()),
+    );
+
+    assert!(output.stdout.contains("openai-view-account"));
+    assert!(!output.stdout.contains("claude-view-account"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn quota_status_snapshot_rows_show_unknown_pace_until_window_metadata_exists() {
     let test_root = TestRoot::new("quota-status-snapshot-unknown-pace");
     must_ok(fs::create_dir(test_root.path()));

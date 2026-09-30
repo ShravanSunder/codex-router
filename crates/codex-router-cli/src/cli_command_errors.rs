@@ -87,6 +87,18 @@ pub enum CliError {
         /// Raw option value.
         value: String,
     },
+    /// Percentage option is outside its inclusive supported range.
+    #[error("value for {option} must be between {minimum} and {maximum}: {value}")]
+    NumericOptionOutOfRange {
+        /// Option name.
+        option: &'static str,
+        /// Raw option value.
+        value: String,
+        /// Lowest accepted value.
+        minimum: u8,
+        /// Highest accepted value.
+        maximum: u8,
+    },
 
     /// CLI argument is not UTF-8.
     #[error("non-UTF-8 CLI argument: {value:?}")]

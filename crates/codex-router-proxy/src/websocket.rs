@@ -1932,6 +1932,7 @@ mod async_forwarding_tests {
             &'a self,
             _exhausted_account_id: AccountId,
             _route_band: codex_router_core::routes::RouteBand,
+            _route_profile: codex_router_core::route_profile::RouteProfile,
             _observed_unix_seconds: u64,
         ) -> BoxFuture<'a, Result<PostExhaustionRouteBandOutcome, ProviderErrorObservationError>>
         {
@@ -2024,6 +2025,7 @@ mod async_forwarding_tests {
             &'a self,
             _exhausted_account_id: AccountId,
             _route_band: codex_router_core::routes::RouteBand,
+            _route_profile: codex_router_core::route_profile::RouteProfile,
             _observed_unix_seconds: u64,
         ) -> BoxFuture<'a, Result<PostExhaustionRouteBandOutcome, ProviderErrorObservationError>>
         {
@@ -2084,6 +2086,7 @@ mod async_forwarding_tests {
             &'a self,
             _exhausted_account_id: AccountId,
             _route_band: codex_router_core::routes::RouteBand,
+            _route_profile: codex_router_core::route_profile::RouteProfile,
             _observed_unix_seconds: u64,
         ) -> BoxFuture<'a, Result<PostExhaustionRouteBandOutcome, ProviderErrorObservationError>>
         {
@@ -6454,6 +6457,7 @@ async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal(
     let post_exhaustion_outcome = provider_error_observer.route_band_post_exhaustion_outcome(
         exhausted_account_id.clone(),
         RouteBand::Responses,
+        codex_router_core::route_profile::RESPONSES_WEBSOCKET.clone(),
         observed_unix_seconds,
     );
     tokio::pin!(post_exhaustion_outcome);

@@ -6,8 +6,17 @@ pub mod eligibility;
 pub mod precommit;
 pub mod reservation;
 pub mod run_rate;
+pub mod selection_outcome;
 pub mod turn_state;
 pub mod weighted_deficit;
+
+#[cfg(test)]
+#[path = "window_policy_selection_tests.rs"]
+mod window_policy_selection_tests;
+
+#[cfg(test)]
+#[path = "openai_legacy_oracle_tests.rs"]
+mod openai_legacy_oracle_tests;
 
 /// Returns this crate's package name.
 #[must_use]
