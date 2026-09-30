@@ -80,7 +80,7 @@ async fn device_login_activation_write_trace_contains_encrypted_tokens_only() {
             Provider::Openai,
             account_id.clone(),
             "device login",
-            bundle,
+            bundle.into(),
         ),
     )
     .await
