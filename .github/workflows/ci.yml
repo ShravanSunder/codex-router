@@ -134,6 +134,10 @@ jobs:
         with:
           shared-key: test
           cache-on-failure: true
+      # The dependency-structure tests use offline Cargo metadata for all
+      # targets, so fetch target-specific packages even on this Linux runner.
+      - name: Fetch dependencies for all targets
+        run: cargo fetch --locked
       - name: Cache pinned Rust tools
         uses: actions/cache@v4
         with:
