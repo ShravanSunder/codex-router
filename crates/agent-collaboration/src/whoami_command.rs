@@ -22,6 +22,8 @@ struct WhoamiArguments {
 struct ResolvedCurrentSession {
     session: SessionRef,
     endpoint_registered: bool,
+    machine_id: String,
+    machine_label: String,
 }
 
 /// Resolves the harness session and binds it to the running Router service.
@@ -90,6 +92,12 @@ async fn resolve_current_session(
             .await
             .map_err(ResolveFailure::Client)?;
     let service_id = client.identity().service_id.clone();
+    let machine_label = client
+        .machine_label()
+        .map(|label| label.as_str().to_owned())
+        .ok_or(ResolveFailure::Client(ClientError::Protocol(
+            "machine label unavailable",
+        )))?;
     let inventory = client
         .list_endpoints()
         .await
@@ -105,6 +113,8 @@ async fn resolve_current_session(
     Ok(ResolvedCurrentSession {
         session,
         endpoint_registered,
+        machine_id: String::from(service_id),
+        machine_label,
     })
 }
 
@@ -122,6 +132,8 @@ fn print_current_session(
                 "session": resolved.session,
                 "source": harness.harness.environment_variable,
                 "endpointRegistered": resolved.endpoint_registered,
+                "machineId": resolved.machine_id,
+                "machineLabel": resolved.machine_label,
             }))
         )
     } else {
@@ -136,10 +148,12 @@ fn print_current_session(
                 harness.harness.endpoint_id
             )
         };
+        let machine_label =
+            collaboration_client::protocol::escape_push_line_field(&resolved.machine_label);
         writeln!(
             out,
-            "{session}\nsource: {}{registration}",
-            harness.harness.environment_variable
+            "machine: {} · {machine_label}\n{session}\nsource: {}{registration}",
+            resolved.machine_id, harness.harness.environment_variable
         )
     };
     if printed.is_err() { 3 } else { 0 }

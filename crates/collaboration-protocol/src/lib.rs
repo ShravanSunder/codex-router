@@ -89,6 +89,10 @@ pub use control_schema_identity::{ControlSchema, ControlSchemaError};
 mod delivery_rejection;
 mod delivery_route_evidence;
 mod message_content;
+mod push_line;
+#[cfg(test)]
+#[path = "push_line_tests.rs"]
+mod push_line_tests;
 mod session_delivery_outcome;
 pub use delivery_rejection::{DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason};
 mod session_delivery_receipt;
@@ -119,6 +123,12 @@ pub use native_control_contract::{
 pub use native_session_catalog::{
     NativeSessionListParams, NativeSessionListResult, NativeSessionObservation, NativeSessionScope,
     NativeSessionSource, NativeSessionSummary, NativeSessionView,
+};
+pub use push_line::{
+    MAX_MACHINE_LABEL_SCALARS, MAX_PUSH_LINE_BYTES, MachineId, MachineLabel, MachineLabelError,
+    ParsedPushLineHeader, PushHeaderFacts, PushId, PushIdError, PushKind, PushLineError,
+    PushLineInput, PushOrigin, RouterLink, escape_push_line_field, parse_push_line_header,
+    render_push_line,
 };
 mod control_initialization;
 mod endpoint_inventory;

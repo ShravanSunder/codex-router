@@ -34,7 +34,7 @@ async fn once_cli_emits_one_batch_then_rearm_times_out_with_exit_three()
         "version":2,
         "serviceId":SERVICE_ID,
         "serviceEpoch":SERVICE_EPOCH,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
     }))?;

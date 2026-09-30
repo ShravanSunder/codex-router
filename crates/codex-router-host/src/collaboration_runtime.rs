@@ -1,5 +1,6 @@
 //! Host-owned composition of public listeners and lifecycle publication.
 use crate::BackendPublication;
+use crate::RemoteControlServerName;
 use collaboration_protocol::{
     CodexGeneration, EndpointAvailability, EndpointId, EndpointRef, NonEmptyText,
     ObservationTimestamp, ProviderKind, RouterExecutableRelation, SchemaDigest, UuidIdentity,
@@ -22,6 +23,8 @@ pub struct CollaborationRuntimeInputs {
     pub native_schema: Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>>,
     /// Fixture override; normal Host starts read the owner's ~/.claude/sessions.
     pub peer_registry_directory: Option<PathBuf>,
+    /// Remote Control machine name observed when this Host started.
+    pub remote_control_server_name: Option<RemoteControlServerName>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderLaunchBinding {
@@ -188,6 +191,14 @@ impl CollaborationRuntime {
         let mut owner_human_id = inputs.owner_human_id.clone();
         let service_id = load_service_identity(&inputs.directory)?;
         let service_epoch = new_service_uuid()?;
+        let machine_identity = collaboration_service::MachineIdentity::new(
+            service_id.clone(),
+            inputs
+                .remote_control_server_name
+                .as_ref()
+                .map(RemoteControlServerName::as_str),
+        )
+        .map_err(io::Error::other)?;
         let native_digest = if let Some(export) = &inputs.native_schema {
             export
                 .bundle()
@@ -535,7 +546,8 @@ impl CollaborationRuntime {
             &inputs.directory,
             &collaboration_protocol::ServiceManifest {
                 version: 2,
-                service_id: service_id.clone(),
+                service_id: machine_identity.service_id().clone(),
+                machine_label: machine_identity.machine_label().clone(),
                 service_epoch: service_epoch.clone(),
                 control: collaboration_protocol::ControlSelector {
                     transport: collaboration_protocol::ControlTransport::UnixJsonLines,

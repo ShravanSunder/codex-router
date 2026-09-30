@@ -100,7 +100,7 @@ async fn run_lost_project_create(
         "version":2,
         "serviceId":SERVICE_ID,
         "serviceEpoch":SERVICE_EPOCH,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
     }))?;
@@ -213,7 +213,7 @@ async fn run_known_project_rejection() -> TestResult<std::process::Output> {
     let digest = format!("sha256:{}", "b".repeat(64));
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
     }))?;

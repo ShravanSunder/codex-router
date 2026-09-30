@@ -108,7 +108,7 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
     .expect("control bind");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
@@ -195,7 +195,7 @@ async fn approval_list_rejection_preserves_rejected_kind_and_exit_four() {
             .expect("control listener");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))

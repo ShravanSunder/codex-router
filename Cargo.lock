@@ -1027,6 +1027,7 @@ dependencies = [
  "lifecycle-observation",
  "message-board",
  "message-board-storage",
+ "nix",
  "serde",
  "serde_json",
  "session-event-model",

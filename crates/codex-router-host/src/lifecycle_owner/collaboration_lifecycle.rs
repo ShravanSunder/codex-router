@@ -1,7 +1,7 @@
 //! Join existing child lifecycle facts to the independent public collaboration runtime.
 use crate::{
     AppServerChild, BackendSchemaEvidence, CollaborationRuntime, CollaborationRuntimeInputs,
-    HostConfig,
+    HostConfig, RemoteControlServerName,
 };
 use std::{io, path::PathBuf};
 
@@ -13,6 +13,7 @@ pub(super) struct CollaborationLifecycle {
     mcp_bind: std::net::SocketAddr,
     external_provider_startups: Vec<crate::ExternalProviderStartup>,
     provider_operation_retention_days: std::num::NonZeroU32,
+    remote_control_server_name: Option<RemoteControlServerName>,
     router_executable_relation:
         tokio::sync::watch::Receiver<collaboration_protocol::RouterExecutableRelation>,
     runtime: Option<CollaborationRuntime>,
@@ -23,6 +24,7 @@ impl CollaborationLifecycle {
     pub(super) async fn start(
         config: &HostConfig,
         child: &AppServerChild,
+        remote_control_server_name: Option<RemoteControlServerName>,
         router_executable_relation: tokio::sync::watch::Receiver<
             collaboration_protocol::RouterExecutableRelation,
         >,
@@ -41,6 +43,7 @@ impl CollaborationLifecycle {
             mcp_bind: config.mcp_bind(),
             external_provider_startups: config.external_provider_startups().to_vec(),
             provider_operation_retention_days: config.provider_operation_retention_days(),
+            remote_control_server_name,
             router_executable_relation,
             runtime: None,
             published_child: None,
@@ -94,6 +97,7 @@ impl CollaborationLifecycle {
                         mcp_bind: self.mcp_bind,
                         native_schema: export.clone(),
                         peer_registry_directory: None,
+                        remote_control_server_name: self.remote_control_server_name.clone(),
                         owner_human_id: self.owner_human_id.clone(),
                     },
                     self.external_provider_startups.clone(),

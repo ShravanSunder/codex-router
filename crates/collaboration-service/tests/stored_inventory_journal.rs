@@ -83,7 +83,7 @@ mod tests {
             "version": 2,
             "serviceId": id,
             "serviceEpoch": epoch,
-            "control": {"transport": "unixJsonLines", "path": "control.sock"},
+            "machineLabel":"fixture-host","control": {"transport": "unixJsonLines", "path": "control.sock"},
             "controlSchemaDigest": format!("sha256:{}", "a".repeat(64)),
             "mcp": {"transport": "streamableHttp", "url": "http://127.0.0.1:0/mcp"}
         }))
@@ -194,7 +194,7 @@ mod tests {
             })
             .unwrap();
         let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
+        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
         let publication = ManifestPublication::publish(&root, &manifest).unwrap();
         let stop = CancellationToken::new();
         let server = tokio::spawn(listener.run(stop.clone()));
@@ -382,7 +382,7 @@ mod tests {
             })
             .unwrap();
         let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
+        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
         let publication = ManifestPublication::publish(root, &manifest).unwrap();
         let stop = CancellationToken::new();
         let server = tokio::spawn(listener.run(stop.clone()));

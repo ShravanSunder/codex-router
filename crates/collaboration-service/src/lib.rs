@@ -2,6 +2,8 @@
 mod control_connection;
 mod control_overload_response;
 pub use control_connection::serve_control_connection;
+mod machine_identity;
+pub use machine_identity::MachineIdentity;
 mod automation_retention_worker;
 mod control_service_context;
 pub use automation_retention_worker::AutomationRetentionWorker;

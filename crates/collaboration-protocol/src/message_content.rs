@@ -41,7 +41,8 @@ impl MessageText {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct SessionDisplayName(String);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -70,6 +71,12 @@ impl SessionDisplayName {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<SessionDisplayName> for String {
+    fn from(value: SessionDisplayName) -> Self {
+        value.0
     }
 }
 

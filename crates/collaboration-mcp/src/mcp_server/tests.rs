@@ -1310,7 +1310,7 @@ async fn inspect_tool_rejects_well_shaped_wrong_target_response_like_typed_sdk()
             "version":2,
             "serviceId":"00000000-0000-4000-8000-000000000001",
             "serviceEpoch":"00000000-0000-4000-8000-000000000002",
-            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
             "controlSchemaDigest":digest,
             "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
         }))
@@ -1399,7 +1399,7 @@ async fn inspect_tool_exposes_native_rejection_message() {
             "version":2,
             "serviceId":"00000000-0000-4000-8000-000000000001",
             "serviceEpoch":"00000000-0000-4000-8000-000000000002",
-            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
             "controlSchemaDigest":digest,
             "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
         }))

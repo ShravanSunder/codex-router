@@ -60,6 +60,7 @@ impl ClientError {
 pub struct ControlClient {
     pub(crate) connection: ClientConnection,
     identity: ControlInitializationResult,
+    machine_label: Option<collaboration_protocol::MachineLabel>,
     notification_state: EndpointNotificationState,
 }
 
@@ -114,11 +115,23 @@ impl ControlClient {
             connection,
             notification_state: EndpointNotificationState::new(&identity),
             identity,
+            machine_label: None,
         })
     }
     #[must_use]
     pub fn identity(&self) -> &ControlInitializationResult {
         &self.identity
+    }
+    /// Machine label read from the same manifest used to discover this service.
+    #[must_use]
+    pub fn machine_label(&self) -> Option<&collaboration_protocol::MachineLabel> {
+        self.machine_label.as_ref()
+    }
+    pub(crate) fn set_machine_label_from_manifest(
+        &mut self,
+        machine_label: collaboration_protocol::MachineLabel,
+    ) {
+        self.machine_label = Some(machine_label);
     }
     /// Agent-originated communication; delivery defaults are carried by the typed request.
     pub async fn send_agent_message(
