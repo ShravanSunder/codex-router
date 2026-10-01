@@ -1,6 +1,7 @@
 import unittest
 
 from scripts.publish_homebrew_tap_local import PublishError
+from scripts.publish_homebrew_tap_local import install_action
 from scripts.publish_homebrew_tap_local import published_asset_sha256
 from scripts.publish_homebrew_tap_local import release_asset_name
 from scripts.publish_homebrew_tap_local import workspace_version
@@ -68,6 +69,17 @@ class ReleaseAssetTests(unittest.TestCase):
         for release in (missing, malformed, no_assets):
             with self.assertRaises(PublishError):
                 _ = published_asset_sha256(release, name)
+
+
+class InstallActionTests(unittest.TestCase):
+    def test_installs_fresh_when_absent_and_upgrades_from_an_older_version(self) -> None:
+        # Act & Assert
+        self.assertEqual(install_action("", "0.1.56"), "install")
+        self.assertEqual(install_action("codex-router 0.1.55", "0.1.56"), "upgrade")
+
+    def test_reinstalls_a_same_version_so_the_install_proof_still_runs(self) -> None:
+        # Act & Assert
+        self.assertEqual(install_action("codex-router 0.1.56", "0.1.56"), "reinstall")
 
 
 if __name__ == "__main__":

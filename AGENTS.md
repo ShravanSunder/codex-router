@@ -14,9 +14,10 @@
   `python3 -m scripts.publish_homebrew_tap_local` from the repository root on
   an Apple Silicon Mac instead of waiting: it verifies the tag is on `main` and
   the asset matches the release digest, updates the formula, runs the tap
-  job's Homebrew checks against a real install, and pushes the tap. The queued
-  CI tap job then finds the formula already matching and exits cleanly. It
-  never restarts the running production Router.
+  job's Homebrew checks against a real install, and pushes the tap. The CI tap
+  job still runs its own validation when it gets a runner and commits nothing
+  if it checks out the tap after the local push; whichever push lands second
+  finds identical content. It never restarts the running production Router.
 - On development machines, the installed `codex-router`, `agent-collaboration`
   and `agent-sessions` come from the Homebrew tap, the same release artifact
   users get: `brew update && brew upgrade codex-router`. Do not `cargo install`

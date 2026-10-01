@@ -121,11 +121,28 @@ def download_verified_asset(*, tag: str, asset_name: str, directory: Path) -> st
 
 
 def prepare_tap(tap_path: Path) -> None:
-    """Require a clean tap checkout and bring it to origin/main."""
+    """Require a clean tap checkout exactly at origin/main."""
     if run(["git", "status", "--porcelain"], cwd=tap_path):
         raise PublishError(f"tap checkout {tap_path} has uncommitted changes")
     _ = run(["git", "fetch", "--quiet", "origin"], cwd=tap_path)
     _ = run(["git", "merge", "--ff-only", "--quiet", "origin/main"], cwd=tap_path)
+    # A checkout ahead of origin would let an earlier unpushed commit pass as
+    # "already published", or ride along on the push.
+    if run(["git", "rev-parse", "HEAD"], cwd=tap_path) != run(
+        ["git", "rev-parse", "origin/main"], cwd=tap_path
+    ):
+        raise PublishError(f"tap checkout {tap_path} is not at origin/main")
+
+
+def install_action(installed_versions: str, version: str) -> str:
+    """Return the brew command that installs `version` fresh, as CI does."""
+    if not installed_versions:
+        return "install"
+    # `upgrade` to an already-installed version is a no-op that would skip the
+    # install proof, so a same-version re-publish reinstalls.
+    if version in installed_versions.split()[1:]:
+        return "reinstall"
+    return "upgrade"
 
 
 def validate_installation(version: str) -> None:
@@ -134,9 +151,12 @@ def validate_installation(version: str) -> None:
     _ = run(["brew", "style", FORMULA_NAME])
     _ = run(["brew", "audit", "--strict", FORMULA_NAME])
     installed = subprocess.run(
-        ["brew", "list", "--versions", "codex-router"], check=False, capture_output=True
+        ["brew", "list", "--versions", "codex-router"],
+        check=False,
+        capture_output=True,
+        text=True,
     )
-    action = "upgrade" if installed.returncode == 0 else "install"
+    action = install_action(installed.stdout.strip() if installed.returncode == 0 else "", version)
     print(f"$ brew {action} {FORMULA_NAME}", flush=True)
     result = subprocess.run(["brew", action, FORMULA_NAME], env=environment, check=False)
     if result.returncode != 0:
@@ -154,25 +174,46 @@ def validate_installation(version: str) -> None:
             raise PublishError(f"Homebrew installed {reported!r}, expected {executable} {version}")
 
 
-def commit_and_push_formula(*, tap_path: Path, version: str, push: bool) -> None:
-    """Commit only the formula and push it, unless it already matches."""
+def commit_and_push_formula(*, tap_path: Path, version: str, push: bool) -> str:
+    """Commit only the formula and push it; return what happened."""
     _ = run(["git", "add", "--", str(FORMULA_RELATIVE_PATH)], cwd=tap_path)
     staged = run(["git", "diff", "--cached", "--name-only"], cwd=tap_path)
     if not staged:
-        print("Homebrew formula already matches this release")
-        return
+        # The checkout is at origin/main, so the published formula already matches.
+        return "already published"
     if staged != str(FORMULA_RELATIVE_PATH):
         raise PublishError(f"tap update staged unexpected paths: {staged}")
     _ = run(["git", "commit", "--quiet", "-m", f"codex-router {version}"], cwd=tap_path)
-    if push:
-        _ = run(["git", "push", "--quiet", "origin", "HEAD:main"], cwd=tap_path)
-    else:
-        print("Committed locally; not pushed (--no-push)")
+    if not push:
+        return "committed locally, not pushed (--no-push)"
+    pushed = subprocess.run(
+        ["git", "push", "--quiet", "origin", "HEAD:main"], cwd=tap_path, check=False
+    )
+    if pushed.returncode == 0:
+        return "pushed"
+    # The CI tap job may have pushed the same release first. Its formula content
+    # is deterministic, so identical content on origin means it is published.
+    _ = run(["git", "fetch", "--quiet", "origin"], cwd=tap_path)
+    published = run(["git", "show", f"origin/main:{FORMULA_RELATIVE_PATH}"], cwd=tap_path)
+    local = (tap_path / FORMULA_RELATIVE_PATH).read_text(encoding="utf-8").strip()
+    if published != local:
+        raise PublishError("push rejected and origin/main holds a different formula")
+    # Drop the redundant local commit; index and file already equal origin/main.
+    _ = run(["git", "reset", "--soft", "--quiet", "origin/main"], cwd=tap_path)
+    return "already published by CI"
+
+
+def restore_formula(tap_path: Path) -> None:
+    """Undo an unvalidated formula edit so the live tap never keeps it."""
+    restored = subprocess.run(
+        ["git", "checkout", "--", str(FORMULA_RELATIVE_PATH)], cwd=tap_path, check=False
+    )
+    if restored.returncode != 0:
+        print(f"could not restore {tap_path / FORMULA_RELATIVE_PATH}", file=sys.stderr)
 
 
 class PublishArguments(argparse.Namespace):
     version: str | None = None
-    tap: Path | None = None
     push: bool = True
 
 
@@ -182,7 +223,6 @@ def parse_arguments() -> PublishArguments:
         description="Publish a verified codex-router release to the Homebrew tap from this Mac."
     )
     _ = parser.add_argument("--version", help="release version; defaults to the workspace version")
-    _ = parser.add_argument("--tap", type=Path, help="tap checkout; defaults to Homebrew's")
     _ = parser.add_argument(
         "--no-push", dest="push", action="store_false", help="validate and commit only"
     )
@@ -193,21 +233,23 @@ def main() -> int:
     """Verify, install, and publish one release to the Homebrew tap."""
     arguments = parse_arguments()
     repository_root = Path(__file__).resolve().parent.parent
+    tap_path: Path | None = None
+    formula_written = False
     try:
         version = arguments.version or workspace_version(
             (repository_root / "Cargo.toml").read_text(encoding="utf-8")
         )
         tag = f"v{version}"
-        tap_path = arguments.tap or (
-            Path(run(["brew", "--repository"])) / "Library/Taps/shravansunder/homebrew-taps"
-        )
+        # The checks resolve the formula through Homebrew's own tap, so publishing
+        # from that same checkout keeps the validated file and the pushed file one.
+        tap_path = Path(run(["brew", "--repository", TAP_NAME]))
         commit = verify_tagged_commit(repository_root=repository_root, tag=tag)
         with tempfile.TemporaryDirectory(prefix="codex-router-release-") as directory:
             sha256 = download_verified_asset(
                 tag=tag, asset_name=release_asset_name(version), directory=Path(directory)
             )
         prepare_tap(tap_path)
-        _ = update_formula_file(
+        formula_written = update_formula_file(
             formula_path=tap_path / FORMULA_RELATIVE_PATH,
             version=version,
             sha256=sha256,
@@ -215,11 +257,15 @@ def main() -> int:
         )
         _ = run(["ruby", "-c", str(tap_path / FORMULA_RELATIVE_PATH)])
         validate_installation(version)
-        commit_and_push_formula(tap_path=tap_path, version=version, push=arguments.push)
-    except PublishError as error:
+        outcome = commit_and_push_formula(
+            tap_path=tap_path, version=version, push=arguments.push
+        )
+    except (PublishError, OSError, ValueError) as error:
+        if formula_written and tap_path is not None:
+            restore_formula(tap_path)
         print(f"publish failed: {error}", file=sys.stderr)
         return 1
-    print(f"codex-router {version} published to {TAP_NAME} and installed.")
+    print(f"codex-router {version}: {outcome}; validated install on this Mac.")
     print("The running production Router is unchanged; restarting it is a separate decision.")
     return 0
 
