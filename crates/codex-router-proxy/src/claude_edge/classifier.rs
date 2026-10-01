@@ -21,6 +21,10 @@ pub(crate) fn classify(
 
     if status == 429 {
         if let Some(window) = shared_rejected_window(headers) {
+            if complete_error_is_expired_oauth_token(evidence) {
+                return AttemptOutcome::PassThrough(PassThroughReason::MalformedEvidence);
+            }
+
             return AttemptOutcome::SharedWindowExhausted {
                 windows: vec![window],
                 resets: vec![reset_for_window(headers, window)],

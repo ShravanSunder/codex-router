@@ -145,6 +145,41 @@ fn claude_classifier_requires_complete_explicit_oauth_evidence() {
 }
 
 #[test]
+fn claude_classifier_passes_through_conflicting_complete_credential_and_window_evidence() {
+    let mut quota_fixture: ResponseFixture = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/claude/shared_five_hour_rejection.json"
+    ))
+    .unwrap_or_else(|error| panic!("quota fixture must be valid JSON: {error}"));
+    let credential_fixture: ResponseFixture = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/claude/oauth_credential_rejection.json"
+    ))
+    .unwrap_or_else(|error| panic!("credential fixture must be valid JSON: {error}"));
+    quota_fixture.body = credential_fixture.body;
+
+    let headers = HeaderCollection::new(
+        quota_fixture
+            .headers
+            .into_iter()
+            .map(|(name, value)| Header::new(name, value))
+            .collect(),
+    );
+    let body = serde_json::to_vec(&quota_fixture.body)
+        .unwrap_or_else(|error| panic!("fixture body must serialize: {error}"));
+
+    assert_eq!(
+        classify(
+            quota_fixture.status,
+            &headers,
+            ErrorBodyEvidence {
+                prefix: &body,
+                complete: true,
+            },
+        ),
+        AttemptOutcome::PassThrough(PassThroughReason::MalformedEvidence)
+    );
+}
+
+#[test]
 fn claude_classifier_requires_unified_rejection_and_shared_representative_claim() {
     let fixture: ResponseFixture = serde_json::from_str(include_str!(
         "../../../tests/fixtures/claude/shared_five_hour_rejection.json"
