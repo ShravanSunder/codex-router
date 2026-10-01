@@ -87,6 +87,7 @@ pub(super) fn git_diff_text(workspace_root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+#[track_caller]
 pub(super) fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
     match result {
         Ok(value) => value,
@@ -165,6 +166,66 @@ pub(super) fn run_cli<const ARGUMENT_COUNT: usize>(
         stdout: must_ok(String::from_utf8(stdout)),
         stderr: must_ok(String::from_utf8(stderr)),
     }
+}
+
+pub(super) fn sqlite_file_open_process_observation(database_path: &Path) -> String {
+    let mut wal_path = database_path.as_os_str().to_os_string();
+    wal_path.push("-wal");
+    let mut shared_memory_path = database_path.as_os_str().to_os_string();
+    shared_memory_path.push("-shm");
+    let database_files = [
+        database_path.to_path_buf(),
+        PathBuf::from(wal_path),
+        PathBuf::from(shared_memory_path),
+    ];
+
+    database_files
+        .iter()
+        .map(|path| {
+            let file_state = fs::metadata(path)
+                .map(|metadata| format!("present, {} bytes", metadata.len()))
+                .unwrap_or_else(|error| format!("absent or unavailable: {error}"));
+            let open_processes = match ProcessCommand::new("/usr/sbin/lsof")
+                .args(["-nP", "-Fpcfn"])
+                .arg(path)
+                .output()
+            {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let process_ids = stdout
+                        .lines()
+                        .filter_map(|line| line.strip_prefix('p'))
+                        .collect::<Vec<_>>();
+                    let process_images = process_ids
+                        .iter()
+                        .map(|process_id| {
+                            match ProcessCommand::new("/usr/sbin/lsof")
+                                .args(["-a", "-p", process_id, "-d", "txt", "-Fin"])
+                                .output()
+                            {
+                                Ok(image) => format!(
+                                    "pid={process_id} exit={:?} image={:?}",
+                                    image.status.code(),
+                                    String::from_utf8_lossy(&image.stdout),
+                                ),
+                                Err(error) => {
+                                    format!("pid={process_id} image-inspection-error={error}")
+                                }
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    format!(
+                        "lsof_exit={:?} open_processes={process_ids:?} images={process_images:?} output={stdout:?}",
+                        output.status.code(),
+                    )
+                }
+                Err(error) => format!("lsof-error={error}"),
+            };
+
+            format!("file={} state={file_state}; {open_processes}", path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(super) fn ensure_async_state_schema(router_root: &Path) {

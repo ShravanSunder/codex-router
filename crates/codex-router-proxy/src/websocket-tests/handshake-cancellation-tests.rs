@@ -7,6 +7,7 @@ async fn weekly_floor_notification_during_upstream_handshake_prevents_first_fram
         .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
     let selector = FixedAsyncSelector {
         account_id: account_id.clone(),
+        credit_backed_at_selection: false,
     };
     let credential_resolver = FixedAsyncCredentialResolver {
         account_id: account_id.clone(),

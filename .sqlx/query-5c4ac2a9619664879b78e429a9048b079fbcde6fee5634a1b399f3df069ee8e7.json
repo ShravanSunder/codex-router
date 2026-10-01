@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT window_kind, remaining_basis_points,\n                reset_unix_seconds, observation_started_at\n           FROM account_window_observations\n          WHERE account_id = ?1\n          ORDER BY window_kind",
+  "describe": {
+    "columns": [
+      {
+        "name": "window_kind",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "window_kind"
+          }
+        }
+      },
+      {
+        "name": "remaining_basis_points",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "remaining_basis_points"
+          }
+        }
+      },
+      {
+        "name": "reset_unix_seconds",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "reset_unix_seconds"
+          }
+        }
+      },
+      {
+        "name": "observation_started_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "observation_started_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "5c4ac2a9619664879b78e429a9048b079fbcde6fee5634a1b399f3df069ee8e7"
+}

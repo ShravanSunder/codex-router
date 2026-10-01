@@ -444,6 +444,7 @@ pub(in crate::quota) fn format_routing_reason(reason: RoutingReason) -> &'static
         RoutingReason::ExcludedWeeklyQuotaFloor => "blocked: weekly quota floor",
         RoutingReason::BlockedWindowExhausted => "blocked: quota empty",
         RoutingReason::BlockedWindowIneligible => "blocked: quota ineligible",
+        RoutingReason::CreditBacked => "usage credits after included quota",
     }
 }
 
@@ -464,6 +465,7 @@ pub(in crate::quota) fn format_next_use_from_routing_reason(reason: RoutingReaso
         | RoutingReason::PreferredSafestQuota
         | RoutingReason::PreferredLastResortShortWindowGuard => "preferred by quota",
         RoutingReason::AvailableSamePool => "available by quota",
+        RoutingReason::CreditBacked => "uses usage credits",
         RoutingReason::HeldReserve
         | RoutingReason::HeldUnknown
         | RoutingReason::HeldShortWindowGuard

@@ -64,6 +64,16 @@ every 180 seconds by default. OAuth upkeep runs separately even when background
 quota refresh is disabled. Run `quota refresh` for an explicit manual provider fetch,
 and `quota status` for SQLite-only status output.
 
+In an interactive terminal, `quota status` lets you browse accounts. Press
+`Ctrl-R` to open options for the focused account, then use Tab or the arrow keys
+to switch between Resets and Credits. On Credits, press `r` to refresh the
+provider-reported credit observation. Press Enter to edit the saved usage policy
+(`Disallow` by default), use the arrow keys to choose, Enter to save, or Esc to
+cancel. `Allow` only lets the router select an account for OpenAI Responses when
+included quota is exhausted and the current credit observation, credentials,
+floor and provider controls permit it. This preference does not set a spending
+limit; the provider controls the actual credit debit.
+
 ## Shared Codex Host
 
 Start the personal-use shared host manually in a foreground terminal:

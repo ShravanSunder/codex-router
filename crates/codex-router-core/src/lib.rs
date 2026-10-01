@@ -3,6 +3,7 @@
 pub mod affinity;
 pub mod audit;
 pub mod config;
+pub mod credit_usage;
 pub mod error;
 pub mod ids;
 pub mod local_auth;

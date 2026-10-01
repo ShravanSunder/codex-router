@@ -10,6 +10,11 @@ use codex_router_core::route_profile::WindowPolicy;
 use codex_router_core::route_profile::WindowRule;
 use codex_router_core::routes::RouteBand;
 
+#[path = "burn_down/credit_assessment.rs"]
+mod credit_assessment;
+
+use credit_assessment::credit_backed_candidate_is_eligible;
+
 /// Fixed v1 short quota window in seconds.
 pub const V1_SHORT_WINDOW_SECONDS: u64 = 18_000;
 /// Fixed v1 weekly quota window in seconds.
@@ -95,6 +100,16 @@ pub struct BurnDownRouteBandAssessmentInput {
     route_profile: RouteProfile,
 }
 
+/// Whether the current coherent account projection permits credit-backed Responses routing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CreditBackedEligibility {
+    /// Current credit authority is missing or one of the routing guards denies its use.
+    #[default]
+    Ineligible,
+    /// Current provider authority permits credit backing after included quota exhaustion.
+    Eligible,
+}
+
 impl BurnDownRouteBandAssessmentInput {
     /// Creates route-band assessment input.
     #[must_use]
@@ -133,6 +148,7 @@ pub struct BurnDownAccountInput {
     active_load_pressure: u32,
     current_active_sessions: u32,
     weekly_quota_floor_basis_points: Option<u32>,
+    credit_backed_eligibility: CreditBackedEligibility,
 }
 
 impl BurnDownAccountInput {
@@ -155,6 +171,7 @@ impl BurnDownAccountInput {
             active_load_pressure: 0,
             current_active_sessions: 0,
             weekly_quota_floor_basis_points: None,
+            credit_backed_eligibility: CreditBackedEligibility::Ineligible,
         }
     }
 
@@ -207,6 +224,16 @@ impl BurnDownAccountInput {
         } else {
             Some(weekly_quota_floor_basis_points)
         };
+        self
+    }
+
+    /// Supplies prevalidated credit authority from one coherent state snapshot.
+    #[must_use]
+    pub const fn with_credit_backed_eligibility(
+        mut self,
+        eligibility: CreditBackedEligibility,
+    ) -> Self {
+        self.credit_backed_eligibility = eligibility;
         self
     }
 
@@ -607,6 +634,7 @@ pub struct BurnDownAccountAssessment {
     routing_weight: Option<u32>,
     routing_reason: RoutingReason,
     weekly_floor_switch_band: bool,
+    credit_backed: bool,
     preferred_next: bool,
     far_idle_priority: bool,
     current_active_sessions: u32,
@@ -722,13 +750,20 @@ impl BurnDownAccountAssessment {
     pub fn is_healthy_floor_switch_peer(&self) -> bool {
         if self.weekly_floor_switch_band
             || self.routing_exclusion != RoutingExclusion::None
-            || self.quota_evidence_reason != QuotaEvidenceReason::Ok
             || self.freshness != QuotaEvidenceFreshness::Fresh
             || !matches!(
                 self.availability,
                 AccountAvailability::Usable | AccountAvailability::Reserve
             )
         {
+            return false;
+        }
+        if self.credit_backed {
+            return self.availability == AccountAvailability::Reserve
+                && self.quota_evidence_reason == QuotaEvidenceReason::CreditBacked
+                && self.routing_reason == RoutingReason::CreditBacked;
+        }
+        if self.quota_evidence_reason != QuotaEvidenceReason::Ok {
             return false;
         }
         match self.projected_weekly_runway_seconds {
@@ -885,6 +920,8 @@ pub enum QuotaEvidenceReason {
     MissingCredential,
     /// Configured hard weekly quota floor excludes the account from new work.
     WeeklyQuotaFloor,
+    /// Fresh opted-in usage credits back this exhausted Responses Reserve candidate.
+    CreditBacked,
 }
 
 /// Public routing reason.
@@ -934,6 +971,8 @@ pub enum RoutingReason {
     BlockedWindowExhausted,
     /// Blocked because quota is ineligible.
     BlockedWindowIneligible,
+    /// Candidate is in Reserve because current usage credits back exhausted Responses quota.
+    CreditBacked,
 }
 
 impl RoutingReason {
@@ -962,6 +1001,7 @@ impl RoutingReason {
             Self::ExcludedWeeklyQuotaFloor => "excluded_weekly_quota_floor",
             Self::BlockedWindowExhausted => "blocked_window_exhausted",
             Self::BlockedWindowIneligible => "blocked_window_ineligible",
+            Self::CreditBacked => "credit_backed",
             Self::HeldShortWindowGuard => "held_short_window_guard",
         }
     }
@@ -995,6 +1035,7 @@ impl RoutingReason {
             Self::ExcludedWeeklyQuotaFloor => "blocked: weekly quota floor",
             Self::BlockedWindowExhausted => "blocked: quota empty",
             Self::BlockedWindowIneligible => "blocked: quota ineligible",
+            Self::CreditBacked => "available: usage credits",
             Self::HeldShortWindowGuard => "held: 5h guard",
         }
     }
@@ -1100,6 +1141,7 @@ pub fn assess_route_band(
                 input.now_unix_seconds,
                 input.policy,
                 &input.route_profile,
+                input.route_band,
             );
             assessment.weekly_floor_switch_band = account
                 .weekly_quota_floor_basis_points
@@ -1262,6 +1304,7 @@ fn assess_account(
     now_unix_seconds: u64,
     policy: BurnDownRouteBandPolicy,
     route_profile: &RouteProfile,
+    route_band: RouteBand,
 ) -> BurnDownAccountAssessment {
     let base = BurnDownAccountAssessment {
         account_id: input.account_id.clone(),
@@ -1281,6 +1324,7 @@ fn assess_account(
         routing_weight: Some(DEFAULT_UNKNOWN_FALLBACK_WEIGHT),
         routing_reason: RoutingReason::UnknownFallbackAvailable,
         weekly_floor_switch_band: false,
+        credit_backed: false,
         preferred_next: false,
         far_idle_priority: false,
         current_active_sessions: input.current_active_sessions,
@@ -1326,6 +1370,8 @@ fn assess_account(
         .iter()
         .map(|window| assess_window(window, now_unix_seconds, policy))
         .collect::<Vec<_>>();
+    let has_eligible_credit_backing =
+        credit_backed_candidate_is_eligible(input, route_band, &windows);
     if input.provider == Provider::Claude && !input.rejected_windows.is_empty() {
         return with_display_metrics(
             BurnDownAccountAssessment {
@@ -1374,6 +1420,7 @@ fn assess_account(
     if windows
         .iter()
         .any(|window| window.status == QuotaWindowStatus::Ineligible)
+        && !has_eligible_credit_backing
     {
         return with_display_metrics(
             BurnDownAccountAssessment {
@@ -1445,6 +1492,21 @@ fn assess_account(
         .iter()
         .any(|window| window.remaining_basis_points == 0)
     {
+        if has_eligible_credit_backing {
+            return with_display_metrics(
+                BurnDownAccountAssessment {
+                    availability: AccountAvailability::Reserve,
+                    freshness: QuotaEvidenceFreshness::Fresh,
+                    limiting_window: limiting_window(&windows),
+                    quota_evidence_reason: QuotaEvidenceReason::CreditBacked,
+                    routing_reason: RoutingReason::CreditBacked,
+                    routing_weight: Some(0),
+                    credit_backed: true,
+                    ..base
+                },
+                display_metrics,
+            );
+        }
         return with_display_metrics(
             BurnDownAccountAssessment {
                 availability: AccountAvailability::Blocked,
@@ -2172,6 +2234,7 @@ fn routing_reason_for_account(
     }
 
     match account.quota_evidence_reason {
+        QuotaEvidenceReason::CreditBacked => return RoutingReason::CreditBacked,
         QuotaEvidenceReason::WindowExhausted => return RoutingReason::BlockedWindowExhausted,
         QuotaEvidenceReason::WindowIneligible => return RoutingReason::BlockedWindowIneligible,
         QuotaEvidenceReason::ShortWindowGuard if account.preferred_next => {
@@ -2287,7 +2350,9 @@ fn candidate_priority_cmp(
     right: &BurnDownAccountAssessment,
     right_weight: u32,
 ) -> std::cmp::Ordering {
-    compare_initial_admission(left, right)
+    left.credit_backed
+        .cmp(&right.credit_backed)
+        .then_with(|| compare_initial_admission(left, right))
         .then_with(|| compare_weekly_drain_pool(left, right))
         .then_with(|| right.far_idle_priority.cmp(&left.far_idle_priority))
         .then_with(|| compare_drain_pool_confidence(left, right))
@@ -3408,6 +3473,48 @@ mod tests {
             hard_stop.preferred_next().map(AccountId::as_str),
             Some("acct_healthy_peer")
         );
+    }
+
+    #[test]
+    fn credit_reserve_counts_as_existing_floor_switch_peer_without_quota_runway() {
+        let protected = account(
+            "acct_protected_credit_peer",
+            vec![
+                window(FIVE_HOURS, 100, 4 * 3_600),
+                window(WEEKLY, 8, 20 * 3_600),
+            ],
+        )
+        .with_weekly_quota_floor_basis_points(500);
+        let credit_peer = account(
+            "acct_credit_peer",
+            vec![
+                QuotaWindowFact::new(FIVE_HOURS, QuotaWindowStatus::Ineligible)
+                    .with_remaining_headroom(0)
+                    .with_reset_unix_seconds(NOW + 4 * 3_600)
+                    .with_observed_unix_seconds(NOW),
+                window(WEEKLY, 20, 6 * 86_400),
+            ],
+        )
+        .with_credit_backed_eligibility(CreditBackedEligibility::Eligible);
+
+        let switching = assess_route_band(input(vec![protected, credit_peer]));
+        let protected_assessment = account_assessment(&switching, "acct_protected_credit_peer");
+        let credit_assessment = account_assessment(&switching, "acct_credit_peer");
+
+        assert_eq!(
+            protected_assessment.routing_reason(),
+            RoutingReason::HeldFloorSwitch
+        );
+        assert_eq!(
+            switching.preferred_next().map(AccountId::as_str),
+            Some("acct_credit_peer")
+        );
+        assert_eq!(
+            credit_assessment.availability(),
+            AccountAvailability::Reserve
+        );
+        assert!(credit_assessment.is_healthy_floor_switch_peer());
+        assert_eq!(credit_assessment.projected_weekly_runway_seconds(), None);
     }
 
     #[test]

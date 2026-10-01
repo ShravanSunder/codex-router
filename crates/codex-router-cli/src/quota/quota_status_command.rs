@@ -41,6 +41,8 @@ pub(super) async fn render_interactive_quota_status(
         quota_status_view_model_loader(router_root.clone(), all_limits, true, width);
     let reset_session = reset_session_factory.create(&router_root)?;
     let weekly_floor_saver = weekly_quota_floor_saver(router_root.join("state.sqlite"));
+    let credit_policy_saver = credit_usage_policy_saver(router_root.join("state.sqlite"));
+    let credit_usage_refresher = reset_session_factory.credit_usage_refresher(&router_root);
     let shutdown_sender = reset_session.ports.intent_sender.clone();
     let session_task = tokio::spawn(reset_session.runner);
     let render_result = run_quota_status_view(
@@ -48,6 +50,8 @@ pub(super) async fn render_interactive_quota_status(
         Some(reload_view_model),
         Some(reset_session.ports),
         Some(weekly_floor_saver),
+        Some(credit_policy_saver),
+        Some(credit_usage_refresher),
     )
     .await;
     let _ = shutdown_sender
@@ -60,6 +64,76 @@ pub(super) async fn render_interactive_quota_status(
         | crate::quota_reset::reset_session_supervisor::ResetSessionOutcome::Finished(_) => {}
     }
     render_result.map_err(QuotaCommandError::Stdout)
+}
+
+fn credit_usage_policy_saver(database_path: PathBuf) -> CreditUsagePolicySaver {
+    Arc::new(move |account_id, credential_generation, policy| {
+        let database_path = database_path.clone();
+        Box::pin(async move {
+            let store = AsyncCreditUsagePolicyMutationStore::open(&database_path)
+                .await
+                .map_err(credit_policy_save_error)?;
+            let result = store
+                .save_account_credit_usage_policy(&account_id, credential_generation, policy)
+                .await
+                .map_err(credit_policy_save_error);
+            store.close().await;
+            result
+        })
+    })
+}
+
+fn credit_policy_save_error(error: StateStoreError) -> CreditUsagePolicySaveError {
+    match error {
+        StateStoreError::CreditUsagePolicyAccountUnavailable => {
+            CreditUsagePolicySaveError::AccountUnavailable
+        }
+        StateStoreError::CreditUsagePolicyTargetChanged => {
+            CreditUsagePolicySaveError::TargetChanged
+        }
+        StateStoreError::CreditUsagePolicyDatabaseBusy => CreditUsagePolicySaveError::DatabaseBusy,
+        StateStoreError::CreditUsagePolicySchemaUpgradeRequired => {
+            CreditUsagePolicySaveError::SchemaUpgradeRequired
+        }
+        _ => CreditUsagePolicySaveError::StateOperationFailed,
+    }
+}
+
+pub(crate) fn interactive_credit_usage_refresher(
+    router_root: PathBuf,
+    base_url: String,
+) -> CreditUsageRefresher {
+    Arc::new(move |account_id, credential_generation| {
+        let router_root = router_root.clone();
+        let base_url = base_url.clone();
+        Box::pin(async move {
+            let state_db = router_root.join("state.sqlite");
+            let resolver = crate::credential_runtime::AsyncCliCredentialResolver::open(
+                &state_db,
+                &router_root.join("secrets"),
+            )
+            .await
+            .map_err(|_| CreditUsageRefreshError::Failed)?;
+            let provider =
+                HttpQuotaRefreshProvider::new().map_err(|_| CreditUsageRefreshError::Failed)?;
+            let mut output_sink = std::io::sink();
+            let report = refresh_quota_with_dependencies(
+                &mut output_sink,
+                router_root,
+                base_url,
+                &resolver,
+                &provider,
+                current_unix_seconds(),
+            )
+            .await
+            .map_err(|_| CreditUsageRefreshError::Failed)?;
+            if report.responses_observation_committed_for(&account_id, credential_generation) {
+                Ok(())
+            } else {
+                Err(CreditUsageRefreshError::Failed)
+            }
+        })
+    })
 }
 
 fn weekly_quota_floor_saver(database_path: PathBuf) -> WeeklyQuotaFloorSaver {
@@ -224,6 +298,75 @@ mod weekly_floor_save_error_tests {
             1_500
         );
         state.close().await.expect("read-only state should close");
+        std::fs::remove_dir_all(root).expect("temporary router root should be removed");
+    }
+
+    #[tokio::test]
+    async fn interactive_credit_policy_saver_reads_back_and_rejects_replaced_generation() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "codex-router-tui-credit-policy-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("temporary router root should be created");
+        let database_path = root.join("state.sqlite");
+        let account_id = AccountId::new("tui-credit-policy").expect("account id should be valid");
+        let state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open and migrate before the mutation fixture");
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "credit policy",
+                    AccountStatus::Disabled,
+                )
+                .with_active_credential_generation(7),
+            )
+            .await
+            .expect("account should persist");
+        state.close().await.expect("state should close");
+
+        let saver = credit_usage_policy_saver(database_path.clone());
+        assert_eq!(
+            saver(
+                account_id.clone(),
+                Some(7),
+                codex_router_core::credit_usage::CreditUsagePolicy::Allow,
+            )
+            .await
+            .expect("disabled account policy can save and read back"),
+            codex_router_core::credit_usage::CreditUsagePolicy::Allow
+        );
+        assert_eq!(
+            saver(
+                account_id.clone(),
+                Some(6),
+                codex_router_core::credit_usage::CreditUsagePolicy::Disallow,
+            )
+            .await
+            .expect_err("old credential pane cannot overwrite the saved policy"),
+            CreditUsagePolicySaveError::TargetChanged
+        );
+
+        let reopened = AsyncSqliteStateStore::open_read_only(&database_path)
+            .await
+            .expect("saved policy should reopen read-only");
+        assert_eq!(
+            reopened
+                .load_account_credit_usage_policy(&account_id)
+                .await
+                .expect("saved policy should read"),
+            codex_router_core::credit_usage::CreditUsagePolicy::Allow
+        );
+        reopened
+            .close()
+            .await
+            .expect("read-only state should close");
         std::fs::remove_dir_all(root).expect("temporary router root should be removed");
     }
 }

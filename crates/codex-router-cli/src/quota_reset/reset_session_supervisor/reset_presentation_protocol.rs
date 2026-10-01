@@ -21,6 +21,10 @@ pub(crate) enum ResetSessionIntent {
         active_credential_generation: u64,
         now_unix_seconds: u64,
     },
+    CancelInspectionForTab {
+        request_id: InspectionTabRequestId,
+        expected_inspection_attempt: Option<u64>,
+    },
     OpenConfirmation,
     SelectNo,
     SelectYes,
@@ -35,6 +39,22 @@ pub(crate) enum ResetSessionIntent {
         reason: PinnedTargetInvalidationReason,
     },
     Shutdown,
+}
+
+/// UI request identity used to correlate an inspection-only tab cancellation with its snapshot.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct InspectionTabRequestId {
+    pane_generation: u64,
+    operation_generation: u64,
+}
+
+impl InspectionTabRequestId {
+    pub(crate) const fn new(pane_generation: u64, operation_generation: u64) -> Self {
+        Self {
+            pane_generation,
+            operation_generation,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +128,8 @@ pub(crate) struct ResetWorkflowSnapshot {
     credit_inventory_provenance: Option<ResetValueProvenance>,
     selected_credit: Option<SelectedCreditConfirmationFacts>,
     disabled_yes_reason: Option<ResetEligibilityDisabledReason>,
+    inspection_attempt_generation: Option<u64>,
+    last_processed_inspection_tab_request: Option<InspectionTabRequestId>,
 }
 
 impl ResetWorkflowSnapshot {
@@ -115,6 +137,8 @@ impl ResetWorkflowSnapshot {
         workflow: &ResetWorkflow,
         target: Option<PinnedResetTarget>,
         invalidation_reason: Option<PinnedTargetInvalidationReason>,
+        inspection_attempt_generation: Option<u64>,
+        last_processed_inspection_tab_request: Option<InspectionTabRequestId>,
     ) -> Self {
         let live_weekly = workflow
             .live_usage_observation()
@@ -158,11 +182,23 @@ impl ResetWorkflowSnapshot {
             credit_inventory_provenance,
             selected_credit,
             disabled_yes_reason,
+            inspection_attempt_generation,
+            last_processed_inspection_tab_request,
         }
     }
 
     pub(crate) const fn phase(&self) -> WorkflowPhase {
         self.phase
+    }
+
+    pub(crate) const fn inspection_attempt_generation(&self) -> Option<u64> {
+        self.inspection_attempt_generation
+    }
+
+    pub(crate) const fn last_processed_inspection_tab_request(
+        &self,
+    ) -> Option<InspectionTabRequestId> {
+        self.last_processed_inspection_tab_request
     }
 
     pub(crate) const fn confirmation_selection(&self) -> ConfirmationSelection {
@@ -356,6 +392,8 @@ impl ResetWorkflowSnapshot {
             credit_inventory_provenance: Some(ResetValueProvenance::CurrentLive),
             selected_credit,
             disabled_yes_reason,
+            inspection_attempt_generation: None,
+            last_processed_inspection_tab_request: None,
         }
     }
 }

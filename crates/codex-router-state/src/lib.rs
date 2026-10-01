@@ -7,6 +7,7 @@ mod account_schema;
 pub mod affinity_owner;
 pub mod credential_maintenance;
 mod credential_maintenance_store;
+pub mod credit_store;
 pub mod quota_snapshot;
 pub mod repositories;
 pub mod selection_projection;
@@ -1997,6 +1998,60 @@ mod tests {
             StateStoreError::MissingReadOnlySchemaObject {
                 object_kind: "table",
                 object_name: "quota_history_observations",
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn async_read_only_store_requires_both_credit_tables_in_native_schema() {
+        for table_name in ["account_credit_policies", "account_credit_observations"] {
+            let temp_dir = TestTempDir::new("async_read_only_missing_credit_schema");
+            let database_path = temp_dir.path().join("state.sqlite");
+            let store = AsyncSqliteStateStore::open(&database_path)
+                .await
+                .expect("current native state should initialize");
+            store.close().await.expect("state should close");
+
+            let raw = Connection::open(&database_path).expect("native fixture should reopen");
+            raw.execute_batch(&format!("DROP TABLE {table_name};"))
+                .expect("test should remove one required credit table");
+            drop(raw);
+
+            assert_eq!(
+                AsyncSqliteStateStore::open_read_only(&database_path)
+                    .await
+                    .expect_err("read-only open must reject a missing credit table"),
+                StateStoreError::MissingReadOnlySchemaObject {
+                    object_kind: "table",
+                    object_name: table_name,
+                }
+            );
+        }
+
+        let temp_dir = TestTempDir::new("async_read_only_missing_credit_column");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("current native state should initialize");
+        store.close().await.expect("state should close");
+        let raw = Connection::open(&database_path).expect("native fixture should reopen");
+        raw.execute_batch(
+            "DROP TABLE account_credit_observations;
+             CREATE TABLE account_credit_observations (
+                 account_id TEXT PRIMARY KEY NOT NULL,
+                 credential_generation INTEGER NOT NULL
+             );",
+        )
+        .expect("test should replace the credit table with a missing column");
+        drop(raw);
+
+        assert_eq!(
+            AsyncSqliteStateStore::open_read_only(&database_path)
+                .await
+                .expect_err("read-only open must reject a missing credit column"),
+            StateStoreError::MissingReadOnlySchemaObject {
+                object_kind: "column",
+                object_name: "latest_started_attempt",
             }
         );
     }

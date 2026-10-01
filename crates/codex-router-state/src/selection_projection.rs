@@ -5,8 +5,10 @@ use std::collections::HashMap;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::WindowKind;
+use codex_router_core::routes::RouteBand;
 use codex_router_selection::burn_down::ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS;
 use codex_router_selection::burn_down::BurnDownAccountInput;
+use codex_router_selection::burn_down::CreditBackedEligibility;
 use codex_router_selection::burn_down::QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaWindowFact;
@@ -471,6 +473,17 @@ where
         .with_account_enabled(input.account_status() == AccountStatus::Enabled)
         .with_active_credential(input.active_credential_generation().is_some())
         .with_current_active_sessions(current_active_sessions);
+        let credit_backed_eligibility = if route_band == RouteBand::Responses.as_str()
+            && input.provider() == Provider::Openai
+            && weekly_floor_basis_points.is_none()
+            && input.has_current_credit_authority(now_unix_seconds)
+        {
+            CreditBackedEligibility::Eligible
+        } else {
+            CreditBackedEligibility::Ineligible
+        };
+        projected_account =
+            projected_account.with_credit_backed_eligibility(credit_backed_eligibility);
         if let Some(floor_basis_points) = weekly_floor_basis_points {
             projected_account =
                 projected_account.with_weekly_quota_floor_basis_points(floor_basis_points);

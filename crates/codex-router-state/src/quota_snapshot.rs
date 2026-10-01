@@ -1,9 +1,11 @@
 //! SQLite quota snapshot DTOs.
 
+use codex_router_core::credit_usage::CreditUsagePolicy;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 
 use crate::account::AccountStatus;
+use crate::credit_store::CreditUsageObservation;
 use crate::window_observation::WindowObservation;
 use crate::window_observation::WindowRejection;
 
@@ -534,6 +536,9 @@ pub struct SelectorQuotaInput {
     windows: Vec<PersistedSelectorQuotaWindow>,
     window_observations: Vec<WindowObservation>,
     window_rejections: Vec<WindowRejection>,
+    credit_usage_policy: CreditUsagePolicy,
+    credit_observation: Option<CreditUsageObservation>,
+    suspect_exhausted_credit_suppression: bool,
 }
 
 impl SelectorQuotaInput {
@@ -558,6 +563,9 @@ impl SelectorQuotaInput {
             windows,
             window_observations: Vec::new(),
             window_rejections: Vec::new(),
+            credit_usage_policy: CreditUsagePolicy::Disallow,
+            credit_observation: None,
+            suspect_exhausted_credit_suppression: false,
         }
     }
 
@@ -570,6 +578,20 @@ impl SelectorQuotaInput {
     ) -> Self {
         self.window_observations = window_observations;
         self.window_rejections = window_rejections;
+        self
+    }
+
+    /// Attaches one coherent credit-policy and provider-observation snapshot.
+    #[must_use]
+    pub fn with_credit_usage(
+        mut self,
+        policy: CreditUsagePolicy,
+        observation: Option<CreditUsageObservation>,
+        suspect_exhausted_credit_suppression: bool,
+    ) -> Self {
+        self.credit_usage_policy = policy;
+        self.credit_observation = observation;
+        self.suspect_exhausted_credit_suppression = suspect_exhausted_credit_suppression;
         self
     }
 
@@ -625,6 +647,29 @@ impl SelectorQuotaInput {
     #[must_use]
     pub fn window_rejections(&self) -> &[WindowRejection] {
         &self.window_rejections
+    }
+
+    /// Returns the saved per-account choice, defaulting absent storage to Disallow.
+    #[must_use]
+    pub const fn credit_usage_policy(&self) -> CreditUsagePolicy {
+        self.credit_usage_policy
+    }
+
+    /// Returns the paired provider facts and refresh-attempt metadata, if observed.
+    #[must_use]
+    pub const fn credit_observation(&self) -> Option<&CreditUsageObservation> {
+        self.credit_observation.as_ref()
+    }
+
+    /// Returns whether credit authority is fresh and current for the persisted account generation.
+    #[must_use]
+    pub fn has_current_credit_authority(&self, now_unix_seconds: u64) -> bool {
+        self.credit_usage_policy.allows_credit_usage()
+            && !self.suspect_exhausted_credit_suppression
+            && self.credit_observation.as_ref().is_some_and(|observation| {
+                observation
+                    .authorizes_credit_usage(self.active_credential_generation, now_unix_seconds)
+            })
     }
 }
 

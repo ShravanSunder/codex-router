@@ -79,7 +79,7 @@ use crate::account_selection::RouteBandQueueHealth;
 use crate::account_selection::RouteBandReservationBooks;
 use crate::account_selection::RouteBandRuntimeExhaustions;
 use crate::account_selection::RouteBandWeightedSelectors;
-use crate::account_selection::RuntimeFloorSwitchPeerAssessor;
+use crate::account_selection::RuntimeAccountAdmissionAssessor;
 use crate::account_selection::SelectionReservationLock;
 use crate::account_selection::SqliteActiveClientLeaseReporter;
 use crate::account_selection::mark_runtime_quota_exhausted;
@@ -1295,7 +1295,7 @@ impl LoopbackProtocolConnectionHandler {
                 Arc::clone(&self.selection_reservation_lock),
                 Arc::clone(&self.session_affinity_cache),
             );
-        let floor_switch_peer_assessor = RuntimeFloorSwitchPeerAssessor::new(
+        let account_admission_assessor = RuntimeAccountAdmissionAssessor::new(
             self.selection_state_store.clone(),
             &selection_runtime_state,
             self.runtime_clock(),
@@ -1333,7 +1333,7 @@ impl LoopbackProtocolConnectionHandler {
             )
         }
         .with_revocation_registry(self.websocket_revocations.clone())
-        .with_floor_switch_peer_assessor(Arc::new(floor_switch_peer_assessor))
+        .with_account_admission_assessor(Arc::new(account_admission_assessor))
         .with_session_shutdown(self.session_shutdown.clone())
         .with_affinity_secret_provider(&self.affinity_secret_provider)
         .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder))

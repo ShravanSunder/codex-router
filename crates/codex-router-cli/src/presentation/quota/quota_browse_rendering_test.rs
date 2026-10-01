@@ -81,6 +81,105 @@ fn quota_status_ansi_colors_selected_reset_pace() {
 }
 
 #[tokio::test]
+async fn quota_pool_headers_survive_preference_focus_and_scroll_changes() {
+    let route_summary =
+        "responses · degraded · 5 accounts · usable 1 · reserve 1 · blocked 1 · unknown 1 · excluded 1";
+    let freshness_summary = "fresh 2 · stale 2 · unknown 1";
+    let mut observed_headers = Vec::new();
+
+    for preferred_index in [0, 9] {
+        let mut view_model = quota_many_account_view_model();
+        view_model.route_line = route_summary.to_owned();
+        view_model.pool_freshness_summary = freshness_summary.to_owned();
+        view_model.selection_projection_degraded = true;
+        view_model.serving_clients = Some(12);
+        for row in &mut view_model.rows {
+            row.selected = false;
+        }
+        if let Some(preferred_row) = view_model.rows.get_mut(preferred_index) {
+            preferred_row.selected = true;
+        }
+
+        let focus_keys = if preferred_index == 0 {
+            vec![KeyCode::Down; 9]
+        } else {
+            vec![KeyCode::Up; 9]
+        };
+        let mut events = focus_keys
+            .into_iter()
+            .map(|key| TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, key)))
+            .collect::<Vec<_>>();
+        events.push(TerminalEvent::Key(KeyEvent::new(
+            KeyEventKind::Press,
+            KeyCode::Esc,
+        )));
+        let frames = render_quota_capture_frames(view_model, 160, 36, events).await;
+        let expected_focus = if preferred_index == 0 {
+            "❯ acct09"
+        } else {
+            "❯ acct00"
+        };
+        assert!(
+            frames.iter().any(|frame| frame.contains(expected_focus)),
+            "keyboard navigation should reach a different focused and scrolled row `{expected_focus}`"
+        );
+        let final_frame = frames
+            .last()
+            .unwrap_or_else(|| panic!("navigation should render at least one frame"));
+
+        for frame in &frames {
+            let title_line = frame
+                .lines()
+                .find(|line| line.contains("Quota status"))
+                .unwrap_or_else(|| panic!("quota title should render:\n{frame}"));
+            assert!(title_line.contains("serving 12 clients"), "{frame}");
+            assert!(title_line.contains(freshness_summary), "{frame}");
+            let route_line = frame
+                .lines()
+                .find(|line| line.contains("responses · degraded"))
+                .unwrap_or_else(|| panic!("pool route summary should render:\n{frame}"));
+            assert!(route_line.contains(route_summary), "{frame}");
+            observed_headers.push((
+                route_line.trim().to_owned(),
+                freshness_summary.to_owned(),
+            ));
+        }
+
+        let expected_detail = if preferred_index == 0 {
+            "account 09 detail"
+        } else {
+            "account 00 detail"
+        };
+        assert!(final_frame.contains(expected_detail), "{final_frame}");
+    }
+
+    let first_header = observed_headers
+        .first()
+        .unwrap_or_else(|| panic!("header proof should observe at least one frame"));
+    assert!(
+        observed_headers.iter().all(|header| header == first_header),
+        "pool header lines must remain identical while preference, focus and scroll change: {observed_headers:?}"
+    );
+}
+
+#[test]
+fn degraded_pool_authority_remains_visible_in_narrow_and_empty_views() {
+    let route_summary = "responses · degraded · no accounts";
+    let mut empty_view_model = quota_empty_view_model();
+    empty_view_model.route_line = route_summary.to_owned();
+    empty_view_model.selection_projection_degraded = true;
+
+    let narrow_frame = render_quota_static_capture(empty_view_model, 48, false);
+
+    assert!(
+        narrow_frame.lines().any(|line| line.contains("degraded")),
+        "narrow header should retain the degraded authority marker:\n{narrow_frame}"
+    );
+    assert!(narrow_frame.contains("no accounts"), "{narrow_frame}");
+    assert!(narrow_frame.contains("unknown"), "{narrow_frame}");
+}
+
+#[tokio::test]
 async fn quota_status_down_arrow_focuses_next_account_details() {
     let frames = element! {
         QuotaStatusComponent(
@@ -186,6 +285,7 @@ async fn quota_status_reloads_view_model_on_timer() {
                 reload_count.fetch_add(1, Ordering::SeqCst);
                 let mut view_model = quota_view_model();
                 view_model.route_line = "responses -> beta    [preferred]".to_owned();
+                view_model.pool_freshness_summary = "stale 1".to_owned();
                 let stale_sample = SampleMetadata {
                     confidence: SampleConfidence::Stale,
                     age_label: "15m 1s".to_owned(),
@@ -240,8 +340,8 @@ async fn quota_status_reloads_view_model_on_timer() {
     assert!(
         frames
             .iter()
-            .any(|frame| frame.contains("stale 15m 1s ago")),
-        "quota status title should render reloaded stale freshness: {frames:?}"
+            .any(|frame| frame.contains("stale 1")),
+        "quota status title should render reloaded report-wide stale count: {frames:?}"
     );
 }
 
@@ -325,6 +425,8 @@ async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() 
         width: 120,
         route_line: "responses -> ssdev    [preferred]".to_owned(),
         why_line: "why: safest quota".to_owned(),
+        pool_freshness_summary: "fresh 1".to_owned(),
+        selection_projection_degraded: false,
         serving_clients: None,
         rows: vec![QuotaStatusAccountViewModel {
             account_id: test_account_id("ssdev"),
@@ -336,6 +438,8 @@ async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() 
             status: "[usable]".to_owned(),
             active_clients: "1 client".to_owned(),
             reset_credits: "2 resets".to_owned(),
+            credit_usage_summary: "unknown".to_owned(),
+            credit_usage: crate::quota::CreditUsageStatus::default(),
             reason: "safest quota".to_owned(),
             weekly_window: "█████ 83%".to_owned(),
             short_window: "█████ 99%".to_owned(),

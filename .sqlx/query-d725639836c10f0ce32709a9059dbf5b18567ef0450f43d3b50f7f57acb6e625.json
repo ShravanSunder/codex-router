@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT accounts.active_credential_generation AS active_credential_generation,\n                        account_credit_observations.latest_started_attempt AS \"latest_started_attempt?\"\n                   FROM accounts\n                   LEFT JOIN account_credit_observations\n                     ON account_credit_observations.account_id = accounts.account_id\n                  WHERE accounts.account_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "active_credential_generation",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "active_credential_generation"
+          }
+        }
+      },
+      {
+        "name": "latest_started_attempt?",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "latest_started_attempt"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "d725639836c10f0ce32709a9059dbf5b18567ef0450f43d3b50f7f57acb6e625"
+}

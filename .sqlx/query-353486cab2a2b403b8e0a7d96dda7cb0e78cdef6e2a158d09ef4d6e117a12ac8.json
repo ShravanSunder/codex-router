@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO account_credit_policies (account_id, allow_credits)\n             VALUES (?1, ?2)\n             ON CONFLICT(account_id) DO UPDATE SET\n               allow_credits = excluded.allow_credits",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "353486cab2a2b403b8e0a7d96dda7cb0e78cdef6e2a158d09ef4d6e117a12ac8"
+}

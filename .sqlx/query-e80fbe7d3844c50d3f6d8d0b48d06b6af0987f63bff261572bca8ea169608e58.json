@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT allow_credits\n               FROM account_credit_policies\n              WHERE account_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "allow_credits",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_credit_policies",
+            "name": "allow_credits"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e80fbe7d3844c50d3f6d8d0b48d06b6af0987f63bff261572bca8ea169608e58"
+}

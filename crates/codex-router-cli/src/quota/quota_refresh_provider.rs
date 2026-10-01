@@ -71,14 +71,34 @@ impl QuotaRefreshProviderRequest {
 pub(crate) struct QuotaRefreshProviderResponse {
     pub(crate) windows: Vec<QuotaRefreshProviderWindow>,
     pub(crate) reset_credits_available: Option<u32>,
+    pub(crate) credit_provider_observation: CreditProviderObservation,
 }
 
 impl QuotaRefreshProviderResponse {
+    fn without_credit_facts() -> Self {
+        Self {
+            windows: Vec::new(),
+            reset_credits_available: None,
+            credit_provider_observation: CreditProviderObservation::missing(),
+        }
+    }
+
+    fn with_credit_facts_from_usage(mut self, usage: &UsageResponse) -> Self {
+        self.credit_provider_observation = usage.credit_provider_observation();
+        self
+    }
+
     pub(super) fn effective_window(&self) -> Option<&QuotaRefreshProviderWindow> {
         self.windows
             .iter()
             .find(|window| window.effective)
             .or_else(|| self.windows.first())
+    }
+}
+
+impl Default for QuotaRefreshProviderResponse {
+    fn default() -> Self {
+        Self::without_credit_facts()
     }
 }
 
@@ -219,23 +239,28 @@ pub(super) fn quota_response_for_route_band(
     usage: &UsageResponse,
     route_band: &str,
 ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
-    if route_band == "code_review" {
+    let mut response = if route_band == "code_review" {
         let window_pair = usage.code_review_rate_limit.as_ref().ok_or_else(|| {
             QuotaCommandError::ProviderResponse {
                 message: format!("missing quota window for route band {route_band}"),
             }
         })?;
-        return quota_response_from_window_pair(window_pair, route_band);
-    }
+        quota_response_from_window_pair(window_pair, route_band)?
+    } else {
+        let window_pair =
+            usage
+                .rate_limit
+                .as_ref()
+                .ok_or_else(|| QuotaCommandError::ProviderResponse {
+                    message: format!("missing quota window for route band {route_band}"),
+                })?;
+        quota_response_from_window_pair(window_pair, route_band)?
+    };
 
-    let window_pair =
-        usage
-            .rate_limit
-            .as_ref()
-            .ok_or_else(|| QuotaCommandError::ProviderResponse {
-                message: format!("missing quota window for route band {route_band}"),
-            })?;
-    quota_response_from_window_pair(window_pair, route_band)
+    if route_band == "responses" {
+        response = response.with_credit_facts_from_usage(usage);
+    }
+    Ok(response)
 }
 
 pub(super) const fn stale_after_unix_seconds(observed_unix_seconds: u64) -> u64 {
@@ -270,6 +295,7 @@ fn quota_response_from_window_pair(
     Ok(QuotaRefreshProviderResponse {
         windows,
         reset_credits_available: None,
+        ..QuotaRefreshProviderResponse::default()
     })
 }
 

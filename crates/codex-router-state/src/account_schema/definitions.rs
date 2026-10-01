@@ -174,6 +174,22 @@ pub(super) const ACCOUNT_ROUTING_POLICIES: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 1),
     column!("weekly_quota_floor_basis_points", "INTEGER", true, 0),
 ];
+pub(super) const ACCOUNT_CREDIT_POLICIES: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("allow_credits", "INTEGER", true, 0),
+];
+pub(super) const ACCOUNT_CREDIT_OBSERVATIONS: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("credential_generation", "INTEGER", true, 0),
+    column!("latest_started_attempt", "INTEGER", true, 0),
+    column!("committed_attempt", "INTEGER", false, 0),
+    column!("observed_unix_seconds", "INTEGER", false, 0),
+    column!("stale_after_unix_seconds", "INTEGER", false, 0),
+    column!("availability", "TEXT", true, 0),
+    column!("balance", "TEXT", false, 0),
+    column!("spend_control_state", "TEXT", true, 0),
+    column!("provider_limit_reason", "TEXT", false, 0),
+];
 pub(super) const ACCOUNT_WINDOW_OBSERVATIONS: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 1),
     column!("window_kind", "TEXT", true, 2),

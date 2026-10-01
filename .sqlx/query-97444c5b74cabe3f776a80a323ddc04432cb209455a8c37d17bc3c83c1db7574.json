@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO quota_refresh_status (\n               account_id, route_band, last_success_unix_seconds,\n               last_attempt_unix_seconds, last_error_class,\n               stale_after_unix_seconds\n             ) VALUES (?1, 'responses', ?2, ?2, NULL, ?3)\n             ON CONFLICT(account_id, route_band) DO UPDATE SET\n               last_success_unix_seconds = excluded.last_success_unix_seconds,\n               last_attempt_unix_seconds = excluded.last_attempt_unix_seconds,\n               last_error_class = NULL,\n               stale_after_unix_seconds = excluded.stale_after_unix_seconds",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "97444c5b74cabe3f776a80a323ddc04432cb209455a8c37d17bc3c83c1db7574"
+}

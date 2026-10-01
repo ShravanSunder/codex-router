@@ -114,7 +114,7 @@ impl TerminalDriver {
             terminal_bytes.contains("\u{1b}[?1003h") && terminal_bytes.contains("\u{1b}[?1006h"),
             terminal_bytes.contains("\u{1b}[?2026h"),
             terminal_bytes.contains("esc/ctrl-r back"),
-            terminal_bytes.contains("ctrl-r reset credits"),
+            terminal_bytes.contains("ctrl-r account options"),
             terminal_bytes.contains("Reset credit"),
             self.reached_eof,
             child_running,
@@ -128,9 +128,9 @@ impl TerminalDriver {
         timeout: Duration,
     ) -> TestResult<()> {
         self.wait_until(timeout, |transcript| {
-            transcript
-                .get(start..)
-                .is_some_and(|tail| String::from_utf8_lossy(tail).contains(expected))
+            transcript.get(start..).is_some_and(|tail| {
+                contains_completed_synchronized_frame_after_text(tail, expected.as_bytes())
+            })
         })
     }
 
@@ -275,6 +275,62 @@ impl TerminalDriver {
             }
         }
     }
+}
+
+fn contains_completed_synchronized_frame_after_text(transcript: &[u8], expected: &[u8]) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+
+    const BEGIN: &[u8] = b"\x1b[?2026h";
+    const END: &[u8] = b"\x1b[?2026l";
+
+    let mut offset = 0;
+    let mut synchronized_update_depth = 0;
+    let mut expected_text_seen_in_update = false;
+    while offset < transcript.len() {
+        let remaining = transcript.get(offset..).unwrap_or_default();
+        let next_text = find_sequence(remaining, expected).map(|position| offset + position);
+        let next_begin = find_sequence(remaining, BEGIN).map(|position| offset + position);
+        let next_end = find_sequence(remaining, END).map(|position| offset + position);
+        let next_event = [next_text, next_begin, next_end]
+            .into_iter()
+            .flatten()
+            .min();
+
+        let Some(event_offset) = next_event else {
+            break;
+        };
+        if next_text == Some(event_offset) {
+            expected_text_seen_in_update |= synchronized_update_depth > 0;
+            offset = event_offset + expected.len();
+        } else if next_begin == Some(event_offset) {
+            if synchronized_update_depth == 0 {
+                expected_text_seen_in_update = false;
+            }
+            synchronized_update_depth += 1;
+            offset = event_offset + BEGIN.len();
+        } else {
+            if synchronized_update_depth > 0 {
+                synchronized_update_depth -= 1;
+                if synchronized_update_depth == 0 && expected_text_seen_in_update {
+                    return true;
+                }
+                if synchronized_update_depth == 0 {
+                    expected_text_seen_in_update = false;
+                }
+            }
+            offset = event_offset + END.len();
+        }
+    }
+
+    false
+}
+
+fn find_sequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 impl Drop for TerminalDriver {

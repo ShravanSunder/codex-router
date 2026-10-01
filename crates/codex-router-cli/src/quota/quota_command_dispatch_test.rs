@@ -304,6 +304,13 @@ async fn non_interactive_dispatch_never_constructs_an_injected_reset_session() {
         {
             panic!("non-interactive quota dispatch must not construct a reset session");
         }
+
+        fn credit_usage_refresher(
+            &self,
+            _router_root: &Path,
+        ) -> crate::presentation::quota::CreditUsageRefresher {
+            panic!("non-interactive quota dispatch must not compose a credit refresher");
+        }
     }
 
     for command in [QuotaCommand::Help("quota help\n"), QuotaCommand::Reset] {

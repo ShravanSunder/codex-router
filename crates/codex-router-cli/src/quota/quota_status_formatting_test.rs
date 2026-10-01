@@ -16,8 +16,8 @@ fn quota_status_width_contract_preserves_layout() {
     must_ok(write_quota_table(&mut output, &blocked_report, Some(80)));
     let text = must_ok(String::from_utf8(output));
     assert!(
-        text.contains("responses -> none    no usable accounts"),
-        "blocked capture should expose compact no-selection route state:\n{text}"
+        text.contains("responses · 2 accounts · blocked 2"),
+        "blocked capture should expose the complete pool summary:\n{text}"
     );
     assert!(
         text.lines().all(|line| line.chars().count() <= 80),
@@ -144,14 +144,15 @@ fn quota_status_table_shows_stale_values_with_sample_marker_without_refresh_fill
 }
 
 #[test]
-fn quota_status_view_model_route_line_compacts_reason_and_burn_rate() {
+fn quota_status_view_model_route_line_summarizes_the_account_pool() {
     let report = quota_capture_report();
     let view_model = quota_status_view_model(&report, report.rows(), 120);
 
     assert_eq!(
-        view_model.route_line, "responses -> ssdev    safest quota    burn 0.1%/h",
-        "route line should identify the selected account, reason, burn rate, and limiting window without a second header line"
+        view_model.route_line, "responses · 4 accounts · usable 2 · reserve 1 · blocked 1",
+        "route summary should describe the full account pool instead of the preferred account"
     );
+    assert_eq!(view_model.pool_freshness_summary, "fresh 3 · stale 1");
     assert!(view_model.why_line.is_empty());
 }
 
@@ -161,6 +162,80 @@ fn quota_status_view_model_reports_serving_clients_from_active_mirror() {
     let view_model = quota_status_view_model(&report, report.rows(), 120);
 
     assert_eq!(view_model.serving_clients, Some(5));
+}
+
+#[test]
+fn quota_status_headers_summarize_every_report_row_independent_of_preference_or_visibility() {
+    let mut report = quota_capture_report();
+    let template = report
+        .rows
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("capture report should have an account row"));
+    let scenarios = [
+        (
+            "usable",
+            AccountAvailability::Usable,
+            QuotaEvidenceFreshness::Fresh,
+        ),
+        (
+            "reserve",
+            AccountAvailability::Reserve,
+            QuotaEvidenceFreshness::Fresh,
+        ),
+        (
+            "blocked",
+            AccountAvailability::Blocked,
+            QuotaEvidenceFreshness::Stale,
+        ),
+        (
+            "unknown",
+            AccountAvailability::Unknown,
+            QuotaEvidenceFreshness::Unknown,
+        ),
+        (
+            "excluded",
+            AccountAvailability::Excluded,
+            QuotaEvidenceFreshness::Stale,
+        ),
+    ];
+    report.rows = scenarios
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, availability, freshness))| {
+            let mut row = template.clone();
+            row.account_id = AccountId::new(format!("account_{label}"))
+                .expect("fixture account identity should validate");
+            row.account_label = label.to_owned();
+            row.availability = availability;
+            row.freshness = freshness;
+            row.preferred_next = index == 0;
+            row
+        })
+        .collect();
+    report.preferred_next_account_id = report.rows.first().map(|row| row.account_id.clone());
+    report.selection_projection_source = SelectionProjectionSource::DisplayWindowsFallback;
+
+    let full = quota_status_view_model(&report, report.rows(), 120);
+    assert_eq!(
+        full.route_line,
+        "responses · degraded · 5 accounts · usable 1 · reserve 1 · blocked 1 · unknown 1 · excluded 1"
+    );
+    assert_eq!(full.pool_freshness_summary, "fresh 2 · stale 2 · unknown 1");
+    assert!(full.selection_projection_degraded);
+
+    let clipped_rows = report.rows[..1].to_vec();
+    report.rows[4].preferred_next = true;
+    report.preferred_next_account_id = report.rows.get(4).map(|row| row.account_id.clone());
+    let clipped = quota_status_view_model(&report, &clipped_rows, 48);
+    assert_eq!(clipped.route_line, full.route_line);
+    assert_eq!(clipped.pool_freshness_summary, full.pool_freshness_summary);
+
+    report.rows.clear();
+    report.preferred_next_account_id = None;
+    let empty = quota_status_view_model(&report, report.rows(), 48);
+    assert_eq!(empty.route_line, "responses · degraded · no accounts");
+    assert_eq!(empty.pool_freshness_summary, "unknown");
 }
 
 #[test]

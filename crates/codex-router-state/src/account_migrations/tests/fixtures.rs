@@ -403,7 +403,7 @@ pub(super) async fn assert_native_history_present(database_path: &Path) {
         .fetch_one(&mut connection)
         .await
         .expect("native history should query");
-    assert_eq!(history_rows, 4);
+    assert_eq!(history_rows, expected_native_migration_count());
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut connection)
         .await
@@ -413,6 +413,11 @@ pub(super) async fn assert_native_history_present(database_path: &Path) {
         .close()
         .await
         .expect("native inspection connection should close");
+}
+
+pub(super) fn expected_native_migration_count() -> i64 {
+    i64::try_from(crate::account_migrations::MIGRATOR.iter().count())
+        .expect("native migration count should fit SQLite integer range")
 }
 
 pub(super) async fn migration_history_bytes(database_path: &Path) -> Vec<(i64, bool, Vec<u8>)> {

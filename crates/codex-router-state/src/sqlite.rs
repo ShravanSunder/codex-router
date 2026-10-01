@@ -171,6 +171,25 @@ const ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
         )",
 ];
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
+const ASYNC_CREDIT_USAGE_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS account_credit_policies (
+        account_id TEXT PRIMARY KEY NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+        allow_credits INTEGER NOT NULL CHECK (allow_credits IN (0, 1))
+    )",
+    "CREATE TABLE IF NOT EXISTS account_credit_observations (
+        account_id TEXT PRIMARY KEY NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+        credential_generation INTEGER NOT NULL,
+        latest_started_attempt INTEGER NOT NULL,
+        committed_attempt INTEGER,
+        observed_unix_seconds INTEGER,
+        stale_after_unix_seconds INTEGER,
+        availability TEXT NOT NULL,
+        balance TEXT,
+        spend_control_state TEXT NOT NULL,
+        provider_limit_reason TEXT
+    )",
+];
+#[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 const ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS active_client_leases (
         route_band TEXT NOT NULL,
@@ -555,6 +574,18 @@ pub enum StateStoreError {
     /// Account-status mutation named an account that is not configured.
     #[error("account status target was not found")]
     AccountStatusAccountNotFound,
+    /// Credit policy mutation requires an existing native database with the current schema.
+    #[error("credit preference requires a compatible upgraded router database")]
+    CreditUsagePolicySchemaUpgradeRequired,
+    /// Credit policy mutation could not acquire the SQLite writer lock.
+    #[error("database is busy; retry save")]
+    CreditUsagePolicyDatabaseBusy,
+    /// Credit policy mutation named an account that is not configured.
+    #[error("credit preference account is unavailable")]
+    CreditUsagePolicyAccountUnavailable,
+    /// Credit policy mutation target changed after the account pane was opened.
+    #[error("account credentials changed; reopen account options")]
+    CreditUsagePolicyTargetChanged,
     /// Account-status mutation matched more than one configured display label.
     #[error("account status target label is ambiguous")]
     AccountStatusAccountLabelAmbiguous,
@@ -603,6 +634,15 @@ pub enum StateStoreError {
     AccountConcurrentModification {
         /// Affected account id.
         account_id: String,
+    },
+    /// The per-account credit refresh attempt sequence reached SQLite's integer limit.
+    #[error("credit refresh attempt sequence overflow")]
+    CreditRefreshAttemptSequenceOverflow,
+    /// A paired Responses refresh commit did not satisfy the state-owned contract.
+    #[error("invalid credit refresh input: {field}")]
+    InvalidCreditRefreshInput {
+        /// Invalid input field.
+        field: &'static str,
     },
     /// A Claude window observation or rejection contains an invalid input value.
     #[error("invalid Claude account window state: {field}")]
@@ -806,17 +846,39 @@ impl AsyncSqliteStateStore {
         route_band: &str,
         now_unix_seconds: u64,
     ) -> Result<Vec<SelectorQuotaInput>, StateStoreError> {
-        let accounts = self.list_accounts().await?;
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        let account_rows = sqlx::query!(
+            "SELECT account_id, label, status, active_credential_generation, provider
+               FROM accounts
+              ORDER BY account_id",
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        let accounts = account_rows
+            .into_iter()
+            .map(|row| {
+                parse_account_row(
+                    row.account_id,
+                    row.label,
+                    row.status,
+                    row.active_credential_generation,
+                    row.provider,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut inputs = Vec::new();
         for account in accounts {
             let mut windows = self
-                .load_selector_windows(account.account_id(), route_band)
+                .load_selector_windows(&mut transaction, account.account_id(), route_band)
                 .await?;
             let route_band_state = self
-                .load_route_band_account_state(account.account_id(), route_band)
+                .load_route_band_account_state(&mut transaction, account.account_id(), route_band)
                 .await?;
+            let mut suspect_exhausted_credit_suppression = false;
             if let Some(state) = route_band_state.as_ref() {
                 if state.is_active_suspect_exhausted(now_unix_seconds) {
+                    suspect_exhausted_credit_suppression = true;
                     windows = suspect_exhausted_selector_windows(
                         account.account_id(),
                         route_band,
@@ -827,7 +889,7 @@ impl AsyncSqliteStateStore {
                 }
             } else {
                 let refresh_status = self
-                    .load_quota_refresh_status(account.account_id(), route_band)
+                    .load_quota_refresh_status(&mut transaction, account.account_id(), route_band)
                     .await?;
                 if selector_windows_are_stale(&windows, refresh_status.as_ref(), now_unix_seconds) {
                     mark_selector_windows_stale(&mut windows);
@@ -836,14 +898,26 @@ impl AsyncSqliteStateStore {
             let (window_observations, window_rejections) = if account.provider() == Provider::Claude
             {
                 (
-                    self.window_observations_for_account(account.account_id())
-                        .await?,
-                    self.window_rejections_for_account(account.account_id())
-                        .await?,
+                    crate::window_observation::window_observations_for_account_in_transaction(
+                        &mut transaction,
+                        account.account_id(),
+                    )
+                    .await?,
+                    crate::window_observation::window_rejections_for_account_in_transaction(
+                        &mut transaction,
+                        account.account_id(),
+                    )
+                    .await?,
                 )
             } else {
                 (Vec::new(), Vec::new())
             };
+            let (credit_usage_policy, credit_observation) =
+                crate::credit_store::load_credit_usage_for_selector(
+                    &mut transaction,
+                    account.account_id(),
+                )
+                .await?;
             inputs.push(
                 SelectorQuotaInput::new(
                     account.account_id().clone(),
@@ -854,10 +928,16 @@ impl AsyncSqliteStateStore {
                     route_band,
                     windows,
                 )
-                .with_window_state(window_observations, window_rejections),
+                .with_window_state(window_observations, window_rejections)
+                .with_credit_usage(
+                    credit_usage_policy,
+                    credit_observation,
+                    suspect_exhausted_credit_suppression,
+                ),
             );
         }
 
+        transaction.commit().await.map_err(sqlx_error)?;
         Ok(inputs)
     }
 
@@ -1047,43 +1127,8 @@ impl AsyncSqliteStateStore {
         snapshot: &PersistedQuotaSnapshot,
         selector_projection: SnapshotSelectorProjection,
     ) -> Result<(), StateStoreError> {
-        let observed_unix_seconds = u64_to_i64(snapshot.observed_unix_seconds())?;
-        let remaining_headroom = u32_to_i64(snapshot.remaining_headroom());
-        let reset_unix_seconds = snapshot.reset_unix_seconds().map(u64_to_i64).transpose()?;
-        let reset_credits_available = snapshot.reset_credits_available().map(u32_to_i64);
-        let stale_penalty = if snapshot.stale_penalty() {
-            1_i64
-        } else {
-            0_i64
-        };
-
         let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
-        sqlx::query(
-            "INSERT INTO quota_snapshots (
-               account_id, source, observed_unix_seconds, route_band,
-               remaining_headroom, reset_unix_seconds,
-               reset_credits_available, stale_penalty
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(account_id, route_band) DO UPDATE SET
-               source = excluded.source,
-               observed_unix_seconds = excluded.observed_unix_seconds,
-               remaining_headroom = excluded.remaining_headroom,
-               reset_unix_seconds = excluded.reset_unix_seconds,
-               reset_credits_available = excluded.reset_credits_available,
-               stale_penalty = excluded.stale_penalty",
-        )
-        .bind(snapshot.account_id().as_str())
-        .bind(snapshot.source().as_str())
-        .bind(observed_unix_seconds)
-        .bind(snapshot.route_band())
-        .bind(remaining_headroom)
-        .bind(reset_unix_seconds)
-        .bind(reset_credits_available)
-        .bind(stale_penalty)
-        .execute(&mut *transaction)
-        .await
-        .map_err(sqlx_error)?;
+        upsert_quota_snapshot_in_async_transaction(&mut transaction, snapshot).await?;
         if selector_projection == SnapshotSelectorProjection::DeriveFromSnapshot
             && selector_route_band(snapshot.route_band())
         {
@@ -1200,6 +1245,12 @@ impl AsyncSqliteStateStore {
         .execute(&mut *transaction)
         .await
         .map_err(sqlx_error)?;
+        crate::credit_store::invalidate_credit_observation_after_credential_mutation(
+            &mut transaction,
+            account_id,
+            active_credential_generation,
+        )
+        .await?;
         sqlx::query("DELETE FROM credential_maintenance WHERE account_id = ?1")
             .bind(account_id.as_str())
             .execute(&mut *transaction)
@@ -1290,6 +1341,12 @@ impl AsyncSqliteStateStore {
                 account_id: account_id.as_str().to_owned(),
             });
         }
+        crate::credit_store::invalidate_credit_observation_after_credential_mutation(
+            &mut transaction,
+            account_id,
+            active_credential_generation,
+        )
+        .await?;
         invalidate_credential_mutation_quota_async(&mut transaction, account_id).await?;
         transaction.commit().await.map_err(sqlx_error)?;
 
@@ -1422,6 +1479,7 @@ impl AsyncSqliteStateStore {
 
     async fn load_quota_refresh_status(
         &self,
+        connection: &mut sqlx::SqliteConnection,
         account_id: &AccountId,
         route_band: &str,
     ) -> Result<Option<QuotaRefreshStatusView>, StateStoreError> {
@@ -1433,7 +1491,7 @@ impl AsyncSqliteStateStore {
         )
         .bind(account_id.as_str())
         .bind(route_band)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(sqlx_error)?;
 
@@ -1622,6 +1680,7 @@ impl AsyncSqliteStateStore {
 
     async fn load_selector_windows(
         &self,
+        connection: &mut sqlx::SqliteConnection,
         account_id: &AccountId,
         route_band: &str,
     ) -> Result<Vec<PersistedSelectorQuotaWindow>, StateStoreError> {
@@ -1635,7 +1694,7 @@ impl AsyncSqliteStateStore {
         )
         .bind(account_id.as_str())
         .bind(route_band)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await
         .map_err(sqlx_error)?;
 
@@ -1701,6 +1760,7 @@ impl AsyncSqliteStateStore {
 
     async fn load_route_band_account_state(
         &self,
+        connection: &mut sqlx::SqliteConnection,
         account_id: &AccountId,
         route_band: &str,
     ) -> Result<Option<RouteBandAccountStateRow>, StateStoreError> {
@@ -1711,7 +1771,7 @@ impl AsyncSqliteStateStore {
         )
         .bind(account_id.as_str())
         .bind(route_band)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(sqlx_error)?;
 
@@ -1781,47 +1841,10 @@ impl AsyncSqliteStateStore {
         &self,
         observation: &PersistedQuotaHistoryObservation,
     ) -> Result<(), StateStoreError> {
-        let (refresh_success, refresh_error_class) = match observation.refresh_outcome() {
-            QuotaHistoryRefreshOutcome::Success => (1_i64, None),
-            QuotaHistoryRefreshOutcome::Failure { error_class } => {
-                (0_i64, Some(error_class.as_str()))
-            }
-        };
-        sqlx::query(
-            "INSERT INTO quota_history_observations (
-                account_id, account_label, route_band, limit_window_seconds,
-                observed_unix_seconds, remaining_headroom, reset_unix_seconds,
-                window_status, effective, refresh_source, refresh_success,
-                refresh_error_class, reset_credits_available
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        )
-        .bind(observation.account_id().as_str())
-        .bind(observation.account_label())
-        .bind(observation.route_band())
-        .bind(u64_to_i64(observation.limit_window_seconds())?)
-        .bind(u64_to_i64(observation.observed_unix_seconds())?)
-        .bind(u32_to_i64(observation.remaining_headroom()))
-        .bind(
-            observation
-                .reset_unix_seconds()
-                .map(u64_to_i64)
-                .transpose()?,
-        )
-        .bind(observation.window_status().as_str())
-        .bind(if observation.effective() {
-            1_i64
-        } else {
-            0_i64
-        })
-        .bind(observation.refresh_source().as_str())
-        .bind(refresh_success)
-        .bind(refresh_error_class)
-        .bind(observation.reset_credits_available().map(u32_to_i64))
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_error)?;
-
+        let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
+        insert_quota_history_observation_in_async_transaction(&mut transaction, observation)
+            .await?;
+        transaction.commit().await.map_err(sqlx_error)?;
         Ok(())
     }
 
@@ -4527,6 +4550,7 @@ impl SqliteStateStore {
     fn ensure_async_read_only_schema(&self) -> Result<(), StateStoreError> {
         for statement in ASYNC_QUOTA_HISTORY_SCHEMA_STATEMENTS
             .iter()
+            .chain(ASYNC_CREDIT_USAGE_SCHEMA_STATEMENTS)
             .chain(ASYNC_ACTIVE_CLIENT_SCHEMA_STATEMENTS)
             .chain(ASYNC_ROUTE_BAND_ACCOUNT_STATE_SCHEMA_STATEMENTS)
             .chain(ASYNC_ACTIVE_SESSION_HISTORY_TABLE_STATEMENTS)
@@ -4822,7 +4846,7 @@ fn redacted_weekly_floor_sqlite_error(message: &'static str) -> StateStoreError 
     }
 }
 
-fn is_busy_or_locked_sqlx_error(error: &sqlx::Error) -> bool {
+pub(crate) fn is_busy_or_locked_sqlx_error(error: &sqlx::Error) -> bool {
     let sqlx::Error::Database(database_error) = error else {
         return false;
     };
@@ -4844,6 +4868,89 @@ fn parse_account_routing_policy_row(
         .and_then(|value| WeeklyQuotaFloorBasisPoints::new(value).ok())
         .ok_or(StateStoreError::CorruptAccountRoutingPolicy)?;
     Ok(AccountRoutingPolicy::new(account_id, basis_points))
+}
+
+pub(crate) async fn upsert_quota_snapshot_in_async_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    snapshot: &PersistedQuotaSnapshot,
+) -> Result<(), StateStoreError> {
+    let stale_penalty = if snapshot.stale_penalty() {
+        1_i64
+    } else {
+        0_i64
+    };
+    sqlx::query(
+        "INSERT INTO quota_snapshots (
+           account_id, source, observed_unix_seconds, route_band,
+           remaining_headroom, reset_unix_seconds,
+           reset_credits_available, stale_penalty
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(account_id, route_band) DO UPDATE SET
+           source = excluded.source,
+           observed_unix_seconds = excluded.observed_unix_seconds,
+           remaining_headroom = excluded.remaining_headroom,
+           reset_unix_seconds = excluded.reset_unix_seconds,
+           reset_credits_available = excluded.reset_credits_available,
+           stale_penalty = excluded.stale_penalty",
+    )
+    .bind(snapshot.account_id().as_str())
+    .bind(snapshot.source().as_str())
+    .bind(u64_to_i64(snapshot.observed_unix_seconds())?)
+    .bind(snapshot.route_band())
+    .bind(u32_to_i64(snapshot.remaining_headroom()))
+    .bind(snapshot.reset_unix_seconds().map(u64_to_i64).transpose()?)
+    .bind(snapshot.reset_credits_available().map(u32_to_i64))
+    .bind(stale_penalty)
+    .execute(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?;
+    Ok(())
+}
+
+pub(crate) async fn insert_quota_history_observation_in_async_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    observation: &PersistedQuotaHistoryObservation,
+) -> Result<(), StateStoreError> {
+    let (refresh_success, refresh_error_class) = match observation.refresh_outcome() {
+        QuotaHistoryRefreshOutcome::Success => (1_i64, None),
+        QuotaHistoryRefreshOutcome::Failure { error_class } => (0_i64, Some(error_class.as_str())),
+    };
+    sqlx::query(
+        "INSERT INTO quota_history_observations (
+            account_id, account_label, route_band, limit_window_seconds,
+            observed_unix_seconds, remaining_headroom, reset_unix_seconds,
+            window_status, effective, refresh_source, refresh_success,
+            refresh_error_class, reset_credits_available
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    )
+    .bind(observation.account_id().as_str())
+    .bind(observation.account_label())
+    .bind(observation.route_band())
+    .bind(u64_to_i64(observation.limit_window_seconds())?)
+    .bind(u64_to_i64(observation.observed_unix_seconds())?)
+    .bind(u32_to_i64(observation.remaining_headroom()))
+    .bind(
+        observation
+            .reset_unix_seconds()
+            .map(u64_to_i64)
+            .transpose()?,
+    )
+    .bind(observation.window_status().as_str())
+    .bind(if observation.effective() {
+        1_i64
+    } else {
+        0_i64
+    })
+    .bind(observation.refresh_source().as_str())
+    .bind(refresh_success)
+    .bind(refresh_error_class)
+    .bind(observation.reset_credits_available().map(u32_to_i64))
+    .execute(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?;
+    Ok(())
 }
 
 async fn insert_selector_window_in_async_transaction(

@@ -25,6 +25,7 @@ impl QuotaRefreshProvider for FirstUnauthorizedQuotaProvider {
                 effective: true,
             }],
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -161,6 +162,7 @@ impl QuotaRefreshProvider for ConcurrentGenerationQuotaProvider {
                 effective: true,
             }],
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -576,7 +578,7 @@ fn quota_refresh_missing_refresh_token_fails_closed_before_provider_egress() {
 
     let error = match refresh_quota_with_dependencies(
         &mut stdout,
-        router_root,
+        router_root.clone(),
         "https://chatgpt.com/backend-api".to_owned(),
         &resolver,
         &provider,
@@ -599,6 +601,49 @@ fn quota_refresh_missing_refresh_token_fails_closed_before_provider_egress() {
     assert!(rendered_stdout.contains("refreshed: 0\n"));
     assert!(rendered_stdout.contains("failed: 2\n"));
     assert!(!rendered_stdout.contains("expired-quota-access-token-canary"));
+
+    let async_state = must_ok(test_async_runtime().block_on(
+        AsyncSqliteStateStore::open_read_only(&router_root.join("state.sqlite")),
+    ));
+    let observation = must_ok(
+        test_async_runtime().block_on(async_state.load_account_credit_observation(&account_id)),
+    )
+    .expect("resolver failure should retain an ordered pending Responses attempt");
+    assert_eq!(observation.latest_started_attempt(), 1);
+    assert_eq!(observation.committed_attempt(), None);
+    assert_eq!(observation.observed_unix_seconds(), None);
+    let statuses = must_ok(
+        test_async_runtime()
+            .block_on(async_state.quota_refresh_statuses_for_route_band("responses")),
+    );
+    let response_status = statuses
+        .iter()
+        .find(|status| status.account_id() == &account_id)
+        .expect("resolver failure status should be persisted");
+    assert_eq!(response_status.last_attempt_unix_seconds(), Some(1_100));
+    assert_eq!(
+        response_status.last_error_class(),
+        Some(codex_router_state::quota_snapshot::QuotaRefreshErrorClass::AuthError)
+    );
+    for window_seconds in [18_000, 604_800] {
+        let history = must_ok(test_async_runtime().block_on(
+            async_state.quota_history_observations_for_window(
+                &account_id,
+                "responses",
+                window_seconds,
+                0,
+                1_100,
+            ),
+        ));
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].refresh_outcome(),
+            codex_router_state::quota_snapshot::QuotaHistoryRefreshOutcome::Failure {
+                error_class: codex_router_state::quota_snapshot::QuotaRefreshErrorClass::AuthError,
+            }
+        );
+    }
+    must_ok(test_async_runtime().block_on(async_state.close()));
 }
 
 #[test]

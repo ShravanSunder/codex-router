@@ -400,6 +400,89 @@ impl AsyncSqliteStateStore {
     }
 }
 
+pub(crate) async fn window_observations_for_account_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &AccountId,
+) -> Result<Vec<WindowObservation>, StateStoreError> {
+    let rows = sqlx::query!(
+        "SELECT window_kind, remaining_basis_points,
+                reset_unix_seconds, observation_started_at
+           FROM account_window_observations
+          WHERE account_id = ?1
+          ORDER BY window_kind",
+        account_id.as_str(),
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?;
+    let mut observations = Vec::with_capacity(rows.len());
+    for row in rows {
+        let window_kind = parse_window_kind(account_id.as_str(), &row.window_kind)?;
+        let remaining_basis_points = u32::try_from(row.remaining_basis_points).map_err(|_| {
+            StateStoreError::CorruptAccountWindowState {
+                account_id: account_id.as_str().to_owned(),
+                field: "remaining_basis_points",
+            }
+        })?;
+        if remaining_basis_points > MAX_REMAINING_BASIS_POINTS {
+            return Err(StateStoreError::CorruptAccountWindowState {
+                account_id: account_id.as_str().to_owned(),
+                field: "remaining_basis_points",
+            });
+        }
+        let reset_unix_seconds = row
+            .reset_unix_seconds
+            .map(|value| i64_to_u64_window_state(value, account_id.as_str(), "reset_unix_seconds"))
+            .transpose()?;
+        let observation_started_at = i64_to_u64_window_state(
+            row.observation_started_at,
+            account_id.as_str(),
+            "observation_started_at",
+        )?;
+        observations.push(WindowObservation::new(
+            WindowObservationProps::new(
+                account_id.clone(),
+                window_kind,
+                remaining_basis_points,
+                observation_started_at,
+            )
+            .with_reset_unix_seconds_option(reset_unix_seconds),
+        )?);
+    }
+    Ok(observations)
+}
+
+pub(crate) async fn window_rejections_for_account_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &AccountId,
+) -> Result<Vec<WindowRejection>, StateStoreError> {
+    let rows = sqlx::query!(
+        "SELECT window_kind, rejected_at, reported_reset
+           FROM account_window_rejections
+          WHERE account_id = ?1
+          ORDER BY window_kind",
+        account_id.as_str(),
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?;
+    rows.into_iter()
+        .map(|row| {
+            let window_kind = parse_window_kind(account_id.as_str(), &row.window_kind)?;
+            let rejected_at =
+                i64_to_u64_window_state(row.rejected_at, account_id.as_str(), "rejected_at")?;
+            let reported_reset = row
+                .reported_reset
+                .map(|value| i64_to_u64_window_state(value, account_id.as_str(), "reported_reset"))
+                .transpose()?;
+            Ok(WindowRejection::new(
+                WindowRejectionProps::new(account_id.clone(), window_kind, rejected_at)
+                    .with_reported_reset_option(reported_reset),
+            ))
+        })
+        .collect()
+}
+
 impl WindowObservationProps {
     fn with_reset_unix_seconds_option(mut self, reset_unix_seconds: Option<u64>) -> Self {
         self.reset_unix_seconds = reset_unix_seconds;

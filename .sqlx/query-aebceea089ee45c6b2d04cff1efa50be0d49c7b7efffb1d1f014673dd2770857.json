@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM selector_quota_windows\n              WHERE account_id = ?1 AND route_band = 'responses'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "aebceea089ee45c6b2d04cff1efa50be0d49c7b7efffb1d1f014673dd2770857"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO quota_refresh_status (\n               account_id, route_band, last_success_unix_seconds,\n               last_attempt_unix_seconds, last_error_class,\n               stale_after_unix_seconds\n             )\n             SELECT ?1, 'responses', NULL, ?2, ?3, ?2\n              WHERE EXISTS (\n                SELECT 1 FROM account_credit_observations\n                 JOIN accounts USING (account_id)\n                 WHERE account_credit_observations.account_id = ?1\n                   AND account_credit_observations.credential_generation = ?4\n                   AND account_credit_observations.latest_started_attempt = ?5\n                   AND accounts.active_credential_generation = ?4\n              )\n             ON CONFLICT(account_id, route_band) DO UPDATE SET\n               last_attempt_unix_seconds = excluded.last_attempt_unix_seconds,\n               last_error_class = excluded.last_error_class,\n               stale_after_unix_seconds =\n                 CASE\n                   WHEN quota_refresh_status.stale_after_unix_seconds IS NULL\n                     THEN excluded.stale_after_unix_seconds\n                   WHEN quota_refresh_status.stale_after_unix_seconds < excluded.stale_after_unix_seconds\n                     THEN quota_refresh_status.stale_after_unix_seconds\n                   ELSE excluded.stale_after_unix_seconds\n                 END\n             WHERE EXISTS (\n               SELECT 1 FROM account_credit_observations\n                JOIN accounts USING (account_id)\n                WHERE account_credit_observations.account_id = ?1\n                  AND account_credit_observations.credential_generation = ?4\n                  AND account_credit_observations.latest_started_attempt = ?5\n                  AND accounts.active_credential_generation = ?4\n             )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "64219b370775e4dd307c6e9b173662e548260517e4665818c89dfc64585d8be5"
+}

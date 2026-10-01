@@ -51,7 +51,7 @@ async fn assert_local_floor_exit_delivers_signal(exit: LocalFloorExit) {
     let session_shutdown = CancellationToken::new();
     let peer_entered = Arc::new(Notify::new());
     let peer_release = Arc::new(Notify::new());
-    let peer_assessor: Option<Arc<dyn LiveFloorSwitchPeerAssessor>> = match exit {
+    let peer_assessor: Option<Arc<dyn LiveAccountAdmissionAssessor>> = match exit {
         LocalFloorExit::PreCancelledHard => None,
         LocalFloorExit::EarlyDecision => Some(Arc::new(ImmediateSelectableFloorPeer)),
         LocalFloorExit::HardDuringPeerAssessment => Some(Arc::new(HeldSelectableFloorPeer {
@@ -59,11 +59,12 @@ async fn assert_local_floor_exit_delivers_signal(exit: LocalFloorExit) {
             release: peer_release,
         })),
     };
-    let floor_admission = FloorSwitchAdmission::new(
+    let floor_admission = AccountTurnAdmission::new(
         intent,
         early_reconnect.clone(),
         hard_reconnect.clone(),
         pending.then(|| AccountId::new("acct_local_floor_exit").expect("fixture account id")),
+        None,
         peer_assessor,
         false,
     );
@@ -83,7 +84,7 @@ async fn assert_local_floor_exit_delivers_signal(exit: LocalFloorExit) {
             tunnel_shutdown: tunnel_shutdown.clone(),
             active_turn_reservation: ActiveTurnReservationState::new(None),
             session_affinity_activity_handle: None,
-            floor_switch_admission: floor_admission,
+            account_turn_admission: floor_admission,
             early_floor_reconnect: early_reconnect,
             quota_floor_reconnect: hard_reconnect,
         },

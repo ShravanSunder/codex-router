@@ -1,4 +1,5 @@
 use super::*;
+use codex_router_core::credit_usage::CreditProviderObservation;
 use codex_router_core::route_profile::RESPONSES_HTTP;
 
 pub(super) async fn load_quota_status_report_async(
@@ -7,19 +8,116 @@ pub(super) async fn load_quota_status_report_async(
     now_unix_seconds: u64,
     unicode_bars: bool,
 ) -> Result<QuotaStatusReport, QuotaCommandError> {
+    let state_database_path = router_root.join("state.sqlite");
     let quota_history_state =
-        AsyncSqliteStateStore::open_read_only(&router_root.join("state.sqlite")).await?;
-    let accounts = quota_history_state.list_accounts().await?;
-    let report = quota_status_report(
+        match AsyncSqliteStateStore::open_read_only(&state_database_path).await {
+            Ok(state) => state,
+            Err(error) => {
+                #[cfg(test)]
+                report_quota_state_lock_diagnostic(&state_database_path, "open_read_only", &error);
+                return Err(error.into());
+            }
+        };
+    let accounts = match quota_history_state.list_accounts().await {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            #[cfg(test)]
+            report_quota_state_lock_diagnostic(&state_database_path, "list_accounts", &error);
+            return Err(error.into());
+        }
+    };
+    let report = match quota_status_report(
         &quota_history_state,
         &accounts,
         all_limits,
         now_unix_seconds,
         unicode_bars,
     )
-    .await?;
-    quota_history_state.close().await?;
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            #[cfg(test)]
+            report_quota_state_lock_diagnostic(&state_database_path, "quota_status_report", &error);
+            return Err(error);
+        }
+    };
+    if let Err(error) = quota_history_state.close().await {
+        #[cfg(test)]
+        report_quota_state_lock_diagnostic(&state_database_path, "close", &error);
+        return Err(error.into());
+    }
     Ok(report)
+}
+
+#[cfg(test)]
+fn report_quota_state_lock_diagnostic(
+    database_path: &Path,
+    operation: &str,
+    error: &dyn std::fmt::Display,
+) {
+    let mut wal_path = database_path.as_os_str().to_os_string();
+    wal_path.push("-wal");
+    let mut shared_memory_path = database_path.as_os_str().to_os_string();
+    shared_memory_path.push("-shm");
+    let database_files = [
+        database_path.to_path_buf(),
+        std::path::PathBuf::from(wal_path),
+        std::path::PathBuf::from(shared_memory_path),
+    ];
+
+    eprintln!(
+        "quota_status_sqlite_operation_failed pid={} operation={operation} database={} error={error}",
+        std::process::id(),
+        database_path.display(),
+    );
+    for path in &database_files {
+        let file_state = std::fs::metadata(path)
+            .map(|metadata| format!("present, {} bytes", metadata.len()))
+            .unwrap_or_else(|metadata_error| format!("absent or unavailable: {metadata_error}"));
+        match std::process::Command::new("/usr/sbin/lsof")
+            .args(["-nP", "-Fpcfn"])
+            .arg(path)
+            .output()
+        {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let process_ids = stdout
+                    .lines()
+                    .filter_map(|line| line.strip_prefix('p'))
+                    .collect::<Vec<_>>();
+                let images = process_ids
+                    .iter()
+                    .map(|process_id| {
+                        match std::process::Command::new("/usr/sbin/lsof")
+                            .args(["-a", "-p", process_id, "-d", "txt", "-Fin"])
+                            .output()
+                        {
+                            Ok(image) => format!(
+                                "pid={process_id} exit={:?} image={:?}",
+                                image.status.code(),
+                                String::from_utf8_lossy(&image.stdout),
+                            ),
+                            Err(image_error) => {
+                                format!("pid={process_id} image-inspection-error={image_error}")
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "quota_status_sqlite_file path={} state={file_state} lsof_exit={:?} open_processes={process_ids:?} images={images:?} output={stdout:?}",
+                    path.display(),
+                    output.status.code(),
+                );
+            }
+            Err(lsof_error) => {
+                eprintln!(
+                    "quota_status_sqlite_file path={} state={file_state} lsof_error={lsof_error}",
+                    path.display(),
+                );
+            }
+        }
+    }
 }
 
 pub(super) async fn quota_status_report(
@@ -169,6 +267,12 @@ pub(super) async fn quota_status_report(
             ),
             active_clients,
             windows: display_windows,
+            credit_usage: credit_usage_status(
+                selector_input,
+                refresh_statuses.get(account.account_id()),
+                account.active_credential_generation(),
+                now_unix_seconds,
+            ),
             weekly_pace,
             weekly_quota_floor_basis_points,
             oauth_maintenance: quota_history_state
@@ -248,4 +352,48 @@ pub(super) async fn quota_status_report(
         now_unix_seconds,
         rows,
     })
+}
+
+fn credit_usage_status(
+    selector_input: Option<&SelectorQuotaInput>,
+    refresh_status: Option<&QuotaRefreshStatusView>,
+    active_credential_generation: Option<u64>,
+    now_unix_seconds: u64,
+) -> CreditUsageStatus {
+    let policy = selector_input.map_or_default(SelectorQuotaInput::credit_usage_policy);
+    let observation = selector_input.and_then(SelectorQuotaInput::credit_observation);
+    let provider_observation = observation
+        .map_or_else(CreditProviderObservation::missing, |value| {
+            value.provider_observation().clone()
+        });
+    let age_label = observation
+        .and_then(|value| value.observed_unix_seconds())
+        .map(|observed_unix_seconds| {
+            sample_metadata_from_observed_windows(&[observed_unix_seconds], now_unix_seconds)
+                .age_label
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    let freshness = observation.map_or(CreditUsageFreshness::Unknown, |value| {
+        let observation_is_current = active_credential_generation
+            == Some(value.credential_generation())
+            && value.committed_attempt() == Some(value.latest_started_attempt())
+            && value
+                .observed_unix_seconds()
+                .is_some_and(|observed| observed <= now_unix_seconds);
+        if !observation_is_current {
+            return CreditUsageFreshness::Unknown;
+        }
+        match refresh_status.and_then(QuotaRefreshStatusView::stale_after_unix_seconds) {
+            Some(stale_after) if now_unix_seconds < stale_after => CreditUsageFreshness::Fresh,
+            Some(_) => CreditUsageFreshness::Stale,
+            None => CreditUsageFreshness::Unknown,
+        }
+    });
+
+    CreditUsageStatus {
+        policy,
+        provider_observation,
+        freshness,
+        age_label,
+    }
 }

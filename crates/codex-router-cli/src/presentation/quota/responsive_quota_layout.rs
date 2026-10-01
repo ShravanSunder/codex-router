@@ -1,79 +1,54 @@
 use crossterm::terminal;
+use iocraft::prelude::*;
 
-use super::quota_browse_rendering::fit_line;
 use super::quota_status_component::MIN_QUOTA_WIDTH;
 use super::quota_status_component::QUOTA_STATUS_SPINNER_TICKS;
 use super::quota_status_view_model::QuotaStatusAccountViewModel;
 use super::quota_status_view_model::QuotaStatusViewModel;
-use super::quota_status_view_model::SampleConfidence;
 
-pub(super) fn quota_title_line(
+pub(super) fn quota_title_row(
     view_model: &QuotaStatusViewModel,
     width: usize,
     spinner_tick: usize,
-) -> String {
-    let title = "Quota status";
-    let status = quota_title_status(view_model, spinner_tick);
-    let title_width = title.chars().count();
-    let status_width = status.chars().count();
-    if title_width + status_width + 1 > width {
-        return fit_line(title, width);
+) -> AnyElement<'static> {
+    let status = truncate_quota_header_text(
+        &quota_title_status(view_model, spinner_tick),
+        width.saturating_sub("Quota status".chars().count()),
+    );
+    element! {
+        View(width: width as u32, flex_direction: FlexDirection::Row) {
+            Text(content: "Quota status", color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            View(flex_grow: 1.0_f32) {}
+            Text(content: status, color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+        }
     }
-    format!(
-        "{title}{}{status}",
-        " ".repeat(width - title_width - status_width)
-    )
+    .into_any()
 }
 
-fn quota_title_status(view_model: &QuotaStatusViewModel, spinner_tick: usize) -> String {
+pub(super) fn quota_title_status(view_model: &QuotaStatusViewModel, spinner_tick: usize) -> String {
     let spinner = quota_spinner_tick(spinner_tick);
-    let freshness = quota_title_freshness(view_model);
+    let freshness = &view_model.pool_freshness_summary;
     if let Some(serving_clients) = view_model.serving_clients.filter(|clients| *clients > 0) {
         return format!(
-            "{spinner} serving {}  {freshness}",
+            "{spinner} serving {} · {freshness}",
             serving_client_count_label(serving_clients)
         );
     }
     format!("{spinner} {freshness}")
 }
 
-fn quota_title_freshness(view_model: &QuotaStatusViewModel) -> String {
-    let metadata = view_model
-        .selected
-        .as_ref()
-        .map(|selected| &selected.sample_metadata)
-        .or_else(|| {
-            view_model
-                .rows
-                .iter()
-                .find(|row| row.selected)
-                .map(|row| &row.sample_metadata)
-        })
-        .or_else(|| {
-            view_model
-                .rows
-                .iter()
-                .map(|row| &row.sample_metadata)
-                .filter(|metadata| metadata.confidence != SampleConfidence::Unknown)
-                .min_by_key(|metadata| metadata.age_seconds.unwrap_or(u64::MAX))
-        });
-    match metadata.map(|metadata| metadata.confidence) {
-        Some(SampleConfidence::Fresh) => {
-            let age = metadata
-                .map(|metadata| metadata.age_label.as_str())
-                .filter(|age| !age.is_empty())
-                .unwrap_or("unknown");
-            format!("fresh {age} ago")
-        }
-        Some(SampleConfidence::Stale) => {
-            let age = metadata
-                .map(|metadata| metadata.age_label.as_str())
-                .filter(|age| !age.is_empty())
-                .unwrap_or("unknown");
-            format!("stale {age} ago")
-        }
-        Some(SampleConfidence::Unknown) | None => "unknown".to_owned(),
+pub(super) fn truncate_quota_header_text(value: &str, width: usize) -> String {
+    let line = value.replace('\n', " ");
+    if line.chars().count() <= width {
+        return line;
     }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+    format!("{}…", line.chars().take(width - 1).collect::<String>())
 }
 
 fn serving_client_count_label(serving_clients: u32) -> String {
@@ -141,15 +116,32 @@ impl QuotaBodyLayout {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum QuotaBodyLayoutMode {
+    Inline,
+    Sidecar,
+    Stacked {
+        fill_available_height: bool,
+        prioritize_details: bool,
+    },
+}
+
 pub(super) fn quota_body_layout(
     body_budget: usize,
-    sidecar: bool,
-    stacked_details: bool,
+    mode: QuotaBodyLayoutMode,
     row_count: usize,
     focused_row_index: Option<usize>,
     details_content_height: usize,
-    stacked_detail_fills_available_height: bool,
 ) -> QuotaBodyLayout {
+    let sidecar = mode == QuotaBodyLayoutMode::Sidecar;
+    let (stacked_details, stacked_detail_fills_available_height, prioritize_stacked_details) =
+        match mode {
+            QuotaBodyLayoutMode::Inline | QuotaBodyLayoutMode::Sidecar => (false, false, false),
+            QuotaBodyLayoutMode::Stacked {
+                fill_available_height,
+                prioritize_details,
+            } => (true, fill_available_height, prioritize_details),
+        };
     let details_height = details_content_height.min(body_budget);
     let list_budget = if sidecar {
         body_budget
@@ -159,7 +151,9 @@ pub(super) fn quota_body_layout(
         } else {
             quota_account_list_height(row_count, focused_row_index, 1)
         };
-        if minimum_list_height + details_content_height <= body_budget {
+        if prioritize_stacked_details {
+            body_budget.saturating_sub(details_content_height.min(body_budget))
+        } else if minimum_list_height + details_content_height <= body_budget {
             body_budget.saturating_sub(details_content_height)
         } else {
             minimum_list_height.min(body_budget)
@@ -167,11 +161,27 @@ pub(super) fn quota_body_layout(
     } else {
         body_budget
     };
-    let visible_account_budget =
-        quota_visible_account_budget(row_count, focused_row_index, list_budget);
+    let minimum_list_height = if row_count == 0 {
+        quota_account_list_height(row_count, None, 0)
+    } else {
+        quota_account_list_height(row_count, focused_row_index, 1)
+    };
+    let visible_account_budget = if prioritize_stacked_details
+        && stacked_details
+        && row_count > 0
+        && list_budget < minimum_list_height
+    {
+        0
+    } else {
+        quota_visible_account_budget(row_count, focused_row_index, list_budget)
+    };
     let list_height =
-        quota_account_list_height(row_count, focused_row_index, visible_account_budget)
-            .min(body_budget);
+        if prioritize_stacked_details && stacked_details && visible_account_budget == 0 {
+            0
+        } else {
+            quota_account_list_height(row_count, focused_row_index, visible_account_budget)
+                .min(body_budget)
+        };
     let stacked_details_height = if stacked_details {
         let available_height = body_budget.saturating_sub(list_height);
         if stacked_detail_fills_available_height {

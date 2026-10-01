@@ -70,14 +70,14 @@ use tokio_util::task::TaskTracker;
 use crate::account_selection::AccountDecisionSelector;
 use crate::account_selection::ActiveReservationGuard;
 use crate::account_selection::AsyncAccountDecisionSelector;
-use crate::account_selection::LiveFloorSwitchPeerAssessor;
+use crate::account_selection::LiveAccountAdmissionAssessor;
 use crate::account_selection::PostExhaustionRouteBandOutcome;
 use crate::account_selection::QuotaAwareAccountSelectorError;
 use crate::capacity_retry::CapacityRetryOutcome;
 use crate::capacity_retry::CapacityRetryTracker;
 
-#[path = "websocket/floor_switch_admission.rs"]
-mod floor_switch_admission;
+#[path = "websocket/account_turn_admission.rs"]
+mod account_turn_admission;
 use crate::capacity_retry::MAX_THREAD_ID_BYTES;
 use crate::db_write_actor::DbWriteEnqueueResult;
 use crate::headers::Header;
@@ -101,8 +101,8 @@ use crate::provider_error::ProviderErrorClassification;
 use crate::provider_error::ProviderErrorObservationError;
 use crate::provider_error::classify_responses_websocket_error_envelope;
 use crate::session_account_affinity_cache::SessionAffinityActivityHandle;
-use floor_switch_admission::FloorSwitchAdmission;
-use floor_switch_admission::FloorSwitchIntent;
+use account_turn_admission::AccountTurnAdmission;
+use account_turn_admission::FloorSwitchIntent;
 
 use crate::routes::Method;
 
@@ -222,6 +222,7 @@ pub struct WebSocketAffinityOwnerContext {
     affinity_secret: RouterAffinityHashSecret,
     account_id: AccountId,
     credential_generation: u64,
+    credit_backed_at_selection: bool,
     active_reservation_guard: Option<ActiveReservationGuard>,
     session_affinity_activity_handle: Option<SessionAffinityActivityHandle>,
 }
@@ -236,6 +237,7 @@ impl WebSocketAffinityOwnerContext {
             affinity_secret,
             account_id,
             credential_generation,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         }
@@ -246,6 +248,11 @@ impl WebSocketAffinityOwnerContext {
         active_reservation_guard: Option<ActiveReservationGuard>,
     ) -> Self {
         self.active_reservation_guard = active_reservation_guard;
+        self
+    }
+
+    fn with_credit_backed_at_selection(mut self, credit_backed_at_selection: bool) -> Self {
+        self.credit_backed_at_selection = credit_backed_at_selection;
         self
     }
 
@@ -538,6 +545,7 @@ where
                             selected.account_id().clone(),
                             resolved.credential_generation(),
                         )
+                        .with_credit_backed_at_selection(selected.credit_backed_at_selection())
                         .with_active_reservation_guard(selected.active_reservation_guard().cloned())
                         .with_session_affinity_activity_handle(
                             selected.session_affinity_activity_handle().cloned(),
@@ -750,6 +758,7 @@ where
                             selected.account_id().clone(),
                             resolved.credential_generation(),
                         )
+                        .with_credit_backed_at_selection(selected.credit_backed_at_selection())
                         .with_active_reservation_guard(selected.active_reservation_guard().cloned())
                         .with_session_affinity_activity_handle(
                             selected.session_affinity_activity_handle().cloned(),
@@ -1404,6 +1413,18 @@ mod registry_tests {
 #[cfg(test)]
 #[path = "websocket-tests"]
 mod async_forwarding_tests {
+    #[path = "credit-source-assessment-tests.rs"]
+    mod credit_source_assessment_tests;
+    #[path = "credit-turn-admission-tests.rs"]
+    mod credit_turn_admission_tests;
+    #[path = "credit-turn-depletion-tests.rs"]
+    mod credit_turn_depletion_tests;
+    #[path = "credit-turn-source-transition-tests.rs"]
+    mod credit_turn_source_transition_tests;
+    #[path = "credit-turn-test-support.rs"]
+    mod credit_turn_test_support;
+    #[path = "credit-turn-unknown-transition-tests.rs"]
+    mod credit_turn_unknown_transition_tests;
     #[path = "floor-switch-supervisor-tests.rs"]
     mod floor_switch_supervisor_tests;
     #[path = "floor-switch-terminal-tests.rs"]
@@ -1411,11 +1432,11 @@ mod async_forwarding_tests {
     #[path = "floor-switch-tests.rs"]
     mod floor_switch_tests;
 
+    use super::AccountTurnAdmission;
     use super::ActiveTurnReservationState;
     use super::AsyncWebSocketTunnel;
     use super::CODEX_WEBSOCKET_RECONNECT_SIGNAL;
     use super::CapacityRetryOutcome;
-    use super::FloorSwitchAdmission;
     use super::FloorSwitchIntent;
     use super::Header;
     use super::HeaderCollection;
@@ -1443,7 +1464,7 @@ mod async_forwarding_tests {
     use super::supervise_websocket_pumps;
     use super::websocket_affinity_owner_record;
     use crate::account_selection::FloorSwitchPeerAssessment;
-    use crate::account_selection::LiveFloorSwitchPeerAssessor;
+    use crate::account_selection::LiveAccountAdmissionAssessor;
     use bytes::Bytes;
     use codex_router_auth::resolver::CredentialResolverError;
     use codex_router_auth::resolver::ResolvedProviderCredential;
@@ -1540,7 +1561,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -1694,7 +1715,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -1782,11 +1803,12 @@ mod async_forwarding_tests {
         let (_floor_intent_sender, floor_intent) = watch::channel(FloorSwitchIntent::default());
         let early_reconnect = CancellationToken::new();
         let hard_reconnect = CancellationToken::new();
-        let floor_admission = FloorSwitchAdmission::new(
+        let floor_admission = AccountTurnAdmission::new(
             floor_intent,
             early_reconnect.clone(),
             hard_reconnect.clone(),
             Some(AccountId::new("acct_forward_test").expect("fixture account id")),
+            None,
             None,
             false,
         );
@@ -1800,7 +1822,7 @@ mod async_forwarding_tests {
                 tunnel_shutdown: CancellationToken::new(),
                 active_turn_reservation: ActiveTurnReservationState::new(None),
                 session_affinity_activity_handle: Some(published.activity_handle().clone()),
-                floor_switch_admission: floor_admission,
+                account_turn_admission: floor_admission,
                 early_floor_reconnect: early_reconnect,
                 quota_floor_reconnect: hard_reconnect,
             },
@@ -2231,6 +2253,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -2301,6 +2324,7 @@ mod async_forwarding_tests {
     #[derive(Clone, Debug)]
     struct FixedAsyncSelector {
         account_id: AccountId,
+        credit_backed_at_selection: bool,
     }
 
     impl AsyncAccountDecisionSelector for FixedAsyncSelector {
@@ -2311,10 +2335,10 @@ mod async_forwarding_tests {
             _affinity_secret: Option<&'a RouterAffinityHashSecret>,
         ) -> BoxFuture<'a, Result<SelectedAccountDecision, HttpProxyError>> {
             Box::pin(async move {
-                Ok(SelectedAccountDecision::new(
-                    self.account_id.clone(),
-                    "test-fixed",
-                ))
+                Ok(
+                    SelectedAccountDecision::new(self.account_id.clone(), "test-fixed")
+                        .with_credit_backed_at_selection(self.credit_backed_at_selection),
+                )
             })
         }
     }
@@ -2631,6 +2655,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id,
             credential_generation: 7,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -2655,6 +2680,7 @@ mod async_forwarding_tests {
             .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
         let selector = FixedAsyncSelector {
             account_id: account_id.clone(),
+            credit_backed_at_selection: false,
         };
         let credential_resolver = FixedAsyncCredentialResolver { account_id };
         let auth_gate = ProxyLocalAuthGate::disabled();
@@ -2753,7 +2779,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     provider_error_observer: None,
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -2842,7 +2868,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     provider_error_observer: None,
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -2918,7 +2944,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     provider_error_observer: None,
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -3018,6 +3044,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: Some(active_reservation_guard),
             session_affinity_activity_handle: None,
         };
@@ -3043,7 +3070,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -3145,6 +3172,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: Some(active_reservation_guard),
             session_affinity_activity_handle: None,
         };
@@ -3168,7 +3196,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -3288,6 +3316,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: Some(active_reservation_guard),
             session_affinity_activity_handle: None,
         };
@@ -3311,7 +3340,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: None,
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -3411,6 +3440,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: Some(active_reservation_guard),
             session_affinity_activity_handle: None,
         };
@@ -3435,7 +3465,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -3530,6 +3560,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -3549,7 +3580,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -3638,6 +3669,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -3665,7 +3697,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -3754,6 +3786,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account,
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -3773,7 +3806,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -3858,6 +3891,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -3874,7 +3908,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -3977,6 +4011,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -3993,7 +4028,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -4088,6 +4123,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -4104,7 +4140,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -4226,6 +4262,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: Some(active_reservation_guard),
             session_affinity_activity_handle: None,
         };
@@ -4250,7 +4287,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -4337,6 +4374,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -4353,7 +4391,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -4435,6 +4473,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -4451,7 +4490,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -4539,6 +4578,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -4555,7 +4595,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -4659,6 +4699,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account,
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -4675,7 +4716,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -4746,6 +4787,7 @@ mod async_forwarding_tests {
             account_id: AccountId::new("acct_selected")
                 .unwrap_or_else(|error| panic!("test account id should parse: {error}")),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -4760,7 +4802,7 @@ mod async_forwarding_tests {
                 affinity_record_tasks: TaskTracker::new(),
                 affinity_owner_context: Some(&affinity_owner_context),
                 provider_error_observer: Some(provider_error_observer_for_context),
-                floor_switch_peer_assessor: None,
+                account_admission_assessor: None,
                 initial_turn_active: false,
                 revocation: &revocation,
                 session_shutdown: &session_shutdown,
@@ -4831,11 +4873,12 @@ mod async_forwarding_tests {
                 quota_floor_reconnect: CancellationToken::new(),
                 early_floor_reconnect: session.early_floor_reconnect.clone(),
                 graceful_floor_switch: session.graceful_floor_switch.clone(),
-                floor_switch_admission: FloorSwitchAdmission::new(
+                account_turn_admission: AccountTurnAdmission::new(
                     session.graceful_floor_switch.clone(),
                     session.early_floor_reconnect.clone(),
                     session.quota_floor_reconnect.clone(),
                     Some(AccountId::new("acct_capacity_fixture").expect("fixture account id")),
+                    None,
                     None,
                     false,
                 ),
@@ -4914,6 +4957,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account,
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -4930,7 +4974,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(Arc::new(FailingAsyncProviderErrorObserver)),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -5001,6 +5045,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account,
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -5019,7 +5064,7 @@ mod async_forwarding_tests {
                     provider_error_observer: Some(Arc::new(
                         DefaultAlternativeSelectionProviderErrorObserver,
                     )),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -5095,6 +5140,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account,
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -5113,7 +5159,7 @@ mod async_forwarding_tests {
                     provider_error_observer: Some(Arc::new(
                         DefaultAlternativeSelectionProviderErrorObserver,
                     )),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -5191,6 +5237,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -5207,7 +5254,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: Some(&affinity_owner_context),
                     provider_error_observer: Some(provider_error_observer.clone()),
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown,
@@ -5288,7 +5335,7 @@ mod async_forwarding_tests {
                     affinity_record_tasks: TaskTracker::new(),
                     affinity_owner_context: None,
                     provider_error_observer: None,
-                    floor_switch_peer_assessor: None,
+                    account_admission_assessor: None,
                     initial_turn_active: false,
                     revocation: &revocation,
                     session_shutdown: &session_shutdown_for_task,
@@ -5349,6 +5396,7 @@ mod async_forwarding_tests {
             affinity_secret,
             account_id: selected_account.clone(),
             credential_generation: 1,
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
         };
@@ -5364,7 +5412,7 @@ mod async_forwarding_tests {
                 affinity_record_tasks: TaskTracker::new(),
                 affinity_owner_context: Some(&affinity_owner_context),
                 provider_error_observer: None,
-                floor_switch_peer_assessor: None,
+                account_admission_assessor: None,
                 initial_turn_active: false,
                 revocation: &revocation,
                 session_shutdown: &session_shutdown,
@@ -5432,7 +5480,7 @@ where
     async_affinity_owner_recorder: Option<Arc<dyn AsyncHttpAffinityOwnerRecorder>>,
     affinity_record_tasks: TaskTracker,
     provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
-    floor_switch_peer_assessor: Option<Arc<dyn LiveFloorSwitchPeerAssessor>>,
+    account_admission_assessor: Option<Arc<dyn LiveAccountAdmissionAssessor>>,
     session_shutdown: CancellationToken,
     local_peer_addr: Option<SocketAddr>,
 }
@@ -5638,7 +5686,7 @@ where
             async_affinity_owner_recorder: None,
             affinity_record_tasks: TaskTracker::new(),
             provider_error_observer: None,
-            floor_switch_peer_assessor: None,
+            account_admission_assessor: None,
             session_shutdown: CancellationToken::new(),
             local_peer_addr: None,
         }
@@ -5666,7 +5714,7 @@ where
             async_affinity_owner_recorder: None,
             affinity_record_tasks: TaskTracker::new(),
             provider_error_observer: None,
-            floor_switch_peer_assessor: None,
+            account_admission_assessor: None,
             session_shutdown: CancellationToken::new(),
             local_peer_addr: None,
         }
@@ -5737,11 +5785,11 @@ where
 
     /// Adds the live read-only peer assessor for graceful weekly-floor switching.
     #[must_use]
-    pub(crate) fn with_floor_switch_peer_assessor(
+    pub(crate) fn with_account_admission_assessor(
         mut self,
-        peer_assessor: Arc<dyn LiveFloorSwitchPeerAssessor>,
+        peer_assessor: Arc<dyn LiveAccountAdmissionAssessor>,
     ) -> Self {
-        self.floor_switch_peer_assessor = Some(peer_assessor);
+        self.account_admission_assessor = Some(peer_assessor);
         self
     }
 
@@ -5870,7 +5918,7 @@ where
                 affinity_record_tasks: self.affinity_record_tasks.clone(),
                 affinity_owner_context: affinity_owner_context.as_ref(),
                 provider_error_observer: self.provider_error_observer.clone(),
-                floor_switch_peer_assessor: self.floor_switch_peer_assessor.clone(),
+                account_admission_assessor: self.account_admission_assessor.clone(),
                 initial_turn_active,
                 revocation: &revocation,
                 session_shutdown: &self.session_shutdown,
@@ -5966,7 +6014,7 @@ struct WebSocketForwardingContext<'a> {
     affinity_record_tasks: TaskTracker,
     affinity_owner_context: Option<&'a WebSocketAffinityOwnerContext>,
     provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
-    floor_switch_peer_assessor: Option<Arc<dyn LiveFloorSwitchPeerAssessor>>,
+    account_admission_assessor: Option<Arc<dyn LiveAccountAdmissionAssessor>>,
     initial_turn_active: bool,
     revocation: &'a CancellationToken,
     session_shutdown: &'a CancellationToken,
@@ -5997,15 +6045,23 @@ where
     let early_floor_reconnect = session_registration.early_floor_reconnect.clone();
     let graceful_floor_switch = session_registration.graceful_floor_switch.clone();
     let affinity_owner_context = context.affinity_owner_context.cloned();
-    let floor_switch_admission = FloorSwitchAdmission::new(
+    let account_turn_admission = AccountTurnAdmission::new(
         graceful_floor_switch.clone(),
         early_floor_reconnect.clone(),
         quota_floor_reconnect.clone(),
         affinity_owner_context
             .as_ref()
             .map(|context| context.account_id.clone()),
-        context.floor_switch_peer_assessor,
+        affinity_owner_context
+            .as_ref()
+            .map(|context| context.credential_generation),
+        context.account_admission_assessor,
         context.initial_turn_active,
+    )
+    .with_credit_backed_admission_seen(
+        affinity_owner_context
+            .as_ref()
+            .is_some_and(|context| context.credit_backed_at_selection),
     );
     let active_turn_reservation = ActiveTurnReservationState::new(
         affinity_owner_context
@@ -6013,7 +6069,7 @@ where
             .and_then(|context| context.active_reservation_guard.clone()),
     );
     let local_active_turn_reservation = active_turn_reservation.clone();
-    let local_floor_switch_admission = floor_switch_admission.clone();
+    let local_account_turn_admission = account_turn_admission.clone();
     let local_early_floor_reconnect = early_floor_reconnect.clone();
     let local_quota_floor_reconnect = quota_floor_reconnect.clone();
     let session_affinity_activity_handle = affinity_owner_context
@@ -6029,7 +6085,7 @@ where
                 tunnel_shutdown: local_to_upstream_tunnel_shutdown,
                 active_turn_reservation: local_active_turn_reservation,
                 session_affinity_activity_handle,
-                floor_switch_admission: local_floor_switch_admission,
+                account_turn_admission: local_account_turn_admission,
                 early_floor_reconnect: local_early_floor_reconnect,
                 quota_floor_reconnect: local_quota_floor_reconnect,
             },
@@ -6055,7 +6111,7 @@ where
                 quota_floor_reconnect,
                 early_floor_reconnect,
                 graceful_floor_switch,
-                floor_switch_admission,
+                account_turn_admission,
             },
         )
         .await
@@ -6114,7 +6170,7 @@ struct LocalToUpstreamPumpContext {
     tunnel_shutdown: CancellationToken,
     active_turn_reservation: ActiveTurnReservationState,
     session_affinity_activity_handle: Option<SessionAffinityActivityHandle>,
-    floor_switch_admission: FloorSwitchAdmission,
+    account_turn_admission: AccountTurnAdmission,
     early_floor_reconnect: CancellationToken,
     quota_floor_reconnect: CancellationToken,
 }
@@ -6134,7 +6190,7 @@ where
         tunnel_shutdown,
         active_turn_reservation,
         session_affinity_activity_handle,
-        floor_switch_admission,
+        account_turn_admission,
         early_floor_reconnect,
         quota_floor_reconnect,
     } = context;
@@ -6181,7 +6237,7 @@ where
                 let is_close = matches!(local_message, Message::Close(_));
                 let is_response_create = is_response_create(&local_message);
                 if is_response_create {
-                    if floor_switch_admission.before_next_create().await {
+                    if account_turn_admission.before_next_create().await {
                         tunnel_shutdown.cancel();
                         let _ = close_websocket_sink_best_effort(&mut upstream_write).await;
                         return Ok(());
@@ -6223,7 +6279,7 @@ struct UpstreamToLocalPumpContext {
     quota_floor_reconnect: CancellationToken,
     early_floor_reconnect: CancellationToken,
     graceful_floor_switch: watch::Receiver<FloorSwitchIntent>,
-    floor_switch_admission: FloorSwitchAdmission,
+    account_turn_admission: AccountTurnAdmission,
 }
 
 async fn pump_upstream_to_local<LocalStream, UpstreamStream>(
@@ -6260,7 +6316,7 @@ where
             }
             changed = context.graceful_floor_switch.changed() => {
                 if changed.is_ok() {
-                    context.floor_switch_admission.on_idle_intent().await;
+                    context.account_turn_admission.on_idle_intent().await;
                 }
             }
             () = context.revocation.cancelled() => {
@@ -6314,7 +6370,7 @@ where
                         .is_some_and(|text| is_response_failed_text(text));
                 if is_terminal {
                     context
-                        .floor_switch_admission
+                        .account_turn_admission
                         .deliver_terminal_and_release_turn(async {
                             local_write.send(upstream_message.message).await?;
                             context

@@ -13,6 +13,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     let secrets = must_ok(FileSecretStore::open(&secret_root));
     let floor_account_id = account_id("acct_a_floor_socket");
     let healthy_account_id = account_id("acct_b_healthy_socket");
+    let excluded_cli_account_id = account_id("acct_c_floor_excluded_cli");
     let seed_account =
         |account_id: &AccountId, label: &str, weekly_remaining: u32, access_token: &str| {
             must_ok(AccountStateRepository::upsert_account(
@@ -149,22 +150,21 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
                     r#"{"type":"response.create","turn":1}"#
                 );
                 must_ok(websocket.send(Message::text(r#"{"type":"response.output_text.delta"}"#)));
-                let second_frame = must_ok(websocket.read());
+                must_ok(websocket.send(Message::text(r#"{"type":"response.completed","turn":1}"#)));
+                let after_failed_refresh = must_ok(websocket.read());
                 assert_eq!(
-                    second_frame.to_string(),
+                    after_failed_refresh.to_string(),
                     r#"{"type":"response.create","turn":2}"#
                 );
-                must_ok(websocket.send(Message::text(
-                    r#"{"type":"response.output_text.delta","turn":2}"#,
-                )));
-                let after_floor = websocket.read();
+                must_ok(websocket.send(Message::text(r#"{"type":"response.completed","turn":2}"#)));
+                let after_successful_floor = websocket.read();
                 assert!(
-                    !matches!(after_floor, Ok(ref frame) if frame.to_string().contains("response.create"))
+                    !matches!(after_successful_floor, Ok(ref frame) if frame.to_string().contains("response.create"))
                 );
             } else {
                 assert_eq!(
                     first_frame.to_string(),
-                    r#"{"type":"response.create","turn":3}"#
+                    r#"{"type":"response.create","turn":4}"#
                 );
                 must_ok(websocket.send(Message::text(r#"{"type":"response.completed"}"#)));
                 must_ok(completion_ack_receiver.recv_timeout(Duration::from_secs(2)));
@@ -179,13 +179,19 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         state_path.clone(),
         secret_root.clone(),
     )
-    .with_quota_clock(1_100, 300);
+    .with_quota_clock(1_201, 300);
     let router = must_ok(LoopbackRouterRuntime::start(config));
     let router_port = router.local_addr().port();
     let floor_notifier = router.websocket_quota_floor_notifier();
     let router_thread = thread::spawn(move || router.serve_protocol_connections(2));
 
     let mut first_client = connect_tokenless_websocket_with_retry(router_port);
+    match first_client.get_mut() {
+        tungstenite::stream::MaybeTlsStream::Plain(stream) => {
+            must_ok(stream.set_read_timeout(Some(Duration::from_secs(2))));
+        }
+        _ => panic!("local floor WebSocket should use a plain TCP stream"),
+    }
     must_ok(first_client.send(Message::text(r#"{"type":"response.create","turn":1}"#)));
     assert_eq!(
         first_client
@@ -195,6 +201,13 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
             ))
             .to_string(),
         r#"{"type":"response.output_text.delta"}"#
+    );
+    assert_eq!(
+        first_client
+            .read()
+            .unwrap_or_else(|error| panic!("first floor socket completion read failed: {error}"))
+            .to_string(),
+        r#"{"type":"response.completed","turn":1}"#
     );
     assert_eq!(
         must_ok(upstream_receiver.recv_timeout(Duration::from_secs(2))),
@@ -207,12 +220,24 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         80,
         "healthy-socket-access-canary",
     );
+    seed_account(
+        &excluded_cli_account_id,
+        "floor-excluded-cli",
+        9,
+        "floor-excluded-cli-access-canary",
+    );
     let mutation = must_ok(
         test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
     );
     must_ok(
         test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
             &floor_account_id,
+            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
+        )),
+    );
+    must_ok(
+        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
+            &excluded_cli_account_id,
             Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
         )),
     );
@@ -236,11 +261,12 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     assert!(
         edited_json["accounts"]
             .as_array()
-            .is_some_and(|accounts| accounts
-                .iter()
-                .any(|account| account["safe_account_label"] == "floor-socket"
+            .is_some_and(
+                |accounts| accounts.iter().any(|account| account["safe_account_label"]
+                    == "floor-excluded-cli"
                     && account["routing_exclusion"] == "excluded_weekly_quota_floor"
-                    && account["preferred_next"] == false,)),
+                    && account["preferred_next"] == false,)
+            ),
         "edited selector: {:?}",
         edited_json["accounts"].as_array().map(|accounts| accounts
             .iter()
@@ -272,15 +298,24 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         },
     ));
     assert!(failed.to_string().contains("sqlite state store failed"));
+    let retained_after_failed_refresh = must_ok(
+        SelectorQuotaRepository::selector_inputs_for_route_band(&state, "responses", 1_200),
+    );
+    assert!(retained_after_failed_refresh.iter().any(|account| {
+        account.account_id() == &floor_account_id
+            && account.windows().iter().any(|window| {
+                window.limit_window_seconds() == 604_800 && window.remaining_headroom() == 9
+            })
+    }));
     must_ok(first_client.send(Message::text(r#"{"type":"response.create","turn":2}"#)));
     assert_eq!(
         first_client
             .read()
             .unwrap_or_else(|error| panic!(
-                "first floor socket second response read failed: {error}"
+                "first floor socket post-failure completion read failed: {error}"
             ))
             .to_string(),
-        r#"{"type":"response.output_text.delta","turn":2}"#
+        r#"{"type":"response.completed","turn":2}"#
     );
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&state_path)
@@ -324,11 +359,12 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         .unwrap_or_else(|error| panic!("first floor socket reconnect read failed: {error}"))
         .to_string();
     assert!(reconnect.contains("websocket_connection_limit_reached"));
-    let _ = first_client.send(Message::text(r#"{"type":"response.create","turn":3}"#));
+    let _old_socket_create =
+        first_client.send(Message::text(r#"{"type":"response.create","turn":3}"#));
     drop(first_client);
 
     let mut second_client = connect_tokenless_websocket_with_retry(router_port);
-    must_ok(second_client.send(Message::text(r#"{"type":"response.create","turn":3}"#)));
+    must_ok(second_client.send(Message::text(r#"{"type":"response.create","turn":4}"#)));
     assert_eq!(
         second_client
             .read()

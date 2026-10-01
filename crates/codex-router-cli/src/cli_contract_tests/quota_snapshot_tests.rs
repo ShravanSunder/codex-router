@@ -52,13 +52,14 @@ impl QuotaRefreshProvider for FaultingFloorRefreshProvider {
                 },
             ],
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
 
 #[test]
-fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_signal() {
-    for (stage, should_signal) in [("history", false), ("snapshot", true)] {
+fn responses_observation_transaction_failure_sends_no_floor_signal_or_windows() {
+    for stage in ["history", "snapshot"] {
         let test_root = TestRoot::new(&format!("floor-refresh-{stage}-fault"));
         must_ok(fs::create_dir(test_root.path()));
         let state_path = test_root.path().join("state.sqlite");
@@ -121,10 +122,7 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
             },
         ));
         assert!(error.to_string().contains("sqlite state store failed"));
-        assert_eq!(
-            lock_test_mutex(&observer.account_ids, "weekly floor observer").len() == 1,
-            should_signal,
-        );
+        assert!(lock_test_mutex(&observer.account_ids, "weekly floor observer").is_empty());
         let windows = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
             &state,
             "responses",
@@ -136,7 +134,7 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
             .any(|window| {
                 window.limit_window_seconds() == 604_800 && window.observed_unix_seconds() == 1_100
             });
-        assert_eq!(saved_new_weekly, should_signal);
+        assert!(!saved_new_weekly);
     }
 }
 
