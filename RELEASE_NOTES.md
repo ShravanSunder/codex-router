@@ -22,6 +22,9 @@
 - Use one CLI and MCP conversation surface for Codex, Claude, and Cursor, including create, prompt, load, and operation inspection. Claude and Cursor can cancel one exact operation; Codex directs callers to turn interrupt. Provider operations retain caller IDs and report completed or pending work.
 - Route messages, wakes, listen pushes, approvals, and scheduled runs through the selected Codex, provider ACP, or live Claude Code peer route. Delivery receipts expose the observed outcome and reachability; `peerMessageWritten` confirms a socket write, not a peer reply.
 - Preserve Codex create-then-message across frontend closure while the Host remains running. Provider schedules run on existing sessions and finish from provider settlement without a summary.
+
+## 0.1.58 - 2026-10-01
+
 - **Breaking:** remove CLI `board thread listen` and MCP `board_thread_listen` and its control tools; use per-thread subscriptions and poll-mode `board thread wait` instead.
 - Persist thread and topic subscription policies, lifecycle, per-root batching windows, and backfill eligible existing participants. Migration `202609170001` was rewritten in place: local or debug board databases that applied the earlier branch version fail with `InvalidSchema` and may need to be deleted; production databases are unaffected.
 - Subscribe participants when they join a watched thread, batch thread activity, and hold thread notices or DMs for targets that are not running. Store Router pushes as 30-day `router://` records and fetch them with `agent-collaboration show`.
