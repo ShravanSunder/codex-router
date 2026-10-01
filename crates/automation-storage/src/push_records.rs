@@ -81,24 +81,24 @@ impl AutomationStore {
             .transpose()?;
         let created_at = push_record_rows::serialize_timestamp(record.created_at);
 
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "INSERT INTO router_pushes (push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,?,NULL,NULL) ON CONFLICT(push_id) DO NOTHING",
+            record.push_id.as_str(),
+            kind,
+            origin_kind,
+            origin_service_id,
+            origin_endpoint_id,
+            origin_session_id,
+            &record.origin_router_ref,
+            target_service_id,
+            target_endpoint_id,
+            target_session_id,
+            reply_to_push_id,
+            header_facts_json,
+            record.body.as_deref(),
+            ranges_json,
+            created_at
         )
-        .bind(record.push_id.as_str())
-        .bind(kind)
-        .bind(origin_kind)
-        .bind(origin_service_id)
-        .bind(origin_endpoint_id)
-        .bind(origin_session_id)
-        .bind(&record.origin_router_ref)
-        .bind(target_service_id)
-        .bind(target_endpoint_id)
-        .bind(target_session_id)
-        .bind(reply_to_push_id)
-        .bind(header_facts_json)
-        .bind(record.body.as_deref())
-        .bind(ranges_json)
-        .bind(created_at)
         .execute(&mut self.connection)
         .await?;
         if result.rows_affected() == 0 {
@@ -111,10 +111,10 @@ impl AutomationStore {
         &mut self,
         push_id: &PushId,
     ) -> Result<PushRecord, StorageError> {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE router_pushes SET delivery_state='attempted',last_outcome_json=NULL,settled_at=NULL WHERE push_id=? AND delivery_state IN ('pending','held')",
+            push_id.as_str()
         )
-        .bind(push_id.as_str())
         .execute(&mut self.connection)
         .await?;
         if result.rows_affected() != 1 {
@@ -140,11 +140,11 @@ impl AutomationStore {
             return Err(StorageError::InvalidRecord);
         }
         let outcome_json = push_record_rows::serialize_json(&outcome)?;
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE router_pushes SET delivery_state='held',last_outcome_json=?,settled_at=NULL WHERE push_id=? AND delivery_state='attempted'",
+            outcome_json,
+            push_id.as_str()
         )
-        .bind(outcome_json)
-        .bind(push_id.as_str())
         .execute(&mut self.connection)
         .await?;
         if result.rows_affected() != 1 {
@@ -164,13 +164,13 @@ impl AutomationStore {
         let state = settled_state(&outcome.outcome);
         let outcome_json = push_record_rows::serialize_json(&outcome)?;
         let settled_at = push_record_rows::serialize_timestamp(settled_at);
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE router_pushes SET delivery_state=?,last_outcome_json=?,settled_at=? WHERE push_id=? AND delivery_state='attempted'",
+            push_record_rows::serialize_delivery_state(state),
+            outcome_json,
+            settled_at,
+            push_id.as_str()
         )
-        .bind(push_record_rows::serialize_delivery_state(state))
-        .bind(outcome_json)
-        .bind(settled_at)
-        .bind(push_id.as_str())
         .execute(&mut self.connection)
         .await?;
         if result.rows_affected() != 1 {
@@ -314,11 +314,13 @@ impl AutomationStore {
             return Err(StorageError::PushNotPermitted);
         }
         let read_at = push_record_rows::serialize_timestamp(read_at);
-        sqlx::query("UPDATE router_pushes SET read_at=COALESCE(read_at,?) WHERE push_id=?")
-            .bind(read_at)
-            .bind(push_id.as_str())
-            .execute(&mut self.connection)
-            .await?;
+        sqlx::query!(
+            "UPDATE router_pushes SET read_at=COALESCE(read_at,?) WHERE push_id=?",
+            read_at,
+            push_id.as_str()
+        )
+        .execute(&mut self.connection)
+        .await?;
         self.get_push_record(push_id)
             .await?
             .ok_or(StorageError::PushNotFound)
@@ -336,11 +338,11 @@ impl AutomationStore {
             .checked_sub_signed(ChronoDuration::days(30))
             .ok_or(StorageError::InvalidRecord)?;
         let cutoff = push_record_rows::serialize_timestamp(cutoff);
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "DELETE FROM router_pushes WHERE push_id IN (SELECT push_id FROM router_pushes WHERE created_at < ? ORDER BY created_at,push_id LIMIT ?)",
+            cutoff,
+            i64::from(batch_size)
         )
-        .bind(cutoff)
-        .bind(i64::from(batch_size))
         .execute(&mut self.connection)
         .await?;
         Ok(result.rows_affected())
