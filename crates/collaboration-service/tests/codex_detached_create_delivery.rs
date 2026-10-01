@@ -1,4 +1,6 @@
 //! A detached Codex ACP create keeps both its operation evidence and empty native binding.
+#[path = "../../codex-acp-adapter/tests/support/native_permission_echo.rs"]
+mod native_permission_echo;
 use codex_acp_adapter::{AcpConnectionInputs, AcpStoredSessions, serve_acp_connection};
 use codex_native_integration::{NativePayloadSchemas, NativeSchemaBundle};
 use collaboration_protocol::{
@@ -11,6 +13,7 @@ use collaboration_service::{
     UnmaterializedThreadHolder, serve_control_connection,
 };
 use futures_util::{SinkExt, StreamExt};
+use native_permission_echo::applied_router_sandbox;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap, future::Future, io, os::unix::fs::DirBuilderExt, pin::Pin, sync::Arc,
@@ -141,7 +144,6 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
 
     let (native_started_tx, native_started_rx) = tokio::sync::oneshot::channel();
     let (release_native_tx, release_native_rx) = tokio::sync::oneshot::channel();
-    let backend_scratch = scratch.display().to_string();
     let native = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut wire = tokio_tungstenite::accept_async(stream).await?;
@@ -181,7 +183,7 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
                     "cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request",
                     "approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
-                    "sandbox":{"type":"workspaceWrite","writableRoots":[backend_scratch]},
+                    "sandbox":applied_router_sandbox(&request),
                     "thread":{"id":"detached-thread","cwd":"/work","turns":[]}
                 }),
                 _ => json!({"turn":{"id":"first-turn"}}),

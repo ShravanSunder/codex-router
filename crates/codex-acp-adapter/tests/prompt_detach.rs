@@ -27,6 +27,9 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::Role},
 };
 
+#[path = "support/native_permission_echo.rs"]
+mod native_permission_echo;
+use native_permission_echo::applied_router_sandbox;
 #[path = "support/conversation_operation_recorder.rs"]
 mod conversation_operation_recorder;
 use conversation_operation_recorder::AcceptingConversationRecorder;
@@ -142,7 +145,7 @@ async fn frontend_eof_detaches_active_turn_and_reconnect_is_busy_until_native_id
                 let result = match method {
                     "initialize" => json!({}),
                     "thread/start" => {
-                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","status":{"type":"idle"},"turns":[]}})
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":applied_router_sandbox(&request),"thread":{"id":"thread-a","cwd":"/work","status":{"type":"idle"},"turns":[]}})
                     }
                     "thread/read" => {
                         json!({"thread":{"id":"thread-a","status":{"type":"idle"},"turns":[]}})
@@ -182,7 +185,7 @@ async fn frontend_eof_detaches_active_turn_and_reconnect_is_busy_until_native_id
             let result = if method == "initialize" {
                 json!({})
             } else {
-                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","status":{"type":"active"},"turns":[{"id":"turn-a","status":"inProgress","items":[]}]}})
+                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":applied_router_sandbox(&request),"thread":{"id":"thread-a","cwd":"/work","status":{"type":"active"},"turns":[{"id":"turn-a","status":"inProgress","items":[]}]}})
             };
             reply_native(&mut second, &request, result).await;
         }

@@ -1,6 +1,6 @@
 use codex_native_integration::{
     AppServerCommandSpec, CodexPaths, CodexRouterProfile, DebugCodexProfile,
-    RouterControlSocketPath,
+    router_permission_profile_overrides,
 };
 use std::path::Path;
 
@@ -66,10 +66,6 @@ fn backend_overrides_preserve_supported_debug_profile_values() {
     let command = AppServerCommandSpec::new(
         &paths,
         &CodexRouterProfile::new(8787),
-        &RouterControlSocketPath::in_collaboration_directory(Path::new(
-            "/tmp/debug-proof/agent-communication",
-        ))
-        .unwrap(),
         Path::new("/tmp/debug-proof/backend.sock"),
     )
     .with_debug_profile(&profile);
@@ -83,11 +79,23 @@ fn backend_overrides_preserve_supported_debug_profile_values() {
             configuration.push('\n');
         }
     }
-    // Assert: no model/project/provider/retry setting was silently dropped.
-    assert_eq!(
-        toml::from_str::<toml::Table>(&configuration).unwrap(),
-        toml::from_str::<toml::Table>(PROFILE).unwrap()
+    // Assert: no model/project/provider/retry setting was silently dropped, and the
+    // debug launch keeps Router's permission profiles so access validation still passes.
+    let mut expected = toml::from_str::<toml::Table>(PROFILE).unwrap();
+    expected.extend(
+        router_permission_profile_overrides()
+            .join("\n")
+            .parse::<toml::Table>()
+            .unwrap(),
     );
+    let decoded = toml::from_str::<toml::Table>(&configuration).unwrap();
+    assert_eq!(decoded, expected);
+    for profile in ["router-write-restricted", "router-workspace-write"] {
+        assert_eq!(
+            decoded["permissions"][profile]["network"]["enabled"].as_bool(),
+            Some(true)
+        );
+    }
     assert!(
         !args
             .iter()
@@ -129,10 +137,6 @@ fn local_only_profile_settings_are_accepted_but_not_projected() {
     let command = AppServerCommandSpec::new(
         &paths,
         &CodexRouterProfile::new(8787),
-        &RouterControlSocketPath::in_collaboration_directory(Path::new(
-            "/tmp/debug-proof/agent-communication",
-        ))
-        .unwrap(),
         Path::new("/tmp/debug-proof/backend.sock"),
     )
     .with_debug_profile(&parsed);
