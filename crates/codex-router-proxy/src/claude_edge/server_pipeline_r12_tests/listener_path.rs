@@ -30,6 +30,9 @@ use std::thread;
 use std::time::Duration;
 use tokio::net::TcpListener as TokioTcpListener;
 
+#[path = "listener_path/maintenance_reauth.rs"]
+mod maintenance_reauth;
+
 fn runtime_config(
     database_path: &std::path::Path,
     secret_root: &std::path::Path,

@@ -469,7 +469,7 @@ where
         )
         .with_rejected_windows(rejected_windows)
         .with_account_enabled(input.account_status() == AccountStatus::Enabled)
-        .with_active_credential(input.active_credential_generation().is_some())
+        .with_active_credential(active_credential_is_routable(&input))
         .with_current_active_sessions(current_active_sessions);
         if let Some(floor_basis_points) = weekly_floor_basis_points {
             projected_account =
@@ -549,12 +549,7 @@ fn selection_account_state_from_selector_input(
         })
         .collect::<Vec<_>>();
 
-    let active_credential_needs_login = matches!(
-        input.active_credential_maintenance_state(),
-        Some(
-            CredentialMaintenanceState::ReauthRequired | CredentialMaintenanceState::Unrefreshable
-        )
-    );
+    let active_credential_needs_login = active_credential_requires_login(input);
     let restriction =
         if input.active_credential_generation().is_none() || active_credential_needs_login {
             SelectionAccountRestriction::NeedsLogin
@@ -576,6 +571,21 @@ fn selection_account_state_from_selector_input(
         window_observations,
         window_rejections,
     )
+}
+
+fn active_credential_requires_login(input: &SelectorQuotaInput) -> bool {
+    input.provider() == Provider::Claude
+        && matches!(
+            input.active_credential_maintenance_state(),
+            Some(
+                CredentialMaintenanceState::ReauthRequired
+                    | CredentialMaintenanceState::Unrefreshable
+            )
+        )
+}
+
+fn active_credential_is_routable(input: &SelectorQuotaInput) -> bool {
+    input.active_credential_generation().is_some() && !active_credential_requires_login(input)
 }
 
 fn weekly_floor_hold_reason(
@@ -923,6 +933,10 @@ mod tests {
                 Some(&SelectionAccountRestriction::NeedsLogin),
                 "active generation maintenance state {maintenance_state:?} requires login"
             );
+            assert!(
+                !active_credential_is_routable(&input),
+                "the reauth-required active generation must not be selected"
+            );
         }
     }
 
@@ -936,6 +950,10 @@ mod tests {
             projected.restriction(),
             Some(&SelectionAccountRestriction::Available),
             "stale maintenance state must not restrict the newer active credential"
+        );
+        assert!(
+            active_credential_is_routable(&input),
+            "a stale maintenance generation must leave the active credential routable"
         );
     }
 
