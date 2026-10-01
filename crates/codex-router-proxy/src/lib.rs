@@ -3,6 +3,7 @@
 
 pub mod account_selection;
 mod capacity_retry;
+pub(crate) mod claude_edge;
 mod credential_runtime;
 pub mod db_write_actor;
 pub mod headers;

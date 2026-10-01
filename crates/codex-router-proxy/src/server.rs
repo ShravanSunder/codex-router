@@ -133,6 +133,8 @@ use crate::routes::is_claude_edge_path;
 use crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
 use crate::session_account_affinity_cache::SessionAccountAffinityCache;
 use crate::session_account_affinity_cache::SharedSessionAccountAffinityCache;
+#[cfg(debug_assertions)]
+use crate::upstream::ClaudeUpstreamEndpoint;
 use crate::upstream::HyperHttpUpstreamTransport;
 use crate::upstream::UpstreamEndpoint;
 use crate::websocket::AsyncWebSocketTunnel;
@@ -346,6 +348,8 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
 pub struct LoopbackRouterRuntimeConfig {
     bind_address: LoopbackBindAddress,
     upstream_endpoint: UpstreamEndpoint,
+    #[cfg(debug_assertions)]
+    debug_claude_upstream_endpoint: Option<ClaudeUpstreamEndpoint>,
     state_database_path: PathBuf,
     secret_store_root: PathBuf,
     local_token: Option<LocalRouterTokenRecord>,
@@ -413,6 +417,8 @@ impl LoopbackRouterRuntimeConfig {
         Self {
             bind_address,
             upstream_endpoint,
+            #[cfg(debug_assertions)]
+            debug_claude_upstream_endpoint: None,
             state_database_path,
             secret_store_root,
             local_token: Some(local_token),
@@ -437,6 +443,8 @@ impl LoopbackRouterRuntimeConfig {
         Self {
             bind_address,
             upstream_endpoint,
+            #[cfg(debug_assertions)]
+            debug_claude_upstream_endpoint: None,
             state_database_path,
             secret_store_root,
             local_token: None,
@@ -461,6 +469,14 @@ impl LoopbackRouterRuntimeConfig {
     #[must_use]
     pub fn with_claude_edge_local_token(mut self, local_token: LocalRouterTokenRecord) -> Self {
         self.claude_edge_local_token = Some(local_token);
+        self
+    }
+
+    /// Applies a validated Claude destination only for an isolated debug runtime.
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn with_debug_claude_upstream_endpoint(mut self, endpoint: ClaudeUpstreamEndpoint) -> Self {
+        self.debug_claude_upstream_endpoint = Some(endpoint);
         self
     }
 
@@ -632,6 +648,11 @@ impl LoopbackRouterRuntime {
         });
         let upstream_endpoint = config.upstream_endpoint;
         let upstream = HyperHttpUpstreamTransport::new(upstream_endpoint.clone());
+        #[cfg(debug_assertions)]
+        let upstream = match config.debug_claude_upstream_endpoint {
+            Some(endpoint) => upstream.with_debug_claude_upstream_endpoint(endpoint),
+            None => upstream,
+        };
         let server = runtime.block_on(AsyncLoopbackServerRuntime::bind(config.bind_address))?;
         let audit_sink = config.audit_file_path.map(AuditFileSink::new);
         let websocket_revocations = WebSocketRevocationRegistry::new();
