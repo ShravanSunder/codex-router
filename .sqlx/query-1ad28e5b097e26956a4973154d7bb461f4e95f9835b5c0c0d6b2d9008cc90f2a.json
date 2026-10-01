@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reader_key FROM thread_subscriptions WHERE scope_kind='thread' AND scope_id=? AND state IN ('active','draining') ORDER BY reader_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "reader_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "reader_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1ad28e5b097e26956a4973154d7bb461f4e95f9835b5c0c0d6b2d9008cc90f2a"
+}

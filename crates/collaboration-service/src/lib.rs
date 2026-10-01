@@ -40,6 +40,7 @@ pub use provider_operation_store::{
 };
 mod delivery_acceptance_effect;
 mod delivery_route_projection;
+mod latest_agent_sender_tracking;
 pub use provider_session_event_hub::{HubReceiveError, ProviderSessionEventHub, receive_hub_event};
 pub use provider_session_record::ProviderSessionRecord;
 mod app_server_event_forwarding;
@@ -102,8 +103,9 @@ pub use session_command_port::{
 };
 pub use session_delivery_contract::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, RouteClaim,
-    RouteUnavailableReason, SessionDeliveryRoute, SessionMessageDelivery,
+    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, LoadPolicy,
+    NOT_LOADED_REASON, RouteClaim, RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
+    SessionMessageDelivery, TargetPresence, TargetPresenceProbe,
 };
 pub use session_delivery_router::SessionDeliveryRouter;
 pub use session_event_hub::{
@@ -120,7 +122,10 @@ mod journal_dispatch;
 pub use control_schema_publication::publish_control_schema;
 mod native_control_dispatch;
 mod native_control_request;
+mod session_display_name_cache;
+pub use session_display_name_cache::SessionDisplayNameCache;
 mod session_message_dispatch;
+mod session_message_reply_dispatch;
 pub use native_control_dispatch::NativeControlBackend;
 
 mod codex_app_server_delivery_route;

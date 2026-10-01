@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(activity_sequence) AS latest_message_activity FROM board_activity WHERE (root_id=? AND kind='threadMessageCreated') OR (message_id=? AND kind='mainMessageCreated')",
+  "describe": {
+    "columns": [
+      {
+        "name": "latest_message_activity",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b79d041d80ec7961f603250469a8b79c91607f3304c6517f3d19569fc62a9669"
+}

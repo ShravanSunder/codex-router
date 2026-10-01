@@ -6,6 +6,8 @@ pub(super) struct JsonQuotaStatusReport {
     pub(super) app_version: String,
     pub(super) route_band: String,
     pub(super) selection_projection_source: &'static str,
+    pub(super) credential_store_status: &'static str,
+    pub(super) unconverted_accounts: Vec<String>,
     pub(super) selected_pool: &'static str,
     pub(super) selected_pool_reason: &'static str,
     pub(super) preferred_next_account_hash: Option<String>,
@@ -19,6 +21,11 @@ impl JsonQuotaStatusReport {
             app_version: report.app_version.clone(),
             route_band: report.route_band.clone(),
             selection_projection_source: report.selection_projection_source.as_json(),
+            credential_store_status: report.credential_store_availability.as_json_status(),
+            unconverted_accounts: report
+                .credential_store_availability
+                .unavailable_accounts()
+                .to_vec(),
             selected_pool: selected_pool_json(report.selected_pool),
             selected_pool_reason: selected_pool_reason_json(report.selected_pool),
             preferred_next_account_hash: report
@@ -28,7 +35,13 @@ impl JsonQuotaStatusReport {
             accounts: report
                 .rows
                 .iter()
-                .map(|row| JsonQuotaStatusAccount::from_row(row, report.now_unix_seconds))
+                .map(|row| {
+                    JsonQuotaStatusAccount::from_row(
+                        row,
+                        report.now_unix_seconds,
+                        &report.credential_store_availability,
+                    )
+                })
                 .collect(),
         }
     }
@@ -39,6 +52,7 @@ pub(super) struct JsonQuotaStatusAccount {
     pub(super) account_hash: String,
     pub(super) safe_account_label: String,
     pub(super) availability: &'static str,
+    pub(super) credential_store_status: &'static str,
     pub(super) freshness: &'static str,
     pub(super) routing_exclusion: &'static str,
     pub(super) next_use: String,
@@ -76,11 +90,16 @@ pub(super) struct JsonQuotaStatusAccount {
 }
 
 impl JsonQuotaStatusAccount {
-    pub(super) fn from_row(row: &QuotaStatusRow, now_unix_seconds: u64) -> Self {
+    pub(super) fn from_row(
+        row: &QuotaStatusRow,
+        now_unix_seconds: u64,
+        credential_store_availability: &CredentialStoreAvailability,
+    ) -> Self {
         Self {
             account_hash: telemetry_hash(row.account_id.as_str()),
             safe_account_label: row.account_label.clone(),
             availability: availability_json(row.availability),
+            credential_store_status: credential_store_availability.as_json_status(),
             freshness: freshness_json(row.freshness),
             routing_exclusion: routing_exclusion_json(row.routing_exclusion),
             next_use: row.next_use.clone(),
@@ -102,7 +121,11 @@ impl JsonQuotaStatusAccount {
                 row.weekly_quota_floor_basis_points,
             )
             .map(|basis_points| basis_points / 100),
-            oauth_maintenance_state: oauth_maintenance_state(row.oauth_maintenance.as_ref()),
+            oauth_maintenance_state: if credential_store_availability.is_ready() {
+                oauth_maintenance_state(row.oauth_maintenance.as_ref())
+            } else {
+                credential_store_availability.as_json_status()
+            },
             oauth_last_success_unix_seconds: row
                 .oauth_maintenance
                 .as_ref()

@@ -14,7 +14,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliationContext, DeliveryFuture, DeliveryPrecondition,
-    DeliveryRequest, RouteClaim, SessionDeliveryRoute,
+    DeliveryRequest, RouteClaim, RoutePresence, SessionDeliveryRoute,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -79,7 +79,9 @@ fn delivery(mode: MessageDelivery) -> DeliveryRequest {
         message: MessageContent::HumanUser {
             text: MessageText::try_from("hello Claude".to_owned()).expect("message text"),
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode,
+        load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::try_from("peer-test-correlation".to_owned())
             .expect("correlation"),
@@ -113,6 +115,10 @@ async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
         route.claim(&target()).await.expect("peer claim"),
         RouteClaim::Holds
     ));
+    assert_eq!(
+        route.presence(&target()).await.expect("peer presence"),
+        RoutePresence::Running
+    );
     let mut request = delivery(MessageDelivery::Auto);
     let mut sender = target();
     sender.endpoint.endpoint_id =
@@ -135,7 +141,7 @@ async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
         .as_str()
         .expect("peer message content");
     assert!(content.contains(&serde_json::to_string(&sender).expect("sender JSON")));
-    assert!(content.contains("message_send"));
+    assert!(content.contains("message reply --text <TEXT>"));
     let records = evidence.0.lock().await;
     assert_eq!(records.len(), 2);
     assert!(
@@ -221,6 +227,10 @@ async fn live_unknown_peer_protocol_reports_live_elsewhere() {
             detail: Some(reason)
         } if reason.contains("protocol 99")
     ));
+    assert!(matches!(
+        route.presence(&target()).await.expect("unsupported peer presence"),
+        RoutePresence::LiveElsewhere { detail: Some(reason) } if reason.contains("protocol 99")
+    ));
     assert!(
         matches!(receipt.outcome, DeliveryOutcome::Rejected(rejection)
         if rejection.reason == DeliveryRejectionReason::LiveElsewhere)
@@ -261,6 +271,12 @@ async fn every_live_registry_status_allows_auto_and_steer_peer_writes() {
             );
             let evidence = RecordedPeerEvidence(tokio::sync::Mutex::new(Vec::new()));
 
+            assert_eq!(
+                route.presence(&target()).await.expect("peer presence"),
+                RoutePresence::Running,
+                "status={status:?}"
+            );
+
             let outcome = route
                 .deliver(delivery(mode), &evidence)
                 .await
@@ -289,6 +305,13 @@ async fn peer_reconciliation_rejects_evidence_for_another_session() {
         target().endpoint,
         Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
         Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
+    );
+    assert_eq!(
+        route
+            .presence(&target())
+            .await
+            .expect("absent peer presence"),
+        RoutePresence::NotMine
     );
     let recorded = RouteEffectEvidence::ClaudeCodePeer(ClaudeCodePeerEffectEvidence {
         session_id: PeerSessionReference::try_from("another-session".to_owned())

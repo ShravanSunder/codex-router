@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO thread_subscriptions(reader_key,scope_kind,scope_id,mode,when_idle, quiet_seconds,cap_seconds,lifetime_seconds,renewed_at,expires_at,state,end_reason, ended_at,last_outcome,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(reader_key,scope_kind,scope_id) DO UPDATE SET mode=excluded.mode, when_idle=excluded.when_idle,quiet_seconds=excluded.quiet_seconds, cap_seconds=excluded.cap_seconds,lifetime_seconds=excluded.lifetime_seconds, renewed_at=excluded.renewed_at,expires_at=excluded.expires_at,state=excluded.state, end_reason=excluded.end_reason,ended_at=excluded.ended_at, last_outcome=excluded.last_outcome,generation=excluded.generation",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 15
+    },
+    "nullable": []
+  },
+  "hash": "3b0614ed16764dbbef9de59b96408bb9888a90096fed0846710d4696b81d0bef"
+}

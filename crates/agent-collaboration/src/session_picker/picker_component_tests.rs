@@ -26,6 +26,7 @@ fn reload_query(search: &str) -> SessionsPickerDataQuery {
         source: SessionsSource::All,
         sort: SessionsSort::Updated,
         search: search.to_owned(),
+        include_empty_sessions: false,
     }
 }
 

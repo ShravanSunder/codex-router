@@ -19,6 +19,7 @@ const MAX_RUNTIME_ROWS: usize = 4096;
 pub(super) async fn load_runtime_records(
     client: &mut ControlClient,
     metadata: &[SessionPickerRecord],
+    include_empty_sessions: bool,
 ) -> Result<(EndpointRef, Vec<SessionPickerRecord>), ClientError> {
     let (endpoint, generation) = selected_generation(client.list_endpoints().await?)?;
     let known: BTreeMap<_, _> = metadata
@@ -36,6 +37,7 @@ pub(super) async fn load_runtime_records(
                 view: NativeSessionView::Loaded,
                 scope: collaboration_client::protocol::NativeSessionScope::Any,
                 source: collaboration_client::protocol::NativeSessionSource::All,
+                include_empty_sessions,
                 query: None,
                 page_size: 100,
                 cursor,
@@ -270,6 +272,7 @@ impl PickerRuntimeInventory {
         &mut self,
         directory: Option<&Path>,
         stored: Vec<SessionPickerRecord>,
+        include_empty_sessions: bool,
     ) -> PickerRecordsSnapshot {
         if directory.is_none() {
             self.remembered.retain(|row| !row.identity.is_provider());
@@ -294,7 +297,8 @@ impl PickerRuntimeInventory {
                     env!("CARGO_PKG_VERSION"),
                 )
                 .await?;
-                let result = load_runtime_records(&mut client, &metadata).await;
+                let result =
+                    load_runtime_records(&mut client, &metadata, include_empty_sessions).await;
                 let _closed = client.close().await;
                 result
             };

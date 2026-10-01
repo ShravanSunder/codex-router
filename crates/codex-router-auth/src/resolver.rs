@@ -9,13 +9,14 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-use codex_router_secret_store::account_tokens::first_unused_account_credential_generation;
+use codex_router_secret_store::account_tokens::provider_credential_bundle_key;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
+use codex_router_state::credential_maintenance::ClaimPurpose;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use codex_router_state::sqlite::SqliteStateStore;
@@ -45,6 +46,9 @@ pub enum CredentialResolverError {
     /// Secret material was unavailable or malformed.
     #[error("provider credential secret is unavailable")]
     SecretUnavailable,
+    /// The process credential store could not provide pooled credentials.
+    #[error("provider credential store is unavailable")]
+    CredentialStoreUnavailable,
     /// Refresh is required but cannot be performed.
     #[error("provider credential refresh is unavailable")]
     RefreshUnavailable,
@@ -56,6 +60,7 @@ impl Clone for CredentialResolverError {
             Self::AccountUnavailable => Self::AccountUnavailable,
             Self::AccountIneligible => Self::AccountIneligible,
             Self::SecretUnavailable => Self::SecretUnavailable,
+            Self::CredentialStoreUnavailable => Self::CredentialStoreUnavailable,
             Self::RefreshUnavailable => Self::RefreshUnavailable,
         }
     }
@@ -68,6 +73,10 @@ impl PartialEq for CredentialResolverError {
             (Self::AccountUnavailable, Self::AccountUnavailable)
                 | (Self::AccountIneligible, Self::AccountIneligible)
                 | (Self::SecretUnavailable, Self::SecretUnavailable)
+                | (
+                    Self::CredentialStoreUnavailable,
+                    Self::CredentialStoreUnavailable
+                )
                 | (Self::RefreshUnavailable, Self::RefreshUnavailable)
         )
     }
@@ -547,11 +556,15 @@ where
         if account.status() != AccountStatus::Enabled {
             return Err(CredentialResolverError::AccountIneligible);
         }
+        if account.provider() != Provider::Openai {
+            return Err(CredentialResolverError::AccountIneligible);
+        }
         let active_generation = account
             .active_credential_generation()
             .ok_or(CredentialResolverError::AccountIneligible)?;
-        let bundle_key = account_credential_bundle_key(account_id, active_generation)
-            .map_err(map_secret_error)?;
+        let bundle_key =
+            provider_credential_bundle_key(account.provider(), account_id, active_generation)
+                .map_err(map_secret_error)?;
 
         let bundle = AccountCredentialBundle::from_secret_string(
             self.secret_store
@@ -590,10 +603,11 @@ where
         let refreshed_generation = current_generation
             .checked_add(1)
             .ok_or(CredentialResolverError::RefreshUnavailable)?;
-        let refreshed_key = account_credential_bundle_key(account_id, refreshed_generation)
-            .map_err(map_secret_error)?;
+        let refreshed_key =
+            provider_credential_bundle_key(Provider::Openai, account_id, refreshed_generation)
+                .map_err(map_secret_error)?;
         self.secret_store
-            .write_secret(
+            .write_staged(
                 &refreshed_key,
                 &refreshed.to_secret_string().map_err(map_secret_error)?,
             )
@@ -662,8 +676,15 @@ fn map_state_error(_error: StateStoreError) -> CredentialResolverError {
     CredentialResolverError::AccountUnavailable
 }
 
-fn map_secret_error(_error: SecretStoreError) -> CredentialResolverError {
-    CredentialResolverError::SecretUnavailable
+fn map_secret_error(error: SecretStoreError) -> CredentialResolverError {
+    match error {
+        SecretStoreError::KeyUnavailable
+        | SecretStoreError::KeyMissing
+        | SecretStoreError::StoreUnavailable(_) => {
+            CredentialResolverError::CredentialStoreUnavailable
+        }
+        _ => CredentialResolverError::SecretUnavailable,
+    }
 }
 
 mod credential_renewal;

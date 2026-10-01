@@ -6,7 +6,11 @@ pub(super) fn quota_status_view_model(
     rows: &[QuotaStatusRow],
     width: usize,
 ) -> QuotaStatusViewModel {
-    let selected_row = rows.iter().find(|row| row.preferred_next);
+    let selected_row = if report.credential_store_availability.is_ready() {
+        rows.iter().find(|row| row.preferred_next)
+    } else {
+        None
+    };
     QuotaStatusViewModel {
         width,
         route_line: quota_status_pool_summary(report),
@@ -21,14 +25,14 @@ pub(super) fn quota_status_view_model(
                 account_tag: account_display_tag(&row.account_id),
                 active_credential_generation: row.active_credential_generation,
                 enabled: row.account_status == "enabled",
-                selected: row.preferred_next,
+                selected: report.credential_store_availability.is_ready() && row.preferred_next,
                 account: row.account_label.clone(),
-                status: quota_state_text(row).to_owned(),
+                status: display_quota_row_status(report, row),
                 active_clients: active_clients_label(row),
                 reset_credits: reset_credits_account_list_label(row.reset_credits_available_value),
                 credit_usage_summary: credit_usage_compact_summary(&row.credit_usage),
                 credit_usage: row.credit_usage.clone(),
-                reason: reason_summary(row),
+                reason: display_quota_row_reason(report, row),
                 weekly_window: quota_account_list_window_summary(
                     &row.windows,
                     V1_WEEKLY_WINDOW_SECONDS,
@@ -100,6 +104,9 @@ pub(super) fn quota_status_pool_summary(report: &QuotaStatusReport) -> String {
     if !report.selection_projection_source.is_authoritative() {
         parts.push("degraded".to_owned());
     }
+    if !report.credential_store_availability.is_ready() {
+        parts.push(report.credential_store_availability.status_label());
+    }
     let total = report.rows.len();
     if total == 0 {
         parts.push("no accounts".to_owned());
@@ -156,8 +163,8 @@ pub(super) fn quota_selected_account_view_model(
 ) -> QuotaSelectedAccountViewModel {
     QuotaSelectedAccountViewModel {
         account: row.account_label.clone(),
-        status: quota_state_text(row).to_owned(),
-        reason: first_line(&row.routing).to_owned(),
+        status: display_quota_row_status(report, row),
+        reason: display_quota_row_reason(report, row),
         short_window: quota_window_visual_summary(
             &row.windows,
             V1_SHORT_WINDOW_SECONDS,
@@ -192,9 +199,35 @@ pub(super) fn quota_selected_account_view_model(
         total_rate: quota_total_rate_summary(row.weekly_pace),
         connection_rate: quota_connection_rate_summary(row.weekly_pace),
         active_clients: active_clients_label(row),
-        guards: weekly_floor_guard_summary(row),
+        guards: if report.credential_store_availability.is_ready() {
+            weekly_floor_guard_summary(row)
+        } else {
+            format!(
+                "credentials: {}",
+                report.credential_store_availability.status_label()
+            )
+        },
         reset: row.reset_credits_available.clone(),
-        note: first_line(&row.routing).to_owned(),
+        note: display_quota_row_reason(report, row),
+    }
+}
+
+fn display_quota_row_status(report: &QuotaStatusReport, row: &QuotaStatusRow) -> String {
+    if report.credential_store_availability.is_ready() {
+        quota_state_text(row).to_owned()
+    } else {
+        report.credential_store_availability.status_label()
+    }
+}
+
+fn display_quota_row_reason(report: &QuotaStatusReport, row: &QuotaStatusRow) -> String {
+    if report.credential_store_availability.is_ready() {
+        reason_summary(row)
+    } else {
+        format!(
+            "pooled credentials unavailable: {}",
+            report.credential_store_availability.status_label()
+        )
     }
 }
 

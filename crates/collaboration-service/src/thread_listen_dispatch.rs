@@ -143,6 +143,7 @@ async fn register_thread_listen(
                 .session_delivery
                 .clone()
                 .ok_or_else(BoardError::board_unavailable)?,
+            display_names: identity.display_names.clone(),
             target,
         })
     } else {

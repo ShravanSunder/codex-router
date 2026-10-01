@@ -34,34 +34,62 @@ pub(super) async fn render_interactive_quota_status(
     reset_session_factory: &dyn crate::quota_reset::InteractiveResetSessionFactory,
 ) -> Result<(), QuotaCommandError> {
     let width = stdout_terminal_width.unwrap_or(100).max(40);
-    let report =
-        load_quota_status_report_async(&router_root, all_limits, now_unix_seconds, true).await?;
+    let credential_resources = QuotaCredentialResources::open(&router_root).await;
+    let report = load_quota_status_report_with_availability_async(
+        &router_root,
+        all_limits,
+        now_unix_seconds,
+        true,
+        credential_resources.availability(),
+    )
+    .await?;
     let view_model = quota_status_view_model(&report, report.rows(), width);
-    let reload_view_model =
-        quota_status_view_model_loader(router_root.clone(), all_limits, true, width);
-    let reset_session = reset_session_factory.create(&router_root)?;
+    let reload_view_model = quota_status_view_model_loader(
+        router_root.clone(),
+        all_limits,
+        true,
+        width,
+        credential_resources.availability(),
+    );
+    let reset_session = credential_resources
+        .credential_store()
+        .map(|credential_store| reset_session_factory.create(&router_root, credential_store))
+        .transpose()?;
     let weekly_floor_saver = weekly_quota_floor_saver(router_root.join("state.sqlite"));
     let credit_policy_saver = credit_usage_policy_saver(router_root.join("state.sqlite"));
     let credit_usage_refresher = reset_session_factory.credit_usage_refresher(&router_root);
-    let shutdown_sender = reset_session.ports.intent_sender.clone();
-    let session_task = tokio::spawn(reset_session.runner);
+    let (reset_session_ports, shutdown_sender, session_task) = match reset_session {
+        Some(reset_session) => {
+            let shutdown_sender = reset_session.ports.intent_sender.clone();
+            let session_task = tokio::spawn(reset_session.runner);
+            (
+                Some(reset_session.ports),
+                Some(shutdown_sender),
+                Some(session_task),
+            )
+        }
+        None => (None, None, None),
+    };
     let render_result = run_quota_status_view(
         view_model,
         Some(reload_view_model),
-        Some(reset_session.ports),
+        reset_session_ports,
         Some(weekly_floor_saver),
         Some(credit_policy_saver),
         Some(credit_usage_refresher),
     )
     .await;
-    let _ = shutdown_sender
-        .send(crate::quota_reset::reset_session_supervisor::ResetSessionIntent::Shutdown)
-        .await;
-    drop(shutdown_sender);
-    let session_outcome = await_reset_session_task(session_task).await?;
-    match session_outcome {
-        crate::quota_reset::reset_session_supervisor::ResetSessionOutcome::Cancelled
-        | crate::quota_reset::reset_session_supervisor::ResetSessionOutcome::Finished(_) => {}
+    if let Some(shutdown_sender) = shutdown_sender {
+        let _ = shutdown_sender
+            .send(crate::quota_reset::reset_session_supervisor::ResetSessionIntent::Shutdown)
+            .await;
+        drop(shutdown_sender);
+    }
+    if let Some(session_task) = session_task {
+        match await_reset_session_task(session_task).await? {
+            crate::quota_reset::reset_session_supervisor::ResetSessionOutcome::Cancelled
+            | crate::quota_reset::reset_session_supervisor::ResetSessionOutcome::Finished(_) => {}
+        }
     }
     render_result.map_err(QuotaCommandError::Stdout)
 }
@@ -193,15 +221,18 @@ pub(super) fn quota_status_view_model_loader(
     all_limits: bool,
     unicode_bars: bool,
     width: usize,
+    credential_store_availability: CredentialStoreAvailability,
 ) -> QuotaStatusViewModelLoader {
     Arc::new(move || {
         let router_root = router_root.clone();
+        let credential_store_availability = credential_store_availability.clone();
         Box::pin(async move {
-            let report = load_quota_status_report_async(
+            let report = load_quota_status_report_with_availability_async(
                 &router_root,
                 all_limits,
                 current_unix_seconds(),
                 unicode_bars,
+                credential_store_availability,
             )
             .await
             .ok()?;

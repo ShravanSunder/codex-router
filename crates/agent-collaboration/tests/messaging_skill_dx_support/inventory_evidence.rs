@@ -18,6 +18,7 @@ pub(super) async fn list_all(
                 view,
                 scope: collaboration_client::protocol::NativeSessionScope::Any,
                 source: collaboration_client::protocol::NativeSessionSource::All,
+                include_empty_sessions: false,
                 query: None,
                 page_size: 100,
                 cursor,

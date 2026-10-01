@@ -558,14 +558,17 @@ async fn post(
     body: &str,
 ) -> MessagePostResult {
     store
-        .post_message(MessagePostRequest {
-            message_id: MessageId::generate(),
-            placement,
-            actor,
-            acting_for: None,
-            text: MessageText::try_from(body.to_owned()).unwrap(),
-            references: MessageReferences::try_from(Vec::new()).unwrap(),
-        })
+        .post_message(
+            MessagePostRequest {
+                message_id: MessageId::generate(),
+                placement,
+                actor,
+                acting_for: None,
+                text: MessageText::try_from(body.to_owned()).unwrap(),
+                references: MessageReferences::try_from(Vec::new()).unwrap(),
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap()
 }

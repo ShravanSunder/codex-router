@@ -151,17 +151,20 @@ pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value 
     }
 }
 
+fn valid_session_rename_name(name: &str) -> bool {
+    let scalar_count = name.chars().count();
+    name.trim() == name
+        && (1..=120).contains(&scalar_count)
+        && collaboration_protocol::SessionDisplayName::try_from(name.to_owned()).is_ok()
+}
+
 async fn dispatch_rename(request: NativeControlRequest<'_>) -> Value {
     let Ok(params) =
         serde_json::from_value::<collaboration_protocol::NativeRenameParams>(request.params)
     else {
         return invalid(request.id);
     };
-    let scalar_count = params.name.chars().count();
-    if params.name.trim() != params.name
-        || !(1..=120).contains(&scalar_count)
-        || params.name.chars().any(char::is_control)
-    {
+    if !valid_session_rename_name(&params.name) {
         return invalid(request.id);
     }
     if &params.target.endpoint.service_id != request.service_id {
@@ -264,6 +267,7 @@ async fn dispatch_rename(request: NativeControlRequest<'_>) -> Value {
     if name != params.name {
         return rename_echo_mismatch(request.id, &params.name, name);
     }
+    request.display_names.remember(params.target.clone(), name);
     let result = collaboration_protocol::NativeRenameResult {
         target: params.target,
         name: name.to_owned(),
@@ -432,9 +436,27 @@ fn failure_with_message(id: Value, kind: &str, stage: &str, message: &str) -> Va
 
 #[cfg(test)]
 mod native_failure_tests {
-    use super::{NativeConnectionError, native_call_failure, rename_echo_mismatch};
+    use super::{
+        NativeConnectionError, native_call_failure, rename_echo_mismatch, valid_session_rename_name,
+    };
     use codex_native_integration::NativeOperation;
     use serde_json::json;
+
+    #[test]
+    fn rename_names_cannot_inject_header_lines_or_identities() {
+        for invalid_name in [
+            "Name\n forged",
+            "Name\u{0001} forged",
+            "Name ← sender",
+            "Name → recipient",
+        ] {
+            assert!(
+                !valid_session_rename_name(invalid_name),
+                "rename should reject {invalid_name:?}"
+            );
+        }
+        assert!(valid_session_rename_name("Renamed Sidekick"));
+    }
 
     #[test]
     fn every_native_error_class_keeps_its_own_projection_on_the_rename_path() {

@@ -44,6 +44,9 @@ pub struct NativeSessionListParams {
     pub view: NativeSessionView,
     pub scope: NativeSessionScope,
     pub source: NativeSessionSource,
+    /// Include sessions that have never received a user message.
+    #[serde(default)]
+    pub include_empty_sessions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[schemars(range(min = 1, max = 100))]

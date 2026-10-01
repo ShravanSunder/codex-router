@@ -1,5 +1,8 @@
 use crate::proof_context::{ProofContext, ProofResult, agent_text};
-use collaboration_client::protocol::{NativeSendReceipt, SessionRef};
+use collaboration_client::protocol::{
+    MessageContent, MessageText, NativeSendReceipt, SessionRef, parse_agent_message_envelope,
+    render_message, session_identity,
+};
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 
@@ -97,21 +100,20 @@ pub(super) fn has_incoming_message_followed_by_agent_text(
     recipient: &SessionRef,
     marker: &str,
 ) -> bool {
-    let prefix = format!(
-        "Agent communication\nSelf-declared sender: {}\nIntended recipient: {}\n\n",
-        serde_json::to_string(sender).unwrap_or_default(),
-        serde_json::to_string(recipient).unwrap_or_default()
-    );
     turns.iter().any(|turn| {
         turn.get("items")
             .and_then(Value::as_array)
             .is_some_and(|items| {
                 items.iter().enumerate().any(|(index, item)| {
-                    user_text(item)
-                        .is_some_and(|text| text.starts_with(&prefix) && text.contains(marker))
-                        && items.iter().skip(index + 1).any(|later| {
-                            later.get("type").and_then(Value::as_str) == Some("agentMessage")
+                    user_text(item).is_some_and(|text| {
+                        parse_agent_message_envelope(text).is_some_and(|envelope| {
+                            envelope.sender == *sender
+                                && envelope.recipient == *recipient
+                                && envelope.body.contains(marker)
                         })
+                    }) && items.iter().skip(index + 1).any(|later| {
+                        later.get("type").and_then(Value::as_str) == Some("agentMessage")
+                    })
                 })
             })
     })
@@ -212,11 +214,22 @@ mod tests {
                 }
             }
         });
-        let incoming = format!(
-            "Agent communication\nSelf-declared sender: {}\nIntended recipient: {}\n\nFIXTURE_MARKER",
-            serde_json::to_string(&sender).expect("sender JSON"),
-            serde_json::to_string(&recipient).expect("recipient JSON")
+        let incoming = render_message(
+            &recipient,
+            &MessageContent::Agent {
+                sender: sender.clone(),
+                text: MessageText::try_from("FIXTURE_MARKER".to_owned())
+                    .expect("fixture message text"),
+            },
+        )
+        .expect("render agent envelope")
+        .text;
+        let expected_identity_line = format!(
+            "{} ← {}\nAgent communication\n",
+            session_identity(&recipient, None),
+            session_identity(&sender, None),
         );
+        assert!(incoming.starts_with(&expected_identity_line));
         let turns = vec![json!({
             "status":"completed",
             "items":[

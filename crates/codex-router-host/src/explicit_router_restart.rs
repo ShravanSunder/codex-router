@@ -54,6 +54,15 @@ pub(crate) fn restart_router(
             };
         }
 
+        let Some(secret_root) = config.coordination_paths().router_secret_root() else {
+            return RouterRestartCompletion {
+                child: None,
+                succeeded: false,
+                message: "router secret root is unavailable for credential migration",
+            };
+        };
+        crate::router_credential_migration::migrate_before_router_spawn(&secret_root).await;
+
         let _ = progress
             .send(OperatorFrame::Progress(HostProgress::StartingRouter))
             .await;

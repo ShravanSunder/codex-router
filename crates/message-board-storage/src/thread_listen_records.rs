@@ -1,12 +1,15 @@
 //! Transactional Thread listening storage; Delivered and Acknowledged positions remain separate.
 use crate::BoardStore;
 use crate::board_topic_records::{require_board, require_topic};
-use crate::message_records::{activate_watch, activity_sequence, load_message, require_thread};
+use crate::message_records::{activate_watch, activity_sequence, require_thread};
 use crate::participant_records::advance_participant_last_seen;
 use crate::participant_row_decoding::load_participant;
 use crate::storage_support::{
     current_activity_sequence, ensure_identity, invalid_record, storage_error,
     validate_stored_boundary,
+};
+use crate::thread_batch_selection::{
+    ThreadBatchSelectionRoot, load_thread_batch_boundary, select_thread_batches,
 };
 use message_board::*;
 use sqlx::Connection;
@@ -23,8 +26,6 @@ enum RootOrigin {
     ThreadWatch,
     TopicWatch,
 }
-
-const THREAD_BATCH_MESSAGE_LIMIT: i64 = 100;
 
 #[derive(Clone, Copy)]
 enum ThreadListenBatchPositionPolicy {
@@ -86,54 +87,17 @@ async fn load_thread_listen_boundary(
     thread: &ThreadListenThread,
     latest: i64,
 ) -> Result<Option<ThreadListenBoundary>, BoardError> {
-    let resource = ResourceIdentity::Thread {
-        root_message_id: thread.root_message_id.clone(),
-    };
-    let initial =
-        i64::try_from(thread.initial_delivered_position.get()).map_err(|_| invalid_record())?;
-    let row = sqlx::query!(
-        "SELECT watch.starts_after_activity,position.delivered_through, \
-           CASE WHEN position.delivered_through IS NULL THEN 1 ELSE EXISTS( \
-             SELECT 1 FROM board_activity activity \
-             WHERE activity.activity_sequence=position.delivered_through \
-               AND ((activity.root_id=watch.root_id AND activity.kind='threadMessageCreated') \
-                 OR (activity.message_id=watch.root_id AND activity.kind='mainMessageCreated'))) END AS valid_scope \
-         FROM thread_watches watch \
-         LEFT JOIN thread_delivery_positions position \
-           ON position.reader_key=watch.reader_key AND position.root_id=watch.root_id \
-         WHERE watch.reader_key=? AND watch.root_id=? AND watch.active=1",
+    let boundary = load_thread_batch_boundary(
+        transaction,
         reader_key,
-        thread.root_message_id.as_str(),
+        &thread.root_message_id,
+        Some(thread.initial_delivered_position),
+        latest,
     )
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(storage_error)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    validate_stored_boundary(row.starts_after_activity, 0, latest, resource.clone())?;
-    let effective_delivered_position = match row.delivered_through {
-        Some(delivered_position) => {
-            validate_stored_boundary(
-                delivered_position,
-                row.starts_after_activity,
-                latest,
-                resource.clone(),
-            )?;
-            if row.valid_scope != 1 {
-                return Err(BoardError::invalid_record(resource));
-            }
-            delivered_position
-        }
-        None => {
-            let effective = initial.max(row.starts_after_activity);
-            validate_stored_boundary(effective, row.starts_after_activity, latest, resource)?;
-            effective
-        }
-    };
-    Ok(Some(ThreadListenBoundary {
-        stored_delivered_position: row.delivered_through,
-        effective_delivered_position,
+    .await?;
+    Ok(boundary.map(|boundary| ThreadListenBoundary {
+        stored_delivered_position: boundary.stored_delivered_position,
+        effective_delivered_position: boundary.effective_delivered_position,
     }))
 }
 
@@ -457,7 +421,7 @@ impl BoardStore {
         let latest = current_activity_sequence(&mut transaction).await?;
         let mut batch_set = ThreadListenBatchSet {
             kind: ThreadListenOutputKind::BatchSet,
-            listen_id,
+            listen_id: listen_id.clone(),
             batches: Vec::new(),
             catch_up: context.armed_after_sequence
                 > context
@@ -467,83 +431,34 @@ impl BoardStore {
                     .min()
                     .unwrap_or(context.armed_after_sequence),
         };
-        let mut remaining_message_limit = THREAD_BATCH_MESSAGE_LIMIT;
         let selected_threads = listening_threads(&mut transaction, context, &reader_key).await?;
-        'threads: for thread in &selected_threads {
-            let Some(boundary) =
-                load_thread_listen_boundary(&mut transaction, &reader_key, thread, latest).await?
-            else {
-                continue;
-            };
-            let message_ids = sqlx::query_scalar!(
-                "SELECT activity.message_id AS \"message_id!: String\" FROM board_activity activity \
-                 WHERE ((activity.root_id=? AND activity.kind='threadMessageCreated') OR (activity.message_id=? AND activity.kind='mainMessageCreated')) \
-                   AND activity.message_id IS NOT NULL AND activity.actor_key<>? \
-                   AND activity.activity_sequence>? \
-                 ORDER BY activity.activity_sequence ASC LIMIT ?",
-                thread.root_message_id.as_str(),
-                thread.root_message_id.as_str(),
-                reader_key,
-                boundary.effective_delivered_position,
-                remaining_message_limit,
-            )
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(storage_error)?;
-            if message_ids.is_empty() {
-                continue;
-            }
-            let mut batch = ThreadBatch {
+        let selection_roots = selected_threads
+            .iter()
+            .map(|thread| ThreadBatchSelectionRoot {
                 root_message_id: thread.root_message_id.clone(),
-                delivered_through: thread.initial_delivered_position,
-                messages: Vec::with_capacity(message_ids.len()),
-            };
-            for message_id in message_ids {
-                let message_id = MessageId::try_from(message_id).map_err(|_| invalid_record())?;
-                let message = load_message(&mut transaction, &message_id).await?;
-                batch.messages.push(ThreadBatchMessage {
-                    activity_sequence: message.activity_sequence,
-                    message_id: message.message_id,
-                    actor: message.actor,
-                    text: message.text,
-                });
-                batch.delivered_through = batch
-                    .messages
-                    .last()
-                    .ok_or_else(invalid_record)?
-                    .activity_sequence;
-                let replacing_batch = batch_set
-                    .batches
-                    .last()
-                    .is_some_and(|selected| selected.root_message_id == batch.root_message_id);
-                if replacing_batch {
-                    batch_set.batches.pop();
-                }
-                batch_set.batches.push(batch.clone());
-                let encoded_bytes = serde_json::to_vec(&batch_set)
-                    .map_err(|_| BoardError::board_unavailable())?
-                    .len();
-                if encoded_bytes > maximum_batch_set_bytes {
-                    batch_set.batches.pop();
-                    batch.messages.pop();
-                    if !batch.messages.is_empty() {
-                        batch.delivered_through = batch
-                            .messages
-                            .last()
-                            .ok_or_else(invalid_record)?
-                            .activity_sequence;
-                        batch_set.batches.push(batch);
-                    } else if batch_set.batches.is_empty() {
-                        return Err(BoardError::board_unavailable());
-                    }
-                    break 'threads;
-                }
-                remaining_message_limit -= 1;
-                if remaining_message_limit == 0 {
-                    break 'threads;
-                }
-            }
-        }
+                initial_delivered_position: Some(thread.initial_delivered_position),
+            })
+            .collect::<Vec<_>>();
+        let selection = select_thread_batches(
+            &mut transaction,
+            &reader_key,
+            &selection_roots,
+            latest,
+            maximum_batch_set_bytes,
+            |batches| {
+                let candidate = ThreadListenBatchSet {
+                    kind: ThreadListenOutputKind::BatchSet,
+                    listen_id: listen_id.clone(),
+                    batches: batches.to_vec(),
+                    catch_up: batch_set.catch_up,
+                };
+                serde_json::to_vec(&candidate)
+                    .map(|encoded| encoded.len())
+                    .map_err(|_| BoardError::board_unavailable())
+            },
+        )
+        .await?;
+        batch_set.batches = selection.batches;
         if matches!(
             position_policy,
             ThreadListenBatchPositionPolicy::CommitOnSelection
@@ -569,7 +484,7 @@ impl BoardStore {
                 )?;
                 sqlx::query!(
                     "INSERT INTO thread_delivery_positions(reader_key,root_id,delivered_through) VALUES(?,?,?) \
-                     ON CONFLICT(reader_key,root_id) DO UPDATE SET delivered_through=excluded.delivered_through",
+                     ON CONFLICT(reader_key,root_id) DO UPDATE SET delivered_through=MAX(thread_delivery_positions.delivered_through,excluded.delivered_through)",
                     reader_key,
                     batch.root_message_id.as_str(),
                     delivered_value,

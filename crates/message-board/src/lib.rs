@@ -10,6 +10,9 @@ mod board_search;
 mod repository_identity;
 mod thread_listening;
 mod thread_participants;
+mod thread_subscriptions;
+#[cfg(test)]
+mod thread_subscriptions_tests;
 
 pub use board_failures::*;
 pub use board_identity::*;
@@ -21,3 +24,4 @@ pub use board_search::*;
 pub use repository_identity::*;
 pub use thread_listening::*;
 pub use thread_participants::*;
+pub use thread_subscriptions::*;

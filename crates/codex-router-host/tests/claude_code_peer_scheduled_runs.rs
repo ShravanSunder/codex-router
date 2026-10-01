@@ -168,6 +168,7 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
                 run_id: run_id.clone(),
                 target: target.clone(),
                 message: MessageText::try_from("scheduled peer input".to_owned()).expect("input"),
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
                 precondition: DeliveryPrecondition::Unpinned,
                 inputs: inputs.clone(),
                 recorded: initial,

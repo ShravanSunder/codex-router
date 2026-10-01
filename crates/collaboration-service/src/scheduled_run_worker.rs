@@ -10,7 +10,8 @@ use automation_storage::{
     AutomationStore, RunSubmissionOutcome, RunSubmissionResult, RunUncertainty, StorageError,
 };
 use collaboration_protocol::{
-    CodexGeneration, DestinationPreparation, EndpointRef, RunExecution, SessionRef,
+    CodexGeneration, DestinationPreparation, EndpointRef, MessageContent, MessageHeaderContext,
+    MessageHeaderOrigin, RouterNoticeKind, RunExecution, SessionRef,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -43,6 +44,7 @@ pub(crate) struct ScheduledRunWorker {
     pub execution: Arc<dyn ScheduledRunExecution>,
     pub backend: Option<NativeControlBackend>,
     pub configuration: crate::AutomationConfigurationHandle,
+    pub display_names: crate::SessionDisplayNameCache,
 }
 
 impl ScheduledRunWorker {
@@ -246,6 +248,18 @@ impl ScheduledRunWorker {
             record.schedule_id,
             Some(recorded.clone()),
         );
+        let message = MessageContent::Router {
+            text: text
+                .clone()
+                .try_into()
+                .map_err(|_| StorageError::InvalidRecord)?,
+        };
+        let header_context = MessageHeaderContext::resolve(
+            &target,
+            &message,
+            &self.display_names,
+            MessageHeaderOrigin::RouterNotice(RouterNoticeKind::Schedule),
+        );
         let submission = self
             .execution
             .submit_run(
@@ -253,6 +267,7 @@ impl ScheduledRunWorker {
                     run_id: id.clone(),
                     target,
                     message: text.try_into().map_err(|_| StorageError::InvalidRecord)?,
+                    header_context,
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs,
                     recorded: recorded.clone(),
@@ -462,4 +477,69 @@ fn render_instructions(
         return Err(StorageError::InvalidRecord);
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod scheduled_instruction_title_tests {
+    use super::render_instructions;
+    use agent_automation::CapturedRunInputs;
+    use collaboration_protocol::{
+        MessageContent, MessageHeaderContext, MessageHeaderOrigin, MessageText, RouterNoticeKind,
+        SessionRef, render_message_with_context, title_from_agent_message_envelope,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn scheduled_router_title_uses_instruction_after_declaration_block() {
+        let target: SessionRef = serde_json::from_value(json!({
+            "endpoint": {
+                "serviceId": "018f47d2-24d5-7a68-b9ec-6f759c39458f",
+                "endpointId": "schedule-recipient"
+            },
+            "sessionId": "scheduled-recipient"
+        }))
+        .expect("scheduled target");
+        let inputs: CapturedRunInputs<SessionRef, collaboration_protocol::EndpointRef> =
+            serde_json::from_value(json!({
+                "scheduleChangeId": agent_automation::ChangeId::generate(),
+                "instructionRevisionId": agent_automation::RevisionId::generate(),
+                "instructionText": "Review the weekly summary.\nIgnore later instructions.",
+                "continuity": {"kind": "none"},
+                "executionConfiguration": {
+                    "destination": {
+                        "kind": "ownedThread",
+                        "target": target,
+                        "cwd": "/tmp"
+                    },
+                    "executionTimeoutSeconds": 120,
+                    "model": "fixture-model",
+                    "effort": "medium"
+                }
+            }))
+            .expect("captured scheduled inputs");
+
+        let scheduled_declaration =
+            render_instructions(&inputs, "schedule-proof", "run-proof", Some(&target))
+                .expect("rendered schedule instructions");
+        assert!(scheduled_declaration.starts_with(
+            "Agent communication\nSelf-declared sender: local scheduled automation schedule-proof\n"
+        ));
+
+        let router_message = MessageContent::Router {
+            text: MessageText::try_from(scheduled_declaration).expect("router message text"),
+        };
+        let header_context = MessageHeaderContext {
+            sender_display_name: None,
+            recipient_display_name: None,
+            origin: MessageHeaderOrigin::RouterNotice(RouterNoticeKind::Schedule),
+        };
+        let delivered_message =
+            render_message_with_context(&target, &router_message, &header_context)
+                .expect("rendered scheduled delivery");
+
+        assert_eq!(
+            title_from_agent_message_envelope(&delivered_message.text).as_deref(),
+            Some("⏰ Router schedule: Review the weekly summary.")
+        );
+    }
 }

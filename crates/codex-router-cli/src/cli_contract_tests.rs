@@ -50,7 +50,7 @@ use codex_router_proxy::websocket::WebSocketRegistrySnapshot;
 use codex_router_proxy::websocket::WebSocketSessionPeerAddr;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
 use codex_router_secret_store::account_tokens::upstream_access_token_key;
 use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_secret_store::model::SecretKey;

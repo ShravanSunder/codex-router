@@ -1,7 +1,7 @@
 use agent_automation::{RouteEffectEvidence, SubmissionEffect};
 use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageContent,
-    MessageDelivery, SessionRef, UuidIdentity,
+    MessageDelivery, MessageHeaderContext, MessageHeaderOrigin, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, CodexAppServerDeliveryRoute, DeliveryClientReceipt, DeliveryFuture,
@@ -116,7 +116,9 @@ async fn stale_strict_generation_stops_before_evidence_or_native_io()
         message: MessageContent::Router {
             text: "hello".to_owned().try_into()?,
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode: MessageDelivery::Auto,
+        load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::EndpointGeneration { expected: stale },
         correlation: DeliveryCorrelationId::generate(),
         attempt: agent_automation::AttemptId::generate(),
@@ -150,6 +152,22 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
         "sessionId":"thread-one"
     }))?;
+    let sender: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":service_id,"endpointId":"claude-local"},
+        "sessionId":"sidekick-session"
+    }))?;
+    let display_names = collaboration_service::SessionDisplayNameCache::default();
+    display_names.remember(sender.clone(), "🐒 Sidekick");
+    let message = MessageContent::Agent {
+        sender,
+        text: "hello".to_owned().try_into()?,
+    };
+    let header_context = MessageHeaderContext::resolve(
+        &target,
+        &message,
+        &display_names,
+        MessageHeaderOrigin::Agent,
+    );
     let generation: CodexGeneration =
         serde_json::from_value(json!({"serviceEpoch":service_id,"generation":1}))?;
     let mut definitions = serde_json::Map::new();
@@ -192,7 +210,8 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
             codex_home: root.clone(),
         },
         std::sync::Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
-    );
+    )
+    .with_display_names(display_names);
     let sink = Arc::new(RecordingEvidenceSink(Mutex::new(Vec::new())));
     let observed = Arc::clone(&sink);
     let server = tokio::spawn(async move {
@@ -234,13 +253,16 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
         if read["method"] != "thread/read" {
             return Err("unexpected native inspection".into());
         }
-        socket.send(Message::Text(json!({"id":read["id"],"result":{"thread":{"id":"thread-one","status":{"type":"idle"}}}}).to_string().into())).await?;
+        socket.send(Message::Text(json!({"id":read["id"],"result":{"thread":{"id":"thread-one","name":"🤖 Codex Main","status":{"type":"idle"}}}}).to_string().into())).await?;
         let start: Value =
             serde_json::from_str(socket.next().await.ok_or("missing start")??.to_text()?)?;
         if start["method"] != "turn/start"
             || start["params"]["clientUserMessageId"] != "caller-correlation"
+            || !start["params"]["input"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("🤖 Codex Main ← 🐒 Sidekick\n"))
         {
-            return Err("native start lost caller correlation".into());
+            return Err("native start lost caller correlation or cached display names".into());
         }
         socket
             .send(Message::Text(
@@ -256,10 +278,10 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
         route.deliver(
             DeliveryRequest {
                 target,
-                message: MessageContent::Router {
-                    text: "hello".to_owned().try_into()?,
-                },
+                message,
+                header_context,
                 mode: MessageDelivery::Auto,
+                load_policy: collaboration_service::LoadPolicy::MayLoad,
                 precondition: DeliveryPrecondition::Unpinned,
                 correlation: DeliveryCorrelationId::try_from("caller-correlation".to_owned())?,
                 attempt: agent_automation::AttemptId::generate(),
@@ -280,6 +302,143 @@ async fn native_route_records_dispatch_before_io_and_returns_caller_correlation(
     drop(records);
     std::fs::remove_file(socket_path)?;
     std::fs::remove_dir(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn retiring_during_thread_read_returns_retryable_unavailable()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let root = tempfile::tempdir()?;
+    let socket_path = root.path().join("native.sock");
+    let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())?;
+    let target: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
+        "sessionId":"thread-one"
+    }))?;
+    let generation: CodexGeneration =
+        serde_json::from_value(json!({"serviceEpoch":service_id,"generation":1}))?;
+    let mut definitions = serde_json::Map::new();
+    for name in [
+        "ThreadRead",
+        "ThreadResume",
+        "ThreadStart",
+        "ThreadTurnsList",
+        "ThreadLoadedList",
+        "TurnStart",
+        "TurnSteer",
+        "TurnInterrupt",
+        "ThreadQueueAdd",
+    ] {
+        definitions.insert(format!("{name}Params"), json!({"type":"object"}));
+        definitions.insert(format!("{name}Response"), json!({"type":"object"}));
+    }
+    let bundle = codex_native_integration::NativeSchemaBundle::from_documents(BTreeMap::from([(
+        "codex_app_server_protocol.schemas.json".to_owned(),
+        serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))?,
+    )]))?;
+    let schemas = Arc::new(codex_native_integration::NativePayloadSchemas::from_bundle(
+        &bundle,
+    )?);
+    let directory = EndpointDirectory::new(service_id.clone());
+    directory.publish(serde_json::from_value(json!({
+        "endpoint":target.endpoint,"label":"Fixture",
+        "availability":{"state":"available","observedAt":"2026-09-24T00:00:00Z"},
+        "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":schemas.schema_digest(),"generation":generation}]
+    }))?)?;
+    let gate = NativeGenerationGate::default();
+    gate.activate(generation, socket_path, Some(schemas))?;
+    let route = Arc::new(CodexAppServerDeliveryRoute::new(
+        service_id,
+        directory,
+        NativeControlBackend {
+            endpoint: target.endpoint.clone(),
+            gate: gate.clone(),
+            codex_home: root.path().to_owned(),
+        },
+        Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+    ));
+    let (read_seen_tx, read_seen_rx) = tokio::sync::oneshot::channel();
+    let (release_server_tx, release_server_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut socket = tokio_tungstenite::accept_async(stream).await?;
+        let initialize: Value = serde_json::from_str(
+            socket
+                .next()
+                .await
+                .ok_or("missing initialize")??
+                .to_text()?,
+        )?;
+        socket
+            .send(Message::Text(
+                json!({"id":initialize["id"],"result":{}})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        let _: Value = serde_json::from_str(
+            socket
+                .next()
+                .await
+                .ok_or("missing initialized")??
+                .to_text()?,
+        )?;
+        let read: Value = serde_json::from_str(
+            socket
+                .next()
+                .await
+                .ok_or("missing thread/read")??
+                .to_text()?,
+        )?;
+        if read.get("method").and_then(Value::as_str) != Some("thread/read") {
+            return Err::<(), Box<dyn std::error::Error + Send + Sync>>(
+                "expected thread/read before generation retirement".into(),
+            );
+        }
+        read_seen_tx
+            .send(())
+            .map_err(|_| std::io::Error::other("delivery task left before thread/read"))?;
+        release_server_rx
+            .await
+            .map_err(|_| std::io::Error::other("test did not release native fixture"))?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let request = DeliveryRequest {
+        target,
+        message: MessageContent::Router {
+            text: "held batch".to_owned().try_into()?,
+        },
+        header_context: MessageHeaderContext::default(),
+        mode: MessageDelivery::Auto,
+        load_policy: collaboration_service::LoadPolicy::LoadedOnly,
+        precondition: DeliveryPrecondition::Unpinned,
+        correlation: DeliveryCorrelationId::generate(),
+        attempt: agent_automation::AttemptId::generate(),
+    };
+    let sink = Arc::new(CountingEvidenceSink(AtomicUsize::new(0)));
+    let delivery = tokio::spawn({
+        let route = Arc::clone(&route);
+        let sink = Arc::clone(&sink);
+        async move { route.deliver(request, sink.as_ref()).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), read_seen_rx).await??;
+    gate.retire()?;
+    let receipt = tokio::time::timeout(Duration::from_secs(5), delivery).await???;
+    release_server_tx
+        .send(())
+        .map_err(|_| std::io::Error::other("native fixture already exited"))?;
+    server.await??;
+
+    if !matches!(
+        receipt.outcome,
+        DeliveryOutcome::NotSubmitted {
+            retryable: true,
+            ref reason,
+        } if reason == "unavailable"
+    ) {
+        return Err("retirement during thread/read was not retryable unavailable".into());
+    }
     Ok(())
 }
 
@@ -619,6 +778,7 @@ async fn exercise_held_empty_thread(
                     run_id,
                     target: target.clone(),
                     message: "scheduled hello".to_owned().try_into()?,
+                    header_context: collaboration_protocol::MessageHeaderContext::default(),
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs,
                     recorded: prepared.evidence,
@@ -684,7 +844,9 @@ async fn exercise_held_empty_thread(
         message: MessageContent::Router {
             text: message_text.clone(),
         },
+        header_context: collaboration_protocol::MessageHeaderContext::default(),
         mode,
+        load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: DeliveryCorrelationId::generate(),
         attempt: agent_automation::AttemptId::generate(),

@@ -258,7 +258,13 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
         )
     )));
     assert!(must_ok(runtime.block_on(
-        native_state.claim_credential_refresh(&primary_account_id, 1, 2,)
+        native_state.claim_credential_refresh(
+            &primary_account_id,
+            codex_router_core::provider::Provider::Openai,
+            codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+            1,
+            2,
+        )
     )));
     must_ok(runtime.block_on(native_state.close()));
     let policy_mutation = must_ok(runtime.block_on(

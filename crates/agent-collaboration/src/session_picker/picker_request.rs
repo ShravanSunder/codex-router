@@ -18,6 +18,7 @@ pub(crate) struct SessionsPickerRequest {
     pub(crate) repository_identity: RepositoryIdentity,
     pub(crate) current_provider: Option<String>,
     pub(crate) new_session_args_display: String,
+    pub(crate) include_empty_sessions: bool,
     pub(crate) records: Vec<SessionPickerRecord>,
 }
 
@@ -28,6 +29,7 @@ pub(crate) struct SessionsPickerDataQuery {
     pub(crate) source: SessionsSource,
     pub(crate) sort: SessionsSort,
     pub(crate) search: String,
+    pub(crate) include_empty_sessions: bool,
 }
 
 pub(crate) type SessionsPickerRecordLoader = Arc<
@@ -54,6 +56,7 @@ impl Default for SessionsPickerRequest {
             },
             current_provider: None,
             new_session_args_display: String::new(),
+            include_empty_sessions: false,
             records: Vec::new(),
         }
     }

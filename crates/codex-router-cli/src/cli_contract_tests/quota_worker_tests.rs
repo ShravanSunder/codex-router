@@ -16,8 +16,10 @@ fn background_quota_refresh_worker_runs_immediate_cycle_without_waiting_for_inte
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -79,8 +81,10 @@ fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider() {
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -134,8 +138,10 @@ fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -213,8 +219,10 @@ fn background_quota_refresh_worker_reports_refresh_failures() {
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -289,8 +297,10 @@ fn cli_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets_root = router_root.join("secrets");
-    let secrets = must_ok(FileSecretStore::open(&secrets_root));
-    let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secrets_root),
+    );
+    let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &expired_key,

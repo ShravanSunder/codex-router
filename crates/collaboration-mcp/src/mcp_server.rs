@@ -1,8 +1,9 @@
 use collaboration_client::{
     BoundedObservationRequest, BoundedObservationResult, ClientError, ControlClient,
     ConversationCancelInput, ConversationClient, ConversationClientError,
-    ConversationCreatePromptOutcome, ConversationOperationResult, MessageSendError,
-    MessageSendRequest, OperationEffect, operation_failure_from_client_error,
+    ConversationCreatePromptOutcome, ConversationOperationResult, MessageReplyError,
+    MessageReplyRequest, MessageSendError, MessageSendRequest, OperationEffect,
+    operation_failure_from_client_error,
 };
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
@@ -14,7 +15,7 @@ use collaboration_protocol::{
     ProviderInspectFailure, ProviderSessionInspectRequest, ProviderSessionInspectResult,
     ProviderSessionListParams, ProviderSessionListResult, ProviderSettingsAcceptRequest,
     ProviderSettingsFailure, ProviderSettingsResult, ProviderSettingsSetRequest,
-    RouterExecutableRelation, router_build_warning,
+    RouterExecutableRelation, SessionMessageReplyResult, router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -376,6 +377,20 @@ impl CollaborationMcpServer {
         let result = client.send_message(request).await;
         let _closed = client.close().await;
         message_tool_result(result)
+    }
+
+    #[tool(name = "message_reply", description = "Replies to the most recent Agent sender delivered to the supplied caller session. Router deliveries do not change the reply address. Optionally refuses unless expectSender matches the resolved recipient; returns the selected target.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<SessionMessageReplyResult>>())]
+    async fn message_reply(
+        &self,
+        Parameters(request): Parameters<MessageReplyRequest>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.reply_to_latest_agent_sender(request).await;
+        let _closed = client.close().await;
+        message_reply_tool_result(result)
     }
 
     #[tool(name = "approval_list", description = "Lists approval requests. Set includeOptions for offered choices and persistent effects. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ApprovalListResponse>>())]
@@ -940,6 +955,55 @@ fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> Cal
                 .map(|mut value| {
                     if let Some(fields) = value.as_object_mut() {
                         fields.insert("target".to_owned(), serde_json::json!(target));
+                    }
+                    structured_tool_error(value)
+                })
+                .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))
+        }
+    }
+}
+
+fn message_reply_tool_result(
+    result: Result<SessionMessageReplyResult, MessageReplyError>,
+) -> CallToolResult {
+    match result {
+        Ok(reply) => {
+            let (kind, message, effect) = match &reply.receipt.outcome {
+                DeliveryOutcome::NotSubmitted { reason, .. } => {
+                    ("notSubmitted", reason.clone(), OperationEffect::None)
+                }
+                DeliveryOutcome::Rejected(rejection) => (
+                    "rejected",
+                    rejection
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| "Reply delivery was rejected".to_owned()),
+                    OperationEffect::None,
+                ),
+                DeliveryOutcome::Unknown => (
+                    "outcomeUnknown",
+                    "Reply delivery acceptance is unknown".to_owned(),
+                    OperationEffect::Unknown,
+                ),
+                _ => return structured_result(Ok(reply), OperationEffect::None),
+            };
+            serde_json::to_value(reply)
+                .map(|mut value| {
+                    if let Some(fields) = value.as_object_mut() {
+                        fields.insert("kind".to_owned(), serde_json::json!(kind));
+                        fields.insert("message".to_owned(), serde_json::json!(message));
+                        fields.insert("effect".to_owned(), serde_json::json!(effect));
+                    }
+                    structured_tool_error(value)
+                })
+                .unwrap_or_else(|_| validation_failure("reply result encoding failed"))
+        }
+        Err(error) => {
+            let (failure, caller) = error.into_operation_failure_and_caller();
+            serde_json::to_value(failure)
+                .map(|mut value| {
+                    if let Some(fields) = value.as_object_mut() {
+                        fields.insert("caller".to_owned(), serde_json::json!(caller));
                     }
                     structured_tool_error(value)
                 })

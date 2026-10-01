@@ -14,9 +14,8 @@ use codex_router_core::credit_usage::CreditProviderObservation;
 use codex_router_core::credit_usage::CreditSpendControl;
 use codex_router_core::ids::AccountId;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
 use codex_router_secret_store::backend::SecretStore;
-use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::quota_snapshot::PersistedQuotaHistoryObservation;
@@ -242,8 +241,10 @@ fn write_fixture_credential(
     .with_expires_unix_seconds(current_unix_seconds().saturating_add(86_400))
     .with_chatgpt_account_id(routing_id)
     .to_secret_string()?;
-    let store = FileSecretStore::open(root.join("secrets"))?;
-    let key = account_credential_bundle_key(account_id, generation)?;
+    let store = codex_router_secret_store::test_support::open_encrypted_credential_store(
+        root.join("secrets"),
+    )?;
+    let key = openai_account_credential_bundle_key(account_id, generation)?;
     store.write_secret(&key, &bundle)?;
     Ok(())
 }

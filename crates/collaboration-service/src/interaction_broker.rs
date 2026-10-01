@@ -1,7 +1,7 @@
 //! Service-owned routing for client-exposed Codex approval callbacks.
 use crate::{
-    DeliveryPrecondition, DeliveryRequest, NativeControlBackend, SessionMessageDelivery,
-    session_delivery_contract::UnstoredAttemptEvidenceSink,
+    DeliveryPrecondition, DeliveryRequest, LoadPolicy, NativeControlBackend,
+    SessionMessageDelivery, session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
 use codex_acp_adapter::{
     ApprovalBroker, ApprovalBrokerError, ApprovalRoute, BrokeredApprovalOutcome,
@@ -12,7 +12,8 @@ use collaboration_protocol::{
     ApprovalDetailedRecord, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionEffect,
     ApprovalOptionScope, ApprovalOptionView, ApprovalOptionViewScope, ApprovalPresentation,
     ApprovalRequestRecord, ApprovalState, DeliveryOutcome, EndpointRef, MessageContent,
-    MessageDelivery, OperationId, SessionRef, UuidIdentity,
+    MessageDelivery, MessageHeaderContext, MessageHeaderOrigin, OperationId, SessionRef,
+    UuidIdentity,
 };
 use serde_json::Value;
 #[cfg(test)]
@@ -163,6 +164,7 @@ pub struct ServiceInteractionBroker {
     service_id: UuidIdentity,
     backend: NativeControlBackend,
     session_delivery: OnceLock<Arc<dyn SessionMessageDelivery>>,
+    display_names: OnceLock<crate::SessionDisplayNameCache>,
     routes_path: PathBuf,
     routes: Mutex<BTreeMap<String, ApprovalRoute>>,
     pending: Arc<Mutex<BTreeMap<String, PendingApproval>>>,
@@ -290,6 +292,7 @@ impl ServiceInteractionBroker {
             service_id,
             backend,
             session_delivery: OnceLock::new(),
+            display_names: OnceLock::new(),
             routes_path,
             routes: Mutex::new(routes),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
@@ -313,6 +316,10 @@ impl ServiceInteractionBroker {
         self.session_delivery
             .set(delivery)
             .map_err(|_| ApprovalBrokerError::Unavailable)
+    }
+
+    pub(crate) fn install_display_names(&self, display_names: crate::SessionDisplayNameCache) {
+        let _already_installed = self.display_names.set(display_names);
     }
 
     async fn persist_routes(&self) -> Result<(), ApprovalBrokerError> {
@@ -805,25 +812,38 @@ impl ServiceInteractionBroker {
             .session_delivery
             .get()
             .ok_or(ApprovalBrokerError::Unavailable)?;
-        deliver_message_via(delivery.as_ref(), requester, approver, text).await
+        let display_names = self
+            .display_names
+            .get_or_init(crate::SessionDisplayNameCache::default);
+        deliver_message_via(delivery.as_ref(), display_names, requester, approver, text).await
     }
 }
 
 async fn deliver_message_via(
     delivery: &dyn SessionMessageDelivery,
+    display_names: &crate::SessionDisplayNameCache,
     requester: SessionRef,
     approver: SessionRef,
     text: String,
 ) -> Result<(), ApprovalBrokerError> {
+    let message = MessageContent::Agent {
+        sender: requester,
+        text: text
+            .try_into()
+            .map_err(|_| ApprovalBrokerError::Unavailable)?,
+    };
+    let header_context = MessageHeaderContext::resolve(
+        &approver,
+        &message,
+        display_names,
+        MessageHeaderOrigin::Agent,
+    );
     let request = DeliveryRequest {
         target: approver,
-        message: MessageContent::Agent {
-            sender: requester,
-            text: text
-                .try_into()
-                .map_err(|_| ApprovalBrokerError::Unavailable)?,
-        },
+        message,
+        header_context,
         mode: MessageDelivery::Auto,
+        load_policy: LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
         correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
         attempt: agent_automation::AttemptId::generate(),

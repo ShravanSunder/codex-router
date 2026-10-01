@@ -297,8 +297,8 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
             &prompt,
         );
         permit.send(
-            crate::provider_acp_message_fifo::ProviderQueuedPrompt::Message(
-                ConversationPromptRequest {
+            crate::provider_acp_message_fifo::ProviderQueuedPrompt::MessageWithHeader {
+                request: ConversationPromptRequest {
                     input_id: Some(input_id),
                     operation_id,
                     target: target.clone(),
@@ -307,7 +307,9 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
                     approver: (requester()).into(),
                     prompt,
                 },
-            ),
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
+                load_policy: collaboration_service::LoadPolicy::MayLoad,
+            },
         );
     }
 
@@ -407,8 +409,8 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
         &queued_prompt,
     );
     queue.reserve(&target).expect("queue capacity").send(
-        crate::provider_acp_message_fifo::ProviderQueuedPrompt::Message(
-            ConversationPromptRequest {
+        crate::provider_acp_message_fifo::ProviderQueuedPrompt::MessageWithHeader {
+            request: ConversationPromptRequest {
                 input_id: Some(queued_input),
                 operation_id: queued_id.clone(),
                 target,
@@ -417,7 +419,9 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
                 approver: (requester()).into(),
                 prompt: queued_prompt,
             },
-        ),
+            header_context: collaboration_protocol::MessageHeaderContext::default(),
+            load_policy: collaboration_service::LoadPolicy::MayLoad,
+        },
     );
 
     queue.shutdown().await;
@@ -500,8 +504,8 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
         },
     );
     permit.send(
-        crate::provider_acp_message_fifo::ProviderQueuedPrompt::Message(
-            ConversationPromptRequest {
+        crate::provider_acp_message_fifo::ProviderQueuedPrompt::MessageWithHeader {
+            request: ConversationPromptRequest {
                 input_id: Some(queued_input_id.clone()),
                 operation_id: queued_id.clone(),
                 target,
@@ -512,7 +516,9 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
                     text: MessageText::try_from("queued".to_owned()).expect("message"),
                 },
             },
-        ),
+            header_context: collaboration_protocol::MessageHeaderContext::default(),
+            load_policy: collaboration_service::LoadPolicy::MayLoad,
+        },
     );
     backend
         .runtime_for(&endpoint())

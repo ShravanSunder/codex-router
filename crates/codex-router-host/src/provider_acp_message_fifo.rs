@@ -7,10 +7,12 @@ use crate::{
 };
 use collaboration_protocol::{
     ConversationOperationFailureKind, ConversationOperationWaitOutput,
-    ConversationOperationWaitRequest, ConversationPromptRequest, PositiveSeconds,
-    ProviderOperationStage, SessionRef,
+    ConversationOperationWaitRequest, ConversationPromptRequest, MessageHeaderContext,
+    PositiveSeconds, ProviderOperationStage, SessionRef,
 };
-use collaboration_service::{ProviderConversationBackend, ProviderOperationStore};
+use collaboration_service::{
+    LoadPolicy, NOT_LOADED_REASON, ProviderConversationBackend, ProviderOperationStore,
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex as StdMutex},
@@ -30,15 +32,30 @@ const PROVIDER_RETIRED_REASON: &str = "providerRetired";
 
 #[derive(Clone)]
 pub(crate) enum ProviderQueuedPrompt {
-    Message(ConversationPromptRequest),
-    Contents(ProviderPromptContentsRequest),
+    MessageWithHeader {
+        request: ConversationPromptRequest,
+        header_context: MessageHeaderContext,
+        load_policy: LoadPolicy,
+    },
+    Contents {
+        request: ProviderPromptContentsRequest,
+        load_policy: LoadPolicy,
+    },
 }
 
 impl ProviderQueuedPrompt {
     fn operation_id(&self) -> &collaboration_protocol::OperationId {
         match self {
-            Self::Message(request) => &request.operation_id,
-            Self::Contents(request) => &request.operation_id,
+            Self::MessageWithHeader { request, .. } => &request.operation_id,
+            Self::Contents { request, .. } => &request.operation_id,
+        }
+    }
+
+    fn load_policy(&self) -> LoadPolicy {
+        match self {
+            Self::MessageWithHeader { load_policy, .. } | Self::Contents { load_policy, .. } => {
+                *load_policy
+            }
         }
     }
 }
@@ -161,6 +178,7 @@ async fn run_provider_message_fifo(
             },
         };
         let operation_id = request.operation_id().clone();
+        let load_policy = request.load_policy();
         let Some(runtime) = supervisor.runtime_for(&target.endpoint) else {
             drop_current_and_remaining(
                 &supervisor,
@@ -204,10 +222,19 @@ async fn run_provider_message_fifo(
                         drop_current_and_remaining(&supervisor, &operation_id, &mut receiver, PROVIDER_RETIRED_REASON);
                         return;
                     },
-                    outcome = ensure_provider_session_loaded(&supervisor, &store, ownership.as_ref(), &target) => outcome,
+                    outcome = ensure_provider_session_loaded(&supervisor, &store, ownership.as_ref(), &target, load_policy) => outcome,
                 };
                 match load_outcome {
-                    ProviderSessionLoadOutcome::Ready => loaded = true,
+                    ProviderSessionLoadOutcome::Ready
+                    | ProviderSessionLoadOutcome::AlreadyLoaded => {
+                        loaded = true;
+                    }
+                    ProviderSessionLoadOutcome::NotLoaded => {
+                        supervisor
+                            .queued_operation_registry()
+                            .mark_not_submitted(&operation_id, NOT_LOADED_REASON);
+                        break;
+                    }
                     ProviderSessionLoadOutcome::UnsupportedLoad => {
                         supervisor
                             .queued_operation_registry()
@@ -285,10 +312,18 @@ async fn run_provider_message_fifo(
                 },
                 submitted = async {
                     match request.clone() {
-                        ProviderQueuedPrompt::Message(message) =>
-                            supervisor.submit_delivery_prompt(message).await,
-                        ProviderQueuedPrompt::Contents(contents) =>
-                            supervisor.submit_delivery_prompt_contents(contents).await,
+                        ProviderQueuedPrompt::MessageWithHeader {
+                            request,
+                            header_context,
+                            ..
+                        } => supervisor
+                            .submit_delivery_prompt_with_header_context(
+                                request,
+                                &header_context,
+                            )
+                            .await,
+                        ProviderQueuedPrompt::Contents { request, .. } =>
+                            supervisor.submit_delivery_prompt_contents(request).await,
                     }
                 } => submitted,
             };
@@ -426,3 +461,7 @@ fn mark_remaining_not_submitted(
             .mark_not_submitted(request.operation_id(), reason);
     }
 }
+
+#[cfg(test)]
+#[path = "provider_acp_message_fifo_tests.rs"]
+mod loaded_only_tests;

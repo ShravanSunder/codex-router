@@ -44,6 +44,76 @@ fn sessions_list_json_reads_codex_state_metadata_without_prompt_leak() {
 }
 
 #[test]
+fn sessions_list_hides_empty_stored_sessions_unless_explicitly_requested() {
+    let test_root = TestRoot::new("sessions-empty-default");
+    must_ok(fs::create_dir(test_root.path()));
+    let codex_home = test_root.path().join("codex-home");
+    let project = test_root.path().join("project");
+    must_ok(fs::create_dir(&codex_home));
+    must_ok(fs::create_dir(&project));
+    create_codex_state_db_with_thread_rows(
+        &codex_home.join("state_5.sqlite"),
+        "EMPTY_SESSION_CANARY",
+        &[
+            CodexStateThreadFixture::new(
+                "empty-thread",
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                2_000,
+            )
+            .without_user_message(),
+            CodexStateThreadFixture::new(
+                "used-thread",
+                &project,
+                "codex-router",
+                "cli",
+                "cli",
+                "main",
+                1_000,
+            )
+            .with_search_fields("A real session", "preview", "First user message"),
+        ],
+    );
+    let context = CliContext::new(vec![
+        ("CODEX_HOME".to_owned(), codex_home.display().to_string()),
+        ("HOME".to_owned(), test_root.path().display().to_string()),
+    ]);
+
+    let default_output = run_cli(
+        ["--any", "--source", "all", "--list", "--format", "json"],
+        context.clone(),
+    );
+    let default_sessions: serde_json::Value = must_ok(serde_json::from_str(&default_output.stdout));
+    assert_eq!(default_sessions.as_array().map(Vec::len), Some(1));
+    assert_eq!(default_sessions[0]["session_id"], "used-thread");
+
+    let opted_in_output = run_cli(
+        [
+            "--any",
+            "--source",
+            "all",
+            "--list",
+            "--format",
+            "json",
+            "--include-empty-sessions",
+        ],
+        context,
+    );
+    let opted_in_sessions: serde_json::Value =
+        must_ok(serde_json::from_str(&opted_in_output.stdout));
+    let session_ids = opted_in_sessions
+        .as_array()
+        .expect("session list")
+        .iter()
+        .filter_map(|session| session["session_id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(session_ids, ["empty-thread", "used-thread"]);
+}
+
+#[test]
 fn sessions_codex_state_reader_returns_busy_immediately_and_leaves_state_unchanged() {
     let test_root = TestRoot::new("sessions-state-busy");
     must_ok(fs::create_dir(test_root.path()));

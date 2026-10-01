@@ -142,7 +142,12 @@ fn resolved_graph() -> Result<NonDevDependencyGraph, Box<dyn std::error::Error +
         .current_dir(workspace_root)
         .output()?;
     if !output.status.success() {
-        return Err(format!("cargo metadata exited {}", output.status).into());
+        return Err(format!(
+            "cargo metadata exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
     }
     Ok(NonDevDependencyGraph::from_metadata(
         serde_json::from_slice(&output.stdout)?,

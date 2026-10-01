@@ -24,6 +24,12 @@ pub(crate) use quota_reset_session_composition::LoopbackInteractiveResetSessionF
 /// Sanitized reset-provider composition and protocol failure.
 #[derive(Debug, Error)]
 pub enum QuotaResetError {
+    #[error("Keychain locked or access denied")]
+    CredentialStoreKeyUnavailable,
+    #[error("credential migration is incomplete for accounts: {accounts:?}")]
+    CredentialMigrationIncomplete { accounts: Vec<String> },
+    #[error("encrypted credential store could not be initialized")]
+    CredentialStoreUnavailable,
     #[error("quota reset provider request failed: {message}")]
     Request { message: String },
     #[error("quota reset provider returned HTTP {status}")]

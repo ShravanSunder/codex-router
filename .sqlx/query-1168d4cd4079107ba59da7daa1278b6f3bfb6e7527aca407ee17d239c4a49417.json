@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM subscription_windows WHERE reader_key=? AND root_id=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "1168d4cd4079107ba59da7daa1278b6f3bfb6e7527aca407ee17d239c4a49417"
+}

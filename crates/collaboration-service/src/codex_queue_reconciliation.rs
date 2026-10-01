@@ -42,7 +42,7 @@ pub(crate) async fn reconcile(
     let observed = tokio::select! {
         biased;
         () = retirement.cancelled() => return AttemptReconciliation::StillUnknown,
-        observed = tokio::time::timeout(std::time::Duration::from_secs(20), find_queued_input(&admission, &context.target, &correlation, &rendered.text)) => observed,
+        observed = tokio::time::timeout(std::time::Duration::from_secs(20), find_queued_input(&admission, &context.target, &correlation, &context.message)) => observed,
     };
     let Ok(Ok(Some(submission_id))) = observed else {
         return AttemptReconciliation::StillUnknown;
@@ -72,7 +72,7 @@ async fn find_queued_input(
     admission: &NativeAdmission,
     target: &SessionRef,
     correlation: &str,
-    text: &str,
+    message: &collaboration_protocol::MessageContent,
 ) -> Result<Option<String>, NativeConnectionError> {
     let schemas = admission
         .schemas()
@@ -104,7 +104,14 @@ async fn find_queued_input(
             };
             if matched.is_some()
                 || input.get("type").and_then(Value::as_str) != Some("text")
-                || input.get("text").and_then(Value::as_str) != Some(text)
+                || !input
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| {
+                        collaboration_protocol::queued_message_matches_content(
+                            target, message, text,
+                        )
+                    })
                 || input
                     .get("text_elements")
                     .or_else(|| input.get("textElements"))

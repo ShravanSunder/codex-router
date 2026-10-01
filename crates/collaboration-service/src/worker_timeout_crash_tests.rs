@@ -440,5 +440,6 @@ fn fixture_worker(
         )),
         backend: Some(backend),
         configuration: crate::AutomationConfigurationHandle::default(),
+        display_names: crate::SessionDisplayNameCache::default(),
     })
 }

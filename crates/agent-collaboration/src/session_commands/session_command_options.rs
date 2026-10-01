@@ -103,6 +103,8 @@ pub struct SessionsCommand {
     pub local: bool,
     /// Maximum matching sessions to load.
     pub limit: usize,
+    /// Show sessions that have never received a user message.
+    pub include_empty_sessions: bool,
     /// Print the command that would be launched instead of executing it.
     pub dry_run: bool,
     /// Arguments passed through to Codex after the router profile is selected.
@@ -187,6 +189,7 @@ impl SessionsCommand {
             new: parsed.new,
             local: parsed.local,
             limit: parsed.limit.unwrap_or(DEFAULT_SESSION_RECORD_LIMIT),
+            include_empty_sessions: parsed.include_empty_sessions,
             dry_run: parsed.dry_run,
             codex_args: parsed.codex_args,
         })
@@ -299,6 +302,9 @@ struct ClapSessionsCommand {
     local: bool,
     #[arg(long)]
     limit: Option<usize>,
+    /// Show sessions that have never received a user message.
+    #[arg(long)]
+    include_empty_sessions: bool,
     #[arg(long)]
     dry_run: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

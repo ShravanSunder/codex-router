@@ -7,6 +7,7 @@ use std::path::Path;
 use std::pin::Pin;
 
 use crate::presentation::quota::CreditUsageRefresher;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 
 use super::QuotaResetError;
 use super::provider_protocol::HttpLiveQuotaResetProvider;
@@ -27,7 +28,11 @@ pub(crate) struct InteractiveResetSession {
 }
 
 pub(crate) trait InteractiveResetSessionFactory: Send + Sync {
-    fn create(&self, router_root: &Path) -> Result<InteractiveResetSession, QuotaResetError>;
+    fn create(
+        &self,
+        router_root: &Path,
+        credential_store: EncryptedCredentialStore,
+    ) -> Result<InteractiveResetSession, QuotaResetError>;
 
     fn credit_usage_refresher(&self, router_root: &Path) -> CreditUsageRefresher;
 }
@@ -36,8 +41,16 @@ pub(crate) trait InteractiveResetSessionFactory: Send + Sync {
 pub(crate) struct FixedOriginInteractiveResetSessionFactory;
 
 impl InteractiveResetSessionFactory for FixedOriginInteractiveResetSessionFactory {
-    fn create(&self, router_root: &Path) -> Result<InteractiveResetSession, QuotaResetError> {
-        compose_http_reset_session(router_root, HttpLiveQuotaResetProvider::new()?)
+    fn create(
+        &self,
+        router_root: &Path,
+        credential_store: EncryptedCredentialStore,
+    ) -> Result<InteractiveResetSession, QuotaResetError> {
+        compose_http_reset_session(
+            router_root,
+            credential_store,
+            HttpLiveQuotaResetProvider::new()?,
+        )
     }
 
     fn credit_usage_refresher(&self, router_root: &Path) -> CreditUsageRefresher {
@@ -63,9 +76,14 @@ impl LoopbackInteractiveResetSessionFactory {
 
 #[cfg(feature = "quota-reset-test-harness")]
 impl InteractiveResetSessionFactory for LoopbackInteractiveResetSessionFactory {
-    fn create(&self, router_root: &Path) -> Result<InteractiveResetSession, QuotaResetError> {
+    fn create(
+        &self,
+        router_root: &Path,
+        credential_store: EncryptedCredentialStore,
+    ) -> Result<InteractiveResetSession, QuotaResetError> {
         compose_http_reset_session(
             router_root,
+            credential_store,
             HttpLiveQuotaResetProvider::new_loopback(self.provider_listener)?,
         )
     }
@@ -80,12 +98,11 @@ impl InteractiveResetSessionFactory for LoopbackInteractiveResetSessionFactory {
 
 fn compose_http_reset_session(
     router_root: &Path,
+    credential_store: codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
     provider: HttpLiveQuotaResetProvider,
 ) -> Result<InteractiveResetSession, QuotaResetError> {
-    let authority_reader = LiveResetAuthorityReader::new(
-        router_root.join("state.sqlite"),
-        router_root.join("secrets"),
-    );
+    let authority_reader =
+        LiveResetAuthorityReader::new(router_root.join("state.sqlite"), credential_store);
     let service = ResetWorkflowService::new(authority_reader, provider);
     let (session, ports) = QuotaInteractiveSession::new(
         service,

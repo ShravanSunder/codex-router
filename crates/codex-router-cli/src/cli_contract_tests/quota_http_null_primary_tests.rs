@@ -16,8 +16,12 @@ fn quota_refresh_http_provider_projects_weekly_window_when_primary_is_null() {
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
