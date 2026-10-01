@@ -1,9 +1,9 @@
-//! Provider-neutral prompt admission and Control text projection.
+//! Provider-neutral prompt admission and Control task-input projection.
 
 use super::*;
 
-/// Host-internal prompt admission. Public Control requests render their text
-/// into one block before reaching this boundary.
+/// Host-internal prompt admission. Public Control requests keep their prompt
+/// text as task input before reaching this boundary.
 #[derive(Clone, Debug)]
 pub struct ProviderPromptContentsRequest {
     pub operation_id: OperationId,
@@ -37,30 +37,13 @@ impl ProviderPromptContentsRequest {
 
     pub(super) fn from_control(
         request: ConversationPromptRequest,
-        display_names: &collaboration_service::SessionDisplayNameCache,
     ) -> Result<Self, Box<ConversationOperationFailure>> {
-        let header_context = collaboration_protocol::MessageHeaderContext::resolve(
-            &request.target,
-            &request.prompt,
-            display_names,
-            collaboration_protocol::MessageHeaderOrigin::Agent,
-        );
-        let rendered = collaboration_protocol::render_message_with_context(
-            &request.target,
-            &request.prompt,
-            &header_context,
-        )
-        .map_err(|_| {
-            Box::new(failure(
-                ConversationOperationFailureKind::InvalidRequest,
-                ConversationOperationFailureStage::Validation,
-                ProviderOperationEffect::None,
-                "provider prompt could not be rendered within the Control frame bound",
-                request.operation_id.clone(),
-                Some(request.target.clone()),
-            ))
-        })?;
-        let content = session_event_model::PromptContent::text(rendered.text).map_err(|_| {
+        let prompt_text = match &request.prompt {
+            collaboration_protocol::MessageContent::Agent { text, .. }
+            | collaboration_protocol::MessageContent::HumanUser { text }
+            | collaboration_protocol::MessageContent::Router { text } => text.as_str().to_owned(),
+        };
+        let content = session_event_model::PromptContent::text(prompt_text).map_err(|_| {
             Box::new(failure(
                 ConversationOperationFailureKind::InvalidRequest,
                 ConversationOperationFailureStage::Validation,
@@ -184,11 +167,10 @@ mod tests {
     use collaboration_protocol::{
         ConversationPromptRequest, MessageContent, MessageText, OperationId, SessionRef,
     };
-    use collaboration_service::SessionDisplayNameCache;
     use session_event_model::PromptContent;
 
     #[test]
-    fn control_prompt_uses_router_known_session_display_names() {
+    fn control_prompt_forwards_exact_task_text_without_router_envelope() {
         let target: SessionRef = serde_json::from_value(serde_json::json!({
             "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
             "sessionId":"target-session"
@@ -199,9 +181,6 @@ mod tests {
             "sessionId":"sender-session"
         }))
         .expect("sender session");
-        let display_names = SessionDisplayNameCache::default();
-        display_names.remember(target.clone(), "🤖 Codex Main");
-        display_names.remember(sender.clone(), "🐒 Sidekick · provider prompt");
         let request = ConversationPromptRequest {
             operation_id: OperationId::generate(),
             input_id: None,
@@ -216,15 +195,13 @@ mod tests {
             },
         };
 
-        let rendered = ProviderPromptContentsRequest::from_control(request, &display_names)
-            .expect("provider prompt contents");
-        let Some(PromptContent::Text { text }) = rendered.contents.first() else {
+        let provider_request =
+            ProviderPromptContentsRequest::from_control(request).expect("provider prompt contents");
+        let Some(PromptContent::Text { text }) = provider_request.contents.first() else {
             panic!("one text prompt should be generated");
         };
-        assert!(
-            text.as_str().starts_with(
-                "🤖 Codex Main ← 🐒 Sidekick · provider prompt\nAgent communication\n"
-            )
-        );
+        assert_eq!(text.as_str(), "Check the provider prompt.");
+        assert!(!text.as_str().contains("Agent communication"));
+        assert!(!text.as_str().contains("Self-declared sender:"));
     }
 }

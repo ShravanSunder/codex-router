@@ -31,6 +31,7 @@ const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 struct RecordingDelivery {
     requests: Mutex<Vec<DeliveryRequest>>,
+    prepared_requests: Mutex<Vec<collaboration_service::layer_zero::DeliveryRequest>>,
     store: Arc<TokioMutex<AutomationStore>>,
     stored_before_delivery: AtomicBool,
 }
@@ -39,6 +40,7 @@ impl RecordingDelivery {
     fn new(store: Arc<TokioMutex<AutomationStore>>) -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
+            prepared_requests: Mutex::new(Vec::new()),
             store,
             stored_before_delivery: AtomicBool::new(false),
         }
@@ -73,6 +75,34 @@ impl SessionMessageDelivery for RecordingDelivery {
                 }
             }
             self.requests
+                .lock()
+                .map_err(|_| DeliveryContractError::ClientOperation)?
+                .push(request);
+            Ok(DeliveryReceipt {
+                outcome: DeliveryOutcome::PeerMessageWritten,
+                reachability: Some(collaboration_protocol::SessionReachability::ClaudeCodePeer),
+                client: Some(DeliveryClientReceipt::ClaudeCodePeer),
+            })
+        })
+    }
+
+    fn deliver_prepared<'a>(
+        &'a self,
+        request: collaboration_service::layer_zero::DeliveryRequest,
+        _: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, DeliveryReceipt> {
+        Box::pin(async move {
+            let record = self
+                .store
+                .lock()
+                .await
+                .get_push_record(&request.payload.push_id)
+                .await
+                .map_err(|_| DeliveryContractError::ClientOperation)?;
+            if record.is_some_and(|record| record.delivery_state == PushDeliveryState::Attempted) {
+                self.stored_before_delivery.store(true, Ordering::SeqCst);
+            }
+            self.prepared_requests
                 .lock()
                 .map_err(|_| DeliveryContractError::ClientOperation)?
                 .push(request);
@@ -278,11 +308,20 @@ async fn message_send_persists_before_delivery_and_submits_one_linked_line() {
     assert_eq!(stored.delivery_state, PushDeliveryState::Delivered);
 
     {
-        let requests = delivery.requests.lock().expect("delivery requests");
+        let requests = delivery
+            .prepared_requests
+            .lock()
+            .expect("prepared delivery requests");
         assert_eq!(requests.len(), 1);
-        let MessageContent::Router { text } = &requests[0].message else {
-            panic!("a stored push is delivered as Router-authored content");
-        };
+        let prepared = &requests[0];
+        assert_eq!(prepared.payload.push_id, push_id);
+        assert_eq!(
+            prepared.payload.load_policy,
+            collaboration_service::LoadPolicy::MayLoad
+        );
+        assert_eq!(prepared.correlation.as_str(), push_id.as_str());
+        let text = &prepared.payload.line;
+        assert_eq!(prepared.target, target);
         assert_eq!(text.as_str().lines().count(), 1);
         assert!(text.as_str().contains("snapshot body"));
         assert!(
@@ -292,6 +331,14 @@ async fn message_send_persists_before_delivery_and_submits_one_linked_line() {
         assert!(!text.as_str().contains("Agent communication"));
         assert!(!text.as_str().contains("Self-declared sender:"));
     }
+    assert!(
+        delivery
+            .requests
+            .lock()
+            .expect("legacy delivery requests")
+            .is_empty(),
+        "stored DM should use the prepared-push route"
+    );
     control.close().await;
 }
 
@@ -454,7 +501,10 @@ async fn unverified_owner_message_is_compact_and_has_no_owner_show_bypass() {
     assert_eq!(record.origin, PushOrigin::OwnerUnverified);
     assert_eq!(result["receipt"]["outcome"]["kind"], "peerMessageWritten");
     {
-        let requests = delivery.requests.lock().expect("delivery requests");
+        let requests = delivery
+            .prepared_requests
+            .lock()
+            .expect("prepared delivery requests");
         let delivered = &requests[0];
         assert_eq!(delivered.target, target);
         assert_eq!(delivered.mode, MessageDelivery::Auto);
@@ -463,13 +513,8 @@ async fn unverified_owner_message_is_compact_and_has_no_owner_show_bypass() {
             DeliveryPrecondition::Unpinned
         ));
         assert_eq!(delivered.correlation.as_str(), push_id.as_str());
-        assert!(!matches!(
-            &delivered.message,
-            MessageContent::HumanUser { .. }
-        ));
-        let MessageContent::Router { text } = &delivered.message else {
-            panic!("an unverified owner push remains Router-authored");
-        };
+        assert_eq!(delivered.payload.push_id, push_id);
+        let text = &delivered.payload.line;
         assert!(text.as_str().starts_with("🧑 Owner (unverified)"));
         assert!(text.as_str().contains("\"human text\""));
         assert!(
@@ -478,6 +523,14 @@ async fn unverified_owner_message_is_compact_and_has_no_owner_show_bypass() {
         );
         assert!(!text.as_str().contains("Self-declared sender:"));
     }
+    assert!(
+        delivery
+            .requests
+            .lock()
+            .expect("legacy delivery requests")
+            .is_empty(),
+        "owner push should use the prepared-push route"
+    );
 
     let denied = control
         .call(
@@ -644,13 +697,23 @@ async fn reply_uses_the_selected_message_id_after_a_later_dm_arrives() {
     );
     assert_eq!(stored_reply.origin, PushOrigin::Session(target));
     {
-        let requests = delivery.requests.lock().expect("delivery requests");
+        let requests = delivery
+            .prepared_requests
+            .lock()
+            .expect("prepared delivery requests");
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[2].target, first_sender);
-        let MessageContent::Router { text } = &requests[2].message else {
-            panic!("a reply push remains Router-authored");
-        };
+        assert_eq!(requests[2].payload.push_id, reply_id);
+        let text = &requests[2].payload.line;
         assert!(text.as_str().contains("reply to first"));
     }
+    assert!(
+        delivery
+            .requests
+            .lock()
+            .expect("legacy delivery requests")
+            .is_empty(),
+        "reply push should use the prepared-push route"
+    );
     control.close().await;
 }

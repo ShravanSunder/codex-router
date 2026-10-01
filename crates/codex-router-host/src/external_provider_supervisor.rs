@@ -949,11 +949,7 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
     ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
         let operation_id = request.operation_id.clone();
         let target = Some(request.target.clone());
-        let display_names = self
-            .inner
-            .display_names
-            .get_or_init(collaboration_service::SessionDisplayNameCache::default);
-        match ProviderPromptContentsRequest::from_control(request, display_names) {
+        match ProviderPromptContentsRequest::from_control(request) {
             Ok(contents_request) => self.prompt_contents(contents_request),
             Err(error) => retain_operation(operation_id, target, async move { Err(*error) }),
         }

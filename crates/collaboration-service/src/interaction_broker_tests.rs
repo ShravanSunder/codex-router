@@ -579,6 +579,149 @@ async fn approval_notice_uses_selected_delivery_outcome() {
     }
 }
 
+#[tokio::test]
+async fn legacy_approval_record_is_stored_and_delivered_as_an_interaction_push() {
+    let (broker, generation, directory) = fixture_broker().await;
+    let requester = session(&broker.service_id, "legacy-requester");
+    let approver = session(&broker.service_id, "legacy-approver");
+    let push_store = Arc::new(tokio::sync::Mutex::new(
+        automation_storage::AutomationStore::open(&directory.join("automation.sqlite"))
+            .await
+            .expect("push store reader"),
+    ));
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let delivered = Arc::new(tokio::sync::Notify::new());
+    let prepared_pushes_at_delivery = Arc::new(Mutex::new(Vec::new()));
+    broker
+        .install_session_delivery(Arc::new(CapturingInteractionDelivery {
+            notices,
+            delivered,
+            push_store: Some(Arc::clone(&push_store)),
+            prepared_pushes_at_delivery: Arc::clone(&prepared_pushes_at_delivery),
+        }))
+        .expect("delivery route");
+    let request = ApprovalRequestRecord {
+        request_id: "legacy-approval-request".to_owned(),
+        requester: requester.clone(),
+        approver: approver.clone(),
+        generation,
+        state: ApprovalState::PendingClientDecision,
+        reason: Some("The file is outside the workspace.".to_owned()),
+        offered_options: vec![collaboration_protocol::ApprovalOfferedOption {
+            option_id: "allow-once".to_owned(),
+            label: Some("Allow once".to_owned()),
+            scope: collaboration_protocol::ApprovalOptionScope::AllowOnce,
+        }],
+        presentation: Some(collaboration_protocol::ApprovalPresentation {
+            tool_name: Some("Filesystem".to_owned()),
+            title: Some("Read a private file".to_owned()),
+            kind: Some("readFile".to_owned()),
+            arguments: vec![collaboration_protocol::ApprovalArgument {
+                name: "path".to_owned(),
+                value: "/tmp/secret.txt".to_owned(),
+            }],
+            permission_details: vec!["read /tmp/secret.txt".to_owned()],
+        }),
+        decision: None,
+        operation: json!({"params":{"path":"/tmp/secret.txt"}}),
+        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+    };
+
+    broker
+        .deliver(&request)
+        .await
+        .expect("legacy approval notice delivered");
+
+    let captures = prepared_pushes_at_delivery.lock().await;
+    assert_eq!(captures.len(), 1);
+    let capture = &captures[0];
+    let stored_at_delivery = capture
+        .record_at_delivery
+        .as_ref()
+        .expect("approval push stored before delivery");
+    assert_eq!(
+        stored_at_delivery.delivery_state,
+        automation_storage::PushDeliveryState::Attempted
+    );
+    assert_eq!(
+        stored_at_delivery.kind,
+        collaboration_protocol::PushKind::Approval
+    );
+    assert_eq!(
+        stored_at_delivery.origin,
+        collaboration_protocol::PushOrigin::Router(collaboration_protocol::PushKind::Approval)
+    );
+    assert_eq!(stored_at_delivery.target, request.approver);
+    let origin_ref = collaboration_protocol::RouterOriginRef::parse_canonical(
+        stored_at_delivery
+            .origin_router_ref
+            .as_deref()
+            .expect("interaction origin ref"),
+    )
+    .expect("canonical interaction origin");
+    let collaboration_protocol::RouterOriginRef::Interaction {
+        interaction_id,
+        presentation_id,
+    } = origin_ref
+    else {
+        panic!("approval must use an interaction origin");
+    };
+    assert_eq!(interaction_id.as_str(), request.request_id);
+    assert_eq!(
+        uuid::Uuid::parse_str(presentation_id.as_str())
+            .expect("presentation UUID")
+            .get_version_num(),
+        7
+    );
+    let body = stored_at_delivery.body.as_deref().expect("approval body");
+    assert!(!body.trim_start().starts_with('{'));
+    assert!(body.contains("Approval request: Read a private file"));
+    assert!(body.contains("legacy-approval-request"));
+    assert!(body.contains("agent-collaboration approval decide"));
+
+    let prepared = &capture.request;
+    assert_eq!(prepared.target, request.approver);
+    assert_eq!(prepared.payload.push_id, stored_at_delivery.push_id);
+    assert_eq!(
+        prepared.correlation.as_str(),
+        stored_at_delivery.push_id.as_str()
+    );
+    assert_eq!(prepared.mode, collaboration_protocol::MessageDelivery::Auto);
+    assert!(
+        prepared
+            .payload
+            .line
+            .as_str()
+            .starts_with("❓ Router approval @Approval Fixture")
+    );
+    assert!(
+        !prepared
+            .payload
+            .line
+            .as_str()
+            .contains("Agent communication")
+    );
+    assert!(
+        !prepared
+            .payload
+            .line
+            .as_str()
+            .contains("Self-declared sender:")
+    );
+
+    let stored_after_delivery = push_store
+        .lock()
+        .await
+        .get_push_record(&stored_at_delivery.push_id)
+        .await
+        .expect("read delivered approval push")
+        .expect("approval push persists");
+    assert_eq!(
+        stored_after_delivery.delivery_state,
+        automation_storage::PushDeliveryState::Delivered
+    );
+}
+
 pub(super) fn session(service_id: &UuidIdentity, id: &str) -> SessionRef {
     SessionRef {
         endpoint: EndpointRef {

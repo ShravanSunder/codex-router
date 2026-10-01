@@ -6,10 +6,10 @@ use crate::{
 };
 use agent_automation::AttemptId;
 use collaboration_protocol::{
-    DeliveryCorrelationId, DeliveryOutcome, DeliveryReceipt, EndpointId, EndpointRef,
-    InteractionId, InteractionPresentationId, MachineId, MessageDelivery, MessageText,
-    PushHeaderFacts, PushId, PushKind, PushLineInput, PushOrigin, PushRecord, PushRecordDraft,
-    RouterLink, RouterOriginRef, SessionDisplayNameLookup, SessionId,
+    ApprovalOptionScope, ApprovalRequestRecord, DeliveryCorrelationId, DeliveryOutcome,
+    DeliveryReceipt, EndpointId, EndpointRef, InteractionId, InteractionPresentationId, MachineId,
+    MessageDelivery, MessageText, PushHeaderFacts, PushId, PushKind, PushLineInput, PushOrigin,
+    PushRecord, PushRecordDraft, RouterLink, RouterOriginRef, SessionDisplayNameLookup, SessionId,
     SessionRef as ProtocolSessionRef, UuidIdentity, render_push_line,
 };
 use message_board::{Identity, SessionRef};
@@ -111,6 +111,59 @@ async fn deliver_notice(
         created_at: chrono::Utc::now(),
     };
 
+    let outcome = deliver_interaction_push_record(delivery.as_ref(), push_context, draft).await?;
+    match outcome {
+        DeliveryOutcome::Started
+        | DeliveryOutcome::Steered
+        | DeliveryOutcome::StartedOrSteered
+        | DeliveryOutcome::Queued
+        | DeliveryOutcome::PeerMessageWritten
+        | DeliveryOutcome::Unknown => Ok(()),
+        DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
+            Err(InteractionHistoryError::Unavailable)
+        }
+    }
+}
+
+pub(super) async fn deliver_legacy_approval_record_notice(
+    delivery: &dyn SessionMessageDelivery,
+    display_names: &crate::SessionDisplayNameCache,
+    push_context: &InteractionPushContext,
+    request: &ApprovalRequestRecord,
+) -> Result<DeliveryOutcome, InteractionHistoryError> {
+    let body = legacy_approval_notice_body(request)?;
+    let requester_display_name = display_names
+        .display_name_for(&request.requester)
+        .ok()
+        .flatten();
+    let origin_router_ref = interaction_origin_ref(&request.request_id)?
+        .canonical_string()
+        .map_err(|_| InteractionHistoryError::Unavailable)?;
+    let push_id = PushId::try_from(uuid::Uuid::now_v7().hyphenated().to_string())
+        .map_err(|_| InteractionHistoryError::Unavailable)?;
+    let draft = PushRecordDraft {
+        push_id,
+        kind: PushKind::Approval,
+        origin: PushOrigin::Router(PushKind::Approval),
+        origin_router_ref: Some(origin_router_ref),
+        target: request.approver.clone(),
+        reply_to_push_id: None,
+        header_facts: PushHeaderFacts::Approval {
+            requester: request.requester.clone(),
+            requester_display_name,
+        },
+        body: Some(body),
+        activity: None,
+        created_at: chrono::Utc::now(),
+    };
+    deliver_interaction_push_record(delivery, push_context, draft).await
+}
+
+async fn deliver_interaction_push_record(
+    delivery: &dyn SessionMessageDelivery,
+    push_context: &InteractionPushContext,
+    draft: PushRecordDraft,
+) -> Result<DeliveryOutcome, InteractionHistoryError> {
     let record = push_context
         .store
         .lock()
@@ -131,7 +184,7 @@ async fn deliver_notice(
         .map_err(|_| InteractionHistoryError::Unavailable)?;
     let request = crate::layer_zero::DeliveryRequest {
         payload: prepared,
-        target,
+        target: record.target.clone(),
         mode: MessageDelivery::Auto,
         precondition: DeliveryPrecondition::Unpinned,
         correlation,
@@ -148,18 +201,7 @@ async fn deliver_notice(
         Ok(Err(_)) | Err(_) => unknown_receipt(),
     };
     settle_interaction_push(push_context, &record.push_id, &receipt).await;
-
-    match &receipt.outcome {
-        DeliveryOutcome::Started
-        | DeliveryOutcome::Steered
-        | DeliveryOutcome::StartedOrSteered
-        | DeliveryOutcome::Queued
-        | DeliveryOutcome::PeerMessageWritten
-        | DeliveryOutcome::Unknown => Ok(()),
-        DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
-            Err(InteractionHistoryError::Unavailable)
-        }
-    }
+    Ok(receipt.outcome)
 }
 
 fn prepared_interaction_push(
@@ -266,6 +308,87 @@ impl TypedInteractionNotice<'_> {
         match self {
             Self::Approval(request) => approval_notice_body(request, approver),
             Self::Question(request) => question_notice_body(request, approver),
+        }
+    }
+}
+
+fn legacy_approval_notice_body(
+    request: &ApprovalRequestRecord,
+) -> Result<String, InteractionHistoryError> {
+    let presentation = request.presentation.as_ref();
+    let title = presentation
+        .and_then(|presentation| presentation.title.as_deref())
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| {
+            presentation
+                .and_then(|presentation| presentation.tool_name.as_deref())
+                .filter(|tool_name| !tool_name.trim().is_empty())
+        })
+        .unwrap_or("Approval required");
+    let actor = serde_json::to_string(&request.approver)
+        .map_err(|_| InteractionHistoryError::Unavailable)?;
+    let mut body = format!(
+        "Approval request: {title}\nRequest ID: {}",
+        request.request_id
+    );
+    if let Some(reason) = request.reason.as_deref() {
+        body.push_str("\nReason: ");
+        body.push_str(reason);
+    }
+    if let Some(presentation) = presentation {
+        if let Some(tool_name) = presentation
+            .tool_name
+            .as_deref()
+            .filter(|tool_name| !tool_name.trim().is_empty() && *tool_name != title)
+        {
+            body.push_str("\nTool: ");
+            body.push_str(tool_name);
+        }
+        if let Some(kind) = presentation.kind.as_deref() {
+            body.push_str("\nKind: ");
+            body.push_str(kind);
+        }
+        for argument in &presentation.arguments {
+            body.push_str(&format!("\n{}: {}", argument.name, argument.value));
+        }
+        for permission_detail in &presentation.permission_details {
+            body.push_str("\nPermission: ");
+            body.push_str(permission_detail);
+        }
+    }
+    if request.offered_options.is_empty() {
+        body.push_str("\n\nTo decide: agent-collaboration approval decide --request-id ");
+        body.push_str(&shell_quote(&request.request_id));
+        body.push_str(" --actor ");
+        body.push_str(&shell_quote(&actor));
+        body.push_str(" --decision <allow|deny>");
+    } else {
+        body.push_str("\n\nOptions:");
+        for option in &request.offered_options {
+            let label = option.label.as_deref().unwrap_or(&option.option_id);
+            body.push_str(&format!(
+                "\n- {label} ({})\n  To choose: agent-collaboration approval decide --request-id {} --actor {} --option-id {}",
+                legacy_approval_scope_label(&option.scope),
+                shell_quote(&request.request_id),
+                shell_quote(&actor),
+                shell_quote(&option.option_id),
+            ));
+        }
+    }
+    body.push_str("\nExpires at: ");
+    body.push_str(&request.expires_at);
+    Ok(body)
+}
+
+fn legacy_approval_scope_label(scope: &ApprovalOptionScope) -> String {
+    match scope {
+        ApprovalOptionScope::AllowOnce => "allow once".to_owned(),
+        ApprovalOptionScope::AllowForSession => "allow for session".to_owned(),
+        ApprovalOptionScope::AllowAlways => "always allow".to_owned(),
+        ApprovalOptionScope::RejectOnce => "reject once".to_owned(),
+        ApprovalOptionScope::RejectAlways => "always reject".to_owned(),
+        ApprovalOptionScope::Unsupported { provider_kind } => {
+            format!("unsupported by {provider_kind}")
         }
     }
 }

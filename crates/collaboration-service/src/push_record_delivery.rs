@@ -1,14 +1,13 @@
-//! Store-first direct-message delivery used until Layer 0 accepts PreparedPush.
+//! Store-first direct-message delivery through Layer 0's PreparedPush path.
 use crate::{
-    DeliveryPrecondition, DeliveryRequest, LoadPolicy, ServiceIdentity,
-    push_record_resolver::line_for, session_delivery_contract::UnstoredAttemptEvidenceSink,
+    DeliveryPrecondition, LoadPolicy, ServiceIdentity, push_record_resolver::line_for,
+    session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
 use automation_storage::StorageError;
 use collaboration_protocol::{
     AttemptId, CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, DeliveryReceipt,
-    MessageContent, MessageDelivery, MessageHeaderContext, MessageHeaderOrigin, MessageText,
-    PushId, PushIdError, PushKind, PushOrigin, PushRecord, PushRecordDraft,
-    PushRecordValidationError, RouterNoticeKind, SessionDisplayNameLookup,
+    MessageContent, MessageDelivery, MessageText, PushId, PushIdError, PushKind, PushOrigin,
+    PushRecord, PushRecordDraft, PushRecordValidationError, SessionDisplayNameLookup,
     SessionMessageReplyParams, SessionMessageReplyResult, SessionMessageSendParams, SessionRef,
     session_identity,
 };
@@ -243,21 +242,17 @@ pub(crate) async fn store_first_and_deliver(
     let line: MessageText = line
         .try_into()
         .map_err(|_| PushDeliveryFailure::LineInvalid)?;
-    let message = MessageContent::Router { text: line };
-    let header_context = MessageHeaderContext::resolve(
-        &target,
-        &message,
-        &identity.display_names,
-        MessageHeaderOrigin::RouterNotice(RouterNoticeKind::Other),
-    );
+    let prepared = crate::layer_zero::PreparedPush {
+        push_id: push_id.clone(),
+        line,
+        load_policy: LoadPolicy::MayLoad,
+    };
     let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())
         .map_err(|_| PushDeliveryFailure::LineInvalid)?;
-    let request = DeliveryRequest {
+    let request = crate::layer_zero::DeliveryRequest {
+        payload: prepared,
         target,
-        message,
-        header_context,
         mode,
-        load_policy: LoadPolicy::MayLoad,
         precondition: generation_guard.map_or(DeliveryPrecondition::Unpinned, |expected| {
             DeliveryPrecondition::EndpointGeneration { expected }
         }),
@@ -265,7 +260,7 @@ pub(crate) async fn store_first_and_deliver(
         attempt: AttemptId::generate(),
     };
     let outcome = match delivery
-        .deliver(request, &UnstoredAttemptEvidenceSink)
+        .deliver_prepared(request, &UnstoredAttemptEvidenceSink)
         .await
     {
         Ok(receipt) => receipt,

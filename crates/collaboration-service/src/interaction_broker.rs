@@ -1,8 +1,5 @@
 //! Service-owned routing for client-exposed Codex approval callbacks.
-use crate::{
-    DeliveryPrecondition, DeliveryRequest, LoadPolicy, NativeControlBackend,
-    SessionMessageDelivery, session_delivery_contract::UnstoredAttemptEvidenceSink,
-};
+use crate::{NativeControlBackend, SessionMessageDelivery};
 use codex_acp_adapter::{
     ApprovalBroker, ApprovalBrokerError, ApprovalRoute, BrokeredApprovalOutcome,
     BrokeredApprovalRequest,
@@ -11,8 +8,7 @@ use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalDetailedListResult,
     ApprovalDetailedRecord, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionEffect,
     ApprovalOptionScope, ApprovalOptionView, ApprovalOptionViewScope, ApprovalPresentation,
-    ApprovalRequestRecord, ApprovalState, DeliveryOutcome, EndpointRef, MessageContent,
-    MessageDelivery, MessageHeaderContext, MessageHeaderOrigin, OperationId, SessionRef,
+    ApprovalRequestRecord, ApprovalState, DeliveryOutcome, EndpointRef, OperationId, SessionRef,
     UuidIdentity,
 };
 use serde_json::Value;
@@ -830,17 +826,6 @@ impl ServiceInteractionBroker {
     }
 
     async fn deliver(&self, record: &ApprovalRequestRecord) -> Result<(), ApprovalBrokerError> {
-        let text = serde_json::to_string(record).map_err(|_| ApprovalBrokerError::Unavailable)?;
-        self.deliver_message(record.requester.clone(), record.approver.clone(), text)
-            .await
-    }
-
-    async fn deliver_message(
-        &self,
-        requester: SessionRef,
-        approver: SessionRef,
-        text: String,
-    ) -> Result<(), ApprovalBrokerError> {
         let delivery = self
             .session_delivery
             .get()
@@ -848,52 +833,28 @@ impl ServiceInteractionBroker {
         let display_names = self
             .display_names
             .get_or_init(crate::SessionDisplayNameCache::default);
-        deliver_message_via(delivery.as_ref(), display_names, requester, approver, text).await
-    }
-}
-
-async fn deliver_message_via(
-    delivery: &dyn SessionMessageDelivery,
-    display_names: &crate::SessionDisplayNameCache,
-    requester: SessionRef,
-    approver: SessionRef,
-    text: String,
-) -> Result<(), ApprovalBrokerError> {
-    let message = MessageContent::Agent {
-        sender: requester,
-        text: text
-            .try_into()
-            .map_err(|_| ApprovalBrokerError::Unavailable)?,
-    };
-    let header_context = MessageHeaderContext::resolve(
-        &approver,
-        &message,
-        display_names,
-        MessageHeaderOrigin::Agent,
-    );
-    let request = DeliveryRequest {
-        target: approver,
-        message,
-        header_context,
-        mode: MessageDelivery::Auto,
-        load_policy: LoadPolicy::MayLoad,
-        precondition: DeliveryPrecondition::Unpinned,
-        correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
-        attempt: agent_automation::AttemptId::generate(),
-    };
-    let receipt = delivery
-        .deliver(request, &UnstoredAttemptEvidenceSink)
+        let push_context = self
+            .push_context
+            .get()
+            .ok_or(ApprovalBrokerError::Unavailable)?;
+        let outcome = typed_interaction_notice::deliver_legacy_approval_record_notice(
+            delivery.as_ref(),
+            display_names,
+            push_context,
+            record,
+        )
         .await
         .map_err(|_| ApprovalBrokerError::Unavailable)?;
-    match receipt.outcome {
-        DeliveryOutcome::Started
-        | DeliveryOutcome::Steered
-        | DeliveryOutcome::StartedOrSteered
-        | DeliveryOutcome::Queued
-        | DeliveryOutcome::PeerMessageWritten
-        | DeliveryOutcome::Unknown => Ok(()),
-        DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
-            Err(ApprovalBrokerError::RouteUnavailable)
+        match outcome {
+            DeliveryOutcome::Started
+            | DeliveryOutcome::Steered
+            | DeliveryOutcome::StartedOrSteered
+            | DeliveryOutcome::Queued
+            | DeliveryOutcome::PeerMessageWritten
+            | DeliveryOutcome::Unknown => Ok(()),
+            DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
+                Err(ApprovalBrokerError::RouteUnavailable)
+            }
         }
     }
 }
