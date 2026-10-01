@@ -13,6 +13,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[path = "support/native_permission_echo.rs"]
+mod native_permission_echo;
+use native_permission_echo::applied_router_sandbox;
 #[path = "support/conversation_operation_recorder.rs"]
 mod conversation_operation_recorder;
 use conversation_operation_recorder::AcceptingConversationRecorder;
@@ -216,7 +219,7 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
             let result = if method == "initialize" {
                 json!({})
             } else {
-                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"created-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}})
+                json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":applied_router_sandbox(&request),"thread":{"id":"created-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}})
             };
             if method != "initialize" {
                 setup_entered.send(method).await.unwrap();
@@ -416,7 +419,6 @@ async fn detached_create_finishes_and_holds_its_empty_thread()
     let listener = tokio::net::UnixListener::bind(&socket)?;
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let native_scratch = scratch.clone();
     let backend = tokio::spawn(async move {
         let mut entered_tx = Some(entered_tx);
         let mut release_rx = Some(release_rx);
@@ -445,7 +447,7 @@ async fn detached_create_finishes_and_holds_its_empty_thread()
                 json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request",
                     "approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
-                    "sandbox":{"type":"workspaceWrite","writableRoots":[native_scratch]},
+                    "sandbox":applied_router_sandbox(&request),
                     "thread":{"id":"detached-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}})
             };
             let _sent = wire
@@ -553,7 +555,7 @@ async fn closed_create_connection_loads_held_binding_without_native_resume_and_p
                     "cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request",
                     "approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
-                    "sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},
+                    "sandbox":applied_router_sandbox(&request),
                     "thread":{"id":"created-thread","cwd":"/work","status":{"type":"idle"},"turns":[]}
                 }),
                 "turn/start" => json!({"turn":{"id":"turn-one"}}),

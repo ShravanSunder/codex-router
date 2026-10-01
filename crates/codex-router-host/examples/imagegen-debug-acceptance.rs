@@ -202,18 +202,9 @@ async fn spawn_app_server(
     port: u16,
 ) -> Result<ProcessGroupChild, Box<dyn std::error::Error>> {
     let paths = CodexPaths::from_codex_home(codex_home.to_owned());
-    let control_socket =
-        codex_native_integration::RouterControlSocketPath::in_collaboration_directory(
-            &run_directory.join("unused-control"),
-        )?;
     let image_profile = profile::image_profile(codex_home, port)?;
-    let spec = AppServerCommandSpec::new(
-        &paths,
-        &CodexRouterProfile::new(port),
-        &control_socket,
-        socket,
-    )
-    .with_debug_profile(&image_profile);
+    let spec = AppServerCommandSpec::new(&paths, &CodexRouterProfile::new(port), socket)
+        .with_debug_profile(&image_profile);
     let version = codex_native_integration::managed_executable_version(&spec.executable()).await?;
     if version != profile::REQUIRED_CODEX_VERSION {
         return Err(format!(

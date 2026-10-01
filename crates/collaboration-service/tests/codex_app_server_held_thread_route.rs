@@ -1,4 +1,6 @@
 use agent_automation::{RouteEffectEvidence, SubmissionEffect};
+#[path = "../../codex-acp-adapter/tests/support/native_permission_echo.rs"]
+mod native_permission_echo;
 use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageContent,
     MessageDelivery, MessageHeaderContext, MessageText, PushId, SessionRef, UuidIdentity,
@@ -9,6 +11,7 @@ use collaboration_service::{
     NativeGenerationGate, ScheduledRunPayload, SessionDeliveryRoute, layer_zero::PreparedPush,
 };
 use futures_util::{SinkExt, StreamExt};
+use native_permission_echo::applied_router_sandbox;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -210,7 +213,6 @@ async fn exercise_held_empty_thread(
     ));
     let evidence = Arc::new(RecordingEvidenceSink(Mutex::new(Vec::new())));
     let observed = Arc::clone(&evidence);
-    let backend_scratch = scratch.clone();
     let run_id = agent_automation::RunId::generate();
     let expected_run_id = run_id.clone();
     let backend = tokio::spawn(async move {
@@ -272,7 +274,7 @@ async fn exercise_held_empty_thread(
                 "thread/start" => json!({
                     "cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
-                    "sandbox":{"type":"workspaceWrite","writableRoots":[backend_scratch]},
+                    "sandbox":applied_router_sandbox(&request),
                     "thread":{"id":"empty-thread","cwd":"/work","turns":[]}
                 }),
                 "thread/queue/add" => json!({"queuedSubmission":{"id":"queued-one"}}),
