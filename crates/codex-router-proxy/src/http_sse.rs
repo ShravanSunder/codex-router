@@ -210,11 +210,17 @@ impl HttpProxyRequest {
         &self.excluded_accounts
     }
 
+    /// Returns client headers in their original order, including duplicate names.
+    #[must_use]
+    pub(crate) fn headers(&self) -> &[Header] {
+        &self.headers
+    }
+
     /// Returns first header value by normalized name.
     #[must_use]
     pub fn header_value(&self, name: &str) -> Option<&str> {
         let normalized = name.to_ascii_lowercase();
-        self.headers
+        self.headers()
             .iter()
             .find(|header| header.name() == normalized)
             .map(Header::value)
@@ -232,10 +238,9 @@ pub struct UpstreamHttpRequest {
 }
 
 impl UpstreamHttpRequest {
-    /// Creates a sanitized upstream request for transport-boundary tests.
-    #[cfg(test)]
+    /// Creates a request after the provider edge has sanitized its headers.
     #[must_use]
-    pub(crate) const fn new_for_test(
+    pub(crate) const fn new(
         method: Method,
         path: String,
         route_kind: RouteKind,
@@ -249,6 +254,19 @@ impl UpstreamHttpRequest {
             headers,
             body,
         }
+    }
+
+    /// Creates a sanitized upstream request for transport-boundary tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn new_for_test(
+        method: Method,
+        path: String,
+        route_kind: RouteKind,
+        headers: HeaderCollection,
+        body: Vec<u8>,
+    ) -> Self {
+        Self::new(method, path, route_kind, headers, body)
     }
 
     /// Returns request method.
@@ -287,13 +305,13 @@ impl UpstreamHttpRequest {
         self,
         body: BoxBody<Bytes, AsyncHttpBodyError>,
     ) -> StreamingUpstreamHttpRequest {
-        StreamingUpstreamHttpRequest {
-            method: self.method,
-            path: self.path,
-            route_kind: self.route_kind,
-            headers: self.headers,
+        StreamingUpstreamHttpRequest::new(
+            self.method,
+            self.path,
+            self.route_kind,
+            self.headers,
             body,
-        }
+        )
     }
 }
 
@@ -307,10 +325,9 @@ pub struct StreamingUpstreamHttpRequest {
 }
 
 impl StreamingUpstreamHttpRequest {
-    /// Creates a sanitized streaming upstream request for transport-boundary tests.
-    #[cfg(test)]
+    /// Creates a streaming request after the provider edge has sanitized its headers.
     #[must_use]
-    pub(crate) const fn new_for_test(
+    pub(crate) const fn new(
         method: Method,
         path: String,
         route_kind: RouteKind,
@@ -324,6 +341,19 @@ impl StreamingUpstreamHttpRequest {
             headers,
             body,
         }
+    }
+
+    /// Creates a sanitized streaming upstream request for transport-boundary tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn new_for_test(
+        method: Method,
+        path: String,
+        route_kind: RouteKind,
+        headers: HeaderCollection,
+        body: BoxBody<Bytes, AsyncHttpBodyError>,
+    ) -> Self {
+        Self::new(method, path, route_kind, headers, body)
     }
 
     /// Returns request method.
@@ -748,13 +778,13 @@ impl<'a, T> HttpProxyService<'a, T> {
             .with_body(request.body)
             .build_with_chatgpt_account_id(provider_bearer_token, chatgpt_account_id);
 
-        Ok(UpstreamHttpRequest {
-            method: request.method,
-            path: original_path,
+        Ok(UpstreamHttpRequest::new(
+            request.method,
+            original_path,
             route_kind,
-            headers: upstream_request.headers().clone(),
-            body: upstream_request.body().to_vec(),
-        })
+            upstream_request.headers().clone(),
+            upstream_request.body().to_vec(),
+        ))
     }
 }
 
