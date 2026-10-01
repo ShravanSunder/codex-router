@@ -182,7 +182,7 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
             }
             let peer = match self.lookup(&run.target).await {
                 PeerSessionLookup::Writable(peer) if peer.process_id == recorded.process_id => peer,
-                PeerSessionLookup::LiveUnsupported { .. } => {
+                PeerSessionLookup::LiveUnsupported { .. } | PeerSessionLookup::Ambiguous { .. } => {
                     return Ok(rejected(
                         DeliveryRejectionReason::LiveElsewhere,
                         DeliveryNextAction::InspectTarget,

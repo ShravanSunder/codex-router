@@ -32,6 +32,9 @@ enum PeerDeliveryPreparation {
     Finished(DeliveryReceipt),
 }
 
+const AMBIGUOUS_PEER_CLAIM_REASON: &str =
+    "multiple live Claude Code registry records claim this session";
+
 impl ClaudeCodePeerDeliveryRoute {
     #[must_use]
     pub fn new(
@@ -184,6 +187,12 @@ impl ClaudeCodePeerDeliveryRoute {
             PeerSessionLookup::LiveUnsupported { reason } => PeerDeliveryPreparation::Finished(
                 peer_rejection(DeliveryRejectionReason::LiveElsewhere, &reason),
             ),
+            PeerSessionLookup::Ambiguous { .. } => {
+                PeerDeliveryPreparation::Finished(peer_rejection(
+                    DeliveryRejectionReason::LiveElsewhere,
+                    AMBIGUOUS_PEER_CLAIM_REASON,
+                ))
+            }
             PeerSessionLookup::Writable(peer) => PeerDeliveryPreparation::Ready(peer),
         })
     }
@@ -277,7 +286,9 @@ impl LiveSessionOwnershipCheck for ClaudeCodePeerDeliveryRoute {
             Ok(match self.lookup(target).await {
                 PeerSessionLookup::Absent => LiveSessionOwnership::NotLive,
                 PeerSessionLookup::Writable(_) => LiveSessionOwnership::LiveWritable,
-                PeerSessionLookup::LiveUnsupported { .. } => LiveSessionOwnership::LiveUnsupported,
+                PeerSessionLookup::LiveUnsupported { .. } | PeerSessionLookup::Ambiguous { .. } => {
+                    LiveSessionOwnership::LiveUnsupported
+                }
             })
         })
     }
@@ -304,6 +315,10 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
                     writable: false,
                     detail: Some(reason),
                 },
+                PeerSessionLookup::Ambiguous { .. } => RouteClaim::LiveElsewhere {
+                    writable: false,
+                    detail: Some(AMBIGUOUS_PEER_CLAIM_REASON.to_owned()),
+                },
             })
         })
     }
@@ -319,6 +334,9 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
                 PeerSessionLookup::Writable(_) => RoutePresence::Running,
                 PeerSessionLookup::LiveUnsupported { reason } => RoutePresence::LiveElsewhere {
                     detail: Some(reason),
+                },
+                PeerSessionLookup::Ambiguous { .. } => RoutePresence::LiveElsewhere {
+                    detail: Some(AMBIGUOUS_PEER_CLAIM_REASON.to_owned()),
                 },
             })
         })
