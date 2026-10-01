@@ -485,6 +485,7 @@ fn message_send_route_push_results_match_advertised_output_schema() {
             "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
             "target":target,
             "targetIdentity":"✳️ codex-local/threa",
+            "deliveryState":"delivered",
             "receipt":receipt
         });
         let push_result: collaboration_protocol::PushMessageSendResult =
@@ -498,6 +499,33 @@ fn message_send_route_push_results_match_advertised_output_schema() {
             panic!("{route} structuredContent violates advertised schema: {error}; {structured}")
         });
     }
+}
+
+#[test]
+fn message_send_held_delivery_is_structured_success() {
+    let link = format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}");
+    let push_result: collaboration_protocol::PushMessageSendResult =
+        serde_json::from_value(serde_json::json!({
+            "pushId":FIXTURE_PUSH_ID,
+            "link":link,
+            "target":fixture_session("codex-local", "thread-a"),
+            "targetIdentity":"✳️ codex-local/thread-a",
+            "deliveryState":"held",
+            "receipt":{
+                "outcome":{"kind":"notSubmitted","retryable":true,"reason":"target is not running"},
+                "reachability":null,
+                "client":null
+            }
+        }))
+        .expect("typed held push result");
+
+    let result = super::message_tool_result(Ok(push_result));
+
+    assert_ne!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured held success");
+    assert_eq!(structured["deliveryState"], "held");
+    assert_eq!(structured["link"], link);
+    assert_eq!(structured["receipt"]["outcome"]["kind"], "notSubmitted");
 }
 
 #[test]
@@ -538,11 +566,39 @@ fn message_reply_is_by_reference_and_has_no_latest_sender_compatibility_fields()
         "targetIdentity":"✳️ claude-local/sender-s",
         "pushId":FIXTURE_PUSH_ID,
         "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
+        "deliveryState":"delivered",
         "receipt":{"outcome":{"kind":"peerMessageWritten"},
             "reachability":"claudeCodePeer",
             "client":{"kind":"claudeCodePeer"}}
     });
     assert!(validator.is_valid(&valid_reply_result));
+}
+
+#[test]
+fn message_reply_held_delivery_is_structured_success() {
+    let link = format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}");
+    let reply_result: collaboration_protocol::SessionMessageReplyResult =
+        serde_json::from_value(serde_json::json!({
+            "target":fixture_session("claude-local", "sender-session"),
+            "targetIdentity":"✳️ claude-local/sender-session",
+            "pushId":FIXTURE_PUSH_ID,
+            "link":link,
+            "deliveryState":"held",
+            "receipt":{
+                "outcome":{"kind":"notSubmitted","retryable":true,"reason":"target is not running"},
+                "reachability":null,
+                "client":null
+            }
+        }))
+        .expect("typed held reply result");
+
+    let result = super::message_reply_tool_result(Ok(reply_result));
+
+    assert_ne!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured held success");
+    assert_eq!(structured["deliveryState"], "held");
+    assert_eq!(structured["link"], link);
+    assert_eq!(structured["receipt"]["outcome"]["kind"], "notSubmitted");
 }
 
 #[test]
@@ -596,6 +652,7 @@ fn message_send_unknown_delivery_retains_outcome_in_typed_error() {
             "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
             "target":fixture_session("codex-local", "thread-a"),
             "targetIdentity":"✳️ codex-local/thread-a",
+            "deliveryState":"outcome-unknown",
             "receipt":{"outcome":{"kind":"unknown"},"reachability":null,"client":null}
         }))
         .expect("typed unknown push result");
@@ -628,6 +685,7 @@ fn message_send_foreign_writer_rejection_has_typed_action_in_mcp_error() {
             "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
             "target":fixture_session("codex-local", "thread-a"),
             "targetIdentity":"✳️ codex-local/thread-a",
+            "deliveryState":"rejected",
             "receipt":{
                 "outcome":{
                     "kind":"rejected","reason":"heldByAnotherClient",

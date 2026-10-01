@@ -14,7 +14,7 @@ use collaboration_protocol::{
     NativeSessionListParams, NativeSessionListResult, OperationId, ProviderInspectFailure,
     ProviderSessionInspectRequest, ProviderSessionInspectResult, ProviderSessionListParams,
     ProviderSessionListResult, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
-    ProviderSettingsResult, ProviderSettingsSetRequest, PushMessageSendResult,
+    ProviderSettingsResult, ProviderSettingsSetRequest, PushDeliveryState, PushMessageSendResult,
     PushRecordHistoryParams, PushRecordListParams, PushRecordListResult, PushRecordShowParams,
     PushRecordShowResult, RouterExecutableRelation, SessionMessageReplyResult,
     router_build_warning,
@@ -963,6 +963,9 @@ fn operation_error_result(
 fn message_tool_result(result: Result<PushMessageSendResult, MessageSendError>) -> CallToolResult {
     match result {
         Ok(push) => {
+            if push.delivery_state == PushDeliveryState::Held {
+                return structured_result(Ok(push), OperationEffect::None);
+            }
             let (kind, message, effect) = match &push.receipt.outcome {
                 DeliveryOutcome::NotSubmitted { reason, .. } => {
                     ("notSubmitted", reason.clone(), OperationEffect::None)
@@ -1012,6 +1015,9 @@ fn message_reply_tool_result(
 ) -> CallToolResult {
     match result {
         Ok(reply) => {
+            if reply.delivery_state == PushDeliveryState::Held {
+                return structured_result(Ok(reply), OperationEffect::None);
+            }
             let (kind, message, effect) = match &reply.receipt.outcome {
                 DeliveryOutcome::NotSubmitted { reason, .. } => {
                     ("notSubmitted", reason.clone(), OperationEffect::None)
