@@ -43,7 +43,7 @@ pub(crate) enum SessionAccountAffinityPublicationError {
 
 #[derive(Debug)]
 struct SessionAccountAffinityEntry {
-    account_id: AccountId,
+    account_id: Option<AccountId>,
     pin_version: u64,
     last_seen_unix_seconds: u64,
     owner_token: Arc<()>,
@@ -151,7 +151,7 @@ impl SessionAffinityActivityHandle {
         let Some(entry) = cache.entries.get_mut(&key) else {
             return Ok(false);
         };
-        if entry.account_id != self.account_id
+        if entry.account_id.as_ref() != Some(&self.account_id)
             || !Arc::ptr_eq(&entry.owner_token, &self.owner_token)
         {
             return Ok(false);
@@ -195,9 +195,9 @@ pub fn lookup_session_account_affinity(
     {
         return Ok(None);
     }
-    Ok(Some(selection_from_entry(
+    Ok(selection_from_entry(
         cache, provider, session_id, route_band, writer, entry,
-    )))
+    ))
 }
 
 /// Rechecks live state after a database await and seeds only a fresh persisted row.
@@ -222,9 +222,9 @@ pub fn reconcile_persisted_session_account_affinity(
         && now_unix_seconds.saturating_sub(live_entry.last_seen_unix_seconds)
             < cache_guard.idle_ttl.as_secs()
     {
-        return Ok(Some(selection_from_entry(
+        return Ok(selection_from_entry(
             cache, provider, session_id, route_band, writer, live_entry,
-        )));
+        ));
     }
     let Some(persisted) = persisted.filter(|persisted| {
         persisted.provider() == provider
@@ -242,14 +242,14 @@ pub fn reconcile_persisted_session_account_affinity(
         .entries
         .get(&key)
         .filter(|entry| {
-            entry.account_id == *persisted_account_id
+            entry.account_id.as_ref() == Some(persisted_account_id)
                 && entry.pin_version == persisted.pin_version()
         })
         .map_or_else(|| Arc::new(()), |entry| Arc::clone(&entry.owner_token));
     cache_guard.entries.insert(
         key,
         SessionAccountAffinityEntry {
-            account_id: persisted_account_id.clone(),
+            account_id: Some(persisted_account_id.clone()),
             pin_version: persisted.pin_version(),
             last_seen_unix_seconds: persisted.last_seen_unix_seconds(),
             owner_token: Arc::clone(&owner_token),
@@ -306,13 +306,13 @@ pub fn publish_session_account_affinity(
         .entries
         .entry(key)
         .or_insert_with(|| SessionAccountAffinityEntry {
-            account_id: account_id.clone(),
+            account_id: Some(account_id.clone()),
             pin_version: 0,
             last_seen_unix_seconds: now_unix_seconds,
             owner_token: Arc::new(()),
         });
-    if entry.account_id != *account_id {
-        entry.account_id = account_id.clone();
+    if entry.account_id.as_ref() != Some(account_id) {
+        entry.account_id = Some(account_id.clone());
         entry.owner_token = Arc::new(());
     }
     entry.last_seen_unix_seconds = entry.last_seen_unix_seconds.max(now_unix_seconds);
@@ -324,9 +324,134 @@ pub fn publish_session_account_affinity(
         route_band,
         entry.last_seen_unix_seconds,
     );
-    Ok(selection_from_entry(
-        cache, provider, session_id, route_band, writer, entry,
-    ))
+    selection_from_entry(cache, provider, session_id, route_band, writer, entry)
+        .ok_or(SessionAccountAffinityCacheUnavailable)
+}
+
+/// Reads Claude's versioned authority without renewing its idle clock.
+pub(crate) async fn observe_claude_session_account_affinity<TRepository>(
+    cache: &SharedSessionAccountAffinityCache,
+    session_id: &str,
+    repository: &TRepository,
+    now_unix_seconds: u64,
+) -> Result<PinObservation, SessionAccountAffinityPublicationError>
+where
+    TRepository: AsyncSessionAccountAffinityRepository + Sync,
+{
+    let persisted = repository
+        .load_session_account_affinity(Provider::Claude, session_id)
+        .await?;
+    reconcile_claude_pin_observation(cache, session_id, persisted.as_ref(), now_unix_seconds)
+}
+
+/// A release winner and the fresh authority for the next attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ClaudePinRelease {
+    pub(crate) observation: PinObservation,
+    pub(crate) released: bool,
+}
+
+/// Releases only the observed active pin; a lost race re-reads current authority.
+pub(crate) async fn release_claude_session_account_affinity<TRepository>(
+    cache: &SharedSessionAccountAffinityCache,
+    session_id: &str,
+    observation: &PinObservation,
+    repository: &TRepository,
+    now_unix_seconds: u64,
+) -> Result<ClaudePinRelease, SessionAccountAffinityPublicationError>
+where
+    TRepository: AsyncSessionAccountAffinityRepository + Sync,
+{
+    let next_version = observation.version().checked_add(1);
+    if observation.active_account().is_some()
+        && let Some(next_version) = next_version
+    {
+        let pin_ttl_seconds = cache
+            .lock()
+            .map_err(|_error| SessionAccountAffinityPublicationError::CacheUnavailable)?
+            .idle_ttl
+            .as_secs();
+        let released_pin = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            session_id,
+            None,
+            next_version,
+            now_unix_seconds,
+        );
+        if repository
+            .compare_and_set_session_account_affinity(observation, &released_pin, pin_ttl_seconds)
+            .await?
+        {
+            reconcile_claude_pin_observation(
+                cache,
+                session_id,
+                Some(&released_pin),
+                now_unix_seconds,
+            )?;
+            return Ok(ClaudePinRelease {
+                observation: PinObservation::new(None, next_version),
+                released: true,
+            });
+        }
+    }
+    Ok(ClaudePinRelease {
+        observation: observe_claude_session_account_affinity(
+            cache,
+            session_id,
+            repository,
+            now_unix_seconds,
+        )
+        .await?,
+        released: false,
+    })
+}
+
+fn reconcile_claude_pin_observation(
+    cache: &SharedSessionAccountAffinityCache,
+    session_id: &str,
+    persisted: Option<&SessionAccountAffinity>,
+    now_unix_seconds: u64,
+) -> Result<PinObservation, SessionAccountAffinityPublicationError> {
+    let mut cache_guard = cache
+        .lock()
+        .map_err(|_error| SessionAccountAffinityPublicationError::CacheUnavailable)?;
+    prune_if_due(&mut cache_guard, now_unix_seconds);
+    let key = SessionAffinityKey {
+        provider: Provider::Claude,
+        session_id: session_id.to_owned(),
+    };
+    if let Some(persisted) = persisted {
+        let live_entry = cache_guard.entries.get(&key);
+        if !live_entry.is_some_and(|entry| {
+            entry.pin_version > persisted.pin_version()
+                || (entry.pin_version == persisted.pin_version()
+                    && entry.last_seen_unix_seconds >= persisted.last_seen_unix_seconds())
+        }) {
+            let owner_token = live_entry
+                .filter(|entry| {
+                    entry.pin_version == persisted.pin_version()
+                        && entry.account_id.as_ref() == persisted.account_id()
+                })
+                .map_or_else(|| Arc::new(()), |entry| Arc::clone(&entry.owner_token));
+            cache_guard.entries.insert(
+                key.clone(),
+                SessionAccountAffinityEntry {
+                    account_id: persisted.account_id().cloned(),
+                    pin_version: persisted.pin_version(),
+                    last_seen_unix_seconds: persisted.last_seen_unix_seconds(),
+                    owner_token,
+                },
+            );
+        }
+    }
+    let Some(entry) = cache_guard.entries.get(&key) else {
+        return Ok(PinObservation::new(None, 0));
+    };
+    let active_account = (now_unix_seconds.saturating_sub(entry.last_seen_unix_seconds)
+        < cache_guard.idle_ttl.as_secs())
+    .then(|| entry.account_id.clone())
+    .flatten();
+    Ok(PinObservation::new(active_account, entry.pin_version))
 }
 
 /// Publishes a Claude pin only after its final response completion was successful.
@@ -394,39 +519,15 @@ fn cache_successful_claude_pin(
     pin_version: u64,
     now_unix_seconds: u64,
 ) -> Result<(), SessionAccountAffinityPublicationError> {
-    let mut cache_guard = cache
-        .lock()
-        .map_err(|_error| SessionAccountAffinityPublicationError::CacheUnavailable)?;
-    prune_if_due(&mut cache_guard, now_unix_seconds);
-    let key = SessionAffinityKey {
-        provider: Provider::Claude,
-        session_id: session_id.to_owned(),
-    };
-    if let Some(entry) = cache_guard.entries.get_mut(&key)
-        && entry.pin_version == pin_version
-        && entry.account_id == *account_id
-    {
-        entry.last_seen_unix_seconds = entry.last_seen_unix_seconds.max(now_unix_seconds);
-        return Ok(());
-    }
-    if cache_guard
-        .entries
-        .get(&key)
-        .is_some_and(|entry| entry.pin_version > pin_version)
-    {
-        return Ok(());
-    }
-
-    cache_guard.entries.insert(
-        key,
-        SessionAccountAffinityEntry {
-            account_id: account_id.clone(),
-            pin_version,
-            last_seen_unix_seconds: now_unix_seconds,
-            owner_token: Arc::new(()),
-        },
+    let successful_pin = SessionAccountAffinity::with_pin_state(
+        Provider::Claude,
+        session_id,
+        Some(account_id.clone()),
+        pin_version,
+        now_unix_seconds,
     );
-    Ok(())
+    reconcile_claude_pin_observation(cache, session_id, Some(&successful_pin), now_unix_seconds)
+        .map(|_observation| ())
 }
 
 fn selection_from_entry(
@@ -436,19 +537,20 @@ fn selection_from_entry(
     route_band: RouteBand,
     writer: Option<&DbWriteActor>,
     entry: &SessionAccountAffinityEntry,
-) -> SessionAccountAffinitySelection {
-    SessionAccountAffinitySelection {
-        account_id: entry.account_id.clone(),
+) -> Option<SessionAccountAffinitySelection> {
+    let account_id = entry.account_id.as_ref()?;
+    Some(SessionAccountAffinitySelection {
+        account_id: account_id.clone(),
         activity_handle: SessionAffinityActivityHandle {
             cache: Arc::clone(cache),
             provider,
             session_id: session_id.to_owned(),
-            account_id: entry.account_id.clone(),
+            account_id: account_id.clone(),
             owner_token: Arc::clone(&entry.owner_token),
             route_band,
             writer: writer.cloned(),
         },
-    }
+    })
 }
 
 fn prune_if_due(cache: &mut SessionAccountAffinityCache, now_unix_seconds: u64) {
@@ -491,3 +593,178 @@ fn enqueue_affinity_write(
 #[cfg(test)]
 #[path = "session_account_affinity_cache_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod pin_authority_tests {
+    use super::*;
+    use codex_router_state::sqlite::AsyncSqliteStateStore;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    static NEXT_DATABASE: AtomicUsize = AtomicUsize::new(0);
+
+    async fn pin_store() -> AsyncSqliteStateStore {
+        let database_path = std::env::temp_dir().join(format!(
+            "codex-router-p6s-pin-{}-{}.sqlite",
+            std::process::id(),
+            NEXT_DATABASE.fetch_add(1, Ordering::Relaxed),
+        ));
+        AsyncSqliteStateStore::open(&database_path)
+            .await
+            .unwrap_or_else(|error| panic!("test pin store should open: {error}"))
+    }
+
+    fn account_id(value: &str) -> AccountId {
+        AccountId::new(value).unwrap_or_else(|error| panic!("test account: {error}"))
+    }
+
+    #[tokio::test]
+    async fn observation_preserves_stored_version_for_active_expired_released_and_missing_pins() {
+        let store = pin_store().await;
+        let cache = SessionAccountAffinityCache::shared(Duration::from_secs(10));
+        let account = account_id("acct_observed");
+        let pin = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "session",
+            Some(account.clone()),
+            7,
+            1_000,
+        );
+        store
+            .upsert_session_account_affinity(&pin)
+            .await
+            .unwrap_or_else(|error| panic!("pin should persist: {error}"));
+        for (now, expected_account) in [(1_009, Some(account)), (1_010, None), (1_100, None)] {
+            assert_eq!(
+                observe_claude_session_account_affinity(&cache, "session", &store, now)
+                    .await
+                    .unwrap_or_else(|error| panic!("pin should observe: {error}")),
+                PinObservation::new(expected_account, 7)
+            );
+        }
+        let released =
+            SessionAccountAffinity::with_pin_state(Provider::Claude, "released", None, 8, 1_000);
+        store
+            .upsert_session_account_affinity(&released)
+            .await
+            .unwrap_or_else(|error| panic!("released pin should persist: {error}"));
+        for (session, expected_version) in [("released", 8), ("missing", 0)] {
+            assert_eq!(
+                observe_claude_session_account_affinity(&cache, session, &store, 1_100)
+                    .await
+                    .unwrap_or_else(|error| panic!("pin should observe: {error}")),
+                PinObservation::new(None, expected_version)
+            );
+        }
+        assert_eq!(
+            store
+                .load_session_account_affinity(Provider::Claude, "session")
+                .await
+                .unwrap_or_else(|error| panic!("pin should load: {error}")),
+            Some(pin)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_releases_have_one_winner_and_late_success_cannot_resurrect_the_pin() {
+        let store = pin_store().await;
+        let cache = SessionAccountAffinityCache::shared(Duration::from_secs(10));
+        let account = account_id("acct_released");
+        store
+            .upsert_session_account_affinity(&SessionAccountAffinity::with_pin_state(
+                Provider::Claude,
+                "session",
+                Some(account.clone()),
+                7,
+                1_000,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("pin should persist: {error}"));
+        let observation = observe_claude_session_account_affinity(&cache, "session", &store, 1_001)
+            .await
+            .unwrap_or_else(|error| panic!("pin should observe: {error}"));
+
+        let (first, second) = tokio::join!(
+            release_claude_session_account_affinity(&cache, "session", &observation, &store, 1_002),
+            release_claude_session_account_affinity(&cache, "session", &observation, &store, 1_002),
+        );
+        let first = first.unwrap_or_else(|error| panic!("first release: {error}"));
+        let second = second.unwrap_or_else(|error| panic!("second release: {error}"));
+        assert_ne!(
+            first.released, second.released,
+            "exactly one CAS release must win"
+        );
+        assert_eq!(first.observation, PinObservation::new(None, 8));
+        assert_eq!(second.observation, PinObservation::new(None, 8));
+
+        let (completion_sender, completion_receiver) = tokio::sync::oneshot::channel();
+        completion_sender
+            .send(ClaudeResponseCompletion::Success)
+            .unwrap_or_else(|_| panic!("completion receiver should remain open"));
+        assert!(
+            !publish_claude_session_account_affinity_on_success(
+                &cache,
+                "session",
+                &observation,
+                &account,
+                completion_receiver,
+                &store,
+                || 1_003,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("late publication: {error}"))
+        );
+        assert_eq!(
+            store
+                .load_session_account_affinity(Provider::Claude, "session")
+                .await
+                .unwrap_or_else(|error| panic!("released pin should load: {error}")),
+            Some(SessionAccountAffinity::with_pin_state(
+                Provider::Claude,
+                "session",
+                None,
+                8,
+                1_002
+            ))
+        );
+        assert_eq!(
+            observe_claude_session_account_affinity(&cache, "session", &store, 1_003)
+                .await
+                .unwrap_or_else(|error| panic!("released pin should observe: {error}")),
+            PinObservation::new(None, 8)
+        );
+    }
+
+    #[tokio::test]
+    async fn losing_release_returns_the_new_active_owner_and_its_version() {
+        let store = pin_store().await;
+        let cache = SessionAccountAffinityCache::shared(Duration::from_secs(10));
+        let old_account = account_id("acct_old");
+        let new_account = account_id("acct_new");
+        let stale_observation = PinObservation::new(Some(old_account), 7);
+        store
+            .upsert_session_account_affinity(&SessionAccountAffinity::with_pin_state(
+                Provider::Claude,
+                "session",
+                Some(new_account.clone()),
+                9,
+                1_000,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("new owner should persist: {error}"));
+        let release = release_claude_session_account_affinity(
+            &cache,
+            "session",
+            &stale_observation,
+            &store,
+            1_001,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("stale release: {error}"));
+        assert!(!release.released);
+        assert_eq!(
+            release.observation,
+            PinObservation::new(Some(new_account), 9)
+        );
+    }
+}
