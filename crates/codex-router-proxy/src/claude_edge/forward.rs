@@ -193,6 +193,7 @@ impl PreparedClaudeResponse {
 
     /// Returns the response with its body bytes and frames preserved.
     #[must_use]
+    #[cfg(test)]
     pub fn into_response(self) -> AsyncStreamingHttpProxyResponse {
         self.response
     }
