@@ -169,7 +169,7 @@ impl AutomationStore {
         {
             return Err(StorageError::InvalidRecord);
         }
-        crate::push_records::insert_push_record_with_connection(&mut *transaction, &record).await?;
+        crate::push_records::insert_push_record_with_connection(&mut transaction, &record).await?;
         transaction.commit().await?;
         Ok(WakeEvaluation::Fired {
             wake,
