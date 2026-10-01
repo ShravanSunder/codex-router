@@ -164,6 +164,7 @@ pub(super) fn parse_subscription_duration(
         "--quiet" => "--quiet 2m",
         "--cap" => "--cap 10m",
         "--for" => "--for 24h",
+        "--max-wait" => "--max-wait 10m",
         _ => "--for 24h",
     };
     let error =
@@ -198,17 +199,23 @@ mod tests {
 
     #[test]
     fn subscription_duration_errors_show_flag_specific_examples() {
-        let invalid_duration_cases: [(&str, &str, bool, &str); 3] = [
+        let invalid_duration_cases: [(&str, &str, bool, &str); 4] = [
             ("--quiet", "not-a-duration", true, "--quiet 2m"),
             ("--cap", "not-a-duration", true, "--cap 10m"),
             ("--for", "not-a-duration", false, "--for 24h"),
+            ("--max-wait", "not-a-duration", true, "--max-wait 10m"),
         ];
 
         for (flag, value, allow_zero, example) in invalid_duration_cases {
             let Err(error) = parse_subscription_duration(value, flag, allow_zero) else {
                 panic!("expected an error for {flag} {value}");
             };
-            assert!(error.contains(&format!("for example {example}")), "{error}");
+            assert_eq!(
+                error,
+                format!(
+                    "{flag} requires an integer followed by s, m, h, or d; for example {example}"
+                )
+            );
         }
 
         let Err(positive_duration_error) = parse_subscription_duration("0s", "--for", false) else {
