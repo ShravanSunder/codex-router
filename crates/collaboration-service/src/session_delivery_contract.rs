@@ -38,6 +38,49 @@ pub struct DeliveryRequest {
     pub attempt: AttemptId,
 }
 
+/// Layer-0 contract introduced before all existing callers move to prepared pushes.
+pub mod layer_zero {
+    use super::{DeliveryPrecondition, LoadPolicy};
+    use agent_automation::AttemptId;
+    use collaboration_protocol::{
+        DeliveryCorrelationId, MessageDelivery, MessageText, PushId, SessionRef,
+    };
+
+    #[derive(Clone, Debug)]
+    pub struct PreparedPush {
+        pub push_id: PushId,
+        pub line: MessageText,
+        pub load_policy: LoadPolicy,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct DeliveryRequest {
+        pub payload: PreparedPush,
+        pub target: SessionRef,
+        pub mode: MessageDelivery,
+        pub precondition: DeliveryPrecondition,
+        pub correlation: DeliveryCorrelationId,
+        pub attempt: AttemptId,
+    }
+
+    impl DeliveryRequest {
+        pub(crate) fn into_legacy_request(self) -> super::DeliveryRequest {
+            super::DeliveryRequest {
+                target: self.target,
+                message: collaboration_protocol::MessageContent::Router {
+                    text: self.payload.line,
+                },
+                header_context: collaboration_protocol::MessageHeaderContext::default(),
+                mode: self.mode,
+                load_policy: self.payload.load_policy,
+                precondition: self.precondition,
+                correlation: self.correlation,
+                attempt: self.attempt,
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RoutePresence {
     NotMine,
@@ -129,6 +172,14 @@ pub trait SessionMessageDelivery: Send + Sync {
         evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt>;
 
+    fn deliver_prepared<'a>(
+        &'a self,
+        request: layer_zero::DeliveryRequest,
+        evidence: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, DeliveryReceipt> {
+        self.deliver(request.into_legacy_request(), evidence)
+    }
+
     fn reconcile_attempt(
         &self,
         context: AttemptReconciliationContext,
@@ -148,6 +199,13 @@ pub trait SessionDeliveryRoute: Send + Sync {
         request: DeliveryRequest,
         evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt>;
+    fn deliver_prepared<'a>(
+        &'a self,
+        request: layer_zero::DeliveryRequest,
+        evidence: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, DeliveryReceipt> {
+        self.deliver(request.into_legacy_request(), evidence)
+    }
     fn reconcile_attempt(
         &self,
         context: AttemptReconciliationContext,

@@ -13,6 +13,11 @@ use collaboration_protocol::{
 use futures_util::future::join_all;
 use std::sync::Arc;
 
+enum RouteDecision {
+    Selected(usize),
+    Complete(Box<DeliveryReceipt>),
+}
+
 pub struct SessionDeliveryRouter {
     pub(crate) routes: Vec<Arc<dyn SessionDeliveryRoute>>,
 }
@@ -28,7 +33,31 @@ impl SessionDeliveryRouter {
         request: DeliveryRequest,
         evidence: &dyn AttemptEvidenceSink,
     ) -> Result<DeliveryReceipt, DeliveryContractError> {
-        let claims = join_all(self.routes.iter().map(|route| route.claim(&request.target)))
+        match self.select_route(&request.target).await? {
+            RouteDecision::Selected(index) => self.deliver_through(index, request, evidence).await,
+            RouteDecision::Complete(receipt) => Ok(*receipt),
+        }
+    }
+
+    async fn deliver_prepared_once(
+        &self,
+        request: crate::layer_zero::DeliveryRequest,
+        evidence: &dyn AttemptEvidenceSink,
+    ) -> Result<DeliveryReceipt, DeliveryContractError> {
+        match self.select_route(&request.target).await? {
+            RouteDecision::Selected(index) => {
+                self.deliver_prepared_through(index, request, evidence)
+                    .await
+            }
+            RouteDecision::Complete(receipt) => Ok(*receipt),
+        }
+    }
+
+    async fn select_route(
+        &self,
+        target: &SessionRef,
+    ) -> Result<RouteDecision, DeliveryContractError> {
+        let claims = join_all(self.routes.iter().map(|route| route.claim(target)))
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -36,13 +65,13 @@ impl SessionDeliveryRouter {
             .iter()
             .position(|claim| matches!(claim, RouteClaim::Holds))
         {
-            return self.deliver_through(index, request, evidence).await;
+            return Ok(RouteDecision::Selected(index));
         }
         if let Some(detail) = claims.iter().find_map(|claim| match claim {
             RouteClaim::LiveElsewhere { detail, .. } => detail.as_deref(),
             _ => None,
         }) {
-            return Ok(DeliveryReceipt {
+            return Ok(RouteDecision::Complete(Box::new(DeliveryReceipt {
                 outcome: DeliveryOutcome::Rejected(DeliveryRejection {
                     reason: DeliveryRejectionReason::LiveElsewhere,
                     next_action: DeliveryNextAction::InspectTarget,
@@ -51,13 +80,13 @@ impl SessionDeliveryRouter {
                 }),
                 reachability: None,
                 client: None,
-            });
+            })));
         }
         if claims
             .iter()
             .any(|claim| matches!(claim, RouteClaim::LiveElsewhere { .. }))
         {
-            return Ok(DeliveryReceipt {
+            return Ok(RouteDecision::Complete(Box::new(DeliveryReceipt {
                 outcome: DeliveryOutcome::Rejected(DeliveryRejection {
                     reason: DeliveryRejectionReason::LiveElsewhere,
                     next_action: DeliveryNextAction::InspectTarget,
@@ -68,13 +97,13 @@ impl SessionDeliveryRouter {
                 }),
                 reachability: None,
                 client: None,
-            });
+            })));
         }
         if let Some(index) = claims
             .iter()
             .position(|claim| matches!(claim, RouteClaim::CanLoad))
         {
-            return self.deliver_through(index, request, evidence).await;
+            return Ok(RouteDecision::Selected(index));
         }
         if let Some(reason) = claims.iter().find_map(|claim| match claim {
             RouteClaim::Unavailable {
@@ -83,14 +112,14 @@ impl SessionDeliveryRouter {
             } => Some(reason),
             _ => None,
         }) {
-            return Ok(DeliveryReceipt {
+            return Ok(RouteDecision::Complete(Box::new(DeliveryReceipt {
                 outcome: DeliveryOutcome::NotSubmitted {
                     retryable: true,
                     reason: reason.reason.clone(),
                 },
                 reachability: None,
                 client: None,
-            });
+            })));
         }
         let reasons: Vec<_> = claims
             .iter()
@@ -101,7 +130,7 @@ impl SessionDeliveryRouter {
                 _ => None,
             })
             .collect();
-        Ok(DeliveryReceipt {
+        Ok(RouteDecision::Complete(Box::new(DeliveryReceipt {
             outcome: DeliveryOutcome::Rejected(DeliveryRejection {
                 reason: if reasons.is_empty() {
                     DeliveryRejectionReason::NoRoute
@@ -122,7 +151,7 @@ impl SessionDeliveryRouter {
             }),
             reachability: None,
             client: None,
-        })
+        })))
     }
 
     async fn deliver_through(
@@ -139,6 +168,21 @@ impl SessionDeliveryRouter {
         receipt.reachability = Some(route.reachability());
         Ok(receipt)
     }
+
+    async fn deliver_prepared_through(
+        &self,
+        index: usize,
+        request: crate::layer_zero::DeliveryRequest,
+        evidence: &dyn AttemptEvidenceSink,
+    ) -> Result<DeliveryReceipt, DeliveryContractError> {
+        let route = self
+            .routes
+            .get(index)
+            .ok_or(DeliveryContractError::InvalidEvidence)?;
+        let mut receipt = route.deliver_prepared(request, evidence).await?;
+        receipt.reachability = Some(route.reachability());
+        Ok(receipt)
+    }
 }
 
 impl SessionMessageDelivery for SessionDeliveryRouter {
@@ -148,6 +192,14 @@ impl SessionMessageDelivery for SessionDeliveryRouter {
         evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
         Box::pin(async move { self.deliver_once(request, evidence).await })
+    }
+
+    fn deliver_prepared<'a>(
+        &'a self,
+        request: crate::layer_zero::DeliveryRequest,
+        evidence: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, DeliveryReceipt> {
+        Box::pin(async move { self.deliver_prepared_once(request, evidence).await })
     }
 
     fn reconcile_attempt(
@@ -230,5 +282,156 @@ fn aggregate_presence(presences: &[RoutePresence]) -> TargetPresence {
     }
     TargetPresence::Unreachable {
         reason: unreachable_reasons.join("; "),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionDeliveryRouter;
+    use crate::{
+        AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
+        DeliveryPrecondition, DeliveryReceipt, DeliveryRequest as LegacyDeliveryRequest,
+        LoadPolicy, RouteClaim, RoutePresence, SessionDeliveryRoute, SessionMessageDelivery,
+    };
+    use agent_automation::AttemptId;
+    use collaboration_protocol::{
+        DeliveryCorrelationId, DeliveryOutcome, MessageContent, MessageDelivery,
+        MessageHeaderContext, MessageText, PushId, SessionReachability, SessionRef,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct CapturingLegacyRoute {
+        requests: Mutex<Vec<LegacyDeliveryRequest>>,
+        prepared_requests: Mutex<Vec<crate::layer_zero::DeliveryRequest>>,
+    }
+
+    impl SessionDeliveryRoute for CapturingLegacyRoute {
+        fn reachability(&self) -> SessionReachability {
+            SessionReachability::ClaudeCodePeer
+        }
+
+        fn claim(&self, _: &SessionRef) -> DeliveryFuture<'_, RouteClaim> {
+            Box::pin(async { Ok(RouteClaim::Holds) })
+        }
+
+        fn presence(&self, _: &SessionRef) -> DeliveryFuture<'_, RoutePresence> {
+            Box::pin(async { Ok(RoutePresence::Running) })
+        }
+
+        fn deliver<'a>(
+            &'a self,
+            request: LegacyDeliveryRequest,
+            _: &'a dyn AttemptEvidenceSink,
+        ) -> DeliveryFuture<'a, DeliveryReceipt> {
+            self.requests
+                .lock()
+                .expect("captured requests")
+                .push(request);
+            Box::pin(async {
+                Ok(DeliveryReceipt {
+                    outcome: DeliveryOutcome::Started,
+                    reachability: None,
+                    client: None,
+                })
+            })
+        }
+
+        fn deliver_prepared<'a>(
+            &'a self,
+            request: crate::layer_zero::DeliveryRequest,
+            evidence: &'a dyn AttemptEvidenceSink,
+        ) -> DeliveryFuture<'a, DeliveryReceipt> {
+            let legacy_request = request.clone().into_legacy_request();
+            self.prepared_requests
+                .lock()
+                .expect("captured prepared requests")
+                .push(request);
+            self.deliver(legacy_request, evidence)
+        }
+
+        fn reconcile_attempt(
+            &self,
+            _: AttemptReconciliationContext,
+        ) -> DeliveryFuture<'_, AttemptReconciliation> {
+            Box::pin(async { Ok(AttemptReconciliation::StillUnknown) })
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_push_uses_the_legacy_route_stand_in_without_changing_its_line_or_policy() {
+        let push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned())
+            .expect("UUIDv7 push id");
+        let expected_push_id = push_id.clone();
+        let link = format!(
+            "router://00000000-0000-4000-8000-000000000001/push/{}",
+            push_id.as_str()
+        );
+        let line =
+            MessageText::try_from(format!("✉️ sender · \"preview\" · {link}")).expect("push line");
+        let target: SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+            "sessionId":"target"
+        }))
+        .expect("target session");
+        let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())
+            .expect("push id correlation");
+        let route = Arc::new(CapturingLegacyRoute::default());
+        let router = SessionDeliveryRouter::new(vec![route.clone()]);
+
+        let receipt = router
+            .deliver_prepared(
+                crate::layer_zero::DeliveryRequest {
+                    payload: crate::layer_zero::PreparedPush {
+                        push_id,
+                        line: line.clone(),
+                        load_policy: LoadPolicy::LoadedOnly,
+                    },
+                    target: target.clone(),
+                    mode: MessageDelivery::Queue,
+                    precondition: DeliveryPrecondition::Unpinned,
+                    correlation: correlation.clone(),
+                    attempt: AttemptId::generate(),
+                },
+                &crate::session_delivery_contract::UnstoredAttemptEvidenceSink,
+            )
+            .await
+            .expect("prepared push delivery");
+
+        assert_eq!(receipt.outcome, DeliveryOutcome::Started);
+        assert_eq!(
+            receipt.reachability,
+            Some(SessionReachability::ClaudeCodePeer)
+        );
+        let prepared_requests = route
+            .prepared_requests
+            .lock()
+            .expect("captured prepared requests");
+        assert_eq!(prepared_requests.len(), 1);
+        assert_eq!(prepared_requests[0].payload.push_id, expected_push_id);
+        assert_eq!(prepared_requests[0].payload.line.as_str(), line.as_str());
+        assert_eq!(
+            prepared_requests[0].payload.load_policy,
+            LoadPolicy::LoadedOnly
+        );
+        assert_eq!(prepared_requests[0].target, target);
+        assert_eq!(prepared_requests[0].mode, MessageDelivery::Queue);
+        assert_eq!(prepared_requests[0].correlation, correlation);
+        let requests = route.requests.lock().expect("captured requests");
+        assert_eq!(requests.len(), 1);
+        let delivered = &requests[0];
+        assert_eq!(delivered.target, target);
+        assert_eq!(delivered.mode, MessageDelivery::Queue);
+        assert_eq!(delivered.load_policy, LoadPolicy::LoadedOnly);
+        assert_eq!(delivered.correlation, correlation);
+        assert!(matches!(
+            &delivered.precondition,
+            DeliveryPrecondition::Unpinned
+        ));
+        assert_eq!(delivered.header_context, MessageHeaderContext::default());
+        let MessageContent::Router { text } = &delivered.message else {
+            panic!("a prepared push must remain Router-authored through the stand-in");
+        };
+        assert_eq!(text.as_str(), line.as_str());
     }
 }

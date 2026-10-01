@@ -102,6 +102,7 @@ pub use session_command_port::{
     SessionSteerOutcome, SessionTargetCommand, SessionTurnHandle, SetSessionSettingCommand,
     SteerSessionCommand,
 };
+pub use session_delivery_contract::layer_zero;
 pub use session_delivery_contract::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, LoadPolicy,
