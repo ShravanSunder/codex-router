@@ -4,7 +4,8 @@ use agent_automation::{PeerWriteEffect, RouteEffectEvidence};
 use claude_code_peer_messaging::{PeerSessionLookup, PeerSocketWriteOutcome};
 use collaboration_protocol::{
     CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
-    DeliveryRejection, DeliveryRejectionReason, RunExecution, ScheduleFailureKind, SessionRef,
+    DeliveryRejection, DeliveryRejectionReason, RouterLink, RunExecution, ScheduleFailureKind,
+    SessionRef,
 };
 use collaboration_service::{
     DeliveryContractError, DeliveryFuture, DeliveryPrecondition, FreshSessionRequest,
@@ -163,6 +164,9 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
                     return Err(DeliveryContractError::ClientOperation);
                 }
             };
+            if !prepared_push_link_matches_id(&prepared) {
+                return Err(DeliveryContractError::InvalidEvidence);
+            }
             let RouteEffectEvidence::ClaudeCodePeer(recorded) = &run.recorded else {
                 return Err(DeliveryContractError::InvalidEvidence);
             };
@@ -297,6 +301,18 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
             }
         })
     }
+}
+
+fn prepared_push_link_matches_id(
+    prepared: &collaboration_service::layer_zero::PreparedPush,
+) -> bool {
+    prepared
+        .line
+        .as_str()
+        .split_whitespace()
+        .last()
+        .and_then(|link| RouterLink::parse(link).ok())
+        .is_some_and(|link| link.push_id() == &prepared.push_id)
 }
 
 fn rejected(

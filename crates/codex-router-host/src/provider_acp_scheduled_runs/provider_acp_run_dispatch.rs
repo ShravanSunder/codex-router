@@ -11,7 +11,7 @@ use agent_automation::{RouteEffectEvidence, SubmissionEffect};
 use collaboration_protocol::{
     ConversationCancelRequest, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome,
     DeliveryReceipt, DeliveryRejection, DeliveryRejectionReason, OperationId,
-    ProviderOperationEffect, ProviderOperationStage, RunExecution, SessionReachability,
+    ProviderOperationEffect, ProviderOperationStage, RouterLink, RunExecution, SessionReachability,
 };
 use collaboration_service::{
     DeliveryContractError, DeliveryPrecondition, LoadPolicy, ProviderConversationBackend,
@@ -36,6 +36,12 @@ impl ProviderAcpScheduledRuns {
                 (None, Some(task_input), LoadPolicy::MayLoad)
             }
         };
+        if prepared_push
+            .as_ref()
+            .is_some_and(|prepared| !prepared_push_link_matches_id(prepared))
+        {
+            return Err(DeliveryContractError::InvalidEvidence);
+        }
         if effect.target != run.target || run.target.endpoint.service_id != self.service_id {
             return Err(DeliveryContractError::InvalidEvidence);
         }
@@ -279,6 +285,18 @@ impl ProviderAcpScheduledRuns {
             StopRequestOutcome::Unknown
         })
     }
+}
+
+fn prepared_push_link_matches_id(
+    prepared: &collaboration_service::layer_zero::PreparedPush,
+) -> bool {
+    prepared
+        .line
+        .as_str()
+        .split_whitespace()
+        .last()
+        .and_then(|link| RouterLink::parse(link).ok())
+        .is_some_and(|link| link.push_id() == &prepared.push_id)
 }
 
 fn timestamp(
