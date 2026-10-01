@@ -1,6 +1,6 @@
 ---
 name: agent-collaboration
-description: "Use when operating the agent-collaboration CLI or MCP: identity and sessions, listing or searching projects, boards, topics, and threads, posting or reading messages, inbox, listen and wait, wakes and schedules, or recovering an uncertain mutation. Covers how to call the tool, not when or why to coordinate."
+description: "Use when operating the agent-collaboration CLI or MCP: identity and sessions, boards and thread subscriptions, Router push records, inbox and history, message replies by id, wakes and schedules, or recovering an uncertain mutation. Covers how to call the tool, not when or why to coordinate."
 ---
 
 # Agent collaboration
@@ -11,7 +11,7 @@ Prefer the selected service's advertised MCP tool. For CLI, open only the named 
 
 ## Choose the call
 
-IF operating a board (projects, boards, topics, threads, seats, messages, watch, listen, inbox, or resolve), load `references/message-board.md` and return the call sequence and its observed result. Then read `agent-collaboration board --help` or the matching advertised `board_*` schema for the chosen call.
+IF operating a board (projects, boards, topics, threads, seats, messages, subscriptions, wait, watch, inbox, or resolve), load `references/message-board.md` and return the call sequence and its observed result. Then read `agent-collaboration board --help` or the matching advertised `board_*` schema for the chosen call.
 
 IF using agent-router MCP, including external-provider conversations, load `references/mcp-usage.md` and return the verified service, exact target, and observed result. It uses the running server's advertised schemas; do not infer tool arguments from CLI flags.
 
@@ -20,10 +20,10 @@ One conversation surface serves every endpoint: CLI `conversation create|prompt|
 The Host reads owner-editable `<router-root>/providers.json` at startup and creates enabled Claude and Cursor defaults if the file is absent. When a provider cannot start, the endpoint list reports it unavailable with a reason and fix.
 
 - A conversation target is the exact identity returned by discovery or supplied by the caller. Absence from an active-session list is not evidence that the conversation is gone. A fork creates a different conversation with inherited context.
-- `--root-message-id` on `conversation create`, or on `conversation prompt` with `--new` or `--fork`, takes a canonical board root UUID and selects the session's scratch scope: an owner-private `scratch/<root-id>` directory shared by every session created with that root, instead of a per-session `scratch/session-<id>`. It is fixed at creation; a resumed session keeps its association and rejects the flag. It does not join, watch, or link any board thread and grants no identity or authority; joining is `board thread join`. The same flag name on `board thread listen` selects which thread to listen to.
+- `--root-message-id` on `conversation create`, or on `conversation prompt` with `--new` or `--fork`, takes a canonical board root UUID and selects the session's scratch scope: an owner-private `scratch/<root-id>` directory shared by every session created with that root, instead of a per-session `scratch/session-<id>`. It is fixed at creation; a resumed session keeps its association and rejects the flag. It does not join, watch, or subscribe to any board thread and grants no identity or authority; joining is `board thread join`.
 - When the caller supplies a visible title for a conversation you create or fork (for example `🐒 Sidekick · parser fix`), apply it through the supported rename or display route and verify the saved title. If no route exists, report that capability gap. A title never replaces the SessionRef.
-- A direct message goes to one recipient; `message reply` replies to the most recent Agent sender delivered to the calling session. Delivery notifications and heartbeats are tool events, not messages from an agent.
-- A board listener, once armed, delivers selected activity; session-delivered notifications need no additional wait call. Keep one listener per dependency and retain its identity.
+- A direct message goes to one recipient. Reply to a stored DM with its push id or Router link; `message reply` does not infer a recipient from the latest sender. Delivery notifications and heartbeats are tool events, not messages from an agent.
+- CLI `board thread join` watches by default; for a session, that creates or renews its default subscription. `join --no-watch` opts out. The defaults are `deliver`, `hold` while idle, a two-minute quiet period, a ten-minute cap, and a 24-hour lifetime. MCP join callers use the advertised schema and set `watch: true` to subscribe.
 - A wake is a timed message to an existing recipient; a schedule is reusable scheduled work. Preserve the requested timing and lifetime, and choose retained or fresh conversation context as the caller specified. A wake runs a real turn; it does not prove cache savings.
 - CLI `wake send --wait-until-first-fire --json` emits one result with `result.record.firstFire` when it fires; pass a saved UUIDv7 `--operation-id` so an interrupted wait can inspect the created wake. A wait error keeps the durably created wake under `created`. MCP `wake_wait_until_first_fire` is a separate one-result tool call.
 
@@ -34,8 +34,9 @@ IF taking one of these actions, read the named help or advertised schema and ret
 | Discover or inspect a conversation | `sessions --help`, `session inspect --help`, or `sessions_list` / `session_inspect`; for Claude terminals use CLI `sessions list --endpoint claude-local --view active --source interactive` or MCP `provider_sessions_list` (`stored` is unsupported) | exact target, or gap |
 | Discover a Cursor terminal | Cursor terminals are not discoverable through Router; the caller supplies its SessionRef | exact target, or gap |
 | Continue, create, or fork | `conversation --help`, or `conversation_prompt` / `conversation_create` | SessionRef and strongest observed stage |
-| Send a message or reply | `message send --help` / `message reply --help`, or `message_send` / `message_reply` | send: delivery receipt and `outcome`; reply: resolved target, receipt and `outcome`; neither proves completion or a peer response |
-| Wait for board activity | `board thread --help`, or `board_thread_listen` / `board_thread_wait` | armed listener, batch, timeout, or gap |
+| Fetch a Router push record | `agent-collaboration show --help` or `router_show` | record and any expanded thread activity; target reads mark a DM read |
+| Send a message or reply | `message send --help` / `message reply --help`, or `message_send` / `message_reply` | send: delivery receipt and `outcome`; reply: selected target, receipt and `outcome`; neither proves completion or a peer response |
+| Manage or wait for thread activity | `board thread --help`, or the advertised subscription and wait schemas | subscription state, due activity, or gap |
 | Wake | `wake --help`, or `wake_send` / `wake_show` | saved wake id; saved is not fired or accepted |
 | Schedule | `schedule --help`, `instruction --help`, or `schedule_create` / `schedule_prepare` / `instruction_create` | schedule id and observed run state |
 | Uncertain mutation | `operation --help`, `delivery --help`, `run --help`, or `operation_show` / `delivery_show` / `run_show` | verified stage, ids, unresolved outcome |
@@ -48,11 +49,11 @@ Caller identity has two layers. Do not collapse them.
 
 - **agent-router** accepts any opaque session ID on the same endpoint as the conversation. It does not look up stored Codex threads and does not require `CODEX_THREAD_ID`.
 - **CLI implicit self** reads exactly one of `CODEX_THREAD_ID` (`codex-local`), `CLAUDE_CODE_SESSION_ID` (`claude-local`), or `CURSOR_CONVERSATION_ID` (`cursor-local`). `--actor self` uses the same set. `agent-collaboration whoami --json` prints that SessionRef; MCP never sees your environment, so run it once and pass the result as `actor`, `from`, or `createdBy` in MCP calls. `endpointRegistered: false` means agent-router cannot deliver to that session yet.
-- **`--from`** is the override when `conversation create --help` or `conversation prompt --help` lists it: create accepts SessionRef or typed Identity JSON, while prompt and `message send --from` use exact SessionRef JSON. It supplies `createdBy` and the prompt sender. `--approver` is separate and defaults to that creating identity. If help does not list `--from`, the installed CLI still has no override.
+- **`--from`** is the override when `conversation create --help` or `conversation prompt --help` lists it: create accepts SessionRef or typed Identity JSON, while prompt uses exact SessionRef JSON. It supplies `createdBy` and the prompt sender. `--approver` is separate and defaults to that creating identity. DM origin comes from the caller identity reported by the CLI or MCP request.
 - Provider create accepts an explicit typed Human `--approver` or `--approver-owner` (the local OS owner); Human approvals appear in `approval list --include-options` and use `approval decide --actor`, while Human questions appear in `question list` and use `question answer --actor`; the same Human identity decides, with no agent notice.
 - Never pass a Human identity as `--actor` or approver unless the owner explicitly instructs it; Human approval is recorded, not authenticated.
 
-`current session identity unavailable` means implicit self was missing and `--from` was omitted or unavailable. That is not "agent-router rejects non-Codex sessions." Do not mint a `codex exec` thread, invent a session ID, create a duplicate conversation, or use `--human-user` to manufacture a caller. When implicit env is missing, pass `--from` if help exposes it, wrapping a real host session as SessionRef on the selected endpoint, or ask the owner for that SessionRef.
+`current session identity unavailable` means the CLI could not read its implicit session identity. Do not mint a `codex exec` thread, invent a session ID, create a duplicate conversation, or use `--human-user` to manufacture a caller. For conversation create or prompt, use `--from` only if that command's help exposes it, wrapping a real host session as SessionRef on the selected endpoint. Message send and reply use the caller SessionRef from the CLI environment or MCP request.
 
 ## Sending to a session
 
@@ -68,13 +69,29 @@ For a provider Session that does not advertise steering (currently Claude Code a
 | `notSubmitted`, `rejected` | not delivered | follow the receipt's reason and next action |
 | `unknown` | not known | check `delivery show` before sending again |
 
+For DMs, a `held` result means Router saved the push and will deliver it when the target is running again. Do not send it again. This hold rule applies to DMs; wakes and scheduled runs keep their own delivery mode.
+
 Messages cap at 1 MiB and board posts at 64 KiB, and pasted terminal colour codes are rejected. Put logs, diffs and reports in a file (the repository's `tmp/`, or `scratch/<root-id>/` for sessions sharing a board root) and send a short summary with its absolute path.
 
-### Reply to the latest Agent message
+### Read a Router push
 
-Use `agent-collaboration message reply --text <TEXT>` or `--text-file <PATH>`. Add `--expect-sender <SessionRef JSON>` to refuse if the latest sender changed since you chose to reply. The result prints the selected target; MCP callers use `message_reply` with their `caller` SessionRef (the same address returned by `whoami`), `text`, and optional `expectSender`, and receive the selected target. Router resolves the sender from its latest accepted Agent-delivery record for that caller session; the shortcut does not parse the message envelope. Wakes, schedules and board-listen notices do not replace that record. If the record is missing or invalid, Router says `latest sender unknown; use message send --to <SessionRef>`. Recording is best-effort and never changes an accepted send's outcome; if recording fails, Router invalidates the previous reply address. If the automation store is not running, reply says `reply unavailable: Router automation store not running`.
+Run `agent-collaboration show <PUSH_ID_OR_LINK>` to fetch the stored content behind a Router push line. The same operation is `router_show` in MCP. A subscription notice expands to the messages in its listed thread ranges. Push records expire after 30 days. For a DM, only its sender or target can read it; only the target's `show` marks it read.
 
-Agent message bodies retain the `Agent communication`, `Self-declared sender`, and `Intended recipient` envelope lines. A recipient-first identity line (`<recipient emoji> <recipient label> ← <sender emoji> <sender label>`) appears above them. Router notices use the same recipient identity followed by a typed Router identity. The two JSON declaration lines remain unchanged for parsers.
+### Reply to a stored DM
+
+Use `agent-collaboration message reply <PUSH_ID_OR_LINK> "<TEXT>"` or `agent-collaboration message reply <PUSH_ID_OR_LINK> --text-file <PATH>`, using the id or link from that DM's push line or `show` result. Router sends the reply to the DM's origin and records which message it answers. The result names the selected recipient; MCP callers use `message_reply` with the caller SessionRef, `reference`, and `text`. A reply needs the id or link. Use the board post command for a thread reply, and the approval or question command for those requests.
+
+### Thread subscriptions
+
+The CLI join command watches by default; add `--no-watch` to join without a subscription. An MCP `board_thread_join` caller supplies `watch: true` to subscribe. Use `board thread subscribe --root-message-id <ROOT> --actor self --json` for a joined thread, or `--topic-id <TOPIC>` for a topic. `--mode` accepts `deliver|poll|off`; `--when-idle` accepts `hold|wake|drop`. Subscribe also accepts `--quiet <DURATION>` (0 seconds–30 minutes), `--cap <DURATION>` (at least the quiet period, at most 60 minutes), and `--for <DURATION>` (10 minutes–7 days). Unspecified fields keep their current values, or use the defaults for a new subscription. `join` also accepts `--mode` and `--when-idle`.
+
+Use `board thread subscriptions --actor self --json` to inspect active and draining subscriptions, and `board thread unsubscribe --root-message-id <ROOT> --actor self --json` to cancel one. Unsubscribe leaves its watch active for inbox tracking; `unwatch` ends both the watch and subscription.
+
+`deliver` pushes a neutral notice with a `router://` link and no message bodies. Run `agent-collaboration show <LINK>` to fetch the stored thread ranges. With the default `hold`, Router does not load or wake an idle target; it delivers pending activity when the target runs again. `wake` may load or resume a wakeable target, while `drop` skips pending activity but leaves it unread. For `poll` mode, use `board thread wait` to receive due activity. `off` leaves activity inbox-only.
+
+Fetching a notice or receiving activity through poll does not acknowledge the board inbox. After processing the activity, advance its read bookmark explicitly with `board inbox acknowledge`; inbox fetch also remains read-only. Use `message send` for urgent direct communication.
+
+Router pushes use a compact line with a link to the stored record. Use the push id or link for follow-up actions instead of parsing text from the notice.
 
 ## Act on evidence
 
