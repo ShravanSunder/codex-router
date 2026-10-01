@@ -4,6 +4,7 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::WindowKind;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
+use thiserror::Error;
 
 use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
@@ -12,7 +13,27 @@ use crate::sqlite::sqlx_error;
 use crate::sqlite::u64_to_i64;
 
 const MAX_REMAINING_BASIS_POINTS: u32 = 10_000;
+const WINDOW_OBSERVATION_FRESHNESS_MARGIN_SECONDS: u64 = 120;
 pub(crate) const LEGACY_QUOTA_EVIDENCE_FRESHNESS_SECONDS: u64 = 300;
+
+/// Failure to calculate a quota observation freshness deadline.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum WindowObservationFreshnessError {
+    /// The observation start, refresh interval, and margin exceed the timestamp range.
+    #[error("quota observation freshness deadline exceeded timestamp range")]
+    DeadlineOverflow,
+}
+
+/// Calculates the freshness deadline shared by active and passive quota observations.
+pub fn calculate_window_observation_fresh_until_unix_seconds(
+    observation_started_at_unix_seconds: u64,
+    refresh_interval_seconds: u64,
+) -> Result<u64, WindowObservationFreshnessError> {
+    observation_started_at_unix_seconds
+        .checked_add(refresh_interval_seconds)
+        .and_then(|deadline| deadline.checked_add(WINDOW_OBSERVATION_FRESHNESS_MARGIN_SECONDS))
+        .ok_or(WindowObservationFreshnessError::DeadlineOverflow)
+}
 
 /// Input values for one Claude quota observation.
 #[derive(Clone, Debug, Eq, PartialEq)]

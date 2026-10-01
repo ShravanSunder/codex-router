@@ -9,9 +9,11 @@ use crate::account::AccountStatus;
 use crate::sqlite::AsyncSqliteStateStore;
 
 use super::WindowObservation;
+use super::WindowObservationFreshnessError;
 use super::WindowObservationProps;
 use super::WindowRejection;
 use super::WindowRejectionProps;
+use super::calculate_window_observation_fresh_until_unix_seconds;
 
 static NEXT_TEMP_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
 
@@ -106,6 +108,30 @@ fn observation(
     }
     WindowObservation::new(props)
         .unwrap_or_else(|error| panic!("test observation should be valid: {error}"))
+}
+
+#[test]
+fn shared_freshness_deadline_adds_margin_to_the_configured_interval() {
+    let deadline = calculate_window_observation_fresh_until_unix_seconds(100, 400)
+        .unwrap_or_else(|error| panic!("deadline should fit timestamp range: {error}"));
+
+    assert_eq!(deadline, 620);
+    assert_eq!(deadline - 100, 520);
+    let passive_observation = WindowObservation::new(
+        WindowObservationProps::new(
+            account_id("shared_freshness"),
+            codex_router_core::route_profile::WindowKind::FiveHour,
+            5_000,
+            100,
+        )
+        .with_fresh_until_unix_seconds(deadline),
+    )
+    .expect("shared deadline should validate as a persisted observation");
+    assert_eq!(passive_observation.fresh_until_unix_seconds(), Some(620));
+    assert_eq!(
+        calculate_window_observation_fresh_until_unix_seconds(u64::MAX, 0),
+        Err(WindowObservationFreshnessError::DeadlineOverflow)
+    );
 }
 
 #[tokio::test]

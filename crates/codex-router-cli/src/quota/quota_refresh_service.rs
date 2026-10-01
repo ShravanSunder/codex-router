@@ -3,8 +3,7 @@ use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::WindowKind;
 use codex_router_state::window_observation::WindowObservation;
 use codex_router_state::window_observation::WindowObservationProps;
-
-const QUOTA_OBSERVATION_FRESHNESS_MARGIN_SECONDS: u64 = 120;
+use codex_router_state::window_observation::calculate_window_observation_fresh_until_unix_seconds;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WeeklyQuotaFloorIntent {
@@ -341,8 +340,13 @@ where
                 }
             };
             let mut observations_recorded = 0_u64;
-            let fresh_until_unix_seconds =
-                quota_observation_fresh_until(observation_started_at, refresh_interval_seconds)?;
+            let fresh_until_unix_seconds = calculate_window_observation_fresh_until_unix_seconds(
+                observation_started_at,
+                refresh_interval_seconds,
+            )
+            .map_err(|error| QuotaCommandError::ProviderResponse {
+                message: error.to_string(),
+            })?;
             for window in response.windows {
                 let window_kind = match window.limit_window_seconds {
                     18_000 => WindowKind::FiveHour,
@@ -664,18 +668,6 @@ where
     refresh_result
 }
 
-fn quota_observation_fresh_until(
-    observation_started_at: u64,
-    refresh_interval_seconds: u64,
-) -> Result<u64, QuotaCommandError> {
-    observation_started_at
-        .checked_add(refresh_interval_seconds)
-        .and_then(|deadline| deadline.checked_add(QUOTA_OBSERVATION_FRESHNESS_MARGIN_SECONDS))
-        .ok_or_else(|| QuotaCommandError::ProviderResponse {
-            message: "quota observation freshness deadline exceeded timestamp range".to_owned(),
-        })
-}
-
 fn quota_refresh_diagnostic_account_label(account: &AccountRecord) -> String {
     safe_account_label(account.label(), account.account_id())
         .as_str()
@@ -712,7 +704,11 @@ mod freshness_tests {
     use super::*;
 
     #[test]
-    fn freshness_deadline_adds_the_configured_interval_and_margin() {
-        assert!(matches!(quota_observation_fresh_until(100, 400), Ok(620)));
+    fn active_refresh_freshness_deadline_uses_the_shared_window_policy() {
+        let deadline = calculate_window_observation_fresh_until_unix_seconds(100, 400)
+            .expect("active refresh deadline should fit timestamp range");
+
+        assert_eq!(deadline, 620);
+        assert_eq!(deadline - 100, 520);
     }
 }
