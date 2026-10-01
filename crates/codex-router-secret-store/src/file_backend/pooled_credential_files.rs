@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use codex_router_core::redaction::SecretString;
 
-use super::{FileSecretStore, read_to_string, reject_symlink_path};
+use super::{FileSecretStore, reject_symlink_path};
 use crate::credential_key::AccountCredentialKey;
 use crate::credential_key::has_credential_bundle_marker;
 use crate::model::SecretKey;
@@ -42,7 +42,7 @@ impl FileSecretStore {
         require_credential_key(key)?;
         let path = self.encrypted_credential_path(key);
         reject_symlink_path(&path)?;
-        fs::read(&path).map_err(|source| SecretStoreError::Filesystem { path, source })
+        self.read_file_bytes(&path)
     }
 
     /// Deletes one encrypted generation bundle if it exists.
@@ -71,7 +71,7 @@ impl FileSecretStore {
         require_credential_key(key)?;
         let path = self.secret_path(key);
         reject_symlink_path(&path)?;
-        read_to_string(&path).map(SecretString::new)
+        self.read_file_to_string(&path).map(SecretString::new)
     }
 
     /// Deletes one legacy credential after its encrypted replacement was verified.
@@ -95,10 +95,7 @@ impl FileSecretStore {
         &self,
         suffix: &str,
     ) -> Result<Vec<SecretKey>, SecretStoreError> {
-        let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {
-            path: self.root.clone(),
-            source,
-        })?;
+        let entries = self.read_directory(&self.root)?;
         let file_suffix = format!(".{suffix}");
         let mut keys = Vec::new();
         for entry in entries {
@@ -147,10 +144,7 @@ impl FileSecretStore {
     pub(crate) fn list_pooled_credential_files_for_pruning(
         &self,
     ) -> Result<Vec<SecretKey>, SecretStoreError> {
-        let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {
-            path: self.root.clone(),
-            source,
-        })?;
+        let entries = self.read_directory(&self.root)?;
         let mut keys = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| SecretStoreError::Filesystem {
@@ -195,10 +189,7 @@ impl FileSecretStore {
 
     /// Conservatively detects any v2 envelope before a missing-key decision.
     pub(crate) fn has_any_v2_files(&self) -> Result<bool, SecretStoreError> {
-        let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {
-            path: self.root.clone(),
-            source,
-        })?;
+        let entries = self.read_directory(&self.root)?;
         for entry in entries {
             let entry = entry.map_err(|source| SecretStoreError::Filesystem {
                 path: self.root.clone(),
@@ -225,10 +216,7 @@ impl FileSecretStore {
 
     /// Lists credential account labels leniently for unavailable-store diagnostics.
     pub(crate) fn list_migration_account_names(&self) -> Result<Vec<String>, SecretStoreError> {
-        let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {
-            path: self.root.clone(),
-            source,
-        })?;
+        let entries = self.read_directory(&self.root)?;
         let mut account_names = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| SecretStoreError::Filesystem {
@@ -291,10 +279,7 @@ impl FileSecretStore {
     pub(crate) fn list_pooled_credential_temporary_files(
         &self,
     ) -> Result<Vec<PooledCredentialTemporaryFile>, SecretStoreError> {
-        let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {
-            path: self.root.clone(),
-            source,
-        })?;
+        let entries = self.read_directory(&self.root)?;
         let mut files = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| SecretStoreError::Filesystem {

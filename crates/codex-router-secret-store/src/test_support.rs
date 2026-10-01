@@ -6,6 +6,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::encrypted_credential_store::EncryptedCredentialStore;
+pub use crate::file_backend::FileReadTrace;
+pub use crate::file_backend::FileReadTraceEvent;
 use crate::file_backend::FileSecretStore;
 pub use crate::file_backend::FileWriteTrace;
 pub use crate::file_backend::FileWriteTraceEvent;
@@ -70,6 +72,17 @@ pub fn open_encrypted_credential_store_with_write_trace(
     open_encrypted_credential_store_with_write_trace_for_home(secret_root.as_ref(), &home_root)
 }
 
+/// Opens an encrypted fixture store and records file/directory reads plus file writes.
+pub fn open_encrypted_credential_store_with_read_write_traces(
+    secret_root: impl AsRef<Path>,
+) -> Result<(EncryptedCredentialStore, FileReadTrace, FileWriteTrace), SecretStoreError> {
+    let home_root = production_home_root()?;
+    open_encrypted_credential_store_with_read_write_traces_for_home(
+        secret_root.as_ref(),
+        &home_root,
+    )
+}
+
 fn open_encrypted_credential_store_with_write_trace_for_home(
     secret_root: &Path,
     home_root: &Path,
@@ -79,6 +92,26 @@ fn open_encrypted_credential_store_with_write_trace_for_home(
     let file_store = FileSecretStore::open_with_write_trace(secret_root, trace.clone())?;
     let data_key = PooledCredentialDataKey::from_bytes([0x54; 32]);
     Ok((EncryptedCredentialStore::new(file_store, data_key), trace))
+}
+
+fn open_encrypted_credential_store_with_read_write_traces_for_home(
+    secret_root: &Path,
+    home_root: &Path,
+) -> Result<(EncryptedCredentialStore, FileReadTrace, FileWriteTrace), SecretStoreError> {
+    ensure_test_credential_key_root_safe_for_home(secret_root, home_root)?;
+    let read_trace = FileReadTrace::default();
+    let write_trace = FileWriteTrace::default();
+    let file_store = FileSecretStore::open_with_read_and_write_traces(
+        secret_root,
+        read_trace.clone(),
+        write_trace.clone(),
+    )?;
+    let data_key = PooledCredentialDataKey::from_bytes([0x54; 32]);
+    Ok((
+        EncryptedCredentialStore::new(file_store, data_key),
+        read_trace,
+        write_trace,
+    ))
 }
 
 /// Refuses deterministic test-key access to Router's production secret directory.
@@ -173,6 +206,10 @@ mod tests {
         let opened = open_encrypted_credential_store_for_home(&secret_root, home.path());
         let traced =
             open_encrypted_credential_store_with_write_trace_for_home(&secret_root, home.path());
+        let read_and_write_traced = open_encrypted_credential_store_with_read_write_traces_for_home(
+            &secret_root,
+            home.path(),
+        );
 
         assert!(matches!(
             opened,
@@ -180,6 +217,10 @@ mod tests {
         ));
         assert!(matches!(
             traced,
+            Err(SecretStoreError::TestCredentialKeyOnProductionRoot)
+        ));
+        assert!(matches!(
+            read_and_write_traced,
             Err(SecretStoreError::TestCredentialKeyOnProductionRoot)
         ));
         assert!(!secret_root.exists());

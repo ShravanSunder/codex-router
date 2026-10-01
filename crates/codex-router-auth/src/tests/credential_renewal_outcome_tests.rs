@@ -178,8 +178,8 @@ async fn committed_provider_refresh_keeps_active_and_previous_generation_only() 
     let temp_dir = AuthTestTempDir::new("provider-refresh-generation-pruning");
     let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
     let secret_root = temp_dir.path().join("secrets");
-    let (secrets, write_trace) = must_ok(
-        codex_router_secret_store::test_support::open_encrypted_credential_store_with_write_trace(
+    let (secrets, read_trace, write_trace) = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store_with_read_write_traces(
             &secret_root,
         ),
     );
@@ -246,6 +246,48 @@ async fn committed_provider_refresh_keeps_active_and_previous_generation_only() 
                 .expect("refreshed provider account remains")
                 .active_credential_generation(),
             Some(4)
+        );
+    }
+
+    let read_events = read_trace.events();
+    let home_root = std::path::PathBuf::from(
+        std::env::var_os("HOME").expect("HOME should be available for native-path proof"),
+    );
+    let native_auth_store_roots = [home_root.join(".codex"), home_root.join(".claude")];
+    assert!(
+        read_events.iter().any(|event| matches!(
+            event,
+            codex_router_secret_store::test_support::FileReadTraceEvent::FileOpenAttempted { path }
+                if path.file_name().is_some_and(|name| name.to_string_lossy().ends_with(".v2"))
+        )),
+        "refresh must trace encrypted credential reads"
+    );
+    assert!(
+        read_events.iter().any(|event| matches!(
+            event,
+            codex_router_secret_store::test_support::FileReadTraceEvent::DirectoryOpenAttempted { path }
+                if path == &secret_root
+        )),
+        "refresh generation pruning must trace its encrypted-store directory read"
+    );
+    for event in read_events {
+        let path = match event {
+            codex_router_secret_store::test_support::FileReadTraceEvent::FileOpenAttempted {
+                path,
+            }
+            | codex_router_secret_store::test_support::FileReadTraceEvent::DirectoryOpenAttempted {
+                path,
+            } => path,
+        };
+        assert!(
+            path.starts_with(&secret_root),
+            "refresh opened a path outside the Router secret store: {path:?}"
+        );
+        assert!(
+            native_auth_store_roots
+                .iter()
+                .all(|native_root| !path.starts_with(native_root)),
+            "refresh opened a path under a native auth store: {path:?}"
         );
     }
 
