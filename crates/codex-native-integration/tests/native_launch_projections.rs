@@ -40,6 +40,31 @@ fn expected_router_root_overrides() -> Vec<String> {
 }
 
 #[test]
+fn rendered_profile_sets_no_permission_key_so_remote_resume_works() {
+    // Arrange: the keys the Codex TUI treats as a permission override on remote resume.
+    let permission_keys = [
+        "approval_policy",
+        "approvals_reviewer",
+        "sandbox_mode",
+        "default_permissions",
+        "permissions",
+        "network",
+        "sandbox_workspace_write",
+    ];
+
+    // Act
+    let profile = CodexRouterProfile::new(8787)
+        .render()
+        .parse::<toml::Table>()
+        .unwrap();
+
+    // Assert
+    for key in permission_keys {
+        assert!(!profile.contains_key(key), "profile must not set {key}");
+    }
+}
+
+#[test]
 fn router_profile_has_one_rendering_and_root_override_projection() {
     // Arrange: the production loopback port and the production collaboration directory.
     let profile = CodexRouterProfile::new(8787);
@@ -48,8 +73,7 @@ fn router_profile_has_one_rendering_and_root_override_projection() {
     assert_eq!(
         profile.render(),
         concat!(
-            "model_provider = \"codex-router\"\n",
-            "sandbox_mode = \"workspace-write\"\n\n",
+            "model_provider = \"codex-router\"\n\n",
             "[model_providers.codex-router]\n",
             "name = \"codex-router\"\n",
             "base_url = \"http://127.0.0.1:8787/v1\"\n",
