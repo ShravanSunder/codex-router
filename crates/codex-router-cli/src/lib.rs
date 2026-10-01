@@ -397,9 +397,9 @@ where
         }
         CliCommand::Token(TokenCommand::Init { router_root }) => {
             let store =
-                FileSecretStore::open(router_root).map_err(TokenCommandError::SecretStore)?;
+                FileSecretStore::open(&router_root).map_err(TokenCommandError::SecretStore)?;
             let service = LocalRouterTokenService::new(store);
-            let record = service.initialize()?;
+            let record = service.ensure_local_token(&router_root)?;
             writeln!(stdout, "generation: {}", record.generation().as_u64())
                 .map_err(CliError::Stdout)?;
         }
