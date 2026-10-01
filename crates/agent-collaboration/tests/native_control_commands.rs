@@ -267,9 +267,23 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
                         } else {
                             json!({"kind":"unknown"})
                         };
+                        let delivery_state = if kind == "nativeRejected" {
+                            "rejected"
+                        } else {
+                            "outcome-unknown"
+                        };
+                        let push_id = "019f0000-0000-7000-8000-000000000101";
+                        let link = format!("router://{service_id}/push/{push_id}");
                         let response = json!({
                             "jsonrpc":"2.0","id":request["id"],
-                            "result":{"outcome":outcome,"reachability":"codexAppServer","client":null}
+                            "result":{
+                                "pushId":push_id,
+                                "link":link,
+                                "target":request["params"]["target"].clone(),
+                                "targetIdentity":"Codex target",
+                                "deliveryState":delivery_state,
+                                "receipt":{"outcome":outcome,"reachability":"codexAppServer","client":null}
+                            }
                         });
                         write
                             .write_all(format!("{response}\n").as_bytes())
@@ -342,10 +356,19 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
         > = serde_json::from_value(result.clone()).expect("published finite message record");
         if let Some(kind) = rejection_kind {
             assert_eq!(
-                result["result"]["record"]["reachability"], "codexAppServer",
+                result["result"]["record"]["deliveryState"],
+                if kind == "nativeRejected" {
+                    "rejected"
+                } else {
+                    "outcome-unknown"
+                },
                 "{label}"
             );
-            let outcome = &result["result"]["record"]["outcome"];
+            assert_eq!(
+                result["result"]["record"]["receipt"]["reachability"], "codexAppServer",
+                "{label}"
+            );
+            let outcome = &result["result"]["record"]["receipt"]["outcome"];
             assert_eq!(
                 outcome["kind"],
                 if kind == "nativeRejected" {
