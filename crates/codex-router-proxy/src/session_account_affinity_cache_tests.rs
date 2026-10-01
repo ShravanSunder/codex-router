@@ -1,24 +1,17 @@
-use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
 use codex_router_state::sqlite::AsyncSessionAccountAffinityRepository;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 
 use super::*;
 
-static NEXT_TEST_DATABASE: AtomicUsize = AtomicUsize::new(0);
-
 fn account_id(value: &str) -> AccountId {
     AccountId::new(value).unwrap_or_else(|error| panic!("test account id: {error}"))
 }
 
-fn test_database_path(name: &str) -> PathBuf {
-    let process_id = std::process::id();
-    let counter = NEXT_TEST_DATABASE.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "codex-router-proxy-session-affinity-{name}-{process_id}-{counter}.sqlite"
-    ))
+fn test_database_directory() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("codex-router-proxy-session-affinity-")
+        .tempdir()
+        .unwrap_or_else(|error| panic!("temporary affinity database directory: {error}"))
 }
 
 fn completed_response(
@@ -393,7 +386,9 @@ async fn publish(
 
 #[tokio::test]
 async fn claude_success_only_creates_or_renews_the_authorized_pin() {
-    let store = AsyncSqliteStateStore::open(&test_database_path("success_and_no_success"))
+    let temporary_directory = test_database_directory();
+    let database_path = temporary_directory.path().join("router.sqlite");
+    let store = AsyncSqliteStateStore::open(&database_path)
         .await
         .unwrap_or_else(|error| panic!("test state should open: {error}"));
     let cache = SessionAccountAffinityCache::shared(Duration::from_secs(4_500));
@@ -485,7 +480,9 @@ async fn claude_success_only_creates_or_renews_the_authorized_pin() {
 
 #[tokio::test]
 async fn stale_mismatched_expired_and_released_authority_is_unchanged() {
-    let store = AsyncSqliteStateStore::open(&test_database_path("authority_noop"))
+    let temporary_directory = test_database_directory();
+    let database_path = temporary_directory.path().join("router.sqlite");
+    let store = AsyncSqliteStateStore::open(&database_path)
         .await
         .unwrap_or_else(|error| panic!("test state should open: {error}"));
     let cache = SessionAccountAffinityCache::shared(Duration::from_secs(4_500));
