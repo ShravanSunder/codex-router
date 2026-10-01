@@ -424,6 +424,41 @@ impl AsyncSqliteStateStore {
         Ok(updated.rows_affected() == 1)
     }
 
+    /// Marks a still-active provider-rejected generation as requiring reauthentication.
+    ///
+    /// A newer active generation or an in-progress successor claim wins over this observation.
+    pub async fn mark_generation_reauth_required(
+        &self,
+        account_id: &AccountId,
+        rejected_generation: u64,
+    ) -> Result<bool, StateStoreError> {
+        let updated = sqlx::query!(
+            "INSERT INTO credential_maintenance (
+                account_id, credential_generation, state, failure_class,
+                last_success_unix_seconds, next_attempt_unix_seconds,
+                claimed_successor_generation, claim_purpose,
+                claim_started_unix_seconds, claim_prior_state, consecutive_failures
+             )
+             SELECT account_id, ?2, 'reauth_required', 'provider_rejected',
+                    NULL, NULL, NULL, NULL, NULL, NULL, 0
+               FROM accounts
+              WHERE account_id = ?1 AND active_credential_generation = ?2
+             ON CONFLICT(account_id) DO UPDATE SET
+                state = 'reauth_required',
+                failure_class = 'provider_rejected',
+                next_attempt_unix_seconds = NULL
+              WHERE credential_maintenance.credential_generation <= excluded.credential_generation
+                AND credential_maintenance.state != 'in_progress'
+                AND credential_maintenance.claimed_successor_generation IS NULL",
+            account_id.as_str(),
+            u64_to_i64(rejected_generation)?,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     /// Activates only the secret slot reserved by this claim and clears the claim atomically.
     pub async fn activate_claimed_credential_generation(
         &self,

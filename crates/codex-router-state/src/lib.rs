@@ -80,6 +80,8 @@ mod tests {
     use crate::sqlite::StateStoreError;
     use crate::sqlite::WeeklyQuotaFloorMutationResult;
 
+    mod credential_maintenance_store_tests;
+
     fn expect_error<T, E>(result: Result<T, E>, context: &'static str) -> E {
         match result {
             Ok(_) => panic!("{context}"),

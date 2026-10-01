@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO credential_maintenance (\n                account_id, credential_generation, state, failure_class,\n                last_success_unix_seconds, next_attempt_unix_seconds,\n                claimed_successor_generation, claim_purpose,\n                claim_started_unix_seconds, claim_prior_state, consecutive_failures\n             )\n             SELECT account_id, ?2, 'reauth_required', 'provider_rejected',\n                    NULL, NULL, NULL, NULL, NULL, NULL, 0\n               FROM accounts\n              WHERE account_id = ?1 AND active_credential_generation = ?2\n             ON CONFLICT(account_id) DO UPDATE SET\n                state = 'reauth_required',\n                failure_class = 'provider_rejected',\n                next_attempt_unix_seconds = NULL\n              WHERE credential_maintenance.credential_generation <= excluded.credential_generation\n                AND credential_maintenance.state != 'in_progress'\n                AND credential_maintenance.claimed_successor_generation IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e7d5c64b1c6b4610999cb2c8007f1182310a4f6709ca593e223f280b6e6275f4"
+}

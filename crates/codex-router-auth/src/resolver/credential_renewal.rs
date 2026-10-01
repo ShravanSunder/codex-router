@@ -254,6 +254,18 @@ where
         ))
     }
 
+    /// Records a provider-rejected access generation without attempting credential renewal.
+    pub async fn mark_generation_reauth_required(
+        &self,
+        account_id: &AccountId,
+        rejected_generation: u64,
+    ) -> Result<bool, CredentialResolverError> {
+        self.state_store
+            .mark_generation_reauth_required(account_id, rejected_generation)
+            .await
+            .map_err(map_state_error)
+    }
+
     fn observed_now_unix_seconds(&self) -> Result<u64, CredentialResolverError> {
         self.fixed_now_unix_seconds.map(Ok).unwrap_or_else(|| {
             current_unix_seconds().map_err(|_| CredentialResolverError::RefreshUnavailable)
