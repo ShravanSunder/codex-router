@@ -25,6 +25,7 @@ use futures_util::future::BoxFuture;
 
 use crate::account::AccountStatus;
 use crate::account_routing_policy::AccountRoutingPolicy;
+use crate::credential_maintenance::CredentialMaintenanceState;
 use crate::quota_snapshot::PersistedQuotaHistoryObservation;
 use crate::quota_snapshot::PersistedSelectorQuotaWindow;
 use crate::quota_snapshot::SelectorQuotaInput;
@@ -548,18 +549,25 @@ fn selection_account_state_from_selector_input(
         })
         .collect::<Vec<_>>();
 
-    let restriction = if input.active_credential_generation().is_none() {
-        SelectionAccountRestriction::NeedsLogin
-    } else if input.provider() == Provider::Claude && !window_rejections.is_empty() {
-        SelectionAccountRestriction::Exhausted
-    } else if let Some(floor_basis_points) = weekly_floor_basis_points {
-        match weekly_floor_hold_reason(input, floor_basis_points, now_unix_seconds) {
-            Some(reason) => SelectionAccountRestriction::HeldByFloor { reason },
-            None => SelectionAccountRestriction::Available,
-        }
-    } else {
-        SelectionAccountRestriction::Available
-    };
+    let active_credential_needs_login = matches!(
+        input.active_credential_maintenance_state(),
+        Some(
+            CredentialMaintenanceState::ReauthRequired | CredentialMaintenanceState::Unrefreshable
+        )
+    );
+    let restriction =
+        if input.active_credential_generation().is_none() || active_credential_needs_login {
+            SelectionAccountRestriction::NeedsLogin
+        } else if input.provider() == Provider::Claude && !window_rejections.is_empty() {
+            SelectionAccountRestriction::Exhausted
+        } else if let Some(floor_basis_points) = weekly_floor_basis_points {
+            match weekly_floor_hold_reason(input, floor_basis_points, now_unix_seconds) {
+                Some(reason) => SelectionAccountRestriction::HeldByFloor { reason },
+                None => SelectionAccountRestriction::Available,
+            }
+        } else {
+            SelectionAccountRestriction::Available
+        };
 
     SelectionAccountState::enabled(
         input.account_id().clone(),
@@ -861,6 +869,8 @@ mod tests {
     use crate::account::AccountRecord;
     use crate::account::AccountStatus;
     use crate::account_routing_policy::WeeklyQuotaFloorBasisPoints;
+    use crate::credential_maintenance::CredentialMaintenanceState;
+    use crate::quota_snapshot::SelectorCredentialMaintenance;
     use crate::sqlite::AsyncWeeklyQuotaFloorMutationStore;
 
     use super::*;
@@ -876,6 +886,56 @@ mod tests {
         assert!(
             !active_session_rollups_cover_interval(&rollups, &account, 0, 900),
             "a missing middle rollup bucket must downgrade active-session history"
+        );
+    }
+
+    fn credential_maintenance_projection_input(
+        maintenance_generation: u64,
+        maintenance_state: CredentialMaintenanceState,
+    ) -> SelectorQuotaInput {
+        SelectorQuotaInput::new(
+            AccountId::new("acct_maintenance_projection")
+                .unwrap_or_else(|error| panic!("test account id should be valid: {error}")),
+            "Claude Maintenance",
+            Provider::Claude,
+            AccountStatus::Enabled,
+            Some(2),
+            "messages",
+            Vec::new(),
+        )
+        .with_credential_maintenance(Some(SelectorCredentialMaintenance::new(
+            maintenance_generation,
+            maintenance_state,
+        )))
+    }
+
+    #[test]
+    fn projection_maps_active_generation_reauth_and_unrefreshable_to_needs_login() {
+        for maintenance_state in [
+            CredentialMaintenanceState::ReauthRequired,
+            CredentialMaintenanceState::Unrefreshable,
+        ] {
+            let input = credential_maintenance_projection_input(2, maintenance_state);
+            let projected = selection_account_state_from_selector_input(&input, None, 1_000);
+
+            assert_eq!(
+                projected.restriction(),
+                Some(&SelectionAccountRestriction::NeedsLogin),
+                "active generation maintenance state {maintenance_state:?} requires login"
+            );
+        }
+    }
+
+    #[test]
+    fn projection_ignores_reauth_state_for_stale_credential_generation() {
+        let input =
+            credential_maintenance_projection_input(1, CredentialMaintenanceState::ReauthRequired);
+        let projected = selection_account_state_from_selector_input(&input, None, 1_000);
+
+        assert_eq!(
+            projected.restriction(),
+            Some(&SelectionAccountRestriction::Available),
+            "stale maintenance state must not restrict the newer active credential"
         );
     }
 

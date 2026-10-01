@@ -43,6 +43,7 @@ use crate::quota_snapshot::QuotaHistoryRefreshOutcome;
 use crate::quota_snapshot::QuotaRefreshErrorClass;
 use crate::quota_snapshot::QuotaRefreshStatusView;
 use crate::quota_snapshot::QuotaSnapshotSource;
+use crate::quota_snapshot::SelectorCredentialMaintenance;
 use crate::quota_snapshot::SelectorQuotaInput;
 use crate::quota_snapshot::SelectorQuotaWindowStatus;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
@@ -845,6 +846,18 @@ impl AsyncSqliteStateStore {
             } else {
                 (Vec::new(), Vec::new())
             };
+            let credential_maintenance = if account.provider() == Provider::Claude {
+                self.load_credential_maintenance(account.account_id())
+                    .await?
+                    .map(|record| {
+                        SelectorCredentialMaintenance::new(
+                            record.credential_generation,
+                            record.state,
+                        )
+                    })
+            } else {
+                None
+            };
             inputs.push(
                 SelectorQuotaInput::new(
                     account.account_id().clone(),
@@ -855,6 +868,7 @@ impl AsyncSqliteStateStore {
                     route_band,
                     windows,
                 )
+                .with_credential_maintenance(credential_maintenance)
                 .with_window_state(window_observations, window_rejections),
             );
         }
