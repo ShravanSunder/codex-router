@@ -13,6 +13,8 @@ use codex_router_proxy::server::LoopbackBindAddress;
 use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
 use codex_router_proxy::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
+#[cfg(debug_assertions)]
+use codex_router_proxy::upstream::ClaudeUpstreamEndpoint;
 use codex_router_proxy::upstream::UpstreamEndpoint;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::file_backend::FileSecretStore;
@@ -293,14 +295,25 @@ fn base_serve_runtime_config(
 ) -> Result<LoopbackRouterRuntimeConfig, CliError> {
     let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
     let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url.clone())?;
-    Ok(LoopbackRouterRuntimeConfig::new_tokenless(
+    let runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
         bind_address,
         upstream_endpoint,
         command.state_db.clone(),
         command.secret_root.clone(),
     )
     .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
-    .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent))
+    .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
+    #[cfg(debug_assertions)]
+    let runtime_config = if let Some(base_url) = &command.debug_claude_upstream_base_url {
+        let endpoint = ClaudeUpstreamEndpoint::isolated_debug_override(
+            base_url.clone(),
+            command.require_debug_isolation,
+        )?;
+        runtime_config.with_debug_claude_upstream_endpoint(endpoint)
+    } else {
+        runtime_config
+    };
+    Ok(runtime_config)
 }
 
 #[cfg(test)]
@@ -361,6 +374,65 @@ mod session_pin_idle_ttl_tests {
         .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
 
         assert_eq!(runtime_config, expected_config);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn isolated_debug_claude_override_reaches_runtime_without_changing_codex_upstream() {
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--upstream-base-url"),
+            OsString::from("https://codex.example/v1"),
+            OsString::from("--require-debug-isolation"),
+            OsString::from("--debug-claude-upstream-base-url"),
+            OsString::from("http://127.0.0.1:19888"),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+        let runtime_config = base_serve_runtime_config(&command)
+            .unwrap_or_else(|error| panic!("debug serve runtime config should build: {error}"));
+        let expected_config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new(&command.listen_host, command.port)
+                .expect("serve bind address should be valid"),
+            UpstreamEndpoint::new("https://codex.example/v1")
+                .expect("Codex upstream should remain independently configured"),
+            command.state_db,
+            command.secret_root,
+        )
+        .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
+        .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent)
+        .with_debug_claude_upstream_endpoint(
+            ClaudeUpstreamEndpoint::isolated_debug_override("http://127.0.0.1:19888", true)
+                .expect("debug endpoint should be isolated and valid"),
+        );
+
+        assert_eq!(runtime_config, expected_config);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn invalid_debug_claude_url_is_reported_without_echoing_the_value() {
+        let supplied_url = "http://user:token@127.0.0.1:19888?secret=value";
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--require-debug-isolation"),
+            OsString::from("--debug-claude-upstream-base-url"),
+            OsString::from(supplied_url),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+        let error = base_serve_runtime_config(&command)
+            .expect_err("query string must not be accepted in a debug Claude base URL");
+        let message = error.to_string();
+
+        assert!(message.contains("--debug-claude-upstream-base-url"));
+        assert!(message.contains("CODEX_ROUTER_DEBUG_CLAUDE_UPSTREAM_BASE_URL"));
+        assert!(message.contains("absolute HTTP(S) base URL"));
+        assert!(!message.contains(supplied_url));
     }
 }
 

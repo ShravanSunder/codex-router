@@ -497,4 +497,57 @@ mod tests {
             ));
         }
     }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn serve_debug_claude_upstream_override_requires_isolation_marker() {
+        let arguments = [
+            OsString::from("--debug-claude-upstream-base-url"),
+            OsString::from("http://127.0.0.1:18888"),
+        ];
+        let mut parser = ArgumentParser::new(arguments.into());
+        let error = ServeCommand::parse(&mut parser)
+            .expect_err("debug endpoint override requires isolated debug serve mode");
+        assert!(matches!(
+            error,
+            super::CliError::MissingOption {
+                option: "--require-debug-isolation"
+            }
+        ));
+
+        let arguments = [
+            OsString::from("--require-debug-isolation"),
+            OsString::from("--debug-claude-upstream-base-url"),
+            OsString::from("http://127.0.0.1:18888"),
+        ];
+        let mut parser = ArgumentParser::new(arguments.into());
+        let command = ServeCommand::parse(&mut parser)
+            .expect("isolated debug serve accepts the debug Claude endpoint override");
+        assert_eq!(
+            command.debug_claude_upstream_base_url.as_deref(),
+            Some("http://127.0.0.1:18888")
+        );
+        assert!(command.require_debug_isolation);
+        assert_eq!(
+            command.upstream_base_url,
+            super::super::DEFAULT_CHATGPT_BACKEND_BASE_URL
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_serve_does_not_expose_debug_claude_override_options() {
+        for arguments in [
+            vec![OsString::from("--require-debug-isolation")],
+            vec![
+                OsString::from("--debug-claude-upstream-base-url"),
+                OsString::from("http://127.0.0.1:18888"),
+            ],
+        ] {
+            let mut parser = ArgumentParser::new(arguments);
+            let error = ServeCommand::parse(&mut parser)
+                .expect_err("release serve does not accept debug Claude override options");
+            assert!(matches!(error, super::CliError::UnknownOption { .. }));
+        }
+    }
 }
