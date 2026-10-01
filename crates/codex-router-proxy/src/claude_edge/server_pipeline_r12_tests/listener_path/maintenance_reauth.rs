@@ -432,21 +432,26 @@ fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
     let success_response = fixture_json_response("200 OK", r#"{"type":"message"}"#);
     let (upstream_endpoint, upstream_thread) =
         start_fake_claude_upstream(vec![success_response.clone(), success_response]);
-    let runtime = LoopbackRouterRuntime::start(
+    let first_runtime = LoopbackRouterRuntime::start(
         runtime_config(&database_path, &secret_root)
             .with_quota_clock(1_100, 300)
-            .with_debug_claude_upstream_endpoint(upstream_endpoint),
-        credentials,
+            .with_debug_claude_upstream_endpoint(upstream_endpoint.clone()),
+        credentials.clone(),
     )
     .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
-    let router_address = runtime.local_addr();
-    let router_thread = thread::spawn(move || runtime.serve_http_connections(2));
+    let first_router_address = first_runtime.local_addr();
+    let first_router_thread = thread::spawn(move || first_runtime.serve_http_connections(1));
 
-    let first_response = send_claude_request_for_session(router_address, SESSION_ID);
+    let first_response = send_claude_request_for_session(first_router_address, SESSION_ID);
     assert!(
         first_response.starts_with("HTTP/1.1 200 OK"),
         "{first_response}"
     );
+    let first_served_connections = first_router_thread
+        .join()
+        .unwrap_or_else(|_error| panic!("first fixture Router thread should join"))
+        .unwrap_or_else(|error| panic!("first fixture Router should drain: {error}"));
+    assert_eq!(first_served_connections, 1);
     let first_pin = setup_runtime.block_on(async {
         AsyncSqliteStateStore::open(&database_path)
             .await
@@ -471,12 +476,21 @@ fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
         );
     });
 
-    let next_response = send_claude_request_for_session(router_address, SESSION_ID);
-    let served_connections = router_thread
+    let second_runtime = LoopbackRouterRuntime::start(
+        runtime_config(&database_path, &secret_root)
+            .with_quota_clock(1_100, 300)
+            .with_debug_claude_upstream_endpoint(upstream_endpoint),
+        credentials,
+    )
+    .unwrap_or_else(|error| panic!("replacement fixture Router should start: {error}"));
+    let second_router_address = second_runtime.local_addr();
+    let second_router_thread = thread::spawn(move || second_runtime.serve_http_connections(1));
+    let next_response = send_claude_request_for_session(second_router_address, SESSION_ID);
+    let second_served_connections = second_router_thread
         .join()
-        .unwrap_or_else(|_error| panic!("fixture Router thread should join"))
-        .unwrap_or_else(|error| panic!("fixture Router should serve both requests: {error}"));
-    assert_eq!(served_connections, 2);
+        .unwrap_or_else(|_error| panic!("replacement fixture Router thread should join"))
+        .unwrap_or_else(|error| panic!("replacement fixture Router should drain: {error}"));
+    assert_eq!(second_served_connections, 1);
     assert!(
         next_response.starts_with("HTTP/1.1 200 OK"),
         "{next_response}"

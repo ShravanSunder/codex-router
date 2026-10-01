@@ -6,6 +6,7 @@ use super::{
     claude_fixture_response, client_response_body, mark_claude_primary_reserve,
     read_claude_credential_maintenance, read_claude_fixture_pin, read_until_response_marker,
     write_claude_fixture_chunk, write_claude_fixture_request,
+    write_claude_fixture_request_with_declared_content_length,
 };
 use crate::server::{
     LoopbackBindAddress, LoopbackRouterRuntime, LoopbackRouterRuntimeConfig, read_http_request,
@@ -16,25 +17,15 @@ use codex_router_core::ids::{AccountId, TokenGeneration};
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
+use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_state::account::{AccountRecord, AccountStatus};
 use codex_router_state::credential_maintenance::CredentialMaintenanceState;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener as TokioTcpListener;
-
-static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-fn test_database_path(name: &str) -> PathBuf {
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "codex-router-claude-server-{name}-{}-{counter}.sqlite",
-        std::process::id()
-    ))
-}
 
 fn local_router_token(token: &str, generation: u64) -> LocalRouterTokenRecord {
     LocalRouterTokenRecord::new(SecretString::new(token), TokenGeneration::new(generation))
@@ -101,6 +92,21 @@ pub(super) fn run_claude_loopback_scenario(
 fn run_claude_loopback_scenario_with_refresh(
     scenario: ClaudeLoopbackScenario,
     refresh: Option<(ClaudeOAuthRefreshClient, FakeClaudeOAuthIssuer)>,
+) -> ClaudeLoopbackReceipt {
+    run_claude_loopback_scenario_with_store(scenario, refresh, false, false)
+}
+
+fn run_claude_loopback_scenario_with_unavailable_credential_store(
+    scenario: ClaudeLoopbackScenario,
+) -> ClaudeLoopbackReceipt {
+    run_claude_loopback_scenario_with_store(scenario, None, true, true)
+}
+
+fn run_claude_loopback_scenario_with_store(
+    scenario: ClaudeLoopbackScenario,
+    refresh: Option<(ClaudeOAuthRefreshClient, FakeClaudeOAuthIssuer)>,
+    credential_store_unavailable: bool,
+    incomplete_request_body: bool,
 ) -> ClaudeLoopbackReceipt {
     use codex_router_core::provider::Provider;
     use codex_router_secret_store::account_tokens::provider_credential_bundle_key;
@@ -169,8 +175,12 @@ fn run_claude_loopback_scenario_with_refresh(
             requests
         })
     });
-    let database_path = test_database_path(scenario.case);
-    let secret_root = database_path.with_extension("secrets");
+    let temporary_directory = tempfile::Builder::new()
+        .prefix(&format!("codex-router-claude-server-{}-", scenario.case))
+        .tempdir()
+        .expect("Claude fixture temp directory");
+    let database_path = temporary_directory.path().join("router.sqlite");
+    let secret_root = temporary_directory.path().join("secrets");
     let secrets =
         codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root)
             .expect("fixture secrets");
@@ -282,6 +292,23 @@ fn run_claude_loopback_scenario_with_refresh(
             .await
             .expect("fixture pin");
     });
+    let credential_store = if credential_store_unavailable {
+        assert!(
+            secrets
+                .read_secret(
+                    &provider_credential_bundle_key(Provider::Claude, &account_ids[0], 1)
+                        .expect("active credential key")
+                )
+                .is_ok(),
+            "the account has an active, readable credential before simulating key unavailability"
+        );
+        drop(secrets);
+        EncryptedCredentialStore::key_unavailable(
+            FileSecretStore::open(&secret_root).expect("unavailable credential store files"),
+        )
+    } else {
+        secrets
+    };
     let config = LoopbackRouterRuntimeConfig::new_tokenless(
         LoopbackBindAddress::new("127.0.0.1", 0).expect("router bind"),
         UpstreamEndpoint::new("http://127.0.0.1:1/v1").expect("unused OpenAI endpoint"),
@@ -309,7 +336,8 @@ fn run_claude_loopback_scenario_with_refresh(
     let router_thread = std::thread::spawn(move || {
         let mut serve_result = None;
         let logs = crate::test_log_capture::capture_log_output(|| {
-            let runtime = LoopbackRouterRuntime::start(config, secrets).expect("fixture router");
+            let runtime =
+                LoopbackRouterRuntime::start(config, credential_store).expect("fixture router");
             let runtime = match refresh_client {
                 Some(refresh_client) => runtime.with_test_claude_refresh_client(refresh_client),
                 None => runtime,
@@ -328,7 +356,15 @@ fn run_claude_loopback_scenario_with_refresh(
     client
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("client timeout");
-    write_claude_fixture_request(&mut client, &scenario.request_body);
+    if incomplete_request_body {
+        write_claude_fixture_request_with_declared_content_length(
+            &mut client,
+            &scenario.request_body,
+            scenario.request_body.len().saturating_add(1),
+        );
+    } else {
+        write_claude_fixture_request(&mut client, &scenario.request_body);
+    }
     let mut second_response = None;
     let mut response_bytes = if reserve_primary_while_streaming {
         assert_eq!(
@@ -379,15 +415,18 @@ fn run_claude_loopback_scenario_with_refresh(
         requests,
         oauth_request,
         database_path,
+        _temporary_directory: temporary_directory,
         account_ids,
         credential_patterns,
     };
-    assert!(
-        receipt
-            .logs
-            .contains("codex_router.claude_attempt_selected"),
-        "scoped subscriber captures an event from the spawned listener handler"
-    );
+    if !credential_store_unavailable {
+        assert!(
+            receipt
+                .logs
+                .contains("codex_router.claude_attempt_selected"),
+            "scoped subscriber captures an event from the spawned listener handler"
+        );
+    }
     super::assert_no_credential_patterns(
         &[
             ("client response", &receipt.response),
@@ -400,6 +439,32 @@ fn run_claude_loopback_scenario_with_refresh(
         &receipt.credential_patterns,
     );
     receipt
+}
+
+#[test]
+fn unavailable_credential_store_short_circuits_body_and_account_selection_for_active_credentials() {
+    let receipt =
+        run_claude_loopback_scenario_with_unavailable_credential_store(ClaudeLoopbackScenario {
+            case: "claude-key-unavailable",
+            request_body: b"{}".to_vec(),
+            reserve_primary: false,
+            reserve_primary_while_streaming: false,
+            quota_refresh_interval: Duration::from_secs(180),
+            responses: Vec::new(),
+        });
+
+    assert!(
+        receipt
+            .response
+            .starts_with("HTTP/1.1 503 Service Unavailable")
+    );
+    assert!(receipt.response.contains("Keychain key is unreadable"));
+    assert!(receipt.requests.is_empty());
+    assert!(
+        !receipt
+            .logs
+            .contains("codex_router.claude_attempt_selected")
+    );
 }
 
 #[test]

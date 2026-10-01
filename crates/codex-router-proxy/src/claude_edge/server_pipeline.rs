@@ -13,6 +13,7 @@ use bytes::BytesMut;
 use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::attempt_outcome::{AttemptOutcome, PassThroughReason, TransportFailure};
 use codex_router_core::audit::{AuditFileSink, RouteKind as AuditRouteKind, TransportKind};
+use codex_router_core::ids::AccountId;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::provider::Provider;
@@ -106,9 +107,7 @@ impl ClaudeServerRuntime {
             .map_or("/", http::uri::PathAndQuery::as_str);
         let mut request = HttpProxyRequest::new(method_from_hyper(&parts.method), path);
         for (name, value) in &parts.headers {
-            if let Ok(value) = value.to_str() {
-                request = request.with_header(Header::new(name.as_str(), value));
-            }
+            request = request.with_header(Header::from_http(name.as_str(), value));
         }
         // Recheck the dedicated gate after admission so token rotation remains authoritative.
         let presented_token = match extract_presented_local_token_from_request(
@@ -131,16 +130,6 @@ impl ClaudeServerRuntime {
             Ok(generation) => generation,
             Err(reason) => return http_error_response(HttpProxyError::LocalAuth { reason }),
         };
-        let buffered_body = match buffer_request_body(body.map_err(incoming_body_error).boxed())
-            .await
-        {
-            Ok(body) => body,
-            Err(error) => {
-                return empty_response(
-                    StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::BAD_REQUEST),
-                );
-            }
-        };
         let pipeline = ClaudeServerAttemptPipeline {
             handler: self,
             request,
@@ -150,6 +139,28 @@ impl ClaudeServerRuntime {
             credential_resolver: self.credential_resolver.clone(),
             request_sequence: NEXT_CLAUDE_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed),
             first_attempt_response_capture: FirstAttemptResponseCapture::default(),
+        };
+        if !matches!(
+            self.credential_store_availability,
+            CredentialStoreAvailability::Available
+        ) {
+            let error = HttpProxyError::Selection {
+                reason:
+                    crate::account_selection::QuotaAwareAccountSelectorError::NoEligibleAccounts,
+            };
+            pipeline.log_attempt_failure(1, failure_class_from_proxy_error(&error));
+            pipeline.log_attempts_completed(0, "not_attempted");
+            return pipeline.response_for_error(error).await;
+        }
+        let buffered_body = match buffer_request_body(body.map_err(incoming_body_error).boxed())
+            .await
+        {
+            Ok(body) => body,
+            Err(error) => {
+                return empty_response(
+                    StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::BAD_REQUEST),
+                );
+            }
         };
         let first_attempt = match pipeline.select_attempt(&pipeline.request, 1).await {
             Ok(attempt) => attempt,
@@ -393,6 +404,32 @@ impl AsyncClaudeQuotaObservationWriter for StateBackedClaudeQuotaObservationWrit
     }
 }
 
+fn schedule_passive_claude_quota_observation(
+    response: AsyncStreamingHttpProxyResponse,
+    writer: Arc<dyn AsyncClaudeQuotaObservationWriter>,
+    account_id: AccountId,
+    request_started_at_unix_seconds: u64,
+    quota_refresh_interval: Duration,
+    affinity_record_tasks: TaskTracker,
+) -> AsyncStreamingHttpProxyResponse {
+    let response_headers = response.headers().clone();
+    affinity_record_tasks.spawn(async move {
+        if let Err(error) = record_passive_claude_quota_observations(
+            &CLAUDE_MESSAGES,
+            &account_id,
+            &response_headers,
+            request_started_at_unix_seconds,
+            quota_refresh_interval,
+            writer.as_ref(),
+        )
+        .await
+        {
+            tracing::warn!(error = %error, "codex_router.claude_passive_quota_observation_failed");
+        }
+    });
+    response
+}
+
 impl ClaudeServerAttemptPipeline<'_> {
     async fn select_attempt(
         &self,
@@ -631,22 +668,18 @@ impl ClaudeAttemptPipeline for ClaudeServerAttemptPipeline<'_> {
                 .send_streaming(request)
                 .await
                 .map_err(|_error| TransportFailure::Connection)?;
-            let observation_writer = StateBackedClaudeQuotaObservationWriter {
+            let observation_writer = Arc::new(StateBackedClaudeQuotaObservationWriter {
                 state: self.handler.provider_error_state_store.clone(),
                 clock: Arc::clone(&self.handler.clock),
-            };
-            if let Err(error) = record_passive_claude_quota_observations(
-                &CLAUDE_MESSAGES,
-                attempt.selected.account_id(),
-                response.headers(),
+            });
+            let response = schedule_passive_claude_quota_observation(
+                response,
+                observation_writer,
+                attempt.selected.account_id().clone(),
                 self.request_started_at_unix_seconds,
                 self.quota_refresh_interval,
-                &observation_writer,
-            )
-            .await
-            {
-                tracing::warn!(error = %error, "codex_router.claude_passive_quota_observation_failed");
-            }
+                self.handler.affinity_record_tasks.clone(),
+            );
             if attempt.attempt_number == 1 && response.status() == StatusCode::TOO_MANY_REQUESTS {
                 let (status, headers, body) = response.into_parts();
                 let body = CapturingProviderErrorBody::new(

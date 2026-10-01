@@ -11,6 +11,8 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::net::TcpListener as TokioTcpListener;
+use tokio::sync::Notify;
+use tokio::sync::oneshot;
 
 #[path = "server_pipeline_tests/acceptance_regressions.rs"]
 mod acceptance_regressions;
@@ -27,6 +29,32 @@ fn assert_no_credential_patterns(
                 "{surface_name} exposed {pattern_name}"
             );
         }
+    }
+}
+
+struct BlockingPassiveQuotaObservationWriter {
+    started_sender: std::sync::Mutex<Option<oneshot::Sender<u64>>>,
+    release_writer: Notify,
+}
+
+impl crate::http_sse::AsyncClaudeQuotaObservationWriter for BlockingPassiveQuotaObservationWriter {
+    fn record_window_observation<'a>(
+        &'a self,
+        observation: codex_router_state::window_observation::WindowObservation,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), codex_router_state::sqlite::StateStoreError>>
+    {
+        Box::pin(async move {
+            let started_sender = self
+                .started_sender
+                .lock()
+                .unwrap_or_else(|_| panic!("writer start mutex is not poisoned"))
+                .take();
+            if let Some(started_sender) = started_sender {
+                let _sent = started_sender.send(observation.observation_started_at());
+            }
+            self.release_writer.notified().await;
+            Ok(())
+        })
     }
 }
 
@@ -172,6 +200,7 @@ struct ClaudeLoopbackReceipt {
     requests: Vec<HttpProxyRequest>,
     oauth_request: Option<HttpProxyRequest>,
     database_path: PathBuf,
+    _temporary_directory: tempfile::TempDir,
     account_ids: Vec<AccountId>,
     credential_patterns: Vec<(String, String)>,
 }
@@ -205,7 +234,19 @@ fn read_until_response_marker(stream: &mut TcpStream, marker: &[u8]) -> Vec<u8> 
 }
 
 fn write_claude_fixture_request(client: &mut TcpStream, request_body: &[u8]) {
-    write!(client, "POST /anthropic/v1/messages?trace=fixture HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\nAuthorization: Bearer claude-local\r\nX-Api-Key: client-key\r\nX-Claude-Code-Session-Id: claude-session\r\nAnthropic-Version: 2023-06-01\r\nAnthropic-Beta: client-capability\r\n\r\n", request_body.len()).expect("request headers");
+    write_claude_fixture_request_with_declared_content_length(
+        client,
+        request_body,
+        request_body.len(),
+    );
+}
+
+fn write_claude_fixture_request_with_declared_content_length(
+    client: &mut TcpStream,
+    request_body: &[u8],
+    content_length: usize,
+) {
+    write!(client, "POST /anthropic/v1/messages?trace=fixture HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {content_length}\r\nAuthorization: Bearer claude-local\r\nX-Api-Key: client-key\r\nX-Claude-Code-Session-Id: claude-session\r\nAnthropic-Version: 2023-06-01\r\nAnthropic-Beta: client-capability\r\n\r\n").expect("request headers");
     client.write_all(request_body).expect("request body");
     client
         .shutdown(std::net::Shutdown::Write)
@@ -543,4 +584,55 @@ fn claude_server_reserve_pin_releases_through_writable_pool_before_preferred_att
     let pin = read_claude_fixture_pin(&receipt);
     assert_eq!(pin.account_id(), Some(&receipt.account_ids[1]));
     assert_eq!(pin.pin_version(), 5);
+}
+
+#[tokio::test]
+async fn passive_quota_writer_block_does_not_delay_upstream_response_completion() {
+    let response = AsyncStreamingHttpProxyResponse::new(
+        200,
+        HeaderCollection::new(vec![
+            Header::new("content-type", "application/json"),
+            Header::new("anthropic-ratelimit-unified-5h-utilization", "0.25"),
+            Header::new("anthropic-ratelimit-unified-5h-reset", "900"),
+        ]),
+        http_body_util::Full::new(Bytes::from_static(b"upstream response"))
+            .map_err(|never| -> crate::http_sse::AsyncHttpBodyError { match never {} })
+            .boxed(),
+    );
+    let (started_sender, started_receiver) = oneshot::channel();
+    let writer = Arc::new(BlockingPassiveQuotaObservationWriter {
+        started_sender: std::sync::Mutex::new(Some(started_sender)),
+        release_writer: Notify::new(),
+    });
+    let task_tracker = TaskTracker::new();
+    let response = schedule_passive_claude_quota_observation(
+        response,
+        writer.clone(),
+        super::r12_tests::account_id("claude-blocked-writer"),
+        123,
+        Duration::from_secs(180),
+        task_tracker.clone(),
+    );
+
+    let observation_started_at = tokio::time::timeout(Duration::from_secs(1), started_receiver)
+        .await
+        .unwrap_or_else(|_| panic!("passive writer should start within the bound"))
+        .unwrap_or_else(|_| panic!("passive writer start signal should remain open"));
+    assert_eq!(observation_started_at, 123);
+
+    let (_, _, response_body) = response.into_parts();
+    let response_bytes = tokio::time::timeout(Duration::from_secs(1), response_body.collect())
+        .await
+        .unwrap_or_else(|_| {
+            panic!("upstream response should finish while its quota writer is blocked")
+        })
+        .unwrap_or_else(|error| panic!("upstream response should be readable: {error}"))
+        .to_bytes();
+    assert_eq!(response_bytes.as_ref(), b"upstream response");
+
+    writer.release_writer.notify_one();
+    task_tracker.close();
+    tokio::time::timeout(Duration::from_secs(1), task_tracker.wait())
+        .await
+        .unwrap_or_else(|_| panic!("released passive writer task should finish within the bound"));
 }

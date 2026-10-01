@@ -11,12 +11,15 @@ use http_body_util::Full;
 use http_body_util::StreamBody;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Frame;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
 use super::BufferedClaudeRequestBody;
 use super::CLAUDE_ERROR_EVIDENCE_LIMIT;
 use super::CLAUDE_REQUEST_BODY_LIMIT;
 use super::ClaudeEdge;
 use super::ClaudeRequestBodyError;
+use super::ErrorBodyEvidence;
 use super::buffer_request_body;
 use super::inspect_response;
 use crate::headers::Header;
@@ -36,6 +39,24 @@ fn credential() -> ResolvedProviderCredential {
         SecretString::new("pooled-access"),
         3,
     )
+}
+
+fn raw_http_header_value<'a>(headers: &'a [u8], header_name: &[u8]) -> Option<&'a [u8]> {
+    headers
+        .split(|byte| *byte == b'\n')
+        .skip(1)
+        .find_map(|line| {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let colon_index = line.iter().position(|byte| *byte == b':')?;
+            if !line[..colon_index].eq_ignore_ascii_case(header_name) {
+                return None;
+            }
+            let mut value = &line[colon_index + 1..];
+            if value.first() == Some(&b' ') {
+                value = &value[1..];
+            }
+            Some(value)
+        })
 }
 
 #[tokio::test]
@@ -136,19 +157,9 @@ async fn claude_upstream_preparation_forwards_real_headers_and_body_to_mock_anth
             let header_bytes = received
                 .get(..header_end)
                 .unwrap_or_else(|| panic!("headers must fit buffer"));
-            let header_text = std::str::from_utf8(header_bytes)
-                .unwrap_or_else(|error| panic!("headers: {error}"));
-            let content_length = header_text
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length").then(|| {
-                        value
-                            .trim()
-                            .parse::<usize>()
-                            .unwrap_or_else(|error| panic!("body length: {error}"))
-                    })
-                })
+            let content_length = raw_http_header_value(header_bytes, b"content-length")
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or_else(|| panic!("bounded Full body must carry Content-Length"));
             if received.len() >= header_end + 4 + content_length {
                 break;
@@ -160,10 +171,15 @@ async fn claude_upstream_preparation_forwards_real_headers_and_body_to_mock_anth
             .unwrap_or_else(|error| panic!("response: {error}"));
         received
     });
+    let opaque_beta_value = b"client-capability\x80";
+    let beta_header = http::HeaderValue::from_bytes(opaque_beta_value)
+        .unwrap_or_else(|error| panic!("opaque HTTP beta header should be valid: {error}"));
     let client = HttpProxyRequest::new(Method::Post, "/anthropic/v1/messages?beta=true")
         .with_header(Header::new("authorization", "Bearer local-token"))
-        .with_header(Header::new("anthropic-beta", "client-capability"))
+        .with_header(Header::from_http("anthropic-beta", &beta_header))
         .with_header(Header::new("x-custom-client-header", "preserved"));
+    let mut expected_beta_value = opaque_beta_value.to_vec();
+    expected_beta_value.extend_from_slice(b",oauth-2025-04-20");
     let expected_body = Bytes::from_static(br#"{"messages":[{"role":"user","content":"hello"}]}"#);
     let body = BufferedClaudeRequestBody::new(expected_body.clone())
         .unwrap_or_else(|error| panic!("body: {error}"));
@@ -202,30 +218,27 @@ async fn claude_upstream_preparation_forwards_real_headers_and_body_to_mock_anth
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .unwrap_or_else(|| panic!("request must contain headers"));
-    let header_text = std::str::from_utf8(
-        received
-            .get(..header_end)
-            .unwrap_or_else(|| panic!("headers must fit")),
-    )
-    .unwrap_or_else(|error| panic!("headers: {error}"));
-    assert!(header_text.starts_with("POST /v1/messages?beta=true HTTP/1.1\r\n"));
-    let normalized = header_text.to_ascii_lowercase();
+    let header_bytes = received
+        .get(..header_end)
+        .unwrap_or_else(|| panic!("headers must fit"));
+    assert!(header_bytes.starts_with(b"POST /v1/messages?beta=true HTTP/1.1\r\n"));
     assert!(
-        normalized
-            .lines()
-            .any(|line| line == "authorization: bearer pooled-access")
+        raw_http_header_value(header_bytes, b"authorization")
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"Bearer pooled-access"))
     );
     assert!(
-        normalized
-            .lines()
-            .any(|line| line == "anthropic-beta: client-capability,oauth-2025-04-20")
+        raw_http_header_value(header_bytes, b"anthropic-beta")
+            .is_some_and(|value| value == expected_beta_value.as_slice())
     );
     assert!(
-        normalized
-            .lines()
-            .any(|line| line == "x-custom-client-header: preserved")
+        raw_http_header_value(header_bytes, b"x-custom-client-header")
+            .is_some_and(|value| value == &b"preserved"[..])
     );
-    assert!(!normalized.contains("local-token"));
+    assert!(
+        !header_bytes
+            .windows(b"local-token".len())
+            .any(|window| window == b"local-token")
+    );
     assert_eq!(received.get(header_end + 4..), Some(expected_body.as_ref()));
 }
 
@@ -531,4 +544,96 @@ async fn claude_non_2xx_error_probe_leaves_unread_remainder_unpolled() {
     .await;
     assert_eq!(prepared.outcome(), &shared_rejection());
     assert_eq!(polls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn claude_error_classifier_receives_gzip_evidence_and_preserves_wire_response() {
+    let plaintext = Bytes::from_static(
+        br#"{"error":{"type":"authentication_error","message":"credential rejected"}}"#,
+    );
+    let compressed = compress_gzip(plaintext.clone()).await;
+    let response = AsyncStreamingHttpProxyResponse::new(
+        401,
+        HeaderCollection::new(vec![
+            Header::new("content-type", "application/json"),
+            Header::new("content-encoding", "gzip"),
+            Header::new("content-length", compressed.len().to_string()),
+        ]),
+        Full::new(compressed.clone())
+            .map_err(|never| -> AsyncHttpBodyError { match never {} })
+            .boxed(),
+    );
+    let classifier = |status: u16, headers: &HeaderCollection, evidence: ErrorBodyEvidence<'_>| {
+        assert_eq!(status, 401);
+        assert_eq!(headers.value("content-encoding"), Some("gzip"));
+        assert_eq!(evidence.prefix, plaintext.as_ref());
+        assert!(evidence.complete);
+        AttemptOutcome::CredentialRejected
+    };
+
+    let prepared = inspect_response(response, &classifier).await;
+    assert_eq!(prepared.outcome(), &AttemptOutcome::CredentialRejected);
+    let response = prepared.into_response();
+    let (status, headers, body) = response.into_parts();
+    assert_eq!(status, 401);
+    assert_eq!(headers.value("content-encoding"), Some("gzip"));
+    assert_eq!(
+        body.collect()
+            .await
+            .unwrap_or_else(|error| panic!("body: {error}"))
+            .to_bytes(),
+        compressed
+    );
+}
+
+#[tokio::test]
+async fn claude_compressed_error_evidence_keeps_a_bounded_plaintext_prefix() {
+    let mut plaintext = br#"{"error":{"type":"rate_limit_error","message":""#.to_vec();
+    plaintext.extend(std::iter::repeat_n(b'x', CLAUDE_ERROR_EVIDENCE_LIMIT + 64));
+    plaintext.extend_from_slice(b"\"}}");
+    let compressed = compress_gzip(Bytes::from(plaintext)).await;
+    assert!(compressed.len() < CLAUDE_ERROR_EVIDENCE_LIMIT);
+    let response = AsyncStreamingHttpProxyResponse::new(
+        429,
+        HeaderCollection::new(vec![
+            Header::new("content-type", "application/json"),
+            Header::new("content-encoding", "gzip"),
+        ]),
+        Full::new(compressed)
+            .map_err(|never| -> AsyncHttpBodyError { match never {} })
+            .boxed(),
+    );
+
+    let prepared = inspect_response(response, &|_, _, evidence| {
+        assert_eq!(evidence.prefix.len(), CLAUDE_ERROR_EVIDENCE_LIMIT);
+        assert!(
+            evidence
+                .prefix
+                .starts_with(b"{\"error\":{\"type\":\"rate_limit_error\"")
+        );
+        assert!(!evidence.complete);
+        shared_rejection()
+    })
+    .await;
+
+    assert_eq!(prepared.outcome(), &shared_rejection());
+}
+
+async fn compress_gzip(plaintext: Bytes) -> Bytes {
+    let (writer, mut reader) = tokio::io::duplex(64);
+    let encoder_task = tokio::spawn(async move {
+        let mut encoder = async_compression::tokio::write::GzipEncoder::new(writer);
+        encoder.write_all(&plaintext).await?;
+        encoder.shutdown().await
+    });
+    let mut compressed = Vec::new();
+    reader
+        .read_to_end(&mut compressed)
+        .await
+        .unwrap_or_else(|error| panic!("compressed error body: {error}"));
+    encoder_task
+        .await
+        .unwrap_or_else(|error| panic!("gzip encoder task: {error}"))
+        .unwrap_or_else(|error| panic!("gzip error body: {error}"));
+    Bytes::from(compressed)
 }

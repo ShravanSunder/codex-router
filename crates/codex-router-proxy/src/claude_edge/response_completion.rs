@@ -1,17 +1,25 @@
 //! Typed Claude response completion evidence consumed by OnSuccess pin publication.
 
+use std::future::Future;
 use std::pin::Pin;
+use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
 
 use bytes::Bytes;
+use futures_util::future::BoxFuture;
 use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Body;
 use hyper::body::Frame;
 use serde::Deserialize;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use super::content_encoding::decoder_for_chunks;
+use super::content_encoding::response_content_encodings;
 use super::forward::CLAUDE_ERROR_EVIDENCE_LIMIT;
 use crate::http_sse::AsyncHttpBodyError;
 use crate::http_sse::AsyncStreamingHttpProxyResponse;
@@ -45,10 +53,40 @@ pub(crate) fn observe_completion(
     let mut observed = CompletionObservingBody {
         body,
         sender: Some(sender),
-        tracker: streaming.then(SseCompletionTracker::default),
+        tracker: None,
+        compressed_sender: None,
+        decoded_completion: None,
+        pending_compressed_frame: Mutex::new(None),
+        terminal_compressed_frame: None,
+        body_ended: false,
     };
+    if streaming {
+        match response_content_encodings(&headers) {
+            Ok(encodings) if encodings.is_empty() => {
+                observed.tracker = Some(SseCompletionTracker::default());
+            }
+            Ok(encodings) => {
+                let (compressed_sender, compressed_receiver) = mpsc::channel(1);
+                let (completion_sender, completion_receiver) = oneshot::channel();
+                let decoder = decoder_for_chunks(compressed_receiver, &encodings);
+                tokio::spawn(async move {
+                    let _result =
+                        completion_sender.send(observe_decoded_sse_completion(decoder).await);
+                });
+                observed.compressed_sender = Some(compressed_sender);
+                observed.decoded_completion = Some(completion_receiver);
+            }
+            Err(_error) => observed.finish(ClaudeResponseCompletion::Incomplete),
+        }
+    }
     if observed.body.is_end_stream() {
-        observed.finish_completed_body();
+        if observed.compressed_sender.is_some() {
+            observed.end_compressed_input();
+            observed.body_ended = true;
+        } else {
+            observed.finish_completed_body();
+            observed.body_ended = true;
+        }
     }
     (
         AsyncStreamingHttpProxyResponse::new(status, headers, observed.boxed()),
@@ -60,10 +98,25 @@ struct CompletionObservingBody {
     body: BoxBody<Bytes, AsyncHttpBodyError>,
     sender: Option<oneshot::Sender<ClaudeResponseCompletion>>,
     tracker: Option<SseCompletionTracker>,
+    compressed_sender: Option<mpsc::Sender<Bytes>>,
+    decoded_completion: Option<oneshot::Receiver<ClaudeResponseCompletion>>,
+    pending_compressed_frame: Mutex<Option<PendingCompressedFrame>>,
+    terminal_compressed_frame: Option<Frame<Bytes>>,
+    body_ended: bool,
+}
+
+struct PendingCompressedFrame {
+    frame: Frame<Bytes>,
+    bytes: Bytes,
+    finishes_body: bool,
+    permit: BoxFuture<'static, Result<mpsc::OwnedPermit<Bytes>, mpsc::error::SendError<()>>>,
 }
 
 impl CompletionObservingBody {
     fn finish_completed_body(&mut self) {
+        if let Some(tracker) = &mut self.tracker {
+            tracker.finish_at_eof();
+        }
         let completion = self.tracker.as_ref().map_or(
             ClaudeResponseCompletion::Success,
             SseCompletionTracker::completion,
@@ -75,6 +128,10 @@ impl CompletionObservingBody {
         if let Some(sender) = self.sender.take() {
             let _result = sender.send(completion);
         }
+    }
+
+    fn end_compressed_input(&mut self) {
+        self.compressed_sender.take();
     }
 }
 
@@ -92,30 +149,140 @@ impl Body for CompletionObservingBody {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, AsyncHttpBodyError>>> {
-        let result = Pin::new(&mut self.body).poll_frame(context);
-        match &result {
-            Poll::Ready(Some(Ok(frame))) => {
-                if let (Some(tracker), Some(bytes)) = (&mut self.tracker, frame.data_ref()) {
-                    tracker.observe(bytes);
+        let this = self.as_mut().get_mut();
+        loop {
+            if this.body_ended {
+                if let Some(decoded_completion) = &mut this.decoded_completion {
+                    match Pin::new(decoded_completion).poll(context) {
+                        Poll::Ready(Ok(completion)) => {
+                            this.decoded_completion.take();
+                            this.finish(completion);
+                        }
+                        Poll::Ready(Err(_error)) => {
+                            this.decoded_completion.take();
+                            this.finish(ClaudeResponseCompletion::Incomplete);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
                 }
-                // Known-length consumers can stop after this frame without polling EOF.
-                // The inner Body contract establishes that no error or trailer remains.
-                if self.body.is_end_stream() {
-                    self.finish_completed_body();
+                return this
+                    .terminal_compressed_frame
+                    .take()
+                    .map_or(Poll::Ready(None), |frame| Poll::Ready(Some(Ok(frame))));
+            }
+
+            let pending = this
+                .pending_compressed_frame
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(mut pending) = pending {
+                match pending.permit.as_mut().poll(context) {
+                    Poll::Ready(Ok(permit)) => {
+                        permit.send(pending.bytes);
+                        if pending.finishes_body {
+                            this.end_compressed_input();
+                            this.body_ended = true;
+                            this.terminal_compressed_frame = Some(pending.frame);
+                            continue;
+                        }
+                        return Poll::Ready(Some(Ok(pending.frame)));
+                    }
+                    Poll::Ready(Err(_error)) => {
+                        this.end_compressed_input();
+                        this.finish(ClaudeResponseCompletion::Incomplete);
+                        if pending.finishes_body {
+                            this.body_ended = true;
+                        }
+                        return Poll::Ready(Some(Ok(pending.frame)));
+                    }
+                    Poll::Pending => {
+                        *this
+                            .pending_compressed_frame
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
+                        return Poll::Pending;
+                    }
                 }
             }
-            Poll::Ready(Some(Err(_error))) => self.finish(ClaudeResponseCompletion::Incomplete),
-            Poll::Ready(None) => {
-                self.finish_completed_body();
+
+            match Pin::new(&mut this.body).poll_frame(context) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    let finishes_body = this.body.is_end_stream();
+                    if let (Some(compressed_sender), Some(bytes)) =
+                        (&this.compressed_sender, frame.data_ref().cloned())
+                    {
+                        *this
+                            .pending_compressed_frame
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(PendingCompressedFrame {
+                                frame,
+                                bytes,
+                                finishes_body,
+                                permit: Box::pin(compressed_sender.clone().reserve_owned()),
+                            });
+                        continue;
+                    }
+                    if let (Some(tracker), Some(bytes)) = (&mut this.tracker, frame.data_ref()) {
+                        tracker.observe(bytes);
+                    }
+                    if finishes_body {
+                        if this.compressed_sender.is_some() {
+                            this.end_compressed_input();
+                            this.body_ended = true;
+                            this.terminal_compressed_frame = Some(frame);
+                            continue;
+                        }
+                        this.finish_completed_body();
+                        this.body_ended = true;
+                    }
+                    return Poll::Ready(Some(Ok(frame)));
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    this.end_compressed_input();
+                    this.decoded_completion.take();
+                    this.finish(ClaudeResponseCompletion::Incomplete);
+                    this.body_ended = true;
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Ready(None) => {
+                    if this.compressed_sender.is_some() {
+                        this.end_compressed_input();
+                        this.body_ended = true;
+                        continue;
+                    }
+                    this.finish_completed_body();
+                    this.body_ended = true;
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => return Poll::Pending,
             }
-            Poll::Pending => {}
         }
-        result
     }
 
     fn is_end_stream(&self) -> bool {
-        // Force the consumer to poll EOF so completion is observed even for empty bodies.
-        self.sender.is_none() && self.body.is_end_stream()
+        self.body_ended && self.sender.is_none() && self.terminal_compressed_frame.is_none()
+    }
+}
+
+async fn observe_decoded_sse_completion(
+    mut reader: Pin<Box<dyn AsyncRead + Send>>,
+) -> ClaudeResponseCompletion {
+    let mut tracker = SseCompletionTracker::default();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => {
+                tracker.finish_at_eof();
+                return tracker.completion();
+            }
+            Ok(count) => match buffer.get(..count) {
+                Some(decoded_bytes) => tracker.observe(decoded_bytes),
+                None => return ClaudeResponseCompletion::Incomplete,
+            },
+            Err(_error) => return tracker.incomplete_after_decode_error(),
+        }
     }
 }
 
@@ -204,11 +371,28 @@ impl SseCompletionTracker {
         self.oversized_event = false;
     }
 
+    fn finish_at_eof(&mut self) {
+        if !self.pending_line.is_empty() && !self.oversized_line {
+            self.observe_line();
+        }
+        self.pending_line.clear();
+        self.oversized_line = false;
+        self.finish_event();
+    }
+
     const fn completion(&self) -> ClaudeResponseCompletion {
         if self.provider_error {
             ClaudeResponseCompletion::ProviderError
         } else if self.message_stopped {
             ClaudeResponseCompletion::Success
+        } else {
+            ClaudeResponseCompletion::Incomplete
+        }
+    }
+
+    const fn incomplete_after_decode_error(&self) -> ClaudeResponseCompletion {
+        if self.provider_error {
+            ClaudeResponseCompletion::ProviderError
         } else {
             ClaudeResponseCompletion::Incomplete
         }

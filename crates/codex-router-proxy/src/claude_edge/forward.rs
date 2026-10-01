@@ -20,6 +20,8 @@ use hyper::body::Frame;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+use super::content_encoding::decode_bounded_error_evidence;
+use super::content_encoding::response_content_encodings;
 use super::response_completion::ClaudeResponseCompletion;
 use super::response_completion::observe_completion;
 use crate::headers::Header;
@@ -108,23 +110,28 @@ impl ClaudeEdge {
         request: &HttpProxyRequest,
         access_token: &SecretString,
     ) -> HeaderCollection {
-        let beta_values: Vec<&str> = request
+        let beta_values: Vec<&[u8]> = request
             .headers()
             .iter()
             .filter(|header| header.name() == "anthropic-beta")
-            .map(Header::value)
+            .map(Header::value_bytes)
             .collect();
-        let oauth_present = beta_values.iter().any(|value| {
-            value
-                .split(',')
-                .any(|token| token.trim() == "oauth-2025-04-20")
-        });
-        let mut beta = beta_values.join(",");
+        let oauth_present = beta_values
+            .iter()
+            .flat_map(|value| value.split(|byte| *byte == b','))
+            .any(|token| trim_ascii_whitespace(token) == b"oauth-2025-04-20");
+        let mut beta = Vec::new();
+        for (index, value) in beta_values.iter().enumerate() {
+            if index > 0 {
+                beta.push(b',');
+            }
+            beta.extend_from_slice(value);
+        }
         if !oauth_present {
             if !beta.is_empty() {
-                beta.push(',');
+                beta.push(b',');
             }
-            beta.push_str("oauth-2025-04-20");
+            beta.extend_from_slice(b"oauth-2025-04-20");
         }
         let headers = request
             .headers()
@@ -134,9 +141,21 @@ impl ClaudeEdge {
             .collect();
         let sanitized = sanitize_headers_for_upstream(headers, access_token.clone(), None);
         let mut headers = sanitized.as_slice().to_vec();
-        headers.push(Header::new("anthropic-beta", beta));
+        headers.push(Header::from_raw_bytes("anthropic-beta", &beta));
         HeaderCollection::new(headers)
     }
+}
+
+fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    value.get(start..end).unwrap_or_default()
 }
 
 /// Request buffering failed before provider egress.
@@ -248,7 +267,7 @@ where
     let (status, headers, mut body) = response.into_parts();
     let mut prefix = Vec::new();
     let mut retained_frames = VecDeque::new();
-    let complete = loop {
+    let mut complete = loop {
         match body.frame().await {
             None => break true,
             Some(Err(error)) => {
@@ -273,6 +292,24 @@ where
             }
         }
     };
+    match response_content_encodings(&headers) {
+        Ok(encodings) if !encodings.is_empty() => {
+            let decoded = decode_bounded_error_evidence(
+                Bytes::from(std::mem::take(&mut prefix)),
+                &encodings,
+                CLAUDE_ERROR_EVIDENCE_LIMIT,
+                complete,
+            )
+            .await;
+            prefix = decoded.prefix.to_vec();
+            complete = decoded.complete;
+        }
+        Ok(_) => {}
+        Err(_error) => {
+            prefix.clear();
+            complete = false;
+        }
+    }
     let classified = classifier(
         status,
         &headers,

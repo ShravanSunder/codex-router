@@ -241,7 +241,12 @@ impl HyperHttpUpstreamTransport {
             .method(hyper_method(request.method()))
             .uri(uri);
         for header in request.headers().as_slice() {
-            builder = builder.header(header.name(), header.value());
+            let value = http::HeaderValue::from_bytes(header.value_bytes()).map_err(|_error| {
+                HttpProxyError::Upstream {
+                    message: "request header value was invalid".to_owned(),
+                }
+            })?;
+            builder = builder.header(header.name(), value);
         }
         let request =
             builder
@@ -320,7 +325,12 @@ fn send_https_request(
     let method = reqwest_method(&request);
     let mut builder = client.request(method, endpoint.url_for_path(request.path()));
     for header in request.headers().as_slice() {
-        builder = builder.header(header.name(), header.value());
+        let value = http::HeaderValue::from_bytes(header.value_bytes()).map_err(|_error| {
+            HttpProxyError::Upstream {
+                message: "request header value was invalid".to_owned(),
+            }
+        })?;
+        builder = builder.header(header.name(), value);
     }
     let response = builder
         .body(request.body().to_vec())
@@ -421,7 +431,11 @@ fn write_request(
         .write_all(b"Connection: close\r\n")
         .map_err(upstream_io_error)?;
     for header in request.headers().as_slice() {
-        write!(stream, "{}: {}\r\n", header.name(), header.value()).map_err(upstream_io_error)?;
+        write!(stream, "{}: ", header.name()).map_err(upstream_io_error)?;
+        stream
+            .write_all(header.value_bytes())
+            .map_err(upstream_io_error)?;
+        stream.write_all(b"\r\n").map_err(upstream_io_error)?;
     }
     stream.write_all(b"\r\n").map_err(upstream_io_error)?;
     stream.write_all(request.body()).map_err(upstream_io_error)
