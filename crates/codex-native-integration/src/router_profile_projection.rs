@@ -24,6 +24,7 @@ impl CodexRouterProfile {
     pub fn render(self) -> String {
         format!(
             r#"model_provider = "codex-router"
+sandbox_mode = "workspace-write"
 
 [model_providers.codex-router]
 name = "codex-router"
@@ -56,8 +57,17 @@ supports_websockets = true
     }
 }
 
-/// Returns the network half of Router's permission profiles, shared by the production
-/// and debug app-server launches.
+/// Returns the network half of Router's permission profiles and the app-server's
+/// default sandbox, shared by the production and debug app-server launches.
+///
+/// Codex refuses to start an app-server that defines permission profiles without a
+/// default, so Router supplies `sandbox_mode="workspace-write"` itself rather than
+/// relying on the owner's home configuration. As the highest config layer it decides
+/// the sandbox for any thread request that selects none, overriding home and project
+/// `sandbox_mode` or `default_permissions`; Router's own threads select a profile, and
+/// a client that asks for another sandbox on start (for example `--yolo`, which
+/// requests `danger-full-access`) still gets it. Clients compute their own request
+/// from their config, so the rendered profile file carries the same default.
 ///
 /// Both profiles get direct network access. The managed network proxy is switched
 /// off explicitly so a home or project setting cannot reinstate it: behind it,
@@ -67,7 +77,10 @@ supports_websockets = true
 /// of replacing their `network`.
 #[must_use]
 pub fn router_permission_profile_overrides() -> Vec<String> {
-    let mut overrides = vec!["features.network_proxy.enabled=false".to_owned()];
+    let mut overrides = vec![
+        "sandbox_mode=\"workspace-write\"".to_owned(),
+        "features.network_proxy.enabled=false".to_owned(),
+    ];
     for (profile, parent) in ROUTER_PERMISSION_PROFILES {
         overrides.push(format!("permissions.{profile}.extends=\"{parent}\""));
         overrides.push(format!("permissions.{profile}.network.enabled=true"));
