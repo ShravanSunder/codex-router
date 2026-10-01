@@ -77,7 +77,7 @@ const TABLE_SPECS: [TableSpec; 11] = [
     },
 ];
 
-const INDEX_SPECS: [&str; 25] = [
+const INDEX_SPECS: [&str; 26] = [
     "automation_events,event_cleanup,0,c,0,recorded_at_ms:0:BINARY:1,event_sequence:0:BINARY:1",
     "automation_events,event_history,0,c,0,subject_kind:0:BINARY:1,subject_id:0:BINARY:1,event_sequence:0:BINARY:1",
     "automation_events,_,1,u,0,event_id:0:BINARY:1",
@@ -90,6 +90,7 @@ const INDEX_SPECS: [&str; 25] = [
     "mailbox_deliveries,_,1,pk,0,delivery_id:0:BINARY:1",
     "operation_receipts,_,1,pk,0,operation_id:0:BINARY:1",
     "router_pushes,router_pushes_created,0,c,0,created_at:0:BINARY:1",
+    "router_pushes,router_pushes_origin_ref,1,c,0,origin_kind:0:BINARY:1,origin_router_ref:0:BINARY:1",
     "router_pushes,router_pushes_target_state,0,c,0,target_service_id:0:BINARY:1,target_endpoint_id:0:BINARY:1,target_session_id:0:BINARY:1,delivery_state:0:BINARY:1,created_at:0:BINARY:1",
     "router_pushes,_,1,pk,0,push_id:0:BINARY:1",
     "schedule_definitions,_,1,pk,0,schedule_id:0:BINARY:1",
@@ -184,6 +185,7 @@ async fn validate_object_inventory(
             "event_cleanup",
             "event_history",
             "router_pushes_created",
+            "router_pushes_origin_ref",
             "router_pushes_target_state",
             "run_admission_lookup",
             "run_history",
@@ -378,18 +380,50 @@ fn expected_definition_tokens(
         CURRENT_TARGET_DEFINITION_SOURCE.replace("accepted_receipt_json", "outcome_receipt_json")
     };
     let tokens = tokenize_schema_definition(&source)?;
+    let index_is_unique = if object_type == "index" {
+        index_is_declared_unique(object_name)?
+    } else {
+        false
+    };
     tokens
         .split(|token| token == ";")
         .find(|statement| {
-            statement.get(..3).is_some_and(|prefix| {
-                prefix
-                    .iter()
-                    .map(String::as_str)
-                    .eq(["create", object_type, object_name])
-            })
+            definition_prefix_matches(statement, object_type, object_name, index_is_unique)
         })
         .map(<[String]>::to_vec)
         .ok_or(StorageError::InvalidSchema)
+}
+
+fn index_is_declared_unique(index_name: &str) -> Result<bool, StorageError> {
+    INDEX_SPECS
+        .iter()
+        .find_map(|index| {
+            let mut fields = index.split(',');
+            fields.next()?;
+            let name = fields.next()?;
+            let unique = fields.next()?;
+            (name == index_name).then_some(unique == "1")
+        })
+        .ok_or(StorageError::InvalidSchema)
+}
+
+fn definition_prefix_matches(
+    statement: &[String],
+    object_type: &str,
+    object_name: &str,
+    index_is_unique: bool,
+) -> bool {
+    let matches_prefix = |prefix: &[&str]| {
+        statement
+            .get(..prefix.len())
+            .is_some_and(|tokens| tokens.iter().map(String::as_str).eq(prefix.iter().copied()))
+    };
+    match (object_type, index_is_unique) {
+        ("index", true) => matches_prefix(&["create", "unique", "index", object_name]),
+        ("index", false) => matches_prefix(&["create", "index", object_name]),
+        ("table", _) => matches_prefix(&["create", "table", object_name]),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -511,5 +545,32 @@ mod tests {
             tokenize_schema_definition("CHECK(value='casesensitive')").unwrap()
         );
         assert!(tokens.contains(&"value name".to_owned()));
+    }
+
+    #[test]
+    fn non_unique_same_name_index_does_not_match_unique_index_spec() {
+        let is_unique =
+            index_is_declared_unique("router_pushes_origin_ref").expect("declared index");
+        assert!(is_unique);
+        let non_unique_definition = tokenize_schema_definition(
+            "CREATE INDEX router_pushes_origin_ref ON router_pushes(origin_kind, origin_router_ref)",
+        )
+        .expect("non-unique index definition should tokenize");
+        assert!(!definition_prefix_matches(
+            &non_unique_definition,
+            "index",
+            "router_pushes_origin_ref",
+            is_unique,
+        ));
+        let unique_definition = tokenize_schema_definition(
+            "CREATE UNIQUE INDEX router_pushes_origin_ref ON router_pushes(origin_kind, origin_router_ref)",
+        )
+        .expect("unique index definition should tokenize");
+        assert!(definition_prefix_matches(
+            &unique_definition,
+            "index",
+            "router_pushes_origin_ref",
+            is_unique,
+        ));
     }
 }

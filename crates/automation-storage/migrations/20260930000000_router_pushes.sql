@@ -28,5 +28,6 @@ CREATE INDEX router_pushes_target_state ON router_pushes(
     created_at
 );
 CREATE INDEX router_pushes_created ON router_pushes(created_at);
+CREATE UNIQUE INDEX router_pushes_origin_ref ON router_pushes(origin_kind,origin_router_ref);
 
 DROP TABLE latest_agent_senders;

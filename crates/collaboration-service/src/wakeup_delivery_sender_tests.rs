@@ -82,7 +82,11 @@ async fn provider_session_not_found_finishes_wake_after_one_attempt() {
             .expect("due wake inventory");
         assert_eq!(due_ids.as_slice(), std::slice::from_ref(&wakeup_id));
         match store
-            .evaluate_wakeup::<SavedMessage>(&wakeup_id, now_ms + 5_000)
+            .evaluate_wakeup::<SavedMessage>(
+                &wakeup_id,
+                now_ms + 5_000,
+                super::build_wake_push_draft,
+            )
             .await
             .expect("wake evaluation")
         {
@@ -93,7 +97,11 @@ async fn provider_session_not_found_finishes_wake_after_one_attempt() {
     let sender = WakeDeliverySender {
         delivery: Arc::new(ProviderSessionNotFound),
         configuration: AutomationConfigurationHandle::default(),
-        display_names: crate::SessionDisplayNameCache::default(),
+        machine_identity: crate::MachineIdentity::new(
+            wake.definition.message.target.endpoint.service_id.clone(),
+            None,
+        )
+        .expect("machine identity"),
     };
 
     sender

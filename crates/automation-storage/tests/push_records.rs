@@ -1,11 +1,12 @@
 #![allow(clippy::expect_used)]
 
+use agent_automation::{OccurrenceId, RunId, ScheduleId, WakeupId};
 use automation_storage::{AutomationStore, PushDeliveryState, PushRecordDraft, StorageError};
 use chrono::{Duration, Utc};
 use collaboration_protocol::{
     DeliveryClientReceipt, DeliveryOutcome, DeliveryReceipt, EndpointId, EndpointRef,
-    PushHeaderFacts, PushId, PushKind, PushOrigin, SessionId, SessionReachability, SessionRef,
-    UuidIdentity,
+    PushHeaderFacts, PushId, PushKind, PushOrigin, RouterOriginRef, SessionId, SessionReachability,
+    SessionRef, UuidIdentity,
 };
 use sqlx::{Connection, sqlite::SqliteConnectOptions};
 use std::path::PathBuf;
@@ -93,6 +94,236 @@ fn push_draft(
 
 fn push_id() -> PushId {
     PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("UUIDv7 push id")
+}
+
+fn wake_push_draft(
+    push_id: PushId,
+    target: SessionRef,
+    wakeup_id: WakeupId,
+    occurrence_id: OccurrenceId,
+) -> PushRecordDraft {
+    let origin_router_ref = RouterOriginRef::Wake {
+        wakeup_id,
+        occurrence_id,
+    }
+    .canonical_string()
+    .expect("canonical wake origin reference");
+    PushRecordDraft {
+        push_id,
+        kind: PushKind::Wake,
+        origin: PushOrigin::Router(PushKind::Wake),
+        origin_router_ref: Some(origin_router_ref),
+        target,
+        reply_to_push_id: None,
+        header_facts: PushHeaderFacts::Wake,
+        body: Some("A durable wake message".to_owned()),
+        activity: None,
+        created_at: Utc::now(),
+    }
+}
+
+fn schedule_run_push_draft(
+    push_id: PushId,
+    target: SessionRef,
+    schedule_id: ScheduleId,
+    run_id: RunId,
+) -> PushRecordDraft {
+    let origin_router_ref = RouterOriginRef::ScheduleRun {
+        schedule_id: schedule_id.clone(),
+        run_id: run_id.clone(),
+    }
+    .canonical_string()
+    .expect("canonical schedule-run origin reference");
+    PushRecordDraft {
+        push_id,
+        kind: PushKind::ScheduleRun,
+        origin: PushOrigin::Router(PushKind::ScheduleRun),
+        origin_router_ref: Some(origin_router_ref),
+        target,
+        reply_to_push_id: None,
+        header_facts: PushHeaderFacts::ScheduleRun {
+            schedule_id,
+            run_id,
+        },
+        body: Some("A scheduled run".to_owned()),
+        activity: None,
+        created_at: Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn one_wake_occurrence_cannot_create_two_push_records() {
+    let database = TestDatabase::new();
+    let mut store = AutomationStore::open(&database.path)
+        .await
+        .expect("automation store migrates");
+    let target = session("codex-local", "wake-target");
+    let wakeup_id = WakeupId::generate();
+    let occurrence_id = OccurrenceId::generate();
+
+    store
+        .insert_push_record(wake_push_draft(
+            push_id(),
+            target.clone(),
+            wakeup_id.clone(),
+            occurrence_id.clone(),
+        ))
+        .await
+        .expect("first push for wake occurrence");
+    let duplicate = store
+        .insert_push_record(wake_push_draft(push_id(), target, wakeup_id, occurrence_id))
+        .await;
+
+    assert!(matches!(duplicate, Err(StorageError::Database(_))));
+    let mut observer = sqlx::SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&database.path)
+            .foreign_keys(true),
+    )
+    .await
+    .expect("open push observer");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM router_pushes WHERE kind='wake'")
+        .fetch_one(&mut observer)
+        .await
+        .expect("read wake push count");
+    assert_eq!(count, 1);
+    observer.close().await.expect("close push observer");
+}
+
+#[tokio::test]
+async fn wake_push_origin_reference_requires_canonical_wake_encoding() {
+    let database = TestDatabase::new();
+    let mut store = AutomationStore::open(&database.path)
+        .await
+        .expect("automation store migrates");
+    let target = session("codex-local", "wake-target");
+    let wakeup_id = WakeupId::generate();
+    let occurrence_id = OccurrenceId::generate();
+    let draft = wake_push_draft(push_id(), target, wakeup_id.clone(), occurrence_id.clone());
+    let mut noncanonical = draft.clone();
+    noncanonical.origin_router_ref = Some(format!(
+        "{} ",
+        draft
+            .origin_router_ref
+            .as_deref()
+            .expect("wake origin reference")
+    ));
+
+    assert!(matches!(
+        store.insert_push_record(noncanonical).await,
+        Err(StorageError::InvalidRecord)
+    ));
+    let inserted = store
+        .insert_push_record(draft)
+        .await
+        .expect("canonical wake push");
+    let canonical = inserted
+        .origin_router_ref
+        .as_deref()
+        .expect("stored wake origin reference");
+    let mut observer = sqlx::SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&database.path)
+            .foreign_keys(true),
+    )
+    .await
+    .expect("open push observer");
+    sqlx::query("UPDATE router_pushes SET origin_router_ref=? WHERE push_id=?")
+        .bind(format!("{canonical} "))
+        .bind(inserted.push_id.as_str())
+        .execute(&mut observer)
+        .await
+        .expect("corrupt stored wake origin reference");
+    observer.close().await.expect("close push observer");
+
+    assert!(matches!(
+        store.get_push_record(&inserted.push_id).await,
+        Err(StorageError::InvalidRecord)
+    ));
+}
+
+#[tokio::test]
+async fn schedule_run_origin_reference_requires_canonical_schedule_identity() {
+    let database = TestDatabase::new();
+    let mut store = AutomationStore::open(&database.path)
+        .await
+        .expect("automation store migrates");
+    let target = session("codex-local", "schedule-target");
+    let schedule_id = ScheduleId::generate();
+    let run_id = RunId::generate();
+    let draft = schedule_run_push_draft(push_id(), target, schedule_id, run_id);
+
+    let mut noncanonical = draft.clone();
+    noncanonical.origin_router_ref = Some(format!(
+        "{} ",
+        draft
+            .origin_router_ref
+            .as_deref()
+            .expect("schedule-run origin reference")
+    ));
+    assert!(matches!(
+        store.insert_push_record(noncanonical).await,
+        Err(StorageError::InvalidRecord)
+    ));
+
+    let mut wrong_kind = draft.clone();
+    wrong_kind.origin_router_ref = Some(
+        RouterOriginRef::Wake {
+            wakeup_id: WakeupId::generate(),
+            occurrence_id: OccurrenceId::generate(),
+        }
+        .canonical_string()
+        .expect("canonical wrong-kind origin reference"),
+    );
+    assert!(matches!(
+        store.insert_push_record(wrong_kind).await,
+        Err(StorageError::InvalidRecord)
+    ));
+
+    let inserted = store
+        .insert_push_record(draft)
+        .await
+        .expect("canonical schedule-run push");
+    let canonical = inserted
+        .origin_router_ref
+        .as_deref()
+        .expect("stored schedule-run origin reference")
+        .to_owned();
+    let decoded = store
+        .get_push_record(&inserted.push_id)
+        .await
+        .expect("read schedule-run push")
+        .expect("schedule-run push exists");
+    assert_eq!(
+        decoded.origin_router_ref.as_deref(),
+        Some(canonical.as_str())
+    );
+
+    let wrong_kind = RouterOriginRef::Wake {
+        wakeup_id: WakeupId::generate(),
+        occurrence_id: OccurrenceId::generate(),
+    }
+    .canonical_string()
+    .expect("canonical wrong-kind stored origin reference");
+    let mut observer = sqlx::SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&database.path)
+            .foreign_keys(true),
+    )
+    .await
+    .expect("open push observer");
+    sqlx::query("UPDATE router_pushes SET origin_router_ref=? WHERE push_id=?")
+        .bind(wrong_kind)
+        .bind(inserted.push_id.as_str())
+        .execute(&mut observer)
+        .await
+        .expect("corrupt stored schedule-run origin reference");
+    observer.close().await.expect("close push observer");
+
+    assert!(matches!(
+        store.get_push_record(&inserted.push_id).await,
+        Err(StorageError::InvalidRecord)
+    ));
 }
 
 #[tokio::test]

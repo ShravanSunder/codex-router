@@ -631,6 +631,7 @@ async fn dropped_steering_reply_remains_unknown() {
         .reconcile_attempt(AttemptReconciliationContext {
             target: sent.target,
             message: sent.message,
+            prepared_push_id: None,
             mode: sent.mode,
             recorded,
         })

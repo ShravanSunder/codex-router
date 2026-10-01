@@ -11,7 +11,8 @@ use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     CodexAppServerDeliveryRoute, DeliveryClientReceipt, DeliveryContractError, DeliveryFuture,
     DeliveryPrecondition, DeliveryRequest, EndpointDirectory, LoadPolicy, NativeControlBackend,
-    NativeGenerationGate, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
+    NativeGenerationGate, ScheduledRunPayload, SessionDeliveryRoute, SessionDeliveryRouter,
+    SessionMessageDelivery,
     layer_zero::{DeliveryRequest as PreparedDeliveryRequest, PreparedPush},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -465,6 +466,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
         .reconcile_attempt(AttemptReconciliationContext {
             target: target.clone(),
             message: MessageContent::Router { text: line.clone() },
+            prepared_push_id: Some(push_id.clone()),
             mode: MessageDelivery::Queue,
             recorded: recorded.clone(),
         })
@@ -488,6 +490,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
             .reconcile_attempt(AttemptReconciliationContext {
                 target: target.clone(),
                 message: MessageContent::Router { text: line.clone() },
+                prepared_push_id: Some(push_id.clone()),
                 mode: MessageDelivery::Queue,
                 recorded: mismatched_id_evidence,
             })
@@ -506,6 +509,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
             .reconcile_attempt(AttemptReconciliationContext {
                 target: mismatched_target,
                 message: MessageContent::Router { text: line.clone() },
+                prepared_push_id: Some(push_id.clone()),
                 mode: MessageDelivery::Queue,
                 recorded: recorded.clone(),
             })
@@ -525,6 +529,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
             .reconcile_attempt(AttemptReconciliationContext {
                 target: target.clone(),
                 message: MessageContent::Router { text: line },
+                prepared_push_id: Some(push_id.clone()),
                 mode: MessageDelivery::Queue,
                 recorded: mismatched_route,
             })
@@ -1013,8 +1018,13 @@ async fn exercise_held_empty_thread(
                 collaboration_service::ScheduledRunSubmission {
                     run_id,
                     target: target.clone(),
-                    message: "scheduled hello".to_owned().try_into()?,
-                    header_context: collaboration_protocol::MessageHeaderContext::default(),
+                    payload: ScheduledRunPayload::Existing {
+                        prepared: PreparedPush {
+                            push_id: PushId::try_from(uuid::Uuid::now_v7().to_string())?,
+                            line: MessageText::try_from("scheduled hello".to_owned())?,
+                            load_policy: LoadPolicy::MayLoad,
+                        },
+                    },
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs,
                     recorded: prepared.evidence,

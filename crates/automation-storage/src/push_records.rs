@@ -3,8 +3,9 @@ use crate::{AutomationStore, StorageError, push_record_rows};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use collaboration_protocol::{
     DeliveryOutcome, DeliveryReceipt, PushDeliveryState, PushId, PushKind, PushOrigin, PushRecord,
-    PushRecordDraft, SessionRef,
+    PushRecordDraft, RouterOriginRef, SessionRef,
 };
+use sqlx::SqliteConnection;
 use std::time::Duration;
 
 const PUSH_INSERT_RETRY_WINDOW: Duration = Duration::from_secs(5);
@@ -58,53 +59,7 @@ impl AutomationStore {
     }
 
     async fn insert_push_record_once(&mut self, record: &PushRecord) -> Result<(), StorageError> {
-        let kind = push_record_rows::serialize_kind(record.kind)?;
-        let (origin_kind, origin_session) = push_record_rows::serialize_origin(&record.origin);
-        let origin_service_id =
-            origin_session.map(|session| String::from(session.endpoint.service_id.clone()));
-        let origin_endpoint_id =
-            origin_session.map(|session| String::from(session.endpoint.endpoint_id.clone()));
-        let origin_session_id =
-            origin_session.map(|session| String::from(session.session_id.clone()));
-        let target_service_id = String::from(record.target.endpoint.service_id.clone());
-        let target_endpoint_id = String::from(record.target.endpoint.endpoint_id.clone());
-        let target_session_id = String::from(record.target.session_id.clone());
-        let reply_to_push_id = record
-            .reply_to_push_id
-            .as_ref()
-            .map(|push_id| push_id.as_str());
-        let header_facts_json = push_record_rows::serialize_json(&record.header_facts)?;
-        let ranges_json = record
-            .activity
-            .as_ref()
-            .map(push_record_rows::serialize_json)
-            .transpose()?;
-        let created_at = push_record_rows::serialize_timestamp(record.created_at);
-
-        let result = sqlx::query!(
-            "INSERT INTO router_pushes (push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,?,NULL,NULL) ON CONFLICT(push_id) DO NOTHING",
-            record.push_id.as_str(),
-            kind,
-            origin_kind,
-            origin_service_id,
-            origin_endpoint_id,
-            origin_session_id,
-            &record.origin_router_ref,
-            target_service_id,
-            target_endpoint_id,
-            target_session_id,
-            reply_to_push_id,
-            header_facts_json,
-            record.body.as_deref(),
-            ranges_json,
-            created_at
-        )
-        .execute(&mut self.connection)
-        .await?;
-        if result.rows_affected() == 0 {
-            return Err(StorageError::PushAlreadyExists);
-        }
-        Ok(())
+        insert_push_record_with_connection(&mut self.connection, record).await
     }
 
     pub async fn mark_push_attempted(
@@ -232,6 +187,25 @@ impl AutomationStore {
             .next()
             .map(push_record_rows::PushRecordRow::into_record)
             .transpose()
+    }
+
+    pub async fn get_push_record_by_origin_reference(
+        &mut self,
+        origin: &RouterOriginRef,
+    ) -> Result<Option<PushRecord>, StorageError> {
+        let origin_router_ref = origin
+            .canonical_string()
+            .map_err(|_| StorageError::InvalidRecord)?;
+        let record = self
+            .get_push_record_by_router_ref(&origin_router_ref)
+            .await?;
+        if record.as_ref().is_some_and(|record| {
+            record.origin_router_ref.as_deref() != Some(origin_router_ref.as_str())
+                || !origin.supports_kind(record.kind)
+        }) {
+            return Err(StorageError::InvalidRecord);
+        }
+        Ok(record)
     }
 
     pub async fn list_pending_push_records(
@@ -393,6 +367,63 @@ impl AutomationStore {
             Err(StorageError::PushStateConflict)
         }
     }
+}
+
+pub(crate) async fn insert_push_record_with_connection(
+    connection: &mut SqliteConnection,
+    record: &PushRecord,
+) -> Result<(), StorageError> {
+    push_record_rows::validate_router_origin_reference(
+        record.kind,
+        &record.origin,
+        record.origin_router_ref.as_deref(),
+    )?;
+    let kind = push_record_rows::serialize_kind(record.kind)?;
+    let (origin_kind, origin_session) = push_record_rows::serialize_origin(&record.origin);
+    let origin_service_id =
+        origin_session.map(|session| String::from(session.endpoint.service_id.clone()));
+    let origin_endpoint_id =
+        origin_session.map(|session| String::from(session.endpoint.endpoint_id.clone()));
+    let origin_session_id = origin_session.map(|session| String::from(session.session_id.clone()));
+    let target_service_id = String::from(record.target.endpoint.service_id.clone());
+    let target_endpoint_id = String::from(record.target.endpoint.endpoint_id.clone());
+    let target_session_id = String::from(record.target.session_id.clone());
+    let reply_to_push_id = record
+        .reply_to_push_id
+        .as_ref()
+        .map(|push_id| push_id.as_str());
+    let header_facts_json = push_record_rows::serialize_json(&record.header_facts)?;
+    let ranges_json = record
+        .activity
+        .as_ref()
+        .map(push_record_rows::serialize_json)
+        .transpose()?;
+    let created_at = push_record_rows::serialize_timestamp(record.created_at);
+
+    let result = sqlx::query!(
+        "INSERT INTO router_pushes (push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,?,NULL,NULL) ON CONFLICT(push_id) DO NOTHING",
+        record.push_id.as_str(),
+        kind,
+        origin_kind,
+        origin_service_id,
+        origin_endpoint_id,
+        origin_session_id,
+        &record.origin_router_ref,
+        target_service_id,
+        target_endpoint_id,
+        target_session_id,
+        reply_to_push_id,
+        header_facts_json,
+        record.body.as_deref(),
+        ranges_json,
+        created_at
+    )
+    .execute(connection)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(StorageError::PushAlreadyExists);
+    }
+    Ok(())
 }
 
 fn session_key(session: &SessionRef) -> (String, String, String) {

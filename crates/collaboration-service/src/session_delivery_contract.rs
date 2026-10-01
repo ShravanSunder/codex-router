@@ -2,7 +2,7 @@
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
     AttemptId, CodexGeneration, DeliveryCorrelationId, DeliveryReceipt, MessageContent,
-    MessageDelivery, MessageHeaderContext, SessionReachability, SessionRef,
+    MessageDelivery, MessageHeaderContext, PushId, SessionReachability, SessionRef,
 };
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -113,6 +113,7 @@ pub enum DeliveryPrecondition {
 pub struct AttemptReconciliationContext {
     pub target: SessionRef,
     pub message: MessageContent,
+    pub prepared_push_id: Option<PushId>,
     pub mode: MessageDelivery,
     pub recorded: RouteEffectEvidence<SessionRef, CodexGeneration>,
 }

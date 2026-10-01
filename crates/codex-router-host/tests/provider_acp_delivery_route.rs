@@ -574,6 +574,7 @@ async fn router_queued_reconciliation_uses_only_the_operation_store() {
         message: MessageContent::HumanUser {
             text: MessageText::try_from("queued".to_owned()).expect("message"),
         },
+        prepared_push_id: None,
         mode: MessageDelivery::Queue,
         recorded: evidence.clone(),
     };

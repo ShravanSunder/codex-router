@@ -3,6 +3,7 @@ use crate::{AutomationStore, StorageError};
 use agent_automation::{
     DeliveryId, DurableMessage, EventId, FirstFire, OccurrenceId, WakeRecord, WakeState, WakeupId,
 };
+use collaboration_protocol::{PushKind, PushOrigin, PushRecordDraft, RouterOriginRef};
 use serde::de::DeserializeOwned;
 use sqlx::{Connection, Row, SqliteConnection};
 
@@ -20,11 +21,32 @@ pub enum WakeEvaluation<TMessage> {
     Expired(WakeRecord<TMessage>),
 }
 impl AutomationStore {
+    /// Evaluates a wake and atomically records its mailbox row and typed push draft.
     pub async fn evaluate_wakeup<TMessage: DurableMessage + DeserializeOwned>(
         &mut self,
         id: &WakeupId,
         now_ms: i64,
+        mut build_push_draft: impl FnMut(
+            &WakeRecord<TMessage>,
+            &FirstFire,
+        ) -> Result<PushRecordDraft, StorageError>
+        + Send,
     ) -> Result<WakeEvaluation<TMessage>, StorageError> {
+        self.evaluate_wakeup_inner(id, now_ms, &mut build_push_draft)
+            .await
+    }
+
+    async fn evaluate_wakeup_inner<TMessage, TBuildPushDraft>(
+        &mut self,
+        id: &WakeupId,
+        now_ms: i64,
+        build_push_draft: &mut TBuildPushDraft,
+    ) -> Result<WakeEvaluation<TMessage>, StorageError>
+    where
+        TMessage: DurableMessage + DeserializeOwned,
+        TBuildPushDraft: FnMut(&WakeRecord<TMessage>, &FirstFire) -> Result<PushRecordDraft, StorageError>
+            + Send,
+    {
         if now_ms < 0 {
             return Err(StorageError::InvalidRecord);
         }
@@ -131,6 +153,23 @@ impl AutomationStore {
         )
         .await?;
         let wake = crate::wakeup_repository::read_current(&mut transaction, id).await?;
+        let draft = build_push_draft(&wake, &fire)?;
+        let record = draft
+            .into_pending()
+            .map_err(|_| StorageError::InvalidRecord)?;
+        let expected_origin_reference = RouterOriginRef::Wake {
+            wakeup_id: fire.wakeup_id.clone(),
+            occurrence_id: fire.occurrence_id.clone(),
+        }
+        .canonical_string()
+        .map_err(|_| StorageError::InvalidRecord)?;
+        if record.kind != PushKind::Wake
+            || record.origin != PushOrigin::Router(PushKind::Wake)
+            || record.origin_router_ref.as_deref() != Some(expected_origin_reference.as_str())
+        {
+            return Err(StorageError::InvalidRecord);
+        }
+        crate::push_records::insert_push_record_with_connection(&mut *transaction, &record).await?;
         transaction.commit().await?;
         Ok(WakeEvaluation::Fired {
             wake,

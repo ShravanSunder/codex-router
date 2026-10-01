@@ -17,13 +17,13 @@ use automation_storage::ScheduleCreate;
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt, DeliveryRejection,
-    DeliveryRejectionReason, DeliveryRouteEvidence, PushDeliveryState, PushKind, RunShowRequest,
-    SessionReachability, parse_push_line_header,
+    DeliveryRejectionReason, DeliveryRouteEvidence, PushDeliveryState, PushKind, RouterLink,
+    RunShowRequest, SessionReachability, parse_push_line_header,
 };
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-type TestResult<TValue> = Result<TValue, Box<dyn std::error::Error + Send + Sync>>;
+pub(super) type TestResult<TValue> = Result<TValue, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Clone, Copy)]
 enum FakeRouteKind {
@@ -32,7 +32,7 @@ enum FakeRouteKind {
 }
 
 #[derive(Clone, Copy)]
-enum FakeSubmissionPlan {
+pub(super) enum FakeSubmissionPlan {
     Accept,
     Reject,
     RejectOnceThenAccept,
@@ -40,7 +40,7 @@ enum FakeSubmissionPlan {
 }
 
 #[derive(Clone, Copy)]
-enum FakeSettlementPlan {
+pub(super) enum FakeSettlementPlan {
     Completed,
     Failed,
     Interrupted,
@@ -206,6 +206,16 @@ impl ScheduledRunExecution for FakeScheduledExecution {
             let ScheduledRunPayload::Existing { prepared } = run.payload else {
                 return Err(DeliveryContractError::InvalidEvidence);
             };
+            let prepared_link_matches_id = prepared
+                .line
+                .as_str()
+                .split_whitespace()
+                .last()
+                .and_then(|link| RouterLink::parse(link).ok())
+                .is_some_and(|link| link.push_id() == &prepared.push_id);
+            if !prepared_link_matches_id {
+                return Err(DeliveryContractError::InvalidEvidence);
+            }
             if prepared.push_id.as_str() == run.run_id.as_str()
                 || parse_push_line_header(prepared.line.as_str())
                     .is_none_or(|header| header.kind != PushKind::ScheduleRun)
@@ -229,19 +239,29 @@ impl ScheduledRunExecution for FakeScheduledExecution {
             {
                 return Err(DeliveryContractError::InvalidEvidence);
             }
-            {
-                let mut observed_push_ids = self
-                    .observed_push_ids
+            let previous_push_id = self
+                .observed_push_ids
+                .lock()
+                .map_err(|_| DeliveryContractError::InvalidEvidence)?
+                .last()
+                .cloned();
+            if let Some(previous_push_id) = previous_push_id
+                && previous_push_id != prepared.push_id
+                && self
+                    .store
                     .lock()
-                    .map_err(|_| DeliveryContractError::InvalidEvidence)?;
-                if observed_push_ids
-                    .first()
-                    .is_some_and(|first_push_id| first_push_id != &prepared.push_id)
-                {
-                    return Err(DeliveryContractError::InvalidEvidence);
-                }
-                observed_push_ids.push(prepared.push_id.clone());
+                    .await
+                    .get_push_record(&previous_push_id)
+                    .await
+                    .map_err(|_| DeliveryContractError::EvidencePersistence)?
+                    .is_some()
+            {
+                return Err(DeliveryContractError::InvalidEvidence);
             }
+            self.observed_push_ids
+                .lock()
+                .map_err(|_| DeliveryContractError::InvalidEvidence)?
+                .push(prepared.push_id.clone());
             let submission_attempt = self.submissions.fetch_add(1, Ordering::SeqCst);
             if submission_attempt == 0 {
                 return Ok(RunSubmission::NotStartedBusy);
@@ -374,7 +394,7 @@ impl ScheduledRunExecution for FakeScheduledExecution {
     }
 }
 
-async fn provider_worker_fixture(
+pub(super) async fn provider_worker_fixture(
     submission_plan: FakeSubmissionPlan,
     settlement_plan: FakeSettlementPlan,
 ) -> TestResult<(
@@ -457,246 +477,12 @@ async fn provider_worker_fixture(
         execution: fake,
         backend: None,
         configuration: crate::AutomationConfigurationHandle::default(),
-        display_names: crate::SessionDisplayNameCache::default(),
         machine_identity: crate::MachineIdentity::new(
             service.to_owned().try_into()?,
             Some("Schedule Fixture"),
         )?,
     };
     Ok((root, store, worker, run_id, observed_push_ids))
-}
-
-#[tokio::test]
-async fn fake_provider_submission_and_settlement_variants_preserve_run_state() -> TestResult<()> {
-    let cases = [
-        (
-            FakeSubmissionPlan::Reject,
-            FakeSettlementPlan::Pending,
-            RunPhase::Preparing,
-            false,
-        ),
-        (
-            FakeSubmissionPlan::Unknown,
-            FakeSettlementPlan::Pending,
-            RunPhase::Uncertain,
-            false,
-        ),
-        (
-            FakeSubmissionPlan::Accept,
-            FakeSettlementPlan::Failed,
-            RunPhase::Finished,
-            false,
-        ),
-        (
-            FakeSubmissionPlan::Accept,
-            FakeSettlementPlan::Interrupted,
-            RunPhase::Finished,
-            false,
-        ),
-        (
-            FakeSubmissionPlan::Accept,
-            FakeSettlementPlan::Pending,
-            RunPhase::Executing,
-            false,
-        ),
-        (
-            FakeSubmissionPlan::Accept,
-            FakeSettlementPlan::WrittenWithoutCompletion,
-            RunPhase::Executing,
-            true,
-        ),
-    ];
-    for (submission, settlement, expected_phase, expected_error) in cases {
-        let (root, store, worker, run_id, observed_push_ids) =
-            provider_worker_fixture(submission, settlement).await?;
-        worker.step(run_id.clone()).await?;
-        worker.step(run_id.clone()).await?;
-        let busy = store
-            .lock()
-            .await
-            .read_run::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(&run_id)
-            .await?;
-        if busy.phase != RunPhase::Preparing || busy.evidence.timing.is_some() {
-            return Err("not-started-busy consumed a dispatch budget".into());
-        }
-        worker.step(run_id.clone()).await?;
-        if matches!(submission, FakeSubmissionPlan::Accept) {
-            let observed = worker.step(run_id.clone()).await;
-            if expected_error {
-                if !matches!(observed, Err(StorageError::InvalidRecord)) {
-                    return Err("provider write-only settlement was not rejected".into());
-                }
-            } else {
-                observed?;
-            }
-        }
-        let settled = store
-            .lock()
-            .await
-            .read_run::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(&run_id)
-            .await?;
-        if settled.phase != expected_phase {
-            return Err(format!(
-                "provider route phase mismatch: expected {expected_phase:?}, got {:?}",
-                settled.phase
-            )
-            .into());
-        }
-        let observed_push_ids = observed_push_ids
-            .lock()
-            .map_err(|_| "scheduled push id observation lock poisoned")?
-            .clone();
-        if observed_push_ids.len() != 2 || observed_push_ids[0] != observed_push_ids[1] {
-            return Err("schedule retry did not reuse the same push id".into());
-        }
-        let push = store
-            .lock()
-            .await
-            .get_push_record(&observed_push_ids[0])
-            .await?
-            .ok_or("scheduled push record missing")?;
-        let (expected_push_state, expected_push_outcome) = match submission {
-            FakeSubmissionPlan::Reject => (
-                PushDeliveryState::Pending,
-                Some(DeliveryOutcome::Rejected(DeliveryRejection {
-                    reason: DeliveryRejectionReason::Busy,
-                    next_action: DeliveryNextAction::RetryLater,
-                    client_code: None,
-                    detail: Some("fixture rejection".into()),
-                })),
-            ),
-            FakeSubmissionPlan::Unknown => (
-                PushDeliveryState::OutcomeUnknown,
-                Some(DeliveryOutcome::Unknown),
-            ),
-            FakeSubmissionPlan::Accept | FakeSubmissionPlan::RejectOnceThenAccept => {
-                (PushDeliveryState::Delivered, Some(DeliveryOutcome::Started))
-            }
-        };
-        if push.delivery_state != expected_push_state
-            || push
-                .last_outcome
-                .as_ref()
-                .map(|receipt| receipt.outcome.clone())
-                != expected_push_outcome
-        {
-            return Err("scheduled push outcome did not match the run submission".into());
-        }
-        if matches!(submission, FakeSubmissionPlan::Reject) && settled.evidence.timing.is_some() {
-            return Err("known rejection retained an execution budget".into());
-        }
-        match (submission, settlement) {
-            (FakeSubmissionPlan::Accept, FakeSettlementPlan::Failed)
-                if !matches!(
-                    settled.worker_outcome,
-                    Some(agent_automation::WorkerOutcome::Failed { .. })
-                ) =>
-            {
-                return Err("failed settlement lost worker outcome".into());
-            }
-            (FakeSubmissionPlan::Accept, FakeSettlementPlan::Interrupted)
-                if !matches!(
-                    settled.worker_outcome,
-                    Some(agent_automation::WorkerOutcome::Interrupted { .. })
-                ) =>
-            {
-                return Err("interrupted settlement lost worker outcome".into());
-            }
-            _ => {}
-        }
-        drop(worker);
-        let store = Arc::try_unwrap(store).map_err(|_| "store still referenced")?;
-        store.into_inner().close().await?;
-        for entry in std::fs::read_dir(&root)? {
-            std::fs::remove_file(entry?.path())?;
-        }
-        std::fs::remove_dir(root)?;
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn rejected_schedule_push_retries_on_the_same_id_before_delivery() -> TestResult<()> {
-    let (root, store, worker, run_id, observed_push_ids) = provider_worker_fixture(
-        FakeSubmissionPlan::RejectOnceThenAccept,
-        FakeSettlementPlan::Pending,
-    )
-    .await?;
-    worker.step(run_id.clone()).await?;
-    worker.step(run_id.clone()).await?;
-    worker.step(run_id.clone()).await?;
-
-    let first_attempt_ids = observed_push_ids
-        .lock()
-        .map_err(|_| "scheduled push id observation lock poisoned")?
-        .clone();
-    if first_attempt_ids.len() != 2 || first_attempt_ids[0] != first_attempt_ids[1] {
-        return Err("known rejection did not retain its original schedule push id".into());
-    }
-    let rejected_push = store
-        .lock()
-        .await
-        .get_push_record(&first_attempt_ids[0])
-        .await?
-        .ok_or("rejected schedule push missing")?;
-    if rejected_push.delivery_state != PushDeliveryState::Pending
-        || !matches!(
-            rejected_push
-                .last_outcome
-                .as_ref()
-                .map(|receipt| &receipt.outcome),
-            Some(DeliveryOutcome::Rejected(_))
-        )
-        || rejected_push.settled_at.is_none()
-    {
-        return Err("known rejection was not retained on a retryable pending push".into());
-    }
-
-    worker.step(run_id.clone()).await?;
-    let accepted_run = store
-        .lock()
-        .await
-        .read_run::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(&run_id)
-        .await?;
-    if accepted_run.phase != RunPhase::Executing {
-        return Err("known rejection retry did not advance the Run after acceptance".into());
-    }
-    let all_attempt_ids = observed_push_ids
-        .lock()
-        .map_err(|_| "scheduled push id observation lock poisoned")?
-        .clone();
-    if all_attempt_ids.len() != 3
-        || all_attempt_ids
-            .iter()
-            .any(|push_id| push_id != &first_attempt_ids[0])
-    {
-        return Err("schedule retry created or dispatched a second push id".into());
-    }
-    let delivered_push = store
-        .lock()
-        .await
-        .get_push_record(&first_attempt_ids[0])
-        .await?
-        .ok_or("delivered schedule push missing")?;
-    if delivered_push.delivery_state != PushDeliveryState::Delivered
-        || !matches!(
-            delivered_push
-                .last_outcome
-                .as_ref()
-                .map(|receipt| &receipt.outcome),
-            Some(DeliveryOutcome::Started)
-        )
-    {
-        return Err("schedule push did not settle delivered after its retry".into());
-    }
-    drop(worker);
-    let store = Arc::try_unwrap(store).map_err(|_| "store still referenced")?;
-    store.into_inner().close().await?;
-    for entry in std::fs::read_dir(&root)? {
-        std::fs::remove_file(entry?.path())?;
-    }
-    std::fs::remove_dir(root)?;
-    Ok(())
 }
 
 #[tokio::test]
@@ -778,7 +564,6 @@ async fn provider_and_peer_routes_drive_run_show_without_native_turns() -> TestR
             execution: Arc::clone(&fake),
             backend: None,
             configuration: crate::AutomationConfigurationHandle::default(),
-            display_names: crate::SessionDisplayNameCache::default(),
             machine_identity: crate::MachineIdentity::new(
                 target.endpoint.service_id.clone(),
                 Some("Schedule Fixture"),

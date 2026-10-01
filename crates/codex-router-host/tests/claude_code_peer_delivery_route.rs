@@ -394,6 +394,7 @@ async fn peer_reconciliation_rejects_evidence_for_another_session() {
         .reconcile_attempt(AttemptReconciliationContext {
             target: target(),
             message: delivery(MessageDelivery::Auto).message,
+            prepared_push_id: None,
             mode: MessageDelivery::Auto,
             recorded,
         })

@@ -16,7 +16,6 @@ impl ScheduleTimingWorker {
         execution: Arc<dyn crate::ScheduledRunExecution>,
         backend: Option<crate::NativeControlBackend>,
         configuration: crate::AutomationConfigurationHandle,
-        display_names: crate::SessionDisplayNameCache,
         machine_identity: crate::MachineIdentity,
     ) -> Self {
         Self {
@@ -26,7 +25,6 @@ impl ScheduleTimingWorker {
                 execution,
                 backend,
                 configuration,
-                display_names,
                 machine_identity,
             },
         }

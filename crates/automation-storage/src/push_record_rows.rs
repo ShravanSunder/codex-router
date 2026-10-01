@@ -3,7 +3,7 @@ use crate::StorageError;
 use chrono::{DateTime, Utc};
 use collaboration_protocol::{
     EndpointId, EndpointRef, PushActivitySnapshot, PushDeliveryState, PushId, PushKind, PushOrigin,
-    PushRecord, PushRecordDraft, SessionId, SessionRef, UuidIdentity,
+    PushRecord, PushRecordDraft, RouterOriginRef, SessionId, SessionRef, UuidIdentity,
 };
 use serde::Serialize;
 use sqlx::FromRow;
@@ -62,7 +62,9 @@ impl PushRecordRow {
                 {
                     return Err(StorageError::InvalidRecord);
                 }
-                PushOrigin::Router(kind)
+                let origin = PushOrigin::Router(kind);
+                validate_router_origin_reference(kind, &origin, self.origin_router_ref.as_deref())?;
+                origin
             }
             _ => return Err(StorageError::InvalidRecord),
         };
@@ -111,6 +113,32 @@ impl PushRecordRow {
         )
         .map_err(|_| StorageError::InvalidRecord)
     }
+}
+
+pub(crate) fn validate_router_origin_reference(
+    kind: PushKind,
+    origin: &PushOrigin,
+    encoded_origin_reference: Option<&str>,
+) -> Result<(), StorageError> {
+    let origin_kind = match origin {
+        PushOrigin::Router(origin_kind) if *origin_kind == kind => *origin_kind,
+        PushOrigin::Router(_) => return Err(StorageError::InvalidRecord),
+        PushOrigin::Session(_) | PushOrigin::OwnerUnverified
+            if encoded_origin_reference.is_none() =>
+        {
+            return Ok(());
+        }
+        PushOrigin::Session(_) | PushOrigin::OwnerUnverified => {
+            return Err(StorageError::InvalidRecord);
+        }
+    };
+    let encoded_origin_reference = encoded_origin_reference.ok_or(StorageError::InvalidRecord)?;
+    let origin_reference = RouterOriginRef::parse_canonical(encoded_origin_reference)
+        .map_err(|_| StorageError::InvalidRecord)?;
+    if !origin_reference.supports_kind(origin_kind) {
+        return Err(StorageError::InvalidRecord);
+    }
+    Ok(())
 }
 
 pub(crate) fn serialize_json<TValue: Serialize>(value: &TValue) -> Result<String, StorageError> {

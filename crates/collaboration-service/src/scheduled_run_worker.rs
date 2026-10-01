@@ -4,7 +4,7 @@ use crate::{
     RunSubmission, ScheduleDestination, ScheduledRunExecution,
 };
 use agent_automation::{
-    ExecutionDestination, PreparationEffect, RouteEffectEvidence, RunId, RunPhase,
+    ExecutionDestination, PreparationEffect, RouteEffectEvidence, RunId, RunPhase, ScheduleId,
 };
 use automation_storage::{
     AutomationStore, PushRecordDraft, RunSubmissionOutcome, RunSubmissionResult, RunUncertainty,
@@ -14,7 +14,7 @@ use collaboration_protocol::{
     CodexGeneration, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt, DeliveryRejection,
     DeliveryRejectionReason, DestinationPreparation, EndpointRef, MachineId, PushDeliveryState,
     PushHeaderFacts, PushId, PushKind, PushLineInput, PushOrigin, PushRecord, RouterLink,
-    RunExecution, SessionReachability, SessionRef, render_push_line,
+    RouterOriginRef, RunExecution, SessionReachability, SessionRef, render_push_line,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -22,6 +22,9 @@ use tokio::sync::Mutex;
 #[cfg(test)]
 #[path = "scheduled_input_validation_tests.rs"]
 mod input_validation_tests;
+#[cfg(test)]
+#[path = "scheduled_run_retry_tests.rs"]
+mod retry_tests;
 #[cfg(test)]
 #[path = "scheduled_run_route_tests.rs"]
 mod route_tests;
@@ -44,7 +47,7 @@ type StoredRun = agent_automation::RunRecord<
 enum SchedulePushPreparation {
     Ready {
         prepared: crate::layer_zero::PreparedPush,
-        origin_router_ref: String,
+        origin_router_ref: RouterOriginRef,
     },
     Recover(PushRecord),
 }
@@ -55,7 +58,6 @@ pub(crate) struct ScheduledRunWorker {
     pub execution: Arc<dyn ScheduledRunExecution>,
     pub backend: Option<NativeControlBackend>,
     pub configuration: crate::AutomationConfigurationHandle,
-    pub display_names: crate::SessionDisplayNameCache,
     pub machine_identity: crate::MachineIdentity,
 }
 
@@ -333,16 +335,13 @@ impl ScheduledRunWorker {
         &self,
         run_record: &StoredRun,
     ) -> Result<bool, StorageError> {
-        let origin_router_ref = format!(
-            "{}:{}",
-            run_record.schedule_id.as_str(),
-            run_record.run_id.as_str()
-        );
+        let origin_router_ref =
+            schedule_run_origin_reference(&run_record.schedule_id, &run_record.run_id);
         let mut push_record = self
             .store
             .lock()
             .await
-            .get_push_record_by_router_ref(&origin_router_ref)
+            .get_push_record_by_origin_reference(&origin_router_ref)
             .await?;
         let Some(mut push_record) = push_record.take() else {
             return Ok(false);
@@ -369,17 +368,20 @@ impl ScheduledRunWorker {
         target: &SessionRef,
         inputs: &agent_automation::CapturedRunInputs<SessionRef, EndpointRef>,
     ) -> Result<SchedulePushPreparation, StorageError> {
-        let origin_router_ref = format!("{}:{}", schedule_id.as_str(), run_id.as_str());
+        let origin_router_ref = schedule_run_origin_reference(schedule_id, run_id);
+        let encoded_origin_reference = origin_router_ref
+            .canonical_string()
+            .map_err(|_| StorageError::InvalidRecord)?;
         if let Some(existing) = self
             .store
             .lock()
             .await
-            .get_push_record_by_router_ref(&origin_router_ref)
+            .get_push_record_by_origin_reference(&origin_router_ref)
             .await?
         {
             if existing.kind != PushKind::ScheduleRun
                 || existing.target != *target
-                || existing.origin_router_ref.as_deref() != Some(origin_router_ref.as_str())
+                || existing.origin_router_ref.as_deref() != Some(encoded_origin_reference.as_str())
                 || existing.body.as_deref() != Some(inputs.instruction_text.as_str())
                 || !matches!(
                     &existing.header_facts,
@@ -407,7 +409,7 @@ impl ScheduledRunWorker {
             push_id: push_id.clone(),
             kind: PushKind::ScheduleRun,
             origin: PushOrigin::Router(PushKind::ScheduleRun),
-            origin_router_ref: Some(origin_router_ref.clone()),
+            origin_router_ref: Some(encoded_origin_reference),
             target: target.clone(),
             reply_to_push_id: None,
             header_facts: PushHeaderFacts::ScheduleRun {
@@ -460,8 +462,16 @@ impl ScheduledRunWorker {
         }
         let origin_router_ref = push_record
             .origin_router_ref
-            .clone()
+            .as_deref()
             .ok_or(StorageError::InvalidRecord)?;
+        let expected_origin_reference =
+            schedule_run_origin_reference(&run_record.schedule_id, &run_record.run_id);
+        let expected_origin_ref = expected_origin_reference
+            .canonical_string()
+            .map_err(|_| StorageError::InvalidRecord)?;
+        if origin_router_ref != expected_origin_ref {
+            return Err(StorageError::InvalidRecord);
+        }
         let effects = run_record
             .evidence
             .route
@@ -483,7 +493,7 @@ impl ScheduledRunWorker {
                     }),
                     Some((
                         push_record.push_id,
-                        origin_router_ref,
+                        expected_origin_reference,
                         Some((
                             PushDeliveryState::Pending,
                             DeliveryReceipt {
@@ -511,7 +521,7 @@ impl ScheduledRunWorker {
             crate::RunSubmission::Unknown,
             Some((
                 push_record.push_id,
-                origin_router_ref,
+                expected_origin_reference,
                 Some((push_state, receipt)),
             )),
         )
@@ -586,7 +596,11 @@ impl ScheduledRunWorker {
         id: RunId,
         effects: RouteEffectEvidence<SessionRef, CodexGeneration>,
         submission: RunSubmission,
-        schedule_push: Option<(PushId, String, Option<(PushDeliveryState, DeliveryReceipt)>)>,
+        schedule_push: Option<(
+            PushId,
+            RouterOriginRef,
+            Option<(PushDeliveryState, DeliveryReceipt)>,
+        )>,
     ) -> Result<(), StorageError> {
         let (outcome, push_receipt, push_state) = match submission {
             RunSubmission::NotStartedBusy => {
@@ -700,6 +714,13 @@ impl ScheduledRunWorker {
                 Err(error) => return Err(error),
             }
         }
+    }
+}
+
+fn schedule_run_origin_reference(schedule_id: &ScheduleId, run_id: &RunId) -> RouterOriginRef {
+    RouterOriginRef::ScheduleRun {
+        schedule_id: schedule_id.clone(),
+        run_id: run_id.clone(),
     }
 }
 

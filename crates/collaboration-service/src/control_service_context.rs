@@ -83,7 +83,6 @@ impl ServiceIdentity {
                     std::sync::Arc::clone(execution),
                     self.native_backend.clone(),
                     self.configuration.clone(),
-                    self.display_names.clone(),
                     self.machine_identity.clone(),
                 )
             })
@@ -99,7 +98,7 @@ impl ServiceIdentity {
                     crate::wakeup_delivery_sender::WakeDeliverySender {
                         delivery: std::sync::Arc::clone(delivery),
                         configuration: self.configuration.clone(),
-                        display_names: self.display_names.clone(),
+                        machine_identity: self.machine_identity.clone(),
                     },
                 )
             })

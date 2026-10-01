@@ -6,7 +6,7 @@ use agent_automation::{
 };
 use chrono::{DateTime, Utc};
 use collaboration_protocol::{
-    DeliveryOutcome, DeliveryReceipt, PushDeliveryState, PushId, PushKind,
+    DeliveryOutcome, DeliveryReceipt, PushDeliveryState, PushId, PushKind, RouterOriginRef,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::Connection;
@@ -40,7 +40,7 @@ pub struct RunSubmissionResult<TTarget, TGeneration, TReceipt> {
 #[derive(Clone)]
 pub struct ScheduleRunPushUpdate {
     pub push_id: PushId,
-    pub origin_router_ref: String,
+    pub origin_router_ref: RouterOriginRef,
     pub delivery_state: PushDeliveryState,
     pub receipt: DeliveryReceipt,
     pub settled_at: DateTime<Utc>,
@@ -252,11 +252,16 @@ impl AutomationStore {
         let timing = record.evidence.timing.as_ref();
         if let Some(push_update) = push_update {
             let push_state = push_state.ok_or(StorageError::InvalidRecord)?;
-            let expected_origin_ref =
-                format!("{}:{}", record.schedule_id.as_str(), record.run_id.as_str());
-            if push_update.origin_router_ref != expected_origin_ref {
+            let expected_origin_reference = RouterOriginRef::ScheduleRun {
+                schedule_id: record.schedule_id.clone(),
+                run_id: record.run_id.clone(),
+            };
+            if push_update.origin_router_ref != expected_origin_reference {
                 return Err(StorageError::InvalidRecord);
             }
+            let expected_origin_ref = expected_origin_reference
+                .canonical_string()
+                .map_err(|_| StorageError::InvalidRecord)?;
             let push_row = sqlx::query_as!(
                 crate::push_record_rows::PushRecordRow,
                 "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE push_id=?",

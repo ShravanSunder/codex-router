@@ -149,7 +149,6 @@ async fn exercise_input_validation(
         )),
         backend: Some(backend),
         configuration: crate::AutomationConfigurationHandle::default(),
-        display_names: crate::SessionDisplayNameCache::default(),
         machine_identity,
     };
     worker.step(run.clone()).await?;
