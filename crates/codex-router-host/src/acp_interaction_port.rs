@@ -532,6 +532,28 @@ mod provider_actor_tests {
         )
         .await
         .expect("broker");
+        let push_store = Arc::new(tokio::sync::Mutex::new(
+            automation_storage::AutomationStore::open(
+                &directory.path().join("approval-pushes.sqlite"),
+            )
+            .await
+            .expect("approval push store"),
+        ));
+        let machine_identity =
+            collaboration_service::MachineIdentity::new(service_id.clone(), Some("fixture-host"))
+                .expect("machine identity");
+        let service_id_text = String::from(service_id.clone());
+        let broker_context = collaboration_service::ServiceIdentity::new(
+            &service_id_text,
+            &service_id_text,
+            &format!("sha256:{}", "a".repeat(64)),
+        )
+        .expect("service identity")
+        .with_machine_identity(machine_identity)
+        .expect("machine identity belongs to service")
+        .with_automation_store(push_store)
+        .with_approval_broker(Arc::clone(&broker));
+        drop(broker_context);
         let notice_entered = Arc::new(tokio::sync::Notify::new());
         let notice_dropped = Arc::new(tokio::sync::Notify::new());
         broker

@@ -13,6 +13,7 @@ fn service_manifest(router_proxy_endpoint: Option<&str>) -> serde_json::Value {
     let mut manifest = serde_json::json!({
         "version": 2,
         "serviceId": "00000000-0000-4000-8000-000000000001",
+        "machineLabel": "fixture-machine",
         "serviceEpoch": "00000000-0000-4000-8000-000000000002",
         "control": {"transport": "unixJsonLines", "path": "control.sock"},
         "controlSchemaDigest": format!("sha256:{}", "a".repeat(64)),
