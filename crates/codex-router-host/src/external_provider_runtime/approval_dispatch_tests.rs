@@ -15,6 +15,8 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use super::approval_push_fixture;
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn approval_actor(session: &SessionRef) -> message_board::Identity {
@@ -24,17 +26,23 @@ fn approval_actor(session: &SessionRef) -> message_board::Identity {
     }
 }
 
-struct AcceptedApprovalNoticeDelivery(Arc<Notify>);
+struct AcceptedApprovalNoticeDelivery {
+    notice_delivered: Arc<Notify>,
+    push_fixture: approval_push_fixture::ApprovalPushFixture,
+}
 
 impl SessionMessageDelivery for AcceptedApprovalNoticeDelivery {
     fn deliver<'a>(
         &'a self,
-        _: collaboration_service::layer_zero::DeliveryRequest,
+        request: collaboration_service::layer_zero::DeliveryRequest,
         _: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        let notice_delivered = Arc::clone(&self.0);
         Box::pin(async move {
-            notice_delivered.notify_one();
+            self.push_fixture
+                .captured_approval(request.payload.line.as_str(), &request.target)
+                .await
+                .map_err(|_| collaboration_service::DeliveryContractError::InvalidEvidence)?;
+            self.notice_delivered.notify_one();
             Ok(DeliveryReceipt {
                 outcome: DeliveryOutcome::Started,
                 reachability: Some(SessionReachability::ProviderAcp),
@@ -252,7 +260,7 @@ sys.stdin.read()
 
 async fn wait_for_pending_approval<TPromptFuture>(
     broker: &ServiceInteractionBroker,
-    _approval_notice: &Notify,
+    approval_notice: &Notify,
     mut pending_request: Pin<&mut TPromptFuture>,
 ) -> TestResult
 where
@@ -260,16 +268,11 @@ where
         Future<Output = Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError>>,
 {
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if !observed_typed_approvals(broker, true).await.is_empty() {
-                break Ok(());
-            }
-            tokio::select! {
-                result = pending_request.as_mut() => break Err::<(), Box<dyn std::error::Error + Send + Sync>>(
-                    format!("permission prompt settled before its cancellation test: {result:?}").into()
-                ),
-                () = tokio::task::yield_now() => {}
-            }
+        tokio::select! {
+            () = approval_notice.notified() => Ok(()),
+            result = pending_request.as_mut() => Err::<(), Box<dyn std::error::Error + Send + Sync>>(
+                format!("permission prompt settled before approval notice delivery: {result:?}").into()
+            ),
         }
     })
     .await
@@ -365,14 +368,18 @@ async fn approval_broker_fixture(
         root.path().join("approval-routes.json"),
     )
     .await?;
+    let push_fixture =
+        approval_push_fixture::ApprovalPushFixture::compose(root.path(), service_id, &broker)
+            .await?;
     let approval_notice = Arc::new(Notify::new());
-    broker.install_session_delivery(Arc::new(AcceptedApprovalNoticeDelivery(Arc::clone(
-        &approval_notice,
-    ))))?;
+    broker.install_session_delivery(Arc::new(AcceptedApprovalNoticeDelivery {
+        notice_delivered: Arc::clone(&approval_notice),
+        push_fixture,
+    }))?;
     Ok((broker, approval_notice))
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn external_approval_timeout_is_recorded_in_history() -> TestResult {
     use acp_client_runtime::InteractionPort as _;
     let root = tempfile::tempdir()?;
@@ -408,8 +415,13 @@ async fn external_approval_timeout_is_recorded_in_history() -> TestResult {
     tokio::pin!(approval);
     tokio::select! {
         () = notified => {},
-        outcome = &mut approval => return Err(format!("approval settled before timeout: {outcome:?}").into()),
+        outcome = &mut approval => return Err(format!(
+            "approval settled before timeout: {outcome:?}; history: {:?}",
+            broker.list_interactions().await
+        ).into()),
     }
+    // SQLx notice persistence needs running time; pause after delivery is observed.
+    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(301)).await;
     assert!(matches!(
         approval.await,

@@ -2,7 +2,7 @@ use super::*;
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecision, EndpointDescription, EndpointId, EndpointRef,
-    GenerationNumber, OperationId, SessionId, UuidIdentity,
+    GenerationNumber, OperationId, RouterOriginRef, SessionId, UuidIdentity,
 };
 use collaboration_service::{
     EndpointDirectory, NativeControlBackend, NativeGenerationGate, ServiceInteractionBroker,
@@ -13,6 +13,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio_tungstenite::tungstenite::Message;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+use super::approval_push_fixture;
 
 fn approval_actor(session: &collaboration_protocol::SessionRef) -> message_board::Identity {
     message_board::Identity::Session {
@@ -236,8 +238,15 @@ async fn approval_broker_fixture(
     broker.install_session_delivery(Arc::new(
         collaboration_service::SessionDeliveryRouter::new(vec![route]),
     ))?;
+    let push_fixture =
+        approval_push_fixture::ApprovalPushFixture::compose(root.path(), service_id, &broker)
+            .await?;
+    let captured_approver = approver.clone();
+    let captured_broker = Arc::clone(&broker);
     let approver_task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .map_err(|_| "native approval push did not connect")??;
         let mut socket = tokio_tungstenite::accept_async(stream).await?;
         let mut offered_option_id = None;
         for expected_method in ["initialize", "initialized", "thread/read", "turn/start"] {
@@ -253,29 +262,47 @@ async fn approval_broker_fixture(
                     .pointer("/params/input/0/text")
                     .and_then(Value::as_str)
                     .ok_or("approval notice text missing")?;
-                if !delivered_text.contains("session/request_permission")
-                    || !delivered_text.contains("externalProviderPermission")
+                let record = push_fixture
+                    .captured_approval(delivered_text, &captured_approver)
+                    .await?;
+                let RouterOriginRef::Interaction { interaction_id, .. } =
+                    RouterOriginRef::parse_canonical(
+                        record
+                            .origin_router_ref
+                            .as_deref()
+                            .ok_or("approval push omitted its interaction reference")?,
+                    )?
+                else {
+                    return Err("approval push reference does not identify an interaction".into());
+                };
+                let body = record.body.ok_or("stored approval push omitted its body")?;
+                let pending = captured_broker
+                    .list_typed_approvals(true)
+                    .await
+                    .into_iter()
+                    .find(|approval| approval.request_id == interaction_id.as_str())
+                    .ok_or("stored notice did not identify its pending approval")?;
+                if !body.contains(&format!("Approval request: {}\n", pending.title))
+                    || !body.contains(&format!("Request ID: {}\n", pending.request_id))
                 {
                     return Err(
-                        "approval notice did not reach the approver with its request details"
-                            .into(),
+                        "stored approval body omitted its reviewed title or request ID".into(),
                     );
                 }
-                let notice_json = delivered_text
-                    .split_once("\n\n")
-                    .map(|(_, notice)| notice)
-                    .ok_or("approval notice omitted the agent sender envelope")?;
-                let notice: Value = serde_json::from_str(notice_json)?;
-                let option_id = notice
-                    .pointer("/decideCommands/0/optionId")
-                    .and_then(Value::as_str)
-                    .ok_or("typed approval notice omitted offered option ID")?;
-                let command = notice
-                    .pointer("/decideCommands/0/command")
-                    .and_then(Value::as_str)
-                    .ok_or("typed approval notice omitted decision command")?;
+                let option_id = pending
+                    .options
+                    .iter()
+                    .next()
+                    .ok_or("pending approval omitted offered option ID")?
+                    .option_id
+                    .as_str();
+                let command = body
+                    .lines()
+                    .find_map(|line| line.strip_prefix("To choose: "))
+                    .ok_or("stored approval body omitted decision command")?;
                 if !command.contains("agent-collaboration approval decide")
-                    || !command.contains("--option-id")
+                    || !command.contains(&format!("--option-id '{option_id}'"))
+                    || !body.contains(&format!("Option {option_id} — "))
                 {
                     return Err("typed approval notice did not explain how to decide".into());
                 }
