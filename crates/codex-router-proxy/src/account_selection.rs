@@ -1667,7 +1667,7 @@ fn select_from_account_states(
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
             })?;
-    select_from_account_states_with_selector(accounts, &mut weighted_selector)
+    select_from_account_states_with_selector(accounts, &mut weighted_selector, current_unix_seconds)
 }
 
 fn quota_states_excluding_attempted(
@@ -1775,14 +1775,16 @@ fn active_session_counts_by_account(book: &ReservationBook) -> HashMap<AccountId
 fn select_from_account_states_with_selector(
     accounts: &[QuotaAwareAccountState],
     weighted_selector: &mut WeightedDeficitSelector,
+    mut clock: impl FnMut() -> u64,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
+    let now_unix_seconds = clock();
     let account_inputs = accounts
         .iter()
-        .map(account_input_from_quota_state)
+        .map(|account| account_input_from_quota_state(account, now_unix_seconds))
         .collect::<Vec<_>>();
     let assessment_input = BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
-        current_unix_seconds(),
+        now_unix_seconds,
         RESPONSES_HTTP.clone(),
         account_inputs,
     );
@@ -2723,18 +2725,20 @@ fn skip_json_whitespace(body: &[u8], mut cursor: usize) -> usize {
     cursor
 }
 
-fn account_input_from_quota_state(account: &QuotaAwareAccountState) -> BurnDownAccountInput {
+fn account_input_from_quota_state(
+    account: &QuotaAwareAccountState,
+    now_unix_seconds: u64,
+) -> BurnDownAccountInput {
     let status = quota_window_status_from_freshness(account.freshness);
-    let reset_base = current_unix_seconds();
     let short_window = QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, status)
         .with_remaining_headroom(account.remaining_headroom)
-        .with_reset_unix_seconds(reset_base)
-        .with_observed_unix_seconds(reset_base)
+        .with_reset_unix_seconds(now_unix_seconds)
+        .with_observed_unix_seconds(now_unix_seconds)
         .with_effective(true);
     let weekly_window = QuotaWindowFact::new(V1_WEEKLY_WINDOW_SECONDS, status)
         .with_remaining_headroom(account.remaining_headroom)
-        .with_reset_unix_seconds(reset_base)
-        .with_observed_unix_seconds(reset_base)
+        .with_reset_unix_seconds(now_unix_seconds)
+        .with_observed_unix_seconds(now_unix_seconds)
         .with_effective(false);
     BurnDownAccountInput::new(
         account.account_id.clone(),
@@ -3523,6 +3527,44 @@ mod tests {
             assert_eq!(selected.account_id(), &strong_account_id);
             assert_ne!(selected.account_id(), &weak_account_id);
         }
+    }
+
+    #[test]
+    fn strict_quota_selection_keeps_strong_account_across_second_boundary() {
+        let weak_account_id = account_id("acct_weekly_low");
+        let strong_account_id = account_id("acct_weekly_healthy");
+        let accounts = vec![
+            QuotaAwareAccountState::new(
+                weak_account_id.clone(),
+                23,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+            QuotaAwareAccountState::new(
+                strong_account_id.clone(),
+                76,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+        ];
+        let boundary_instants = [1_800_000_000, 1_800_000_001];
+        let mut clock_reads = 0;
+        let mut weighted_selector = super::WeightedDeficitSelector::default();
+
+        let selected = super::select_from_account_states_with_selector(
+            &accounts,
+            &mut weighted_selector,
+            || {
+                // Production consumes the first instant; a hypothetical second read crosses the
+                // boundary, giving the first account a weekly reset R21 prefers before quota weight.
+                let instant = boundary_instants[clock_reads.min(boundary_instants.len() - 1)];
+                clock_reads += 1;
+                instant
+            },
+        )
+        .unwrap_or_else(|error| panic!("selection should succeed: {error}"));
+
+        assert_eq!(clock_reads, 1, "one selection must read its clock once");
+        assert_eq!(selected.account_id(), &strong_account_id);
+        assert_ne!(selected.account_id(), &weak_account_id);
     }
 
     #[test]

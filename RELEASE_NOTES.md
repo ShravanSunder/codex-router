@@ -2,6 +2,7 @@
 
 ## Unreleased - 2026-09-30
 
+- Keep quota facts and route-band assessment on one clock reading per selection to prevent account-order drift at second boundaries.
 - Persist thread and topic subscription policies, lifecycle, per-root batching windows, and backfill eligible existing participants. This is storage groundwork; session-target delivery arrives in the next release. Migration `202609170001` was rewritten in place: local or debug board databases that applied the earlier branch version fail with `InvalidSchema` and may need to be deleted; production databases are unaffected.
 - Add Claude subscription accounts with `codex-router account login --provider claude --label work`. Open the displayed authorization URL, sign in to Claude, then paste the hosted callback as `code#state`; Router stores encrypted credentials, renews them even when an account is idle or out of quota, and shows Claude 5-hour and weekly use in `codex-router quota status`. Keep only the active and previous encrypted credential generations after a successful login or refresh. The shared login command now takes `--provider openai` or `--provider claude`. Quota refresh intervals above 300 seconds are rejected to keep displayed evidence fresh.
 - Provider setting rejection errors now name the setting, requested value, and advertised choices; display truncation is marked with an ellipsis.
