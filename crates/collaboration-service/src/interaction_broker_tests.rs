@@ -7,7 +7,12 @@ struct CapturingInteractionDelivery {
     notices: Arc<Mutex<Vec<crate::DeliveryRequest>>>,
     delivered: Arc<tokio::sync::Notify>,
     push_store: Option<Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
-    push_records_at_delivery: Arc<Mutex<Vec<Option<collaboration_protocol::PushRecord>>>>,
+    prepared_pushes_at_delivery: Arc<Mutex<Vec<CapturedInteractionPush>>>,
+}
+
+struct CapturedInteractionPush {
+    request: crate::layer_zero::DeliveryRequest,
+    record_at_delivery: Option<collaboration_protocol::PushRecord>,
 }
 
 impl crate::SessionMessageDelivery for CapturingInteractionDelivery {
@@ -17,28 +22,6 @@ impl crate::SessionMessageDelivery for CapturingInteractionDelivery {
         _: &'a dyn crate::AttemptEvidenceSink,
     ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
         Box::pin(async move {
-            let push_record = match (&request.message, &self.push_store) {
-                (collaboration_protocol::MessageContent::Router { text }, Some(push_store)) => {
-                    let push_id = text
-                        .as_str()
-                        .split_whitespace()
-                        .last()
-                        .and_then(|link| collaboration_protocol::RouterLink::parse(link).ok())
-                        .map(|link| link.push_id().clone());
-                    match push_id {
-                        Some(push_id) => push_store
-                            .lock()
-                            .await
-                            .get_push_record(&push_id)
-                            .await
-                            .ok()
-                            .flatten(),
-                        None => None,
-                    }
-                }
-                _ => None,
-            };
-            self.push_records_at_delivery.lock().await.push(push_record);
             self.notices.lock().await.push(request);
             self.delivered.notify_one();
             Ok(collaboration_protocol::DeliveryReceipt {
@@ -46,6 +29,33 @@ impl crate::SessionMessageDelivery for CapturingInteractionDelivery {
                 reachability: Some(collaboration_protocol::SessionReachability::CodexAppServer),
                 client: None,
             })
+        })
+    }
+
+    fn deliver_prepared<'a>(
+        &'a self,
+        request: crate::layer_zero::DeliveryRequest,
+        evidence: &'a dyn crate::AttemptEvidenceSink,
+    ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
+        Box::pin(async move {
+            let record_at_delivery = match &self.push_store {
+                Some(push_store) => push_store
+                    .lock()
+                    .await
+                    .get_push_record(&request.payload.push_id)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            self.prepared_pushes_at_delivery
+                .lock()
+                .await
+                .push(CapturedInteractionPush {
+                    request: request.clone(),
+                    record_at_delivery,
+                });
+            self.deliver(request.into_legacy_request(), evidence).await
         })
     }
 
@@ -71,13 +81,13 @@ async fn typed_approval_and_question_notify_their_session_approver() {
         board_session_ref(&session(&broker.service_id, "approver-session")).expect("approver");
     let notices = Arc::new(Mutex::new(Vec::new()));
     let delivered = Arc::new(tokio::sync::Notify::new());
-    let push_records_at_delivery = Arc::new(Mutex::new(Vec::new()));
+    let prepared_pushes_at_delivery = Arc::new(Mutex::new(Vec::new()));
     broker
         .install_session_delivery(Arc::new(CapturingInteractionDelivery {
             notices: Arc::clone(&notices),
             delivered: Arc::clone(&delivered),
             push_store: Some(push_store),
-            push_records_at_delivery: Arc::clone(&push_records_at_delivery),
+            prepared_pushes_at_delivery: Arc::clone(&prepared_pushes_at_delivery),
         }))
         .expect("delivery route");
     let approver_identity = message_board::Identity::Session {
@@ -115,15 +125,28 @@ async fn typed_approval_and_question_notify_their_session_approver() {
     })
     .await
     .expect("both notices delivered");
-    let push_records_at_delivery = push_records_at_delivery.lock().await;
-    assert_eq!(push_records_at_delivery.len(), 2);
-    assert!(push_records_at_delivery.iter().all(Option::is_some));
-    let stored_pushes: Vec<_> = push_records_at_delivery
+    let prepared_pushes_at_delivery = prepared_pushes_at_delivery.lock().await;
+    assert_eq!(prepared_pushes_at_delivery.len(), 2);
+    let stored_pushes: Vec<_> = prepared_pushes_at_delivery
         .iter()
-        .filter_map(Clone::clone)
+        .filter_map(|captured| captured.record_at_delivery.clone())
         .collect();
-    drop(push_records_at_delivery);
-    for record in &stored_pushes {
+    let mut presentation_ids = std::collections::HashSet::new();
+    for captured in prepared_pushes_at_delivery.iter() {
+        let record = captured
+            .record_at_delivery
+            .as_ref()
+            .expect("push record stored before delivery");
+        let prepared = &captured.request;
+        assert_eq!(
+            record.delivery_state,
+            collaboration_protocol::PushDeliveryState::Attempted
+        );
+        assert_eq!(prepared.payload.push_id, record.push_id);
+        assert_eq!(prepared.correlation.as_str(), record.push_id.as_str());
+        assert_eq!(prepared.target, record.target);
+        assert_eq!(prepared.mode, collaboration_protocol::MessageDelivery::Auto);
+        assert_eq!(prepared.payload.load_policy, crate::LoadPolicy::MayLoad);
         assert_eq!(
             String::from(record.target.endpoint.service_id.clone()),
             approver.endpoint.service_id.as_str()
@@ -150,14 +173,38 @@ async fn typed_approval_and_question_notify_their_session_approver() {
         } else {
             "question-1"
         };
+        let origin_ref = collaboration_protocol::RouterOriginRef::parse_canonical(
+            record
+                .origin_router_ref
+                .as_deref()
+                .expect("typed interaction origin reference"),
+        )
+        .expect("canonical interaction origin");
+        let collaboration_protocol::RouterOriginRef::Interaction {
+            interaction_id,
+            presentation_id,
+        } = origin_ref
+        else {
+            panic!("interaction origin reference expected");
+        };
+        assert_eq!(interaction_id.as_str(), expected_request_id);
+        assert!(presentation_ids.insert(presentation_id.as_str().to_owned()));
         assert_eq!(
-            record.origin_router_ref.as_deref(),
-            Some(expected_request_id)
+            uuid::Uuid::parse_str(presentation_id.as_str())
+                .expect("presentation UUID")
+                .get_version_num(),
+            7
         );
-        let requester = match &record.header_facts {
-            collaboration_protocol::PushHeaderFacts::Approval { requester, .. }
-            | collaboration_protocol::PushHeaderFacts::Question { requester, .. } => requester,
-            _ => panic!("interaction push must retain typed requester facts"),
+        let requester = match (record.kind, &record.header_facts) {
+            (
+                collaboration_protocol::PushKind::Approval,
+                collaboration_protocol::PushHeaderFacts::Approval { requester, .. },
+            )
+            | (
+                collaboration_protocol::PushKind::Question,
+                collaboration_protocol::PushHeaderFacts::Question { requester, .. },
+            ) => requester,
+            _ => panic!("interaction push kind and typed requester facts must agree"),
         };
         assert_eq!(
             String::from(requester.session_id.clone()),
@@ -169,10 +216,39 @@ async fn typed_approval_and_question_notify_their_session_approver() {
                 .as_deref()
                 .is_some_and(|body| body.contains(expected_request_id))
         );
+        let body = record.body.as_deref().expect("stored interaction body");
+        assert!(!body.trim_start().starts_with('{'));
+        match record.kind {
+            collaboration_protocol::PushKind::Approval => {
+                assert!(body.contains("Approval request: Run command"));
+                assert!(body.contains("agent-collaboration approval decide"));
+            }
+            collaboration_protocol::PushKind::Question => {
+                assert!(body.contains("Question: Choose?"));
+                assert!(body.contains("agent-collaboration question answer"));
+            }
+            _ => panic!("interaction push kind expected"),
+        }
     }
+    assert_eq!(presentation_ids.len(), 2);
     let notices = notices.lock().await;
     assert_eq!(notices.len(), 2);
-    for (notice, record) in notices.iter().zip(&stored_pushes) {
+    for captured in prepared_pushes_at_delivery.iter() {
+        let prepared = &captured.request;
+        let record = captured
+            .record_at_delivery
+            .as_ref()
+            .expect("push record stored before delivery");
+        let notice = notices
+            .iter()
+            .find(|notice| {
+                matches!(
+                    &notice.message,
+                    collaboration_protocol::MessageContent::Router { text }
+                        if text.as_str() == prepared.payload.line.as_str()
+                )
+            })
+            .expect("prepared line passed to delivery");
         assert_eq!(
             String::from(notice.target.session_id.clone()),
             "approver-session"
@@ -181,6 +257,7 @@ async fn typed_approval_and_question_notify_their_session_approver() {
         let collaboration_protocol::MessageContent::Router { text } = &notice.message else {
             panic!("interaction notice must deliver a Router-authored push line");
         };
+        assert_eq!(text.as_str(), prepared.payload.line.as_str());
         let expected_kind = match record.kind {
             collaboration_protocol::PushKind::Approval => "❓ Router approval @",
             collaboration_protocol::PushKind::Question => "❓ Router question @",
@@ -194,20 +271,23 @@ async fn typed_approval_and_question_notify_their_session_approver() {
             .and_then(|link| collaboration_protocol::RouterLink::parse(link).ok())
             .expect("push line link");
         assert_eq!(link.push_id(), &record.push_id);
+        assert_eq!(link.push_id(), &prepared.payload.push_id);
     }
+    drop(notices);
+    drop(prepared_pushes_at_delivery);
     let approval_body = stored_pushes
         .iter()
         .find(|record| record.kind == collaboration_protocol::PushKind::Approval)
         .and_then(|record| record.body.as_deref())
         .expect("stored approval notice");
-    assert!(approval_body.contains("externalProviderPermission"));
+    assert!(approval_body.contains("Approval request: Run command"));
     assert!(approval_body.contains("--option-id"));
     let question_body = stored_pushes
         .iter()
         .find(|record| record.kind == collaboration_protocol::PushKind::Question)
         .and_then(|record| record.body.as_deref())
         .expect("stored question notice");
-    assert!(question_body.contains("externalProviderQuestion"));
+    assert!(question_body.contains("Question: Choose?"));
     assert!(question_body.contains("question answer"));
 }
 
@@ -223,7 +303,7 @@ async fn provider_session_approval_legacy_projection_survives_restart_without_du
             notices: Arc::new(Mutex::new(Vec::new())),
             delivered: Arc::new(tokio::sync::Notify::new()),
             push_store: None,
-            push_records_at_delivery: Arc::new(Mutex::new(Vec::new())),
+            prepared_pushes_at_delivery: Arc::new(Mutex::new(Vec::new())),
         }))
         .expect("notice route");
     let target = session(&broker.service_id, "provider-session");
@@ -305,7 +385,7 @@ async fn human_and_old_provider_approval_rows_stay_detailed_only() {
             notices: Arc::new(Mutex::new(Vec::new())),
             delivered: Arc::new(tokio::sync::Notify::new()),
             push_store: None,
-            push_records_at_delivery: Arc::new(Mutex::new(Vec::new())),
+            prepared_pushes_at_delivery: Arc::new(Mutex::new(Vec::new())),
         }))
         .expect("notice route");
     for (request_id, requested_by) in [
@@ -399,7 +479,7 @@ async fn unreachable_approver_cancellation_keeps_its_typed_state_in_both_lists()
             notices: Arc::new(Mutex::new(Vec::new())),
             delivered: Arc::new(tokio::sync::Notify::new()),
             push_store: None,
-            push_records_at_delivery: Arc::new(Mutex::new(Vec::new())),
+            prepared_pushes_at_delivery: Arc::new(Mutex::new(Vec::new())),
         }))
         .expect("notice route");
     let _receiver = broker
