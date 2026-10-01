@@ -141,6 +141,8 @@ async fn implementer_seat_is_unique_replaceable_and_visible_on_thread_reads() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: first.clone(),
                 role: ParticipantRole::Implementer,
@@ -160,6 +162,8 @@ async fn implementer_seat_is_unique_replaceable_and_visible_on_thread_reads() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: second.clone(),
                 role: ParticipantRole::Implementer,
@@ -177,6 +181,8 @@ async fn implementer_seat_is_unique_replaceable_and_visible_on_thread_reads() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: second.clone(),
                 role: ParticipantRole::Implementer,
@@ -289,6 +295,8 @@ async fn create_and_repeat_join_preserve_one_valid_participant_and_explicit_watc
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: created.message.message_id.clone(),
                 actor: creator.clone(),
                 role: ParticipantRole::Reviewer,
@@ -305,6 +313,8 @@ async fn create_and_repeat_join_preserve_one_valid_participant_and_explicit_watc
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: created.message.message_id.clone(),
                 actor: creator,
                 role: ParticipantRole::Participant,
@@ -357,6 +367,8 @@ async fn create_and_repeat_join_preserve_one_valid_participant_and_explicit_watc
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id,
                 actor: second_join.participant.identity,
                 role: ParticipantRole::Advisor,
@@ -446,6 +458,8 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: second.clone(),
                 role: ParticipantRole::Reviewer,
@@ -461,6 +475,8 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: first.clone(),
                 role: ParticipantRole::Orchestrator,
@@ -477,6 +493,8 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: third.clone(),
                 role: ParticipantRole::Orchestrator,
@@ -503,6 +521,8 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: third.clone(),
                 role: ParticipantRole::Orchestrator,
@@ -663,6 +683,8 @@ async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: joined_non_orchestrator.clone(),
                 role: ParticipantRole::Reviewer,
@@ -806,6 +828,8 @@ async fn concurrent_orchestrator_joins_commit_one_holder_and_report_the_winner()
     let first = session("first-racer");
     let second = session("second-racer");
     let first_request = ThreadJoinRequest {
+        mode: None,
+        when_idle: None,
         root_message_id: root.clone(),
         actor: first.clone(),
         role: ParticipantRole::Orchestrator,
@@ -814,6 +838,8 @@ async fn concurrent_orchestrator_joins_commit_one_holder_and_report_the_winner()
         note: None,
     };
     let second_request = ThreadJoinRequest {
+        mode: None,
+        when_idle: None,
         root_message_id: root.clone(),
         actor: second.clone(),
         role: ParticipantRole::Orchestrator,
@@ -856,6 +882,8 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: reader.clone(),
                 role: ParticipantRole::Reviewer,
@@ -974,6 +1002,8 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root,
                 actor: session("later-participant"),
                 role: ParticipantRole::Advisor,
@@ -1011,6 +1041,8 @@ async fn participant_cursor_is_thread_bound_and_unknown_stored_role_is_rejected(
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: second_root.clone(),
                 actor: session("other-thread"),
                 role: ParticipantRole::Participant,
@@ -1029,6 +1061,8 @@ async fn participant_cursor_is_thread_bound_and_unknown_stored_role_is_rejected(
             .store
             .join_thread(
                 ThreadJoinRequest {
+                    mode: None,
+                    when_idle: None,
                     root_message_id: first_root.clone(),
                     actor: session(name),
                     role: ParticipantRole::Participant,
@@ -1125,6 +1159,8 @@ async fn thread_list_rejects_corrupt_projected_orchestrator_records() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: second_root,
                 actor: session("foreign-participant"),
                 role: ParticipantRole::Participant,

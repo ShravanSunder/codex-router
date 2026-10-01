@@ -748,6 +748,8 @@ fn prepare_thread_join(
         return Err("--replace requires --role orchestrator".into());
     }
     let request = ThreadJoinRequest {
+        mode: None,
+        when_idle: None,
         root_message_id: parse_uuid_v7(arguments.root_message_id, "--root-message-id")?,
         actor: match &actor {
             ActorInput::Explicit(identity) => identity.clone(),

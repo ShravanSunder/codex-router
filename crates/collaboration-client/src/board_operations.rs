@@ -1,5 +1,9 @@
 //! Typed board calls share Control transport and never replay uncertain writes.
 use crate::{ClientError, ControlClient};
+use collaboration_protocol::{
+    ThreadSubscribeRequest, ThreadSubscriptionView, ThreadSubscriptionsRequest,
+    ThreadSubscriptionsResult, ThreadUnsubscribeRequest,
+};
 use message_board::*;
 use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
@@ -287,6 +291,28 @@ impl ControlClient {
         self.board_call("board/threadParticipantList", request)
             .await
     }
+    pub async fn board_thread_subscribe(
+        &mut self,
+        request: ThreadSubscribeRequest,
+    ) -> Result<ThreadSubscriptionView, BoardClientError> {
+        let resource = subscription_resource(&request.scope);
+        self.board_mutation_call("board/threadSubscribe", request, resource)
+            .await
+    }
+    pub async fn board_thread_unsubscribe(
+        &mut self,
+        request: ThreadUnsubscribeRequest,
+    ) -> Result<ThreadSubscriptionView, BoardClientError> {
+        let resource = subscription_resource(&request.scope);
+        self.board_mutation_call("board/threadUnsubscribe", request, resource)
+            .await
+    }
+    pub async fn board_thread_subscriptions(
+        &mut self,
+        request: ThreadSubscriptionsRequest,
+    ) -> Result<ThreadSubscriptionsResult, BoardClientError> {
+        self.board_call("board/threadSubscriptions", request).await
+    }
     pub async fn board_thread_listen(
         &mut self,
         request: ThreadListenRequest,
@@ -433,5 +459,16 @@ fn outcome_unknown(resource: ResourceIdentity) -> BoardClientError {
         resource,
         message: "Board write outcome is unknown. Inspect the affected resource before deciding whether to retry.",
         next_action: BoardNextAction::InspectResource,
+    }
+}
+
+fn subscription_resource(scope: &SubscriptionScope) -> ResourceIdentity {
+    match scope {
+        SubscriptionScope::Thread { root_message_id } => ResourceIdentity::Thread {
+            root_message_id: root_message_id.clone(),
+        },
+        SubscriptionScope::Topic { topic_id } => ResourceIdentity::Topic {
+            topic_id: topic_id.clone(),
+        },
     }
 }

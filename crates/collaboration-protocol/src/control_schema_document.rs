@@ -157,6 +157,18 @@ pub fn control_schema_document(
         message_board::ThreadParticipantListRequest,
         message_board::ThreadParticipantListResult,
     >("board/threadParticipantList", &[])?;
+    assembly.add_method::<ThreadSubscribeRequest, ThreadSubscriptionView>(
+        "board/threadSubscribe",
+        &[],
+    )?;
+    assembly.add_method::<ThreadUnsubscribeRequest, ThreadSubscriptionView>(
+        "board/threadUnsubscribe",
+        &[],
+    )?;
+    assembly.add_method::<ThreadSubscriptionsRequest, ThreadSubscriptionsResult>(
+        "board/threadSubscriptions",
+        &[],
+    )?;
     assembly.add_method::<message_board::ThreadListenRequest, message_board::ThreadListenResult>(
         "board/threadListen",
         &[],

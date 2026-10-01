@@ -92,6 +92,8 @@ impl OwnerFixture {
         store
             .join_thread(
                 ThreadJoinRequest {
+                    mode: None,
+                    when_idle: None,
                     root_message_id: root.clone(),
                     actor: reader.clone(),
                     role: ParticipantRole::Participant,
@@ -194,6 +196,8 @@ impl OwnerFixture {
         store
             .join_thread(
                 ThreadJoinRequest {
+                    mode: None,
+                    when_idle: None,
                     root_message_id: root.clone(),
                     actor: self.reader.clone(),
                     role: ParticipantRole::Participant,

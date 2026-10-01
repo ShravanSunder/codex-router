@@ -160,6 +160,8 @@ impl ThreadSubscriptionFixture {
         self.store
             .join_thread(
                 ThreadJoinRequest {
+                    mode: None,
+                    when_idle: None,
                     root_message_id: self.root_message_id.clone(),
                     actor: reader,
                     role,

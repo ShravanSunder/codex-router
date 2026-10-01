@@ -89,6 +89,8 @@ async fn human_poll_returns_bodyless_ranges_without_storing_or_pushing() {
         store
             .join_thread(
                 ThreadJoinRequest {
+                    mode: None,
+                    when_idle: None,
                     root_message_id: fixture.root.clone(),
                     actor: reader.clone(),
                     role: ParticipantRole::Participant,

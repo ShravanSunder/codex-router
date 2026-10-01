@@ -95,6 +95,8 @@ async fn backfill_requires_open_session_unresolved_thread_and_active_watch() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: resolved_root.clone(),
                 actor: resolved_reader.clone(),
                 role: ParticipantRole::Participant,

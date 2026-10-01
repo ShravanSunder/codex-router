@@ -694,6 +694,8 @@ async fn board_listen_push_targets(
         proof
             .client
             .board_thread_join(ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root_id.clone(),
                 actor: reader.clone(),
                 role: ParticipantRole::Participant,

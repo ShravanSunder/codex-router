@@ -1,4 +1,15 @@
 //! Public communication contracts without process, storage or transport ownership.
+mod thread_subscription_contract;
+mod thread_subscription_wait;
+pub use thread_subscription_contract::{
+    ThreadSubscribeRequest, ThreadSubscriptionPresence, ThreadSubscriptionState,
+    ThreadSubscriptionView, ThreadSubscriptionsRequest, ThreadSubscriptionsResult,
+    ThreadUnsubscribeRequest,
+};
+pub use thread_subscription_wait::{
+    InvalidSubscriptionWait, MAX_SUBSCRIPTION_WAIT_SECONDS, SubscriptionWaitBatch,
+    ThreadSubscriptionWaitFilter, ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult,
+};
 mod cli_output_contract;
 pub use cli_output_contract::{
     ConversationRecord, ConversationTerminalReason, EffortChange, FiniteCommandRecord,

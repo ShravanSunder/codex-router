@@ -170,6 +170,8 @@ pub(super) async fn post_thread_activity_for_sessions(
         .expect("session reader");
         client
             .board_thread_join(ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root_message_id.clone(),
                 actor: reader.clone(),
                 role: ParticipantRole::Participant,

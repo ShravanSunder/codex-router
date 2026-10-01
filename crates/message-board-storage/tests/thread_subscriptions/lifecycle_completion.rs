@@ -62,6 +62,8 @@ async fn leave_replacement_and_expiry_end_rows_and_delete_windows() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: replaced_fixture.root_message_id.clone(),
                 actor: replacement_reader,
                 role: ParticipantRole::Implementer,
