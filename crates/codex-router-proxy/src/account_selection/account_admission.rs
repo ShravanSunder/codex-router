@@ -2,7 +2,6 @@
 
 use super::*;
 use codex_router_selection::burn_down::QuotaEvidenceReason;
-use codex_router_selection::burn_down::SelectedPool;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::quota_snapshot::SelectorQuotaInput;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -231,14 +230,6 @@ impl LiveAccountAdmissionAssessor for RuntimeAccountAdmissionAssessor {
                 // Preserve established non-credit fallback sessions. They cannot use this
                 // branch after the socket has admitted credit-backed work.
                 AccountAvailability::Unknown if !credit_backed_admission_seen => {
-                    AccountSourceAdmission::Permitted
-                }
-                AccountAvailability::Blocked
-                    if !credit_backed_admission_seen
-                        && account.quota_evidence_reason()
-                            == QuotaEvidenceReason::ShortWindowGuard
-                        && assessment.selected_pool() == SelectedPool::LastResort =>
-                {
                     AccountSourceAdmission::Permitted
                 }
                 AccountAvailability::Unknown

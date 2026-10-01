@@ -111,9 +111,7 @@ impl AsyncAccountDecisionSelector for FixedOrdinaryFallbackSelector {
     }
 }
 
-async fn ordinary_fallback_source_continues_for_two_websocket_turns(
-    selection_reason: &'static str,
-) {
+async fn ordinary_unknown_source_continues_for_two_websocket_turns() {
     let directory = CreditTurnTestDirectory::new();
     let fixture = CreditTurnFixture::new(&directory).await;
     fixture
@@ -154,7 +152,7 @@ async fn ordinary_fallback_source_continues_for_two_websocket_turns(
     });
     let selector = FixedOrdinaryFallbackSelector {
         account_id: fixture.account_id.clone(),
-        selection_reason,
+        selection_reason: "unknown_fallback_preferred",
     };
     let credential_resolver = FixedAsyncCredentialResolver {
         account_id: fixture.account_id.clone(),
@@ -220,7 +218,7 @@ async fn ordinary_fallback_source_continues_for_two_websocket_turns(
             assert_eq!(
                 wait_for_source_assessment(&mut source_results).await,
                 AccountSourceAdmission::Permitted,
-                "ordinary unknown/LastResort source should preserve existing turn admission"
+                "ordinary Unknown source should preserve existing turn admission"
             );
             let create = tokio::time::timeout(Duration::from_secs(2), upstream_websocket.next())
                 .await
@@ -265,12 +263,8 @@ async fn ordinary_fallback_source_continues_for_two_websocket_turns(
 }
 
 #[tokio::test]
-async fn ordinary_unknown_and_last_resort_sources_continue_on_websocket() {
-    ordinary_fallback_source_continues_for_two_websocket_turns("unknown_fallback_preferred").await;
-    ordinary_fallback_source_continues_for_two_websocket_turns(
-        "preferred_last_resort_short_window_guard",
-    )
-    .await;
+async fn ordinary_unknown_source_continues_on_websocket() {
+    ordinary_unknown_source_continues_for_two_websocket_turns().await;
 }
 
 #[tokio::test]
