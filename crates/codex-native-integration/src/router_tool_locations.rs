@@ -46,7 +46,7 @@ pub const WORKSPACE_TOOL_LOCATIONS: [&str; 21] = [
 /// from them (`~/.cargo/bin/cargo` dispatches into `~/.rustup/toolchains`, pnpm's `npm`
 /// into `~/Library/pnpm/global`), and these agents read untrusted content. Cached
 /// sources and build products remain writable; poisoning them is a residual risk.
-pub const RESTRICTED_TOOL_LOCATIONS: [&str; 19] = [
+pub const RESTRICTED_TOOL_LOCATIONS: [&str; 20] = [
     "Library/Caches",
     ".cache/uv",
     "Library/pnpm/store",
@@ -61,6 +61,7 @@ pub const RESTRICTED_TOOL_LOCATIONS: [&str; 19] = [
     ".cargo/.package-cache",
     ".cargo/.package-cache-mutate",
     ".cargo/.global-cache",
+    ".cargo/.global-cache-journal",
     "go/pkg/mod",
     ".gradle/caches",
     ".m2/repository",
@@ -69,18 +70,39 @@ pub const RESTRICTED_TOOL_LOCATIONS: [&str; 19] = [
 ];
 
 /// Granted entries that are files Cargo creates itself, never directories.
-const TOOL_LOCATION_FILES: [&str; 3] = [
+const TOOL_LOCATION_FILES: [&str; 4] = [
     ".cargo/.package-cache",
     ".cargo/.package-cache-mutate",
     ".cargo/.global-cache",
+    ".cargo/.global-cache-journal",
 ];
 
+/// Granted locations the Host must never create, because their existence changes
+/// where a tool keeps its data: uv prefers its legacy macOS folder whenever it exists,
+/// so creating it would move the owner's uv to an empty folder.
+const GRANT_ONLY_TOOL_LOCATIONS: [&str; 1] = ["Library/Application Support/uv"];
+
+/// Whether the Host creates `location` when missing.
+fn host_creates(location: &str) -> bool {
+    !TOOL_LOCATION_FILES.contains(&location) && !GRANT_ONLY_TOOL_LOCATIONS.contains(&location)
+}
+
 /// Paths inside the tool locations that stay read-only: executables on the owner's
-/// `PATH` and files the owner's shells source or tools load as configuration or
-/// credentials. A session writing these could run code in the owner's next
-/// unsandboxed shell or build. Native does not report these exceptions back.
-pub const READ_ONLY_INSIDE_TOOL_LOCATIONS: [&str; 18] = [
+/// `PATH`, caches whose contents the owner's commands execute, and files the owner's
+/// shells source or tools load as configuration or credentials. A session writing
+/// these could run code in the owner's next unsandboxed shell or build. pnpm 10 and
+/// earlier link global bins into the `Library/pnpm` root itself, which stays writable
+/// for `workspace-write`. Native does not report these exceptions back.
+pub const READ_ONLY_INSIDE_TOOL_LOCATIONS: [&str; 24] = [
     "Library/pnpm/bin",
+    ".local/share/mise/shims",
+    ".yarn/bin",
+    // Caches whose contents unsandboxed commands execute: `pnpm dlx` installs,
+    // Playwright browsers, bazelisk downloads and uv tool environments.
+    "Library/Caches/pnpm/dlx",
+    "Library/Caches/ms-playwright",
+    "Library/Caches/bazelisk",
+    ".cache/uv/environments-v2",
     ".cargo/bin",
     ".cargo/env",
     ".cargo/env.fish",
@@ -109,7 +131,7 @@ pub async fn prepare_router_tool_locations(home: &Path) {
     let directories = WORKSPACE_TOOL_LOCATIONS
         .iter()
         .chain(RESTRICTED_TOOL_LOCATIONS.iter())
-        .filter(|location| !TOOL_LOCATION_FILES.contains(location));
+        .filter(|location| host_creates(location));
     for location in directories {
         let path = home.join(location);
         if let Err(error) = tokio::fs::create_dir_all(&path).await {
@@ -143,9 +165,16 @@ mod tests {
         for location in WORKSPACE_TOOL_LOCATIONS
             .iter()
             .chain(RESTRICTED_TOOL_LOCATIONS.iter())
-            .filter(|location| !TOOL_LOCATION_FILES.contains(location))
+            .filter(|location| host_creates(location))
         {
             assert!(home.join(location).is_dir(), "{location} was not created");
+        }
+        // Assert: creating uv's legacy folder would redirect the owner's uv.
+        for location in GRANT_ONLY_TOOL_LOCATIONS {
+            assert!(
+                !home.join(location).exists(),
+                "{location} must never be created"
+            );
         }
         for file in TOOL_LOCATION_FILES {
             assert!(
@@ -158,6 +187,18 @@ mod tests {
 
     #[test]
     fn restricted_locations_exclude_toolchain_homes_and_executable_caches() {
+        // Assert: executed caches inside granted caches are carved out read-only.
+        for executed in [
+            "Library/Caches/pnpm/dlx",
+            "Library/Caches/ms-playwright",
+            "Library/Caches/bazelisk",
+            ".cache/uv/environments-v2",
+        ] {
+            assert!(
+                READ_ONLY_INSIDE_TOOL_LOCATIONS.contains(&executed),
+                "{executed}"
+            );
+        }
         // Assert: nothing an unsandboxed command executes from is writable to write-restricted.
         for executed in [
             ".rustup",
