@@ -13,6 +13,9 @@ use serde_json::{Value, json};
 use sqlx::Connection;
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
+
+const FRESH_SCHEDULE_TASK_TEXT: &str = "Inspect the task completely and preserve every detail. This deliberately long instruction must arrive intact rather than as a shortened push preview. Final verification marker: FRESH_SCHEDULE_TASK_TEXT_FULLY_DELIVERED_7D2A9B";
+
 #[tokio::test]
 async fn scheduled_fresh_thread_finishes_after_separate_luna_summary()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -157,7 +160,7 @@ async fn exercise_scheduled_run(
     let instruction = client
         .create_instruction(InstructionCreateParams {
             operation_id: OperationId::generate(),
-            text: InstructionText::try_from("Inspect the task".to_owned())?,
+            text: InstructionText::try_from(FRESH_SCHEDULE_TASK_TEXT.to_owned())?,
         })
         .await?;
     let backend_store = Arc::clone(&store);
@@ -362,7 +365,7 @@ async fn exercise_scheduled_run(
                 )?;
                 if frozen_inputs {
                     let encoded = start.to_string();
-                    if !encoded.contains("Inspect the task")
+                    if !encoded.contains(FRESH_SCHEDULE_TASK_TEXT)
                         || encoded.contains("FUTURE_INSTRUCTION")
                     {
                         return Err(
@@ -377,8 +380,10 @@ async fn exercise_scheduled_run(
                     .pointer("/params/input/0/text")
                     .and_then(Value::as_str)
                     .ok_or("fresh schedule turn input missing")?;
-                if !task_input.contains("Inspect the task") {
-                    return Err("fresh schedule run lost its full task instruction".into());
+                if !task_input.ends_with(FRESH_SCHEDULE_TASK_TEXT) {
+                    return Err(
+                        "fresh schedule run truncated or changed its full task instruction".into(),
+                    );
                 }
                 if start.pointer("/params/effort").and_then(Value::as_str) != Some("medium") {
                     return Err("scheduled worker turn omitted the requested effort".into());
