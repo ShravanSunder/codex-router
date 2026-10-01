@@ -30,6 +30,7 @@ fn expected_router_root_overrides() -> Vec<String> {
         "model_providers.codex-router.wire_api=\"responses\"".to_owned(),
         "model_providers.codex-router.requires_openai_auth=true".to_owned(),
         "model_providers.codex-router.supports_websockets=true".to_owned(),
+        "sandbox_mode=\"workspace-write\"".to_owned(),
         "features.network_proxy.enabled=false".to_owned(),
         "permissions.router-write-restricted.extends=\":read-only\"".to_owned(),
         "permissions.router-write-restricted.network.enabled=true".to_owned(),
@@ -68,6 +69,12 @@ fn router_root_overrides_enable_direct_network_without_the_managed_proxy() {
     // Act: parse them exactly as TOML, proving the dotted keys are valid.
     let document = toml::Value::Table(overrides.join("\n").parse::<toml::Table>().unwrap());
 
+    // Assert: Router owns the app-server's default sandbox, so starting it does not
+    // depend on the owner's home configuration.
+    assert_eq!(
+        document.get("sandbox_mode").and_then(toml::Value::as_str),
+        Some("workspace-write")
+    );
     // Assert: the proxy is off, so Seatbelt allows direct DNS, ssh and local sockets.
     let proxy = document["features"]["network_proxy"].as_table().unwrap();
     assert_eq!(proxy.len(), 1);
