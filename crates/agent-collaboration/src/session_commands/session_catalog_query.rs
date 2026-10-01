@@ -138,6 +138,7 @@ fn catalog_provider(provider: &SessionsProvider) -> SessionCatalogProvider {
     match provider {
         SessionsProvider::Any => SessionCatalogProvider::Any,
         SessionsProvider::Current => SessionCatalogProvider::Current,
+        SessionsProvider::ClaudeCode => SessionCatalogProvider::Id("claude".to_owned()),
         SessionsProvider::Id(provider_id) => SessionCatalogProvider::Id(provider_id.clone()),
     }
 }

@@ -21,4 +21,17 @@ pub trait SecretStore {
     fn write_staged(&self, key: &SecretKey, secret: &SecretString) -> Result<(), SecretStoreError> {
         self.write_secret(key, secret)
     }
+
+    /// Removes an inactive staged credential after its durable claim was restored.
+    fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError>;
+
+    /// Keeps the previously active generation and deletes only generations below it.
+    fn prune_obsolete_generations(
+        &self,
+        _provider: codex_router_core::provider::Provider,
+        _account_id: &codex_router_core::ids::AccountId,
+        _previously_active_generation: u64,
+    ) -> Result<Vec<u64>, SecretStoreError> {
+        Ok(Vec::new())
+    }
 }

@@ -443,6 +443,20 @@ mod tests {
     }
 
     #[test]
+    fn serve_quota_refresh_interval_accepts_values_above_three_hundred_seconds() {
+        for (value, expected) in [("300", 300), ("400", 400)] {
+            let arguments = [
+                OsString::from("--quota-refresh-interval-seconds"),
+                OsString::from(value),
+            ];
+            let mut parser = ArgumentParser::new(arguments.into());
+            let command = ServeCommand::parse(&mut parser)
+                .unwrap_or_else(|error| panic!("interval should parse: {error}"));
+            assert_eq!(command.quota_refresh_interval_seconds, expected);
+        }
+    }
+
+    #[test]
     fn serve_claude_five_hour_reserve_percent_defaults_and_accepts_one_through_ninety_nine() {
         let mut default_parser = ArgumentParser::new(Vec::new());
         let default_command = ServeCommand::parse(&mut default_parser)
@@ -481,6 +495,59 @@ mod tests {
                     maximum: 99,
                 } if parsed_value == value
             ));
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn serve_debug_claude_upstream_override_requires_isolation_marker() {
+        let arguments = [
+            OsString::from("--debug-claude-upstream-base-url"),
+            OsString::from("http://127.0.0.1:18888"),
+        ];
+        let mut parser = ArgumentParser::new(arguments.into());
+        let error = ServeCommand::parse(&mut parser)
+            .expect_err("debug endpoint override requires isolated debug serve mode");
+        assert!(matches!(
+            error,
+            super::CliError::MissingOption {
+                option: "--require-debug-isolation"
+            }
+        ));
+
+        let arguments = [
+            OsString::from("--require-debug-isolation"),
+            OsString::from("--debug-claude-upstream-base-url"),
+            OsString::from("http://127.0.0.1:18888"),
+        ];
+        let mut parser = ArgumentParser::new(arguments.into());
+        let command = ServeCommand::parse(&mut parser)
+            .expect("isolated debug serve accepts the debug Claude endpoint override");
+        assert_eq!(
+            command.debug_claude_upstream_base_url.as_deref(),
+            Some("http://127.0.0.1:18888")
+        );
+        assert!(command.require_debug_isolation);
+        assert_eq!(
+            command.upstream_base_url,
+            super::super::DEFAULT_CHATGPT_BACKEND_BASE_URL
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_serve_does_not_expose_debug_claude_override_options() {
+        for arguments in [
+            vec![OsString::from("--require-debug-isolation")],
+            vec![
+                OsString::from("--debug-claude-upstream-base-url"),
+                OsString::from("http://127.0.0.1:18888"),
+            ],
+        ] {
+            let mut parser = ArgumentParser::new(arguments);
+            let error = ServeCommand::parse(&mut parser)
+                .expect_err("release serve does not accept debug Claude override options");
+            assert!(matches!(error, super::CliError::UnknownOption { .. }));
         }
     }
 }

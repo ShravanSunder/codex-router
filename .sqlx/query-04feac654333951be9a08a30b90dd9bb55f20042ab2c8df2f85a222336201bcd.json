@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM credential_maintenance\n              WHERE account_id = ?1 AND credential_generation = ?2\n                AND claimed_successor_generation = ?3 AND state = 'in_progress'\n                AND claim_purpose = 'login' AND claim_prior_state IS NULL\n                AND EXISTS (\n                    SELECT 1 FROM accounts\n                     WHERE accounts.account_id = credential_maintenance.account_id\n                       AND accounts.provider = ?4\n                )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "04feac654333951be9a08a30b90dd9bb55f20042ab2c8df2f85a222336201bcd"
+}

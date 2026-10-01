@@ -1,4 +1,5 @@
 use super::*;
+use crate::quota::QuotaWindowHeadroom;
 
 struct FirstUnauthorizedQuotaProvider {
     seen_tokens: Mutex<Vec<String>>,
@@ -20,7 +21,7 @@ impl QuotaRefreshProvider for FirstUnauthorizedQuotaProvider {
         Ok(QuotaRefreshProviderResponse {
             windows: vec![QuotaRefreshProviderWindow {
                 limit_window_seconds: 18_000,
-                remaining_headroom: 42,
+                headroom: QuotaWindowHeadroom::Percent(42),
                 reset_unix_seconds: Some(2_000),
                 effective: true,
             }],
@@ -162,7 +163,7 @@ impl QuotaRefreshProvider for ConcurrentGenerationQuotaProvider {
         Ok(QuotaRefreshProviderResponse {
             windows: vec![QuotaRefreshProviderWindow {
                 limit_window_seconds: 18_000,
-                remaining_headroom: 42,
+                headroom: QuotaWindowHeadroom::Percent(42),
                 reset_unix_seconds: Some(2_000),
                 effective: true,
             }],
@@ -278,8 +279,11 @@ fn quota_401_does_not_bypass_terminal_or_retry_cooldown_maintenance() {
         let changed =
             if scenario == "terminal" {
                 must_ok(
-                    test_async_runtime()
-                        .block_on(async_state.mark_credential_unrefreshable(&account_id, 1)),
+                    test_async_runtime().block_on(async_state.mark_credential_unrefreshable(
+                        &account_id,
+                        codex_router_core::provider::Provider::Openai,
+                        1,
+                    )),
                 )
             } else {
                 must_ok(test_async_runtime().block_on(

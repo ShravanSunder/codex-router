@@ -1,4 +1,7 @@
 use std::fs;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -8,6 +11,8 @@ use codex_router_core::redaction::SecretString;
 
 use crate::SecretStore;
 use crate::account_tokens::openai_account_credential_bundle_key;
+use crate::credential_store_lock::CredentialStoreLock;
+use crate::credential_store_lock::CredentialStoreLockMode;
 use crate::encrypted_credential_store::EncryptedCredentialStore;
 use crate::encrypted_credential_store::EncryptedCredentialStoreStatus;
 use crate::file_backend::FileSecretStore;
@@ -66,6 +71,59 @@ fn staged_credential_write_keeps_plaintext_out_of_files_and_authenticates_key_na
         "AAD must bind ciphertext to its key name"
     );
     assert!(!ciphertext_text.is_empty());
+}
+
+#[test]
+fn staged_credential_deletion_waits_for_the_store_lock() {
+    let root = tempfile::tempdir().expect("temporary secret root");
+    let store = EncryptedCredentialStore::new(
+        FileSecretStore::open(root.path()).expect("file secret store"),
+        PooledCredentialDataKey::from_bytes([0x52; 32]),
+    );
+    let account_id = AccountId::new("acct_locked_staged_delete").expect("account id");
+    let credential_key =
+        openai_account_credential_bundle_key(&account_id, 1).expect("credential key");
+    store
+        .write_staged(&credential_key, &SecretString::new("staged-token-canary"))
+        .expect("staged credential should be written");
+
+    let exclusive_lock =
+        CredentialStoreLock::acquire(root.path(), CredentialStoreLockMode::Exclusive)
+            .expect("exclusive store lock");
+    let (attempt_sender, attempt_receiver) = mpsc::channel();
+    let (result_sender, result_receiver) = mpsc::channel();
+    let deletion_store = store.clone();
+    let deletion_key = credential_key.clone();
+    let deletion_thread = thread::spawn(move || {
+        attempt_sender
+            .send(())
+            .expect("deletion attempt should be announced");
+        result_sender
+            .send(deletion_store.delete_staged(&deletion_key))
+            .expect("deletion result should be sent");
+    });
+
+    attempt_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("deletion attempt should start");
+    assert!(matches!(
+        result_receiver.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+
+    drop(exclusive_lock);
+    result_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("deletion should finish after lock release")
+        .expect("staged credential should be deleted");
+    deletion_thread
+        .join()
+        .expect("deletion thread should finish");
+    assert!(matches!(
+        store.read_secret(&credential_key),
+        Err(SecretStoreError::Filesystem { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound
+    ));
 }
 
 #[test]
@@ -184,4 +242,60 @@ fn ready_store_reads_only_v2_and_never_legacy_credential_files() {
 
     assert!(matches!(error, SecretStoreError::Filesystem { .. }));
     assert!(!error.to_string().contains("legacy-token-canary"));
+}
+
+#[test]
+fn generation_pruning_keeps_active_and_previous_and_isolated_by_provider_and_account() {
+    let root = tempfile::tempdir().expect("temporary secret root");
+    let store = EncryptedCredentialStore::new(
+        FileSecretStore::open(root.path()).expect("file secret store"),
+        PooledCredentialDataKey::from_bytes([0x62; 32]),
+    );
+    let account_id = AccountId::new("acct_prune_generations").expect("account id");
+    let other_account_id = AccountId::new("acct_prune_other").expect("other account id");
+    for (provider, owner, generation) in [
+        (Provider::Openai, &account_id, 1),
+        (Provider::Openai, &account_id, 2),
+        (Provider::Openai, &account_id, 3),
+        (Provider::Openai, &account_id, 4),
+        (Provider::Claude, &account_id, 1),
+        (Provider::Claude, &account_id, 2),
+        (Provider::Claude, &other_account_id, 1),
+    ] {
+        let key =
+            crate::account_tokens::provider_credential_bundle_key(provider, owner, generation)
+                .expect("provider-scoped key");
+        store
+            .write_staged(&key, &SecretString::new(format!("opaque-{generation}")))
+            .expect("credential generation should be encrypted");
+    }
+
+    let malformed_key_path = root
+        .path()
+        .join("unknown_credential_bundle.acct_prune_generations.1.v2");
+    std::fs::write(&malformed_key_path, b"invalid envelope").expect("malformed v2 entry");
+
+    let removed = store
+        .prune_obsolete_generations(Provider::Openai, &account_id, 4)
+        .expect("obsolete OpenAI generations should be pruned");
+
+    assert_eq!(removed, vec![1, 2, 3]);
+    for (provider, owner, generation, should_remain) in [
+        (Provider::Openai, &account_id, 1, false),
+        (Provider::Openai, &account_id, 2, false),
+        (Provider::Openai, &account_id, 3, false),
+        (Provider::Openai, &account_id, 4, true),
+        (Provider::Claude, &account_id, 1, true),
+        (Provider::Claude, &account_id, 2, true),
+        (Provider::Claude, &other_account_id, 1, true),
+    ] {
+        let key =
+            crate::account_tokens::provider_credential_bundle_key(provider, owner, generation)
+                .expect("provider-scoped key");
+        assert_eq!(store.read_secret(&key).is_ok(), should_remain);
+    }
+    assert!(
+        malformed_key_path.is_file(),
+        "unparseable v2 names are skipped rather than deleted"
+    );
 }

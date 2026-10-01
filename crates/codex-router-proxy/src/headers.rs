@@ -7,15 +7,41 @@ use codex_router_core::redaction::SecretString;
 pub struct Header {
     name: String,
     value: String,
+    value_bytes: Vec<u8>,
 }
 
 impl Header {
     /// Creates a header.
     #[must_use]
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        let value = value.into();
         Self {
             name: normalize_header_name(name.into()),
-            value: value.into(),
+            value_bytes: value.as_bytes().to_vec(),
+            value,
+        }
+    }
+
+    /// Creates a header from validated HTTP header-value bytes.
+    pub fn from_bytes(
+        name: impl Into<String>,
+        value: &[u8],
+    ) -> Result<Self, http::header::InvalidHeaderValue> {
+        let value = http::HeaderValue::from_bytes(value)?;
+        Ok(Self::from_raw_bytes(name, value.as_bytes()))
+    }
+
+    /// Preserves bytes from an HTTP header value already validated by the parser.
+    pub(crate) fn from_http(name: impl Into<String>, value: &http::HeaderValue) -> Self {
+        Self::from_raw_bytes(name, value.as_bytes())
+    }
+
+    /// Preserves raw bytes while retaining a lossy UTF-8 view for string-based consumers.
+    pub(crate) fn from_raw_bytes(name: impl Into<String>, value: &[u8]) -> Self {
+        Self {
+            name: normalize_header_name(name.into()),
+            value: String::from_utf8_lossy(value).into_owned(),
+            value_bytes: value.to_vec(),
         }
     }
 
@@ -25,10 +51,16 @@ impl Header {
         &self.name
     }
 
-    /// Returns header value.
+    /// Returns a lossy UTF-8 view of the header value.
     #[must_use]
     pub fn value(&self) -> &str {
         &self.value
+    }
+
+    /// Returns the exact header-value bytes used for forwarding.
+    #[must_use]
+    pub fn value_bytes(&self) -> &[u8] {
+        &self.value_bytes
     }
 }
 

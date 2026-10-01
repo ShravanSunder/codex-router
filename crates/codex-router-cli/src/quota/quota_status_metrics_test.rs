@@ -69,3 +69,41 @@ fn quota_status_telemetry_contract_uses_scrubbed_low_cardinality_labels() {
         );
     }
 }
+
+#[test]
+fn claude_post_renewal_auth_rejection_has_a_provider_scoped_counter() {
+    let source = include_str!("quota_status_metrics.rs");
+    let Some(after_metric) = source
+        .split("fn record_claude_usage_auth_rejected_after_renewal")
+        .nth(1)
+    else {
+        panic!("Claude post-renewal auth rejection metric helper should exist");
+    };
+
+    assert!(source.contains("codex_router_claude_usage_auth_rejected_after_renewal_total"));
+    assert!(after_metric.contains("provider"));
+    assert!(after_metric.contains("route_band"));
+    assert!(!after_metric.contains("account_id"));
+    assert!(!after_metric.contains("token"));
+}
+
+#[test]
+fn credential_upkeep_refresh_counter_records_provider_outcomes_and_classes() {
+    let source = include_str!("../credential_upkeep_worker/telemetry.rs");
+    let Some(after_metric) = source
+        .split("fn record_credential_upkeep_refresh_outcome")
+        .nth(1)
+    else {
+        panic!("credential upkeep refresh counter helper should exist");
+    };
+    let Some(metric_helper_body) = after_metric.split("\n}\n").next() else {
+        panic!("credential upkeep refresh counter helper body should be extractable");
+    };
+
+    assert!(source.contains("codex_router_credential_upkeep_refresh_total"));
+    assert!(metric_helper_body.contains("provider"));
+    assert!(metric_helper_body.contains("refresh.outcome"));
+    assert!(metric_helper_body.contains("refresh.failure_class"));
+    assert!(!metric_helper_body.contains("account_id"));
+    assert!(!metric_helper_body.contains("token"));
+}

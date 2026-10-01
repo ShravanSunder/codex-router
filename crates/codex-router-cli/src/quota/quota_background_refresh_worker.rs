@@ -132,6 +132,9 @@ where
                             &quota_provider,
                             QuotaRefreshObservationContext {
                                 observed_unix_seconds,
+                                schedule: QuotaRefreshSchedule::Background {
+                                    interval_seconds: interval.as_secs(),
+                                },
                                 weekly_floor_observer: quota_floor_notifier.as_deref(),
                             },
                         ),

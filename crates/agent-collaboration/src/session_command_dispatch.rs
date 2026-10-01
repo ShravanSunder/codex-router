@@ -20,6 +20,11 @@ use session_launch_selection::SessionsLaunchTarget;
 #[cfg(test)]
 use session_launch_selection::session_profile_for_environment;
 use session_launch_selection::sessions_launch_target;
+#[path = "session_commands/claude_launch_target.rs"]
+mod claude_launch_target;
+#[path = "session_commands/claude_session_commands.rs"]
+mod claude_session_commands;
+use claude_session_commands::run_claude_sessions_command;
 
 pub(crate) use collaboration_client::session_catalog::SessionSearchExpression;
 
@@ -80,6 +85,9 @@ pub fn run_sessions_command<W: Write>(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<(), SessionsCommandError> {
+    if command.provider.is_claude_code() {
+        return run_claude_sessions_command(stdout, command, context);
+    }
     if command.list {
         return run_session_listing(stdout, command, context);
     }
@@ -97,6 +105,9 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
+    if command.provider.is_claude_code() {
+        return run_claude_sessions_command(stdout, command, context);
+    }
     if command.list {
         return run_session_listing(stdout, command, context);
     }

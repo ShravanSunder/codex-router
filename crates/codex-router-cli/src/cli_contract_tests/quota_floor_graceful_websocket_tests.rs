@@ -191,6 +191,7 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
         &provider,
         QuotaRefreshObservationContext {
             observed_unix_seconds: 1_200,
+            schedule: crate::quota::QuotaRefreshSchedule::Manual,
             weekly_floor_observer: Some(&floor_notifier),
         },
     ));

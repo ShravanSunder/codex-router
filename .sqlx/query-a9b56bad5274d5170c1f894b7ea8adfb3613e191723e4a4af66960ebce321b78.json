@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(event_unix_seconds) AS \"event_unix_seconds?\"\n               FROM active_session_events\n              WHERE account_id = ?1 AND route_band = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "event_unix_seconds?",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "a9b56bad5274d5170c1f894b7ea8adfb3613e191723e4a4af66960ebce321b78"
+}

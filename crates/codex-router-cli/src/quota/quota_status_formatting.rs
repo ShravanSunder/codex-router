@@ -56,7 +56,7 @@ pub(super) fn write_quota_plain(
     .map_err(QuotaCommandError::Stdout)?;
     writeln!(
         stdout,
-        "account\tstatus\tOAuth\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
+        "provider\taccount\tstatus\tOAuth\t5h\tweekly\tweekly floor\treset pace\tsample\tupdated\tclients\tresets available\trouting\tnext use"
     )
     .map_err(QuotaCommandError::Stdout)?;
     for row in rows {
@@ -80,7 +80,8 @@ pub(super) fn write_quota_plain(
         };
         writeln!(
             stdout,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.provider,
             row.account_label,
             account_status,
             oauth_status,
@@ -124,13 +125,26 @@ pub(super) fn write_selector_summary_plain(
     stdout: &mut impl Write,
     rows: &[QuotaStatusRow],
 ) -> Result<(), QuotaCommandError> {
+    let openai_rows = rows
+        .iter()
+        .filter(|row| row.provider == codex_router_core::provider::Provider::Openai)
+        .cloned()
+        .collect::<Vec<_>>();
     writeln!(
         stdout,
         "responses route\tnext: {}\twhy: {}",
-        selected_account_label(rows),
-        selector_summary(rows)
+        selected_account_label(&openai_rows),
+        selector_summary(&openai_rows)
     )
-    .map_err(QuotaCommandError::Stdout)
+    .map_err(QuotaCommandError::Stdout)?;
+    let next_claude_session = rows
+        .iter()
+        .find(|row| {
+            row.provider == codex_router_core::provider::Provider::Claude && row.preferred_next
+        })
+        .map_or("none", |row| row.account_label.as_str());
+    writeln!(stdout, "next claude session → {next_claude_session}")
+        .map_err(QuotaCommandError::Stdout)
 }
 
 pub(super) fn plain_reset_pace_summary(reset_pace: &ResetPaceViewModel) -> String {

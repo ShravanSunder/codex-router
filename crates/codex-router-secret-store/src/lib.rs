@@ -3,12 +3,14 @@
 pub mod account_tokens;
 pub mod affinity_secret;
 pub mod backend;
+pub mod credential_bundle;
 pub mod credential_key;
 pub mod credential_migration;
 pub mod credential_store_lock;
 pub mod encrypted_credential_store;
 pub mod file_backend;
 pub mod keychain_data_key;
+pub mod local_router_token;
 pub mod model;
 pub mod refresh_lease;
 

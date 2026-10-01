@@ -26,6 +26,8 @@ pub enum SessionsProvider {
     Any,
     /// Use the current configured Codex provider.
     Current,
+    /// Launch or list Claude Code sessions through Router.
+    ClaudeCode,
     /// Match one exact provider id.
     Id(String),
 }
@@ -41,8 +43,15 @@ impl FromStr for SessionsProvider {
         match trimmed {
             "any" => Ok(Self::Any),
             "current" => Ok(Self::Current),
+            "claude" => Ok(Self::ClaudeCode),
             provider_id => Ok(Self::Id(provider_id.to_owned())),
         }
+    }
+}
+
+impl SessionsProvider {
+    pub(crate) const fn is_claude_code(&self) -> bool {
+        matches!(self, Self::ClaudeCode)
     }
 }
 
@@ -167,6 +176,7 @@ impl SessionsCommand {
         if let Some(session_id) = parsed.id.as_deref() {
             validate_exact_uuid_session_id(session_id)?;
         }
+        validate_claude_command(&parsed)?;
         reject_legacy_router_options(&parsed.codex_args)?;
         if parsed.id.is_none() {
             reject_misplaced_positional_session_id(
@@ -256,6 +266,34 @@ fn reject_interactive_checkout(command: &ClapSessionsCommand) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_claude_command(command: &ClapSessionsCommand) -> Result<(), String> {
+    if command.provider != SessionsProvider::ClaudeCode {
+        return Ok(());
+    }
+    if command.local {
+        return Err("--local is only supported for Codex sessions".to_owned());
+    }
+    if command.last {
+        return Err("--last is not supported for Claude sessions; use --id <uuid>".to_owned());
+    }
+    if !command.list && !command.new && command.id.is_none() {
+        return Err("--provider claude requires --list, --new, or --id <uuid>".to_owned());
+    }
+    if command.checkout || command.repo || command.any {
+        return Err("Claude session commands do not accept Codex root filters".to_owned());
+    }
+    if command.source != SessionsSource::Interactive {
+        return Err("Claude sessions only support --source interactive".to_owned());
+    }
+    if command.sort != SessionsSort::Updated {
+        return Err("Claude sessions only support --sort updated".to_owned());
+    }
+    if command.include_empty_sessions {
+        return Err("--include-empty-sessions is only supported for Codex sessions".to_owned());
+    }
+    Ok(())
+}
+
 pub(super) fn validate_exact_uuid_session_id(session_id: &str) -> Result<(), String> {
     let bytes = session_id.as_bytes();
     let is_canonical_uuid = bytes.len() == 36
@@ -281,7 +319,11 @@ struct ClapSessionsCommand {
     repo: bool,
     #[arg(long, conflicts_with_all = ["checkout", "repo"])]
     any: bool,
-    #[arg(long, default_value = "any")]
+    #[arg(
+        long,
+        default_value = "any",
+        help = "Codex model-provider filter, or claude to list/launch Claude Code through Router"
+    )]
     provider: SessionsProvider,
     #[arg(long, value_enum, default_value = "interactive")]
     source: SessionsSource,

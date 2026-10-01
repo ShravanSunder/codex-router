@@ -329,7 +329,11 @@ fn cli_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
         refresh_client.clone(),
     ));
 
-    let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+    let resolved =
+        must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
     assert_eq!(
         resolved.access_token().expose_secret(),
