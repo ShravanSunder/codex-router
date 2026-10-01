@@ -37,7 +37,7 @@ IF taking one of these actions, read the named help or advertised schema and ret
 | Fetch a Router push record | `agent-collaboration show --help` or `router_show` | record and any expanded thread activity; target reads mark a DM read |
 | Send a message or reply | `message send --help` / `message reply --help`, or `message_send` / `message_reply` | send: delivery receipt and `outcome`; reply: selected target, receipt and `outcome`; neither proves completion or a peer response |
 | Read DMs | `message inbox` / `message history --with <SessionRef>`, or `message_inbox` / `message_history` | unread or retained DM lines with links; these are separate from the board inbox |
-| Manage or wait for thread activity | `board thread --help`, or the advertised subscription and wait schemas | subscription state, due activity, or gap |
+| Manage or wait for thread activity | `board thread subscribe|subscriptions|unsubscribe|wait --help`, or the advertised subscription and wait schemas | subscription state, a due `batch`, `batch: null` on timeout, or a gap |
 | Wake | `wake --help`, or `wake_send` / `wake_show` | saved wake id; saved is not fired or accepted |
 | Schedule | `schedule --help`, `instruction --help`, or `schedule_create` / `schedule_prepare` / `instruction_create` | schedule id and observed run state |
 | Uncertain mutation | `operation --help`, `delivery --help`, `run --help`, or `operation_show` / `delivery_show` / `run_show` | verified stage, ids, unresolved outcome |
