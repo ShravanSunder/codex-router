@@ -1,11 +1,13 @@
 use codex_native_integration::ResumeModelChoice;
 use codex_native_integration::caller_overrides;
 use std::ffi::OsString;
+use std::path::Path;
 use std::path::PathBuf;
 
 use codex_native_integration::AppServerCommandSpec;
 use codex_native_integration::CodexPaths;
 use codex_native_integration::CodexRouterProfile;
+use codex_native_integration::RouterControlSocketPath;
 use codex_native_integration::SessionLaunch;
 
 #[test]
@@ -22,6 +24,10 @@ fn codex_paths_keep_native_state_under_normal_codex_home() {
     );
 }
 
+const CONTROL_SOCKET: &str = "/Users/owner/.codex-router/agent-communication/control.sock";
+
+const COLLABORATION_DIRECTORY: &str = "/Users/owner/.codex-router/agent-communication";
+
 fn expected_router_root_overrides() -> Vec<String> {
     vec![
         "model_provider=\"codex-router\"".to_owned(),
@@ -31,8 +37,21 @@ fn expected_router_root_overrides() -> Vec<String> {
         "model_providers.codex-router.requires_openai_auth=true".to_owned(),
         "model_providers.codex-router.supports_websockets=true".to_owned(),
         "features.network_proxy.enabled=false".to_owned(),
+        "features.network_proxy.mode=\"full\"".to_owned(),
+        "features.network_proxy.domains={\"*\"=\"allow\"}".to_owned(),
+        format!("features.network_proxy.unix_sockets={{\"{CONTROL_SOCKET}\"=\"allow\"}}"),
+        "features.network_proxy.allow_local_binding=false".to_owned(),
+        "features.network_proxy.dangerously_allow_all_unix_sockets=false".to_owned(),
+        "features.network_proxy.enable_socks5=false".to_owned(),
+        "features.network_proxy.allow_upstream_proxy=false".to_owned(),
+        "features.network_proxy.credential_broker=false".to_owned(),
         "permissions.router-write-restricted.extends=\":read-only\"".to_owned(),
         "permissions.router-write-restricted.network.enabled=true".to_owned(),
+        "permissions.router-write-restricted.network.mode=\"full\"".to_owned(),
+        "permissions.router-write-restricted.network.domains={\"*\"=\"allow\"}".to_owned(),
+        format!(
+            "permissions.router-write-restricted.network.unix_sockets={{\"{CONTROL_SOCKET}\"=\"allow\"}}"
+        ),
         "permissions.router-workspace-write.extends=\":workspace\"".to_owned(),
         "permissions.router-workspace-write.network.enabled=true".to_owned(),
     ]
@@ -42,6 +61,9 @@ fn expected_router_root_overrides() -> Vec<String> {
 fn router_profile_has_one_rendering_and_root_override_projection() {
     // Arrange: the production loopback port and the production collaboration directory.
     let profile = CodexRouterProfile::new(8787);
+    let owner_control_socket =
+        RouterControlSocketPath::in_collaboration_directory(Path::new(COLLABORATION_DIRECTORY))
+            .unwrap();
 
     // Act & assert: the profile file stays model routing only.
     assert_eq!(
@@ -56,40 +78,98 @@ fn router_profile_has_one_rendering_and_root_override_projection() {
             "supports_websockets = true\n",
         )
     );
-    // Assert: the managed child also carries both Router profiles' direct network.
-    assert_eq!(profile.root_overrides(), expected_router_root_overrides());
+    // Assert: the managed child also carries Router's permission profiles.
+    assert_eq!(
+        profile.root_overrides(&owner_control_socket),
+        expected_router_root_overrides()
+    );
 }
 
 #[test]
-fn router_root_overrides_enable_direct_network_without_the_managed_proxy() {
+fn write_restricted_keeps_the_proxied_socket_boundary_and_workspace_write_goes_direct() {
     // Arrange: overrides are separate -c values; native merges them into one table.
-    let overrides = CodexRouterProfile::new(8787).root_overrides();
+    let owner_control_socket =
+        RouterControlSocketPath::in_collaboration_directory(Path::new(COLLABORATION_DIRECTORY))
+            .unwrap();
+    let overrides = CodexRouterProfile::new(8787).root_overrides(&owner_control_socket);
 
-    // Act: parse them exactly as TOML, proving the dotted keys are valid.
+    // Act: parse them exactly as TOML, proving the inline tables and dotted keys are valid.
     let document = toml::Value::Table(overrides.join("\n").parse::<toml::Table>().unwrap());
 
-    // Assert: the proxy is off, so Seatbelt allows direct DNS, ssh and local sockets.
-    let proxy = document["features"]["network_proxy"].as_table().unwrap();
-    assert_eq!(proxy.len(), 1);
+    // Assert: the proxy is configured but off; write-restricted sessions switch it on.
+    let proxy = &document["features"]["network_proxy"];
     assert_eq!(
         proxy.get("enabled").and_then(toml::Value::as_bool),
         Some(false)
     );
-    // Assert: each profile enables network with no proxy-only domain or socket rules.
-    for profile in ["router-write-restricted", "router-workspace-write"] {
-        let network = document["permissions"][profile]["network"]
-            .as_table()
-            .unwrap();
-        assert_eq!(network.len(), 1, "{profile} network carries only enabled");
+    // Assert: the proxied tables allow every host and only the Control socket.
+    for network in [
+        proxy,
+        &document["permissions"]["router-write-restricted"]["network"],
+    ] {
         assert_eq!(
-            network.get("enabled").and_then(toml::Value::as_bool),
-            Some(true)
+            network.get("mode").and_then(toml::Value::as_str),
+            Some("full")
         );
-        assert!(
-            document["permissions"][profile].get("filesystem").is_none(),
-            "{profile} filesystem belongs to per-session overrides"
+        let domains = network
+            .get("domains")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert_eq!(domains.len(), 1);
+        assert_eq!(
+            domains.get("*").and_then(toml::Value::as_str),
+            Some("allow")
+        );
+        let sockets = network
+            .get("unix_sockets")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert_eq!(sockets.len(), 1);
+        assert_eq!(
+            sockets.get(CONTROL_SOCKET).and_then(toml::Value::as_str),
+            Some("allow")
         );
     }
+    for denied in [
+        "allow_local_binding",
+        "dangerously_allow_all_unix_sockets",
+        "enable_socks5",
+        "allow_upstream_proxy",
+        "credential_broker",
+    ] {
+        assert_eq!(
+            proxy.get(denied).and_then(toml::Value::as_bool),
+            Some(false),
+            "{denied} must stay off"
+        );
+    }
+    // Assert: workspace-write enables network with no proxy-only rules, so it is direct.
+    let workspace_network = document["permissions"]["router-workspace-write"]["network"]
+        .as_table()
+        .unwrap();
+    assert_eq!(workspace_network.len(), 1);
+    assert_eq!(
+        workspace_network
+            .get("enabled")
+            .and_then(toml::Value::as_bool),
+        Some(true)
+    );
+}
+
+#[test]
+fn router_control_socket_requires_an_absolute_collaboration_directory() {
+    // Arrange & act: a relative directory cannot name a canonical socket.
+    let socket =
+        RouterControlSocketPath::in_collaboration_directory(Path::new("agent-communication"));
+
+    // Assert.
+    assert!(socket.is_err());
+    assert_eq!(
+        RouterControlSocketPath::in_collaboration_directory(Path::new(COLLABORATION_DIRECTORY))
+            .unwrap()
+            .as_path(),
+        Path::new(CONTROL_SOCKET)
+    );
 }
 
 #[test]
@@ -97,9 +177,17 @@ fn app_server_command_uses_managed_executable_profile_and_native_contract() {
     // Arrange.
     let paths = CodexPaths::from_codex_home(PathBuf::from("/Users/owner/.codex"));
     let socket = paths.app_server_socket();
+    let owner_control_socket =
+        RouterControlSocketPath::in_collaboration_directory(Path::new(COLLABORATION_DIRECTORY))
+            .unwrap();
 
     // Act.
-    let command = AppServerCommandSpec::new(&paths, &CodexRouterProfile::new(8787), &socket);
+    let command = AppServerCommandSpec::new(
+        &paths,
+        &CodexRouterProfile::new(8787),
+        &owner_control_socket,
+        &socket,
+    );
 
     // Assert: every root override reaches the child as its own -c argument.
     assert_eq!(command.executable(), paths.managed_executable());

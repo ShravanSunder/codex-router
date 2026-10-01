@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 /// toolchain state here; without them `pnpm install`, Cargo, SwiftPM and Xcode fail
 /// outside the working directory. These are shared tool state, not only caches: a
 /// write here can affect later runs in other sessions and the owner's own builds.
-/// Locations that do not exist yet are granted too, so a first install can create
-/// them when their parent directory exists.
+/// Router creates any that are missing before the session starts: a grant covers
+/// only its own subtree, so a sandboxed first install cannot create missing parents.
 const TOOL_LOCATIONS_UNDER_HOME: [&str; 20] = [
     // Platform and XDG caches: SwiftPM, Xcode, clang modules, Go builds, Homebrew, pip, uv.
     "Library/Caches",
@@ -126,21 +126,29 @@ impl HostLocations {
             temporary_directories,
         })
     }
+
+    /// Creates missing tool locations outside the sandbox so first use can write them.
+    async fn prepare_tool_locations(&self) -> Result<(), SessionSetupError> {
+        for location in TOOL_LOCATIONS_UNDER_HOME {
+            tokio::fs::create_dir_all(self.home.join(location))
+                .await
+                .map_err(|_| SessionSetupError::HostLocationsUnavailable)?;
+        }
+        Ok(())
+    }
 }
 
 impl RouterSessionProfile {
-    /// Resolves the profile for a session against the host's home and temporary directories.
+    /// Resolves the profile for a session against the host's home and temporary
+    /// directories, creating missing tool locations first.
     pub(super) async fn for_session(
         access: RouterAccess,
         cwd: &Path,
         scratch: &Path,
     ) -> Result<Self, SessionSetupError> {
-        Ok(Self::with_host(
-            access,
-            cwd,
-            scratch,
-            &HostLocations::resolve().await?,
-        ))
+        let host = HostLocations::resolve().await?;
+        host.prepare_tool_locations().await?;
+        Ok(Self::with_host(access, cwd, scratch, &host))
     }
 
     fn with_host(access: RouterAccess, cwd: &Path, scratch: &Path, host: &HostLocations) -> Self {
@@ -178,6 +186,10 @@ impl RouterSessionProfile {
     }
 
     /// Native `config` entries selecting this profile on start, fork or resume.
+    ///
+    /// Write-restricted sessions switch on the managed network proxy Router's root
+    /// configuration defines but leaves off, so their network stays proxied with only
+    /// the Control socket; workspace-write sessions keep direct network.
     pub(super) fn native_config(&self) -> Map<String, Value> {
         let profile = self.name();
         let filesystem = self
@@ -190,7 +202,7 @@ impl RouterSessionProfile {
                     .map(|path| (path.clone(), json!("read"))),
             )
             .collect::<Map<_, _>>();
-        Map::from_iter([
+        let mut config = Map::from_iter([
             ("default_permissions".to_owned(), json!(profile)),
             (
                 format!("permissions.{profile}.extends"),
@@ -200,7 +212,11 @@ impl RouterSessionProfile {
                 format!("permissions.{profile}.filesystem"),
                 Value::Object(filesystem),
             ),
-        ])
+        ]);
+        if self.access == RouterAccess::WriteRestricted {
+            config.insert("features.network_proxy.enabled".to_owned(), json!(true));
+        }
+        config
     }
 
     /// Refuses a native start, fork or resume whose effective settings differ from this profile.
@@ -224,8 +240,9 @@ impl RouterSessionProfile {
         let network_access = response
             .pointer("/sandbox/networkAccess")
             .and_then(Value::as_bool);
-        // Both profiles surface as a writable-roots sandbox with direct network; a
-        // proxied network is not visible here, so the root projection guards it.
+        // Both profiles surface as a writable-roots sandbox with network enabled.
+        // Whether it is direct or proxied is not visible here; the root projection
+        // and the per-session proxy switch carry that.
         // Temporary-directory flags are not compared: both profiles write them.
         if profile_id != self.name()
             || sandbox_type != Some("workspaceWrite")
@@ -315,6 +332,10 @@ mod tests {
             restricted_config["permissions.router-write-restricted.extends"],
             ":read-only"
         );
+        // Assert: only write-restricted switches on the managed proxy; workspace-write
+        // keeps direct network.
+        assert_eq!(restricted_config["features.network_proxy.enabled"], true);
+        assert!(!workspace_config.contains_key("features.network_proxy.enabled"));
         // Assert: only write-restricted adds the repository's tmp and docs/wip and the
         // system temporary directories that `:workspace` already grants natively.
         let restricted_filesystem =
@@ -332,6 +353,30 @@ mod tests {
             assert_eq!(restricted_filesystem[root], "write");
             assert!(!workspace_filesystem.contains_key(root));
         }
+    }
+
+    #[tokio::test]
+    async fn missing_tool_locations_and_their_parents_are_created_before_the_session() {
+        // Arrange: an empty home, so every location and parent (`.bun`, `go`, `.local`) is absent.
+        let home = std::env::temp_dir().join(format!(
+            "router-tool-locations-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let host = HostLocations {
+            home: home.clone(),
+            temporary_directories: Vec::new(),
+        };
+
+        // Act
+        host.prepare_tool_locations().await.unwrap();
+
+        // Assert
+        for location in TOOL_LOCATIONS_UNDER_HOME {
+            assert!(home.join(location).is_dir(), "{location} was not created");
+        }
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

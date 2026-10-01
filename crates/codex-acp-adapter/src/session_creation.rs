@@ -44,7 +44,7 @@ pub enum SessionSetupError {
     Unavailable,
     #[error("session schema unavailable")]
     SchemaUnavailable,
-    #[error("Router host home or temporary directory is unavailable for session grants")]
+    #[error("Router host home, temporary or tool directory is unavailable for session grants")]
     HostLocationsUnavailable,
 }
 mod router_permission_profile;

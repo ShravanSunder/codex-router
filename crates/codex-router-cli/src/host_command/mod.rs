@@ -411,6 +411,8 @@ pub enum HostCommandError {
     #[error(transparent)]
     Operator(#[from] OperatorClientError),
     #[error(transparent)]
+    ControlSocket(#[from] codex_native_integration::RouterControlSocketError),
+    #[error(transparent)]
     Runtime(#[from] codex_router_host::HostError),
 }
 
