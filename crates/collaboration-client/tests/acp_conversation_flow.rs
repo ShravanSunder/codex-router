@@ -53,12 +53,16 @@ async fn create_and_first_prompt_share_one_connection_and_return_correlated_sett
         let prompt: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(prompt["method"], "session/prompt");
-        let text = prompt
-            .pointer("/params/prompt/0/text")
-            .and_then(Value::as_str)
-            .unwrap();
-        assert!(text.contains("first-sender"));
-        assert!(text.contains("first prompt"));
+        assert_eq!(
+            prompt.pointer("/params/sessionId").and_then(Value::as_str),
+            Some("fresh-thread")
+        );
+        assert_eq!(
+            prompt
+                .pointer("/params/prompt/0/text")
+                .and_then(Value::as_str),
+            Some("first prompt")
+        );
         writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fresh-thread","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"FIRST_RESULT"}}}})).as_bytes()).await.unwrap();
         writer
             .write_all(
@@ -157,6 +161,16 @@ async fn create_and_first_prompt_backend_rejection_retains_created_target() {
         let prompt: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(prompt["method"], "session/prompt");
+        assert_eq!(
+            prompt.pointer("/params/sessionId").and_then(Value::as_str),
+            Some("created-before-rejection")
+        );
+        assert_eq!(
+            prompt
+                .pointer("/params/prompt/0/text")
+                .and_then(Value::as_str),
+            Some("valid first prompt")
+        );
         writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":prompt["id"],"error":{"code":-32603,"message":"backend rejected first prompt","data":{"phase":"prompt"}}})).as_bytes()).await.unwrap();
     });
     let endpoint_ref: collaboration_protocol::EndpointRef =
