@@ -48,7 +48,6 @@ pub(super) async fn prepare_recipient() -> ProofResult<()> {
                 text: task.try_into()?,
             },
             mode: MessageDelivery::Auto,
-            correlation: None,
         })
         .await?;
     proof.record("messagingRecipientPreparationAccepted", json!(receipt))?;
@@ -164,7 +163,6 @@ pub(super) async fn exercise_round_trip() -> ProofResult<()> {
                 text: task.try_into()?,
             },
             mode: MessageDelivery::Auto,
-            correlation: None,
         })
         .await?;
     proof.record("messagingSenderGoalAccepted", json!(initial_receipt))?;

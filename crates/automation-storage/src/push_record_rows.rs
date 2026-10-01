@@ -1,10 +1,10 @@
 //! Typed conversion between persisted push columns and validated protocol records.
 use crate::StorageError;
-use collaboration_protocol::{
-    EndpointId, EndpointRef, PushActivitySnapshot, PushDeliveryState, PushId, PushKind,
-    PushOrigin, PushRecord, PushRecordDraft, SessionId, SessionRef, UuidIdentity,
-};
 use chrono::{DateTime, Utc};
+use collaboration_protocol::{
+    EndpointId, EndpointRef, PushActivitySnapshot, PushDeliveryState, PushId, PushKind, PushOrigin,
+    PushRecord, PushRecordDraft, SessionId, SessionRef, UuidIdentity,
+};
 use serde::Serialize;
 use sqlx::FromRow;
 
@@ -169,7 +169,9 @@ fn decode_timestamp(value: String) -> Result<DateTime<Utc>, StorageError> {
         .map_err(|_| StorageError::InvalidRecord)
 }
 
-fn decode_json_enum<TEnum: serde::de::DeserializeOwned>(value: &str) -> Result<TEnum, StorageError> {
+fn decode_json_enum<TEnum: serde::de::DeserializeOwned>(
+    value: &str,
+) -> Result<TEnum, StorageError> {
     serde_json::from_value(serde_json::Value::String(value.to_owned()))
         .map_err(|_| StorageError::InvalidRecord)
 }

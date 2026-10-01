@@ -1,8 +1,6 @@
 //! Replies resolve one retained DM id/link instead of guessing the latest sender.
-use crate::{
-    ServiceIdentity, push_record_delivery, push_record_resolver,
-};
-use automation_storage::{StorageError};
+use crate::{ServiceIdentity, push_record_delivery, push_record_resolver};
+use automation_storage::StorageError;
 use collaboration_protocol::SessionMessageReplyParams;
 use serde_json::Value;
 

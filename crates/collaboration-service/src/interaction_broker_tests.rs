@@ -459,9 +459,7 @@ fn interaction_records_without_timestamps(
 ) -> std::collections::BTreeMap<String, crate::interaction_broker::InteractionHistoryRecord> {
     let mut values: serde_json::Value =
         serde_json::from_slice(bytes).expect("interaction history JSON");
-    let records = values
-        .as_object_mut()
-        .expect("interaction history map");
+    let records = values.as_object_mut().expect("interaction history map");
     for record in records.values_mut() {
         record
             .as_object_mut()

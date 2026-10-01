@@ -259,7 +259,7 @@ mod tests {
     fn sender_comes_from_harness_identity_and_fails_with_whoami_guidance_when_absent() {
         let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
             .expect("service identity");
-        let resolved = resolve_sender_ref(&service_id, || {
+        let resolved = resolve_sender_ref(&service_id, None, || {
             crate::current_session_identity::resolve_harness_session_identity(|name| {
                 (name == "CURSOR_CONVERSATION_ID").then(|| "cursor-1".into())
             })
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(String::from(resolved.endpoint.endpoint_id), "cursor-local");
         assert_eq!(String::from(resolved.session_id), "cursor-1");
 
-        let error = resolve_sender_ref(&service_id, || {
+        let error = resolve_sender_ref(&service_id, None, || {
             crate::current_session_identity::resolve_harness_session_identity(|_| None)
         })
         .expect_err("sender must fail closed");

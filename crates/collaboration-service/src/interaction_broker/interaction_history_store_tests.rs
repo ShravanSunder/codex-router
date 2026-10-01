@@ -1,7 +1,5 @@
+use super::super::{InteractionHistoryRecord, RefusedApprovalOption, RefusedTypedApproval};
 use super::InteractionHistoryStore;
-use super::super::{
-    InteractionHistoryRecord, RefusedApprovalOption, RefusedTypedApproval,
-};
 use chrono::{Duration, Utc};
 use message_board::{Identity, SessionRef};
 use std::collections::BTreeMap;
@@ -21,9 +19,7 @@ fn refused_approval(request_id: &str) -> InteractionHistoryRecord {
     let requester = session_ref("requester");
     InteractionHistoryRecord::RefusedApproval {
         requester: requester.clone(),
-        approver: Identity::Session {
-            session: requester,
-        },
+        approver: Identity::Session { session: requester },
         refusal: RefusedTypedApproval {
             request_id: request_id.to_owned(),
             title: "Rejected approval".to_owned(),
@@ -67,12 +63,9 @@ async fn load_stamps_undated_entries_and_prunes_strictly_after_thirty_days() {
         .copied()
         .expect("stamp the old entry at upgrade");
     assert!(created_at >= load_started_at && created_at <= Utc::now());
-    let upgraded: serde_json::Value = serde_json::from_slice(
-        &tokio::fs::read(&path)
-            .await
-            .expect("read upgraded history"),
-    )
-    .expect("parse upgraded history");
+    let upgraded: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&path).await.expect("read upgraded history"))
+            .expect("parse upgraded history");
     assert!(upgraded["legacy-request"]["createdAt"].is_string());
 
     let exact_cutoff = created_at + Duration::days(30);

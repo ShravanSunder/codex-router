@@ -90,10 +90,10 @@ mod delivery_rejection;
 mod delivery_route_evidence;
 mod message_content;
 mod push_line;
-mod push_record;
 #[cfg(test)]
 #[path = "push_line_tests.rs"]
 mod push_line_tests;
+mod push_record;
 mod session_delivery_outcome;
 pub use delivery_rejection::{DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason};
 mod session_delivery_receipt;

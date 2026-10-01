@@ -37,7 +37,10 @@ pub async fn exercise(
 ) -> Result<(Result<DeliveryReceipt, ClientError>, Vec<Value>), FixtureError> {
     let fixture_id = String::from(new_service_uuid()?);
     // Keep the Unix socket path below SUN_LEN even when the host temp prefix is long.
-    let root = std::env::temp_dir().join(format!("mf-{}", &fixture_id[24..]));
+    let short_fixture_id = fixture_id
+        .get(24..)
+        .ok_or_else(|| std::io::Error::other("generated service UUID is shorter than 24 bytes"))?;
+    let root = std::env::temp_dir().join(format!("mf-{short_fixture_id}"));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     let socket_path = root.join("n.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path)?;

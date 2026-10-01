@@ -125,10 +125,10 @@ mod native_control_dispatch;
 mod native_control_request;
 mod session_display_name_cache;
 pub use session_display_name_cache::SessionDisplayNameCache;
-mod session_message_dispatch;
-mod session_message_reply_dispatch;
 mod push_record_delivery;
 mod push_record_resolver;
+mod session_message_dispatch;
+mod session_message_reply_dispatch;
 pub use native_control_dispatch::NativeControlBackend;
 
 mod codex_app_server_delivery_route;

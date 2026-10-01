@@ -229,7 +229,6 @@ async fn run_operator(
                 text: task.to_owned().try_into()?,
             },
             mode: MessageDelivery::Auto,
-            correlation: None,
         })
         .await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);

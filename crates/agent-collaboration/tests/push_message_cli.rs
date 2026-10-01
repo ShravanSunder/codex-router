@@ -366,14 +366,14 @@ impl ServiceFixture {
         let digest = format!("sha256:{}", "a".repeat(64));
         let manifest: collaboration_client::protocol::ServiceManifest =
             serde_json::from_value(json!({
-            "version": 2,
-            "serviceId": SERVICE_ID,
-            "serviceEpoch": SERVICE_EPOCH,
-            "machineLabel": "fixture-host",
-            "control": {"transport": "unixJsonLines", "path": "control.sock"},
-            "controlSchemaDigest": digest,
-            "mcp": {"transport": "streamableHttp", "url": "http://127.0.0.1:0/mcp"}
-        }))?;
+                "version": 2,
+                "serviceId": SERVICE_ID,
+                "serviceEpoch": SERVICE_EPOCH,
+                "machineLabel": "fixture-host",
+                "control": {"transport": "unixJsonLines", "path": "control.sock"},
+                "controlSchemaDigest": digest,
+                "mcp": {"transport": "streamableHttp", "url": "http://127.0.0.1:0/mcp"}
+            }))?;
         let publication =
             collaboration_service::ManifestPublication::publish(directory.path(), &manifest)?;
         Ok(Self {

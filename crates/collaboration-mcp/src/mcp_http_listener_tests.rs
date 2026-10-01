@@ -557,7 +557,7 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
     assert!(tool_names.contains(&"question_list"));
     assert!(tool_names.contains(&"question_answer"));
     assert!(tool_names.contains(&"provider_sessions_list"));
-    assert_eq!(tool_names.len(), 104);
+    assert_eq!(tool_names.len(), 107);
     let tools = tools_body
         .pointer("/result/tools")
         .and_then(Value::as_array)
@@ -1059,7 +1059,7 @@ async fn initialized_http_message_response_loss_retains_known_target() {
             .header("mcp-protocol-version", "2025-11-25")
             .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"message_send","arguments":{
                 "target":{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"http-thread"},
-                "message":{"kind":"humanUser","text":"proof"},"delivery":"auto","generationGuard":null,"correlation":null
+                "message":{"kind":"humanUser","text":"proof"},"delivery":"auto","generationGuard":null
             }}}))
             .send()
             .await

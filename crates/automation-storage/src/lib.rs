@@ -7,9 +7,9 @@ mod instruction_repository;
 mod instruction_revision_read;
 mod instruction_updates;
 pub use instruction_revision_read::InstructionRevisionRecord;
+mod push_record_rows;
 mod schema_initialization;
 mod schema_validation;
-mod push_record_rows;
 pub use instruction_updates::InstructionUpdate;
 mod run_admission;
 pub use run_admission::RunAdmission;
@@ -37,7 +37,7 @@ mod delivery_inspection;
 pub use delivery_inspection::DeliveryRecord;
 mod push_records;
 pub use push_records::{
-    DirectMessageHistoryQuery, PushInboxQuery, MAX_PUSH_LIST_LIMIT, MAX_PUSH_PRUNE_BATCH,
+    DirectMessageHistoryQuery, MAX_PUSH_LIST_LIMIT, MAX_PUSH_PRUNE_BATCH, PushInboxQuery,
 };
 mod wakeup_observation;
 pub use wakeup_observation::WakeTransition;

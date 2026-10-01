@@ -52,25 +52,24 @@ impl SessionMessageDelivery for RecordingDelivery {
         _: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
         Box::pin(async move {
-            if let MessageContent::Router { text } = &request.message {
-                if let Some(link_text) = text
+            if let MessageContent::Router { text } = &request.message
+                && let Some(link_text) = text
                     .as_str()
                     .split_whitespace()
                     .find(|part| part.starts_with("router://"))
-                    && let Ok(link) = collaboration_protocol::RouterLink::parse(link_text)
+                && let Ok(link) = collaboration_protocol::RouterLink::parse(link_text)
+            {
+                let record = self
+                    .store
+                    .lock()
+                    .await
+                    .get_push_record(link.push_id())
+                    .await
+                    .map_err(|_| DeliveryContractError::ClientOperation)?;
+                if record
+                    .is_some_and(|record| record.delivery_state == PushDeliveryState::Attempted)
                 {
-                    let record = self
-                        .store
-                        .lock()
-                        .await
-                        .get_push_record(link.push_id())
-                        .await
-                        .map_err(|_| DeliveryContractError::ClientOperation)?;
-                    if record
-                        .is_some_and(|record| record.delivery_state == PushDeliveryState::Attempted)
-                    {
-                        self.stored_before_delivery.store(true, Ordering::SeqCst);
-                    }
+                    self.stored_before_delivery.store(true, Ordering::SeqCst);
                 }
             }
             self.requests
@@ -278,20 +277,21 @@ async fn message_send_persists_before_delivery_and_submits_one_linked_line() {
     assert_eq!(stored.origin, PushOrigin::Session(sender));
     assert_eq!(stored.delivery_state, PushDeliveryState::Delivered);
 
-    let requests = delivery.requests.lock().expect("delivery requests");
-    assert_eq!(requests.len(), 1);
-    let MessageContent::Router { text } = &requests[0].message else {
-        panic!("a stored push is delivered as Router-authored content");
-    };
-    assert_eq!(text.as_str().lines().count(), 1);
-    assert!(text.as_str().contains("snapshot body"));
-    assert!(
-        text.as_str()
-            .contains(&result["link"].as_str().expect("link").to_owned())
-    );
-    assert!(!text.as_str().contains("Agent communication"));
-    assert!(!text.as_str().contains("Self-declared sender:"));
-    drop(requests);
+    {
+        let requests = delivery.requests.lock().expect("delivery requests");
+        assert_eq!(requests.len(), 1);
+        let MessageContent::Router { text } = &requests[0].message else {
+            panic!("a stored push is delivered as Router-authored content");
+        };
+        assert_eq!(text.as_str().lines().count(), 1);
+        assert!(text.as_str().contains("snapshot body"));
+        assert!(
+            text.as_str()
+                .contains(&result["link"].as_str().expect("link").to_owned())
+        );
+        assert!(!text.as_str().contains("Agent communication"));
+        assert!(!text.as_str().contains("Self-declared sender:"));
+    }
     control.close().await;
 }
 
@@ -453,30 +453,31 @@ async fn unverified_owner_message_is_compact_and_has_no_owner_show_bypass() {
         .expect("owner message record");
     assert_eq!(record.origin, PushOrigin::OwnerUnverified);
     assert_eq!(result["receipt"]["outcome"]["kind"], "peerMessageWritten");
-    let requests = delivery.requests.lock().expect("delivery requests");
-    let delivered = &requests[0];
-    assert_eq!(delivered.target, target);
-    assert_eq!(delivered.mode, MessageDelivery::Auto);
-    assert!(matches!(
-        delivered.precondition,
-        DeliveryPrecondition::Unpinned
-    ));
-    assert_eq!(delivered.correlation.as_str(), push_id.as_str());
-    assert!(!matches!(
-        &delivered.message,
-        MessageContent::HumanUser { .. }
-    ));
-    let MessageContent::Router { text } = &delivered.message else {
-        panic!("an unverified owner push remains Router-authored");
-    };
-    assert!(text.as_str().starts_with("🧑 Owner (unverified)"));
-    assert!(text.as_str().contains("\"human text\""));
-    assert!(text.as_str().contains(&format!(
-        "router://{SERVICE_ID}/push/{}",
-        push_id.as_str()
-    )));
-    assert!(!text.as_str().contains("Self-declared sender:"));
-    drop(requests);
+    {
+        let requests = delivery.requests.lock().expect("delivery requests");
+        let delivered = &requests[0];
+        assert_eq!(delivered.target, target);
+        assert_eq!(delivered.mode, MessageDelivery::Auto);
+        assert!(matches!(
+            delivered.precondition,
+            DeliveryPrecondition::Unpinned
+        ));
+        assert_eq!(delivered.correlation.as_str(), push_id.as_str());
+        assert!(!matches!(
+            &delivered.message,
+            MessageContent::HumanUser { .. }
+        ));
+        let MessageContent::Router { text } = &delivered.message else {
+            panic!("an unverified owner push remains Router-authored");
+        };
+        assert!(text.as_str().starts_with("🧑 Owner (unverified)"));
+        assert!(text.as_str().contains("\"human text\""));
+        assert!(
+            text.as_str()
+                .contains(&format!("router://{SERVICE_ID}/push/{}", push_id.as_str()))
+        );
+        assert!(!text.as_str().contains("Self-declared sender:"));
+    }
 
     let denied = control
         .call(
@@ -635,13 +636,14 @@ async fn reply_uses_the_selected_message_id_after_a_later_dm_arrives() {
         Some(first_id.as_str())
     );
     assert_eq!(stored_reply.origin, PushOrigin::Session(target));
-    let requests = delivery.requests.lock().expect("delivery requests");
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[2].target, first_sender);
-    let MessageContent::Router { text } = &requests[2].message else {
-        panic!("a reply push remains Router-authored");
-    };
-    assert!(text.as_str().contains("reply to first"));
-    drop(requests);
+    {
+        let requests = delivery.requests.lock().expect("delivery requests");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[2].target, first_sender);
+        let MessageContent::Router { text } = &requests[2].message else {
+            panic!("a reply push remains Router-authored");
+        };
+        assert!(text.as_str().contains("reply to first"));
+    }
     control.close().await;
 }

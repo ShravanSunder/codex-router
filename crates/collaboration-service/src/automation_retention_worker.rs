@@ -32,7 +32,10 @@ impl AutomationRetentionWorker {
         {
             let mut store = self.store.lock().await;
             for (name, result) in [
-                ("automation events", store.prune_automation_events(now_ms, 1000).await),
+                (
+                    "automation events",
+                    store.prune_automation_events(now_ms, 1000).await,
+                ),
                 ("push records", store.prune_push_records(now, 500).await),
                 (
                     "settled mailbox deliveries",
@@ -45,14 +48,18 @@ impl AutomationRetentionWorker {
             ] {
                 match result {
                     Ok(count) => add_pruned_total(&mut pruned_total, count)?,
-                    Err(error) => tracing::warn!(error = %error, prune = name, "retention prune failed; the next pass will retry"),
+                    Err(error) => {
+                        tracing::warn!(error = %error, prune = name, "retention prune failed; the next pass will retry")
+                    }
                 }
             }
         }
         if let Some(broker) = self.interaction_broker.as_ref() {
             match broker.prune_interaction_history(now, 500).await {
                 Ok(count) => add_pruned_total(&mut pruned_total, count)?,
-                Err(error) => tracing::warn!(error = %error, "interaction-history retention prune failed; the next pass will retry"),
+                Err(error) => {
+                    tracing::warn!(error = %error, "interaction-history retention prune failed; the next pass will retry")
+                }
             }
         }
         Ok(pruned_total)
@@ -82,7 +89,9 @@ impl AutomationRetentionWorker {
 }
 
 fn add_pruned_total(total: &mut u64, count: u64) -> Result<(), StorageError> {
-    *total = total.checked_add(count).ok_or(StorageError::InvalidRecord)?;
+    *total = total
+        .checked_add(count)
+        .ok_or(StorageError::InvalidRecord)?;
     Ok(())
 }
 
@@ -193,8 +202,7 @@ mod tests {
                     "018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned(),
                 )
                 .expect("service id"),
-                endpoint_id: EndpointId::try_from(endpoint_id.to_owned())
-                    .expect("endpoint id"),
+                endpoint_id: EndpointId::try_from(endpoint_id.to_owned()).expect("endpoint id"),
             },
             session_id: SessionId::try_from(session_id.to_owned()).expect("session id"),
         }
@@ -203,8 +211,7 @@ mod tests {
     fn expired_push(now_ms: i64) -> PushRecordDraft {
         let sender = session("claude-local", "sender");
         PushRecordDraft {
-            push_id: PushId::try_from(uuid::Uuid::now_v7().to_string())
-                .expect("UUIDv7 push id"),
+            push_id: PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("UUIDv7 push id"),
             kind: PushKind::DirectMessage,
             origin: PushOrigin::Session(sender),
             origin_router_ref: None,
@@ -247,13 +254,15 @@ mod tests {
                 .expect("run bounded retention pass"),
             1
         );
-        assert!(shared_store
-            .lock()
-            .await
-            .get_push_record(&push_id)
-            .await
-            .expect("read pruned push")
-            .is_none());
+        assert!(
+            shared_store
+                .lock()
+                .await
+                .get_push_record(&push_id)
+                .await
+                .expect("read pruned push")
+                .is_none()
+        );
         Arc::try_unwrap(shared_store)
             .unwrap_or_else(|_| panic!("store should be released"))
             .into_inner()
@@ -306,13 +315,15 @@ mod tests {
             .await
             .expect("independent event prune succeeds");
         assert_eq!(removed, 1);
-        assert!(shared_store
-            .lock()
-            .await
-            .get_push_record(&push_id)
-            .await
-            .expect("push still exists after its failed prune")
-            .is_some());
+        assert!(
+            shared_store
+                .lock()
+                .await
+                .get_push_record(&push_id)
+                .await
+                .expect("push still exists after its failed prune")
+                .is_some()
+        );
         let mut observer = sqlx::SqliteConnection::connect_with(
             &sqlx::sqlite::SqliteConnectOptions::new().filename(&path),
         )
@@ -332,5 +343,4 @@ mod tests {
             .expect("close automation store");
         std::fs::remove_file(path).expect("remove isolated database");
     }
-
 }

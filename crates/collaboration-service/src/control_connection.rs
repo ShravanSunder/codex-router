@@ -174,12 +174,9 @@ pub async fn serve_control_connection(
                     let identity = identity.clone();
                     pending.spawn(async move {
                         let id = request.id.clone();
-                        let response = crate::push_record_resolver::show(
-                            json!(id),
-                            request.params,
-                            &identity,
-                        )
-                        .await;
+                        let response =
+                            crate::push_record_resolver::show(json!(id), request.params, &identity)
+                                .await;
                         (id, response)
                     });
                     continue;

@@ -2,12 +2,14 @@
 use crate::ServiceIdentity;
 use automation_storage::{DirectMessageHistoryQuery, PushInboxQuery, StorageError};
 use collaboration_protocol::{
-    MachineId, PushActivityRangeRead, PushId, PushKind, PushMessageSendResult, PushOrigin,
-    PushRecord, PushRecordHistoryParams, PushRecordListParams, PushRecordListResult,
+    MachineId, PushActivityRangeRead, PushId, PushKind, PushLineInput, PushMessageSendResult,
+    PushOrigin, PushRecord, PushRecordHistoryParams, PushRecordListParams, PushRecordListResult,
     PushRecordNotice, PushRecordShowParams, PushRecordShowResult, RouterLink, SessionRef,
-    PushLineInput, render_push_line,
+    render_push_line,
 };
-use message_board::{MessageListRequest, MessageListScope, MessageSelection, PageLimit, PageRequest};
+use message_board::{
+    MessageListRequest, MessageListScope, MessageSelection, PageLimit, PageRequest,
+};
 use serde_json::{Value, json};
 
 pub(crate) fn link_for(record: &PushRecord, identity: &ServiceIdentity) -> String {
@@ -51,22 +53,38 @@ pub(crate) fn delivery_result(
     })
 }
 
-pub(crate) async fn show(
-    id: Value,
-    params: Value,
-    identity: &ServiceIdentity,
-) -> Value {
+pub(crate) async fn show(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
     let params = match serde_json::from_value::<PushRecordShowParams>(params) {
         Ok(params) => params,
-        Err(_) => return failure(id, -32602, "invalidField", "inspect", "Invalid push show request"),
+        Err(_) => {
+            return failure(
+                id,
+                -32602,
+                "invalidField",
+                "inspect",
+                "Invalid push show request",
+            );
+        }
     };
     if !caller_is_local(&params.caller, identity) {
-        return failure(id, -32602, "wrongService", "inspect", "Caller belongs to another Router");
+        return failure(
+            id,
+            -32602,
+            "wrongService",
+            "inspect",
+            "Caller belongs to another Router",
+        );
     }
     let push_id = match resolve_reference(&params.reference, identity) {
         Ok(push_id) => push_id,
         Err(ReferenceError::Invalid) => {
-            return failure(id, -32602, "invalidField", "inspect", "Invalid push id or Router link");
+            return failure(
+                id,
+                -32602,
+                "invalidField",
+                "inspect",
+                "Invalid push id or Router link",
+            );
         }
         Err(ReferenceError::Foreign(machine_id)) => {
             return failure(
@@ -79,17 +97,37 @@ pub(crate) async fn show(
         }
     };
     let Some(store) = identity.automation.as_ref() else {
-        return failure(id, -32050, "unavailable", "inspect", "Push storage is unavailable");
+        return failure(
+            id,
+            -32050,
+            "unavailable",
+            "inspect",
+            "Push storage is unavailable",
+        );
     };
     let mut record = match store.lock().await.get_push_record(&push_id).await {
         Ok(Some(record)) => record,
         Ok(None) | Err(StorageError::PushNotFound) => {
             return not_found(id, "inspect");
         }
-        Err(_) => return failure(id, -32050, "unavailable", "inspect", "Push storage could not be read"),
+        Err(_) => {
+            return failure(
+                id,
+                -32050,
+                "unavailable",
+                "inspect",
+                "Push storage could not be read",
+            );
+        }
     };
     if !can_read(&record, &params.caller) {
-        return failure(id, -32050, "notPermitted", "inspect", "Not permitted to read this push");
+        return failure(
+            id,
+            -32050,
+            "notPermitted",
+            "inspect",
+            "Not permitted to read this push",
+        );
     }
     if record.kind == PushKind::DirectMessage && record.target == params.caller {
         record = match store
@@ -101,18 +139,44 @@ pub(crate) async fn show(
             Ok(record) => record,
             Err(StorageError::PushNotFound) => return not_found(id, "inspect"),
             Err(StorageError::PushNotPermitted) => {
-                return failure(id, -32050, "notPermitted", "inspect", "Not permitted to read this push");
+                return failure(
+                    id,
+                    -32050,
+                    "notPermitted",
+                    "inspect",
+                    "Not permitted to read this push",
+                );
             }
-            Err(_) => return failure(id, -32050, "unavailable", "inspect", "Push read state could not be recorded"),
+            Err(_) => {
+                return failure(
+                    id,
+                    -32050,
+                    "unavailable",
+                    "inspect",
+                    "Push read state could not be recorded",
+                );
+            }
         };
     }
     let activity_ranges = match expand_activity_ranges(&record, identity).await {
         Ok(ranges) => ranges,
         Err(ActivityReadError::Unavailable) => {
-            return failure(id, -32050, "unavailable", "inspect", "Board range storage is unavailable");
+            return failure(
+                id,
+                -32050,
+                "unavailable",
+                "inspect",
+                "Board range storage is unavailable",
+            );
         }
         Err(ActivityReadError::Failed) => {
-            return failure(id, -32050, "unavailable", "inspect", "Board activity range could not be read");
+            return failure(
+                id,
+                -32050,
+                "unavailable",
+                "inspect",
+                "Board activity range could not be read",
+            );
         }
     };
     let result = PushRecordShowResult {
@@ -123,20 +187,36 @@ pub(crate) async fn show(
     json!({"jsonrpc":"2.0","id":id,"result":result})
 }
 
-pub(crate) async fn inbox(
-    id: Value,
-    params: Value,
-    identity: &ServiceIdentity,
-) -> Value {
+pub(crate) async fn inbox(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
     let params = match serde_json::from_value::<PushRecordListParams>(params) {
         Ok(params) => params,
-        Err(_) => return failure(id, -32602, "invalidField", "discovery", "Invalid message inbox request"),
+        Err(_) => {
+            return failure(
+                id,
+                -32602,
+                "invalidField",
+                "discovery",
+                "Invalid message inbox request",
+            );
+        }
     };
     if !caller_is_local(&params.caller, identity) {
-        return failure(id, -32602, "wrongService", "discovery", "Caller belongs to another Router");
+        return failure(
+            id,
+            -32602,
+            "wrongService",
+            "discovery",
+            "Caller belongs to another Router",
+        );
     }
     let Some(store) = identity.automation.as_ref() else {
-        return failure(id, -32050, "unavailable", "discovery", "Push storage is unavailable");
+        return failure(
+            id,
+            -32050,
+            "unavailable",
+            "discovery",
+            "Push storage is unavailable",
+        );
     };
     let records = match store
         .lock()
@@ -149,30 +229,66 @@ pub(crate) async fn inbox(
     {
         Ok(records) => records,
         Err(StorageError::InvalidRecord) => {
-            return failure(id, -32602, "invalidField", "discovery", "Inbox limit must be between 1 and 100");
+            return failure(
+                id,
+                -32602,
+                "invalidField",
+                "discovery",
+                "Inbox limit must be between 1 and 100",
+            );
         }
-        Err(_) => return failure(id, -32050, "unavailable", "discovery", "Push inbox could not be read"),
+        Err(_) => {
+            return failure(
+                id,
+                -32050,
+                "unavailable",
+                "discovery",
+                "Push inbox could not be read",
+            );
+        }
     };
     match make_notice_list(records, identity) {
         Ok(records) => json!({"jsonrpc":"2.0","id":id,"result":PushRecordListResult { records }}),
-        Err(_) => failure(id, -32050, "unavailable", "discovery", "Push notice could not be rendered"),
+        Err(_) => failure(
+            id,
+            -32050,
+            "unavailable",
+            "discovery",
+            "Push notice could not be rendered",
+        ),
     }
 }
 
-pub(crate) async fn history(
-    id: Value,
-    params: Value,
-    identity: &ServiceIdentity,
-) -> Value {
+pub(crate) async fn history(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
     let params = match serde_json::from_value::<PushRecordHistoryParams>(params) {
         Ok(params) => params,
-        Err(_) => return failure(id, -32602, "invalidField", "discovery", "Invalid message history request"),
+        Err(_) => {
+            return failure(
+                id,
+                -32602,
+                "invalidField",
+                "discovery",
+                "Invalid message history request",
+            );
+        }
     };
     if !caller_is_local(&params.caller, identity) || !caller_is_local(&params.with, identity) {
-        return failure(id, -32602, "wrongService", "discovery", "Both sessions must belong to this Router");
+        return failure(
+            id,
+            -32602,
+            "wrongService",
+            "discovery",
+            "Both sessions must belong to this Router",
+        );
     }
     let Some(store) = identity.automation.as_ref() else {
-        return failure(id, -32050, "unavailable", "discovery", "Push storage is unavailable");
+        return failure(
+            id,
+            -32050,
+            "unavailable",
+            "discovery",
+            "Push storage is unavailable",
+        );
     };
     let records = match store
         .lock()
@@ -186,13 +302,33 @@ pub(crate) async fn history(
     {
         Ok(records) => records,
         Err(StorageError::InvalidRecord) => {
-            return failure(id, -32602, "invalidField", "discovery", "History limit must be between 1 and 100");
+            return failure(
+                id,
+                -32602,
+                "invalidField",
+                "discovery",
+                "History limit must be between 1 and 100",
+            );
         }
-        Err(_) => return failure(id, -32050, "unavailable", "discovery", "Push history could not be read"),
+        Err(_) => {
+            return failure(
+                id,
+                -32050,
+                "unavailable",
+                "discovery",
+                "Push history could not be read",
+            );
+        }
     };
     match make_notice_list(records, identity) {
         Ok(records) => json!({"jsonrpc":"2.0","id":id,"result":PushRecordListResult { records }}),
-        Err(_) => failure(id, -32050, "unavailable", "discovery", "Push notice could not be rendered"),
+        Err(_) => failure(
+            id,
+            -32050,
+            "unavailable",
+            "discovery",
+            "Push notice could not be rendered",
+        ),
     }
 }
 
@@ -206,7 +342,9 @@ pub(crate) fn resolve_reference(
     let link = RouterLink::parse(reference).map_err(|_| ReferenceError::Invalid)?;
     let local_machine_id = String::from(identity.machine_identity.service_id().clone());
     if link.machine_id().as_str() != local_machine_id {
-        return Err(ReferenceError::Foreign(link.machine_id().as_str().to_owned()));
+        return Err(ReferenceError::Foreign(
+            link.machine_id().as_str().to_owned(),
+        ));
     }
     Ok(link.push_id().clone())
 }
@@ -303,13 +441,7 @@ pub(crate) enum ReferenceError {
     Foreign(String),
 }
 
-pub(crate) fn failure(
-    id: Value,
-    code: i64,
-    kind: &str,
-    stage: &str,
-    message: &str,
-) -> Value {
+pub(crate) fn failure(id: Value, code: i64, kind: &str, stage: &str, message: &str) -> Value {
     json!({
         "jsonrpc":"2.0",
         "id":id,

@@ -141,7 +141,11 @@ async fn stale_strict_generation_stops_before_evidence_or_native_io()
 async fn native_route_records_dispatch_before_io_and_returns_caller_correlation()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let attempt_id = agent_automation::AttemptId::generate();
-    let root = std::env::temp_dir().join(format!("route-{}", &attempt_id.as_str()[24..]));
+    let attempt_suffix = attempt_id
+        .as_str()
+        .get(24..)
+        .ok_or("attempt id must have an ASCII UUID suffix")?;
+    let root = std::env::temp_dir().join(format!("route-{attempt_suffix}"));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     let socket_path = root.join("native.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
@@ -498,7 +502,11 @@ async fn exercise_held_empty_thread(
         }
     }
     let run_id = agent_automation::RunId::generate();
-    let root = std::env::temp_dir().join(format!("held-{}", &run_id.as_str()[24..]));
+    let run_suffix = run_id
+        .as_str()
+        .get(24..)
+        .ok_or("run id must have an ASCII UUID suffix")?;
+    let root = std::env::temp_dir().join(format!("held-{run_suffix}"));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     let scratch_scope = "session-00000000-0000-4000-8000-000000000099";
     let scratch_parent = root.join("scratch");

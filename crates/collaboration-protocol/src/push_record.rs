@@ -81,7 +81,11 @@ impl PushRecordDraft {
         }
 
         let is_subscription_activity = self.kind == PushKind::SubscriptionActivity;
-        match (is_subscription_activity, self.body.as_ref(), self.activity.as_ref()) {
+        match (
+            is_subscription_activity,
+            self.body.as_ref(),
+            self.activity.as_ref(),
+        ) {
             (true, None, Some(activity)) if activity.is_valid() => {
                 let PushHeaderFacts::SubscriptionActivity {
                     root_count,

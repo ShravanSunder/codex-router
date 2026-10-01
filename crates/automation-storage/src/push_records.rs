@@ -2,8 +2,8 @@
 use crate::{AutomationStore, StorageError, push_record_rows};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use collaboration_protocol::{
-    DeliveryOutcome, DeliveryReceipt, PushDeliveryState, PushId, PushKind, PushRecord,
-    PushRecordDraft, PushOrigin, SessionRef,
+    DeliveryOutcome, DeliveryReceipt, PushDeliveryState, PushId, PushKind, PushOrigin, PushRecord,
+    PushRecordDraft, SessionRef,
 };
 use std::time::Duration;
 
@@ -60,11 +60,12 @@ impl AutomationStore {
     async fn insert_push_record_once(&mut self, record: &PushRecord) -> Result<(), StorageError> {
         let kind = push_record_rows::serialize_kind(record.kind)?;
         let (origin_kind, origin_session) = push_record_rows::serialize_origin(&record.origin);
-        let origin_service_id = origin_session
-            .map(|session| String::from(session.endpoint.service_id.clone()));
-        let origin_endpoint_id = origin_session
-            .map(|session| String::from(session.endpoint.endpoint_id.clone()));
-        let origin_session_id = origin_session.map(|session| String::from(session.session_id.clone()));
+        let origin_service_id =
+            origin_session.map(|session| String::from(session.endpoint.service_id.clone()));
+        let origin_endpoint_id =
+            origin_session.map(|session| String::from(session.endpoint.endpoint_id.clone()));
+        let origin_session_id =
+            origin_session.map(|session| String::from(session.session_id.clone()));
         let target_service_id = String::from(record.target.endpoint.service_id.clone());
         let target_endpoint_id = String::from(record.target.endpoint.endpoint_id.clone());
         let target_session_id = String::from(record.target.session_id.clone());
@@ -106,7 +107,10 @@ impl AutomationStore {
         Ok(())
     }
 
-    pub async fn mark_push_attempted(&mut self, push_id: &PushId) -> Result<PushRecord, StorageError> {
+    pub async fn mark_push_attempted(
+        &mut self,
+        push_id: &PushId,
+    ) -> Result<PushRecord, StorageError> {
         let result = sqlx::query(
             "UPDATE router_pushes SET delivery_state='attempted',last_outcome_json=NULL,settled_at=NULL WHERE push_id=? AND delivery_state IN ('pending','held')",
         )
@@ -126,7 +130,13 @@ impl AutomationStore {
         push_id: &PushId,
         outcome: DeliveryReceipt,
     ) -> Result<PushRecord, StorageError> {
-        if !matches!(outcome.outcome, DeliveryOutcome::NotSubmitted { retryable: true, .. }) {
+        if !matches!(
+            outcome.outcome,
+            DeliveryOutcome::NotSubmitted {
+                retryable: true,
+                ..
+            }
+        ) {
             return Err(StorageError::InvalidRecord);
         }
         let outcome_json = push_record_rows::serialize_json(&outcome)?;
@@ -182,7 +192,8 @@ impl AutomationStore {
         )
         .fetch_optional(&mut self.connection)
         .await?;
-        row.map(push_record_rows::PushRecordRow::into_record).transpose()
+        row.map(push_record_rows::PushRecordRow::into_record)
+            .transpose()
     }
 
     pub async fn list_pending_push_records(

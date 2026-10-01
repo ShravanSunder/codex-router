@@ -60,10 +60,8 @@ async fn migration_adds_router_push_records_and_removes_latest_sender_table() {
 fn session(endpoint_id: &str, session_id: &str) -> SessionRef {
     SessionRef {
         endpoint: EndpointRef {
-            service_id: UuidIdentity::try_from(
-                "018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned(),
-            )
-            .expect("service UUID"),
+            service_id: UuidIdentity::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned())
+                .expect("service UUID"),
             endpoint_id: EndpointId::try_from(endpoint_id.to_owned()).expect("endpoint id"),
         },
         session_id: SessionId::try_from(session_id.to_owned()).expect("session id"),
@@ -189,13 +187,12 @@ async fn header_facts_round_trip_through_stored_json_uses_camel_case() {
     )
     .await
     .expect("open isolated JSON observer");
-    let stored_json: String = sqlx::query_scalar(
-        "SELECT header_facts_json FROM router_pushes WHERE push_id=?",
-    )
-    .bind(push_id.as_str())
-    .fetch_one(&mut observer)
-    .await
-    .expect("read serialized header facts");
+    let stored_json: String =
+        sqlx::query_scalar("SELECT header_facts_json FROM router_pushes WHERE push_id=?")
+            .bind(push_id.as_str())
+            .fetch_one(&mut observer)
+            .await
+            .expect("read serialized header facts");
     let stored_value: serde_json::Value =
         serde_json::from_str(&stored_json).expect("stored header facts JSON");
     assert_eq!(stored_value["kind"], "directMessage");
@@ -208,7 +205,10 @@ async fn header_facts_round_trip_through_stored_json_uses_camel_case() {
         .expect("decode stored push")
         .expect("stored push remains available");
     assert_eq!(decoded.header_facts, header_facts);
-    observer.close().await.expect("close isolated JSON observer");
+    observer
+        .close()
+        .await
+        .expect("close isolated JSON observer");
     store.close().await.expect("close automation store");
 }
 
@@ -226,7 +226,11 @@ async fn prune_removes_only_push_records_strictly_older_than_thirty_days() {
     let boundary_id = push_id();
     let recent_id = push_id();
     for (id, timestamp, body) in [
-        (expired_id.clone(), cutoff - Duration::nanoseconds(1), "expired"),
+        (
+            expired_id.clone(),
+            cutoff - Duration::nanoseconds(1),
+            "expired",
+        ),
         (boundary_id.clone(), cutoff, "boundary"),
         (recent_id.clone(), now - Duration::seconds(1), "recent"),
     ] {
@@ -249,9 +253,27 @@ async fn prune_removes_only_push_records_strictly_older_than_thirty_days() {
             .expect("prune one bounded batch"),
         1
     );
-    assert!(store.get_push_record(&expired_id).await.expect("read expired").is_none());
-    assert!(store.get_push_record(&boundary_id).await.expect("read boundary").is_some());
-    assert!(store.get_push_record(&recent_id).await.expect("read recent").is_some());
+    assert!(
+        store
+            .get_push_record(&expired_id)
+            .await
+            .expect("read expired")
+            .is_none()
+    );
+    assert!(
+        store
+            .get_push_record(&boundary_id)
+            .await
+            .expect("read boundary")
+            .is_some()
+    );
+    assert!(
+        store
+            .get_push_record(&recent_id)
+            .await
+            .expect("read recent")
+            .is_some()
+    );
     store.close().await.expect("close automation store");
 }
 
@@ -292,8 +314,20 @@ async fn unknown_delivery_outcome_is_settled_and_not_pending_for_replay() {
         .expect("settle outcome unknown");
 
     assert_eq!(settled.delivery_state, PushDeliveryState::OutcomeUnknown);
-    assert!(store.list_pending_push_records(&target).await.expect("list pending").is_empty());
-    assert!(store.list_held_push_records(&target).await.expect("list held").is_empty());
+    assert!(
+        store
+            .list_pending_push_records(&target)
+            .await
+            .expect("list pending")
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_held_push_records(&target)
+            .await
+            .expect("list held")
+            .is_empty()
+    );
     store.close().await.expect("close automation store");
 }
 
@@ -318,7 +352,13 @@ async fn direct_message_over_sixty_four_kib_is_rejected_before_persistence() {
         store.insert_push_record(draft).await,
         Err(StorageError::InvalidRecord)
     ));
-    assert!(store.get_push_record(&push_id).await.expect("check absent record").is_none());
+    assert!(
+        store
+            .get_push_record(&push_id)
+            .await
+            .expect("check absent record")
+            .is_none()
+    );
     store.close().await.expect("close automation store");
 }
 
@@ -351,16 +391,25 @@ async fn insert_retries_sqlite_busy_only_within_the_five_second_window() {
         Utc::now(),
     );
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(6), store.insert_push_record(draft))
-        .await
-        .expect("busy retries finish within the specified bound");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        store.insert_push_record(draft),
+    )
+    .await
+    .expect("busy retries finish within the specified bound");
     assert!(matches!(result, Err(StorageError::Database(_))));
     sqlx::query("ROLLBACK")
         .execute(&mut writer)
         .await
         .expect("release SQLite writer lock");
     writer.close().await.expect("close lock holder");
-    assert!(store.get_push_record(&push_id).await.expect("read after busy").is_none());
+    assert!(
+        store
+            .get_push_record(&push_id)
+            .await
+            .expect("read after busy")
+            .is_none()
+    );
     store.close().await.expect("close automation store");
 }
 
@@ -494,13 +543,12 @@ async fn thirty_day_cleanup_deletes_whole_settled_mailbox_and_operation_receipts
         (recent_delivery_id.as_str(), 1),
         (pending_delivery_id.as_str(), 1),
     ] {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM mailbox_deliveries WHERE delivery_id=?",
-        )
-        .bind(delivery_id)
-        .fetch_one(&mut observer)
-        .await
-        .expect("read mailbox retention result");
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM mailbox_deliveries WHERE delivery_id=?")
+                .bind(delivery_id)
+                .fetch_one(&mut observer)
+                .await
+                .expect("read mailbox retention result");
         assert_eq!(count, expected_count);
     }
     for (operation_id, expected_count) in [
@@ -508,20 +556,21 @@ async fn thirty_day_cleanup_deletes_whole_settled_mailbox_and_operation_receipts
         (boundary_receipt_id.as_str(), 1),
         (recent_receipt_id.as_str(), 1),
     ] {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM operation_receipts WHERE operation_id=?",
-        )
-        .bind(operation_id)
-        .fetch_one(&mut observer)
-        .await
-        .expect("read operation retention result");
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM operation_receipts WHERE operation_id=?")
+                .bind(operation_id)
+                .fetch_one(&mut observer)
+                .await
+                .expect("read operation retention result");
         assert_eq!(count, expected_count);
     }
-    assert!(sqlx::query("PRAGMA foreign_key_check")
-        .fetch_all(&mut observer)
-        .await
-        .expect("check retained foreign keys")
-        .is_empty());
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&mut observer)
+            .await
+            .expect("check retained foreign keys")
+            .is_empty()
+    );
     observer.close().await.expect("close retention observer");
     store.close().await.expect("close automation store");
 }

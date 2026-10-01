@@ -174,7 +174,10 @@ impl ControlClient {
                 "push show caller belongs to another service",
             ));
         }
-        let value = self.connection.call("router/show", serde_json::json!(request)).await?;
+        let value = self
+            .connection
+            .call("router/show", serde_json::json!(request))
+            .await?;
         serde_json::from_value(value)
             .map_err(|_| ClientError::Protocol("invalid Router push show result"))
     }
@@ -677,9 +680,7 @@ mod tests {
         .expect("message request")
     }
 
-    async fn control_client_with_send_result(
-        result: Value,
-    ) -> (ControlClient, JoinHandle<()>) {
+    async fn control_client_with_send_result(result: Value) -> (ControlClient, JoinHandle<()>) {
         let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
         let peer = tokio::spawn(async move {
             let (read, mut write) = server_stream.into_split();

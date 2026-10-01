@@ -103,7 +103,7 @@ enum PushRecordQuery {
 }
 
 enum PushRecordReadResult {
-    Show(PushRecordShowResult),
+    Show(Box<PushRecordShowResult>),
     List(PushRecordListResult),
 }
 
@@ -226,7 +226,7 @@ fn run_push_record_query(
         Err(error) => {
             return crate::endpoint_commands::report_failure(
                 "currentSessionUnavailable",
-                &format!("{}; run agent-collaboration whoami --json", error),
+                &format!("{error}; run agent-collaboration whoami --json"),
                 2,
                 machine,
             );
@@ -263,6 +263,7 @@ fn run_push_record_query(
             PushRecordQuery::Show(reference) => client
                 .router_show(PushRecordShowParams { caller, reference })
                 .await
+                .map(Box::new)
                 .map(PushRecordReadResult::Show),
             PushRecordQuery::Inbox { limit } => client
                 .message_inbox(PushRecordListParams { caller, limit })
@@ -299,7 +300,7 @@ fn report_push_record_read(
     match result {
         Ok(PushRecordReadResult::Show(show)) => {
             let written = if machine {
-                writeln!(io::stdout(), "{}", push_record_show_envelope(show))
+                writeln!(io::stdout(), "{}", push_record_show_envelope(*show))
             } else {
                 writeln!(
                     io::stdout(),
@@ -380,7 +381,7 @@ fn run_message_reply(args: ReplyArguments) -> i32 {
         Err(error) => {
             return crate::endpoint_commands::report_failure(
                 "currentSessionUnavailable",
-                &format!("{}; run agent-collaboration whoami --json", error),
+                &format!("{error}; run agent-collaboration whoami --json"),
                 2,
                 machine,
             );

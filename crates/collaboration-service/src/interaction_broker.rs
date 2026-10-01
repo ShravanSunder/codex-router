@@ -251,7 +251,9 @@ impl ServiceInteractionBroker {
         now: chrono::DateTime<chrono::Utc>,
         batch_size: usize,
     ) -> Result<u64, InteractionHistoryError> {
-        self.interaction_history.prune_expired(now, batch_size).await
+        self.interaction_history
+            .prune_expired(now, batch_size)
+            .await
     }
 
     fn participants_belong_to_service(

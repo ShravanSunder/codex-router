@@ -55,7 +55,9 @@ fn parse_history_timestamp(value: &str) -> Result<DateTime<Utc>, InteractionHist
 }
 
 impl InteractionHistoryStore {
-    pub(in crate::interaction_broker) async fn load(path: PathBuf) -> Result<Self, InteractionHistoryError> {
+    pub(in crate::interaction_broker) async fn load(
+        path: PathBuf,
+    ) -> Result<Self, InteractionHistoryError> {
         let upgraded_at = Utc::now();
         let (mut data, had_undated_records) = match tokio::fs::read(&path).await {
             Ok(bytes) => {
@@ -69,8 +71,7 @@ impl InteractionHistoryStore {
                         .as_object_mut()
                         .ok_or(InteractionHistoryError::Unavailable)?;
                     let created_at = match object.remove("createdAt") {
-                        Some(serde_json::Value::String(value)) =>
-                            parse_history_timestamp(&value)?,
+                        Some(serde_json::Value::String(value)) => parse_history_timestamp(&value)?,
                         None => {
                             had_undated_records = true;
                             upgraded_at
@@ -302,7 +303,10 @@ impl InteractionHistoryStore {
         Ok(cancelled)
     }
 
-    pub(in crate::interaction_broker) async fn list_approvals(&self, pending_only: bool) -> Vec<InteractionHistoryRecord> {
+    pub(in crate::interaction_broker) async fn list_approvals(
+        &self,
+        pending_only: bool,
+    ) -> Vec<InteractionHistoryRecord> {
         self.data
             .lock()
             .await
@@ -318,7 +322,10 @@ impl InteractionHistoryStore {
             .collect()
     }
 
-    pub(in crate::interaction_broker) async fn interaction(&self, request_id: &str) -> Option<InteractionHistoryRecord> {
+    pub(in crate::interaction_broker) async fn interaction(
+        &self,
+        request_id: &str,
+    ) -> Option<InteractionHistoryRecord> {
         self.data.lock().await.get(request_id).cloned()
     }
 
@@ -384,7 +391,10 @@ impl InteractionHistoryStore {
         Ok(())
     }
 
-    pub(in crate::interaction_broker) async fn list_questions(&self, pending_only: bool) -> Vec<InteractionHistoryRecord> {
+    pub(in crate::interaction_broker) async fn list_questions(
+        &self,
+        pending_only: bool,
+    ) -> Vec<InteractionHistoryRecord> {
         self.data.lock().await.values()
             .filter(|record| matches!(record, InteractionHistoryRecord::Question { state, .. } if !pending_only || state == &QuestionHistoryState::Pending))
             .cloned().collect()
@@ -581,24 +591,23 @@ impl InteractionHistoryStore {
         u64::try_from(expired.len()).map_err(|_| InteractionHistoryError::Unavailable)
     }
 
-    async fn persist(
-        &self,
-        data: &InteractionHistoryData,
-    ) -> Result<(), InteractionHistoryError> {
+    async fn persist(&self, data: &InteractionHistoryData) -> Result<(), InteractionHistoryError> {
         let mut records = serde_json::Map::new();
         for (request_id, record) in &data.records {
             let created_at = data
                 .created_at
                 .get(request_id)
                 .ok_or(InteractionHistoryError::Unavailable)?;
-            let mut value = serde_json::to_value(record)
-                .map_err(|_| InteractionHistoryError::Unavailable)?;
+            let mut value =
+                serde_json::to_value(record).map_err(|_| InteractionHistoryError::Unavailable)?;
             let object = value
                 .as_object_mut()
                 .ok_or(InteractionHistoryError::Unavailable)?;
             object.insert(
                 "createdAt".to_owned(),
-                serde_json::Value::String(created_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+                serde_json::Value::String(
+                    created_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                ),
             );
             records.insert(request_id.clone(), value);
         }

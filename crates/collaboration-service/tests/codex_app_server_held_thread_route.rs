@@ -141,7 +141,11 @@ async fn exercise_held_empty_thread(
         }
     }
     let run_id = agent_automation::RunId::generate();
-    let root = std::env::temp_dir().join(format!("held-{}", &run_id.as_str()[24..]));
+    let short_run_id = run_id
+        .as_str()
+        .get(24..)
+        .ok_or_else(|| std::io::Error::other("generated RunId is shorter than 24 bytes"))?;
+    let root = std::env::temp_dir().join(format!("held-{short_run_id}"));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     let scratch_scope = "session-00000000-0000-4000-8000-000000000099";
     let scratch_parent = root.join("scratch");

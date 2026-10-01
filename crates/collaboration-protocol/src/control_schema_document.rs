@@ -373,11 +373,7 @@ pub fn control_schema_document(
     )?;
     assembly.add_method::<SessionMessageSendParams, PushMessageSendResult>(
         "message/send",
-        &[
-            "wrongService",
-            "unavailable",
-            "invalidField",
-        ],
+        &["wrongService", "unavailable", "invalidField"],
     )?;
     assembly.add_method::<SessionMessageReplyParams, SessionMessageReplyResult>(
         "message/reply",

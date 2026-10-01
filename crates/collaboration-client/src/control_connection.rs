@@ -210,77 +210,79 @@ impl ControlClient {
         let consistent = receipt.target == params.target
             && receipt.link == expected_link
             && match (&delivery_receipt.reachability, &delivery_receipt.client) {
-            (None, None) => true,
-            (
-                Some(SessionReachability::CodexAppServer),
-                Some(DeliveryClientReceipt::CodexAppServer(native)),
-            ) => {
-                let acceptance_matches = matches!(
-                    (&params.mode, &delivery_receipt.outcome, &native.acceptance),
-                    (
-                        MessageDelivery::Auto,
-                        DeliveryOutcome::Started,
-                        NativeSendAcceptance::NativeInputAccepted {
-                            operation: NativeInputOperation::TurnStart,
-                            ..
-                        }
-                    ) | (
-                        MessageDelivery::Auto,
-                        DeliveryOutcome::StartedOrSteered,
-                        NativeSendAcceptance::NativeInputAccepted { .. }
-                    ) | (
-                        MessageDelivery::Auto,
-                        DeliveryOutcome::Steered,
-                        NativeSendAcceptance::SteerAccepted { .. }
-                    ) | (
-                        MessageDelivery::Queue,
-                        DeliveryOutcome::Queued,
-                        NativeSendAcceptance::QueueAccepted { .. }
-                    ) | (
-                        MessageDelivery::Steer,
-                        DeliveryOutcome::Steered,
-                        NativeSendAcceptance::SteerAccepted { .. }
+                (None, None) => true,
+                (
+                    Some(SessionReachability::CodexAppServer),
+                    Some(DeliveryClientReceipt::CodexAppServer(native)),
+                ) => {
+                    let acceptance_matches = matches!(
+                        (&params.mode, &delivery_receipt.outcome, &native.acceptance),
+                        (
+                            MessageDelivery::Auto,
+                            DeliveryOutcome::Started,
+                            NativeSendAcceptance::NativeInputAccepted {
+                                operation: NativeInputOperation::TurnStart,
+                                ..
+                            }
+                        ) | (
+                            MessageDelivery::Auto,
+                            DeliveryOutcome::StartedOrSteered,
+                            NativeSendAcceptance::NativeInputAccepted { .. }
+                        ) | (
+                            MessageDelivery::Auto,
+                            DeliveryOutcome::Steered,
+                            NativeSendAcceptance::SteerAccepted { .. }
+                        ) | (
+                            MessageDelivery::Queue,
+                            DeliveryOutcome::Queued,
+                            NativeSendAcceptance::QueueAccepted { .. }
+                        ) | (
+                            MessageDelivery::Steer,
+                            DeliveryOutcome::Steered,
+                            NativeSendAcceptance::SteerAccepted { .. }
+                        )
+                    );
+                    native.target == params.target
+                        && params
+                            .generation_guard
+                            .as_ref()
+                            .is_none_or(|guard| guard == &native.generation)
+                        && native.input_kind == kind
+                        && native.representation == representation
+                        && acceptance_matches
+                        && (params.mode == MessageDelivery::Auto
+                            || native.resume_effect == AcceptedResumeEffect::NotRequested)
+                        && String::from(native.client_user_message_id.clone())
+                            == receipt.push_id.as_str()
+                }
+                (
+                    Some(SessionReachability::ProviderAcp),
+                    Some(DeliveryClientReceipt::ProviderAcp { .. }),
+                ) => {
+                    matches!(
+                        delivery_receipt.outcome,
+                        DeliveryOutcome::Started
+                            | DeliveryOutcome::Steered
+                            | DeliveryOutcome::Queued
                     )
-                );
-                native.target == params.target
-                    && params
-                        .generation_guard
-                        .as_ref()
-                        .is_none_or(|guard| guard == &native.generation)
-                    && native.input_kind == kind
-                    && native.representation == representation
-                    && acceptance_matches
-                    && (params.mode == MessageDelivery::Auto
-                        || native.resume_effect == AcceptedResumeEffect::NotRequested)
-                    && String::from(native.client_user_message_id.clone())
-                        == receipt.push_id.as_str()
-            }
-            (
-                Some(SessionReachability::ProviderAcp),
-                Some(DeliveryClientReceipt::ProviderAcp { .. }),
-            ) => {
-                matches!(
+                }
+                (
+                    Some(SessionReachability::ClaudeCodePeer),
+                    Some(DeliveryClientReceipt::ClaudeCodePeer),
+                ) => {
+                    matches!(
+                        delivery_receipt.outcome,
+                        DeliveryOutcome::PeerMessageWritten
+                    )
+                }
+                (Some(_), None) => matches!(
                     delivery_receipt.outcome,
-                    DeliveryOutcome::Started | DeliveryOutcome::Steered | DeliveryOutcome::Queued
-                )
-            }
-            (
-                Some(SessionReachability::ClaudeCodePeer),
-                Some(DeliveryClientReceipt::ClaudeCodePeer),
-            ) => {
-                matches!(
-                    delivery_receipt.outcome,
-                    DeliveryOutcome::PeerMessageWritten
-                )
-            }
-            (Some(_), None) => matches!(
-                delivery_receipt.outcome,
-                DeliveryOutcome::NotSubmitted { .. }
-                    | DeliveryOutcome::Rejected(_)
-                    | DeliveryOutcome::Unknown
-            ),
-            _ => false,
-        };
+                    DeliveryOutcome::NotSubmitted { .. }
+                        | DeliveryOutcome::Rejected(_)
+                        | DeliveryOutcome::Unknown
+                ),
+                _ => false,
+            };
         if !consistent {
             self.connection.failed = true;
             return Err(ClientError::Protocol(

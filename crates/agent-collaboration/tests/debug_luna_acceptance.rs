@@ -88,7 +88,6 @@ async fn fresh_native_history_becomes_readable_without_resubmission() -> ProofRe
                     .try_into()?,
             },
             mode: MessageDelivery::Auto,
-            correlation: None,
         })
         .await?;
     let turn_id = match &receipt.client {
@@ -237,7 +236,6 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
                 text: alpha_task.try_into()?,
             },
             mode: MessageDelivery::Auto,
-            correlation: None,
         })
         .await?;
     proof.record("alphaInputAccepted", json!(initial))?;
