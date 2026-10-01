@@ -122,8 +122,13 @@ impl ClaudeOAuthLoginFlow {
         }
     }
 
-    #[cfg(test)]
-    fn new_for_test(token_endpoint: impl Into<String>, client_id: impl Into<String>) -> Self {
+    /// Creates a login flow for a local fake issuer in tests.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_test_issuer(
+        token_endpoint: impl Into<String>,
+        client_id: impl Into<String>,
+    ) -> Self {
         Self {
             token_endpoint: token_endpoint.into(),
             client_id: client_id.into(),
@@ -382,8 +387,10 @@ impl CredentialRefreshClient for ClaudeOAuthRefreshClient {
 }
 
 impl ClaudeOAuthRefreshClient {
-    #[cfg(test)]
-    fn new_with_endpoint_for_test(
+    /// Creates a refresh client for a local fake issuer in tests.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_test_issuer(
         token_endpoint: impl Into<String>,
         client_id: impl Into<String>,
     ) -> Self {
@@ -476,7 +483,7 @@ mod tests {
 
     #[test]
     fn authorization_url_uses_hosted_callback_public_client_and_s256_pkce() {
-        let flow = ClaudeOAuthLoginFlow::new_for_test(
+        let flow = ClaudeOAuthLoginFlow::with_test_issuer(
             format!("http://127.0.0.1:{}/oauth/token", unused_loopback_port()),
             "test-claude-client",
         );
@@ -547,7 +554,7 @@ mod tests {
             200,
             r#"{"access_token":"claude-access-canary","refresh_token":"claude-refresh-canary","expires_in":3600}"#,
         );
-        let flow = ClaudeOAuthLoginFlow::new_for_test(endpoint, "test-claude-client");
+        let flow = ClaudeOAuthLoginFlow::with_test_issuer(endpoint, "test-claude-client");
         let pending = flow
             .begin_login()
             .expect("OAuth login start should generate PKCE material");
@@ -627,7 +634,7 @@ mod tests {
         listener
             .set_nonblocking(true)
             .expect("listener should support nonblocking observation");
-        let flow = ClaudeOAuthLoginFlow::new_for_test(endpoint, "test-claude-client");
+        let flow = ClaudeOAuthLoginFlow::with_test_issuer(endpoint, "test-claude-client");
         let pending = flow
             .begin_login()
             .expect("OAuth login start should generate PKCE material");
@@ -660,10 +667,7 @@ mod tests {
         ] {
             let (endpoint, request_receiver, server_thread) =
                 one_response_server(200, response_body);
-            let client = ClaudeOAuthRefreshClient::new_with_endpoint_for_test(
-                endpoint,
-                "test-claude-client",
-            );
+            let client = ClaudeOAuthRefreshClient::with_test_issuer(endpoint, "test-claude-client");
             let account_id =
                 AccountId::new("acct_claude_refresh").expect("account id should be valid");
             let bundle = client
@@ -700,8 +704,7 @@ mod tests {
     fn definitive_refresh_refusal_requires_login() {
         let (endpoint, _request_receiver, server_thread) =
             one_response_server(400, r#"{"error":"invalid_grant"}"#);
-        let client =
-            ClaudeOAuthRefreshClient::new_with_endpoint_for_test(endpoint, "test-claude-client");
+        let client = ClaudeOAuthRefreshClient::with_test_issuer(endpoint, "test-claude-client");
         let account_id = AccountId::new("acct_claude_refused").expect("account id should be valid");
 
         assert_eq!(

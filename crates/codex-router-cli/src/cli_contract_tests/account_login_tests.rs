@@ -474,6 +474,14 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn request_body_json(request: &str) -> serde_json::Value {
+    let (_, body) = request
+        .split_once("\r\n\r\n")
+        .expect("fake issuer request should include an HTTP body");
+    serde_json::from_str(body).expect("fake issuer request body should be JSON")
+}
+
 fn fake_id_token() -> String {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;

@@ -294,11 +294,13 @@ pub(crate) fn run_account_command_with_input_and_openai_client(
     command: AccountCommand,
     openai_client: &OpenAiOAuthDeviceLoginClient,
 ) -> Result<(), AccountCommandError> {
-    run_account_command_with_input_and_openai_client_and_store_override(
+    run_account_command_with_input_and_provider_flows_and_store_overrides(
         stdout,
         reader,
         command,
         openai_client,
+        None,
+        None,
         None,
     )
 }
@@ -311,21 +313,57 @@ pub(crate) fn run_account_command_with_input_and_openai_client_and_secret_store(
     openai_client: &OpenAiOAuthDeviceLoginClient,
     secret_store: EncryptedCredentialStore,
 ) -> Result<(), AccountCommandError> {
-    run_account_command_with_input_and_openai_client_and_store_override(
+    run_account_command_with_input_and_provider_flows_and_store_overrides(
         stdout,
         reader,
         command,
         openai_client,
         Some(secret_store),
+        None,
+        None,
     )
 }
 
-fn run_account_command_with_input_and_openai_client_and_store_override(
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn run_account_command_with_input_and_claude_flow_and_secret_store(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
+    command: AccountCommand,
+    claude_flow: &impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin>,
+    secret_store: EncryptedCredentialStore,
+) -> Result<(), AccountCommandError> {
+    assert!(
+        matches!(
+            &command,
+            AccountCommand::Login {
+                provider_login_flow: ProviderLoginFlow::ClaudeOAuth,
+                ..
+            }
+        ),
+        "test Claude login runner requires a Claude login command"
+    );
+    let openai_client = OpenAiOAuthDeviceLoginClient::new();
+    let claude_flow_override: &dyn AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin> =
+        claude_flow;
+    run_account_command_with_input_and_provider_flows_and_store_overrides(
+        stdout,
+        reader,
+        command,
+        &openai_client,
+        None,
+        Some(claude_flow_override),
+        Some(secret_store),
+    )
+}
+
+fn run_account_command_with_input_and_provider_flows_and_store_overrides(
     stdout: &mut impl Write,
     reader: &mut impl BufRead,
     command: AccountCommand,
     openai_client: &OpenAiOAuthDeviceLoginClient,
-    secret_store_override: Option<EncryptedCredentialStore>,
+    openai_secret_store_override: Option<EncryptedCredentialStore>,
+    claude_flow_override: Option<&dyn AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin>>,
+    claude_secret_store_override: Option<EncryptedCredentialStore>,
 ) -> Result<(), AccountCommandError> {
     match command {
         AccountCommand::Help(text) => stdout
@@ -341,15 +379,26 @@ fn run_account_command_with_input_and_openai_client_and_store_override(
                 router_root,
                 label,
                 openai_client,
-                secret_store_override,
+                openai_secret_store_override,
             ),
-            ProviderLoginFlow::ClaudeOAuth => login_with_claude_oauth(
-                stdout,
-                reader,
-                router_root,
-                label,
-                &ClaudeOAuthLoginFlow::new(),
-            ),
+            ProviderLoginFlow::ClaudeOAuth => match claude_flow_override {
+                Some(claude_flow) => login_with_claude_oauth(
+                    stdout,
+                    reader,
+                    router_root,
+                    label,
+                    claude_flow,
+                    claude_secret_store_override,
+                ),
+                None => login_with_claude_oauth(
+                    stdout,
+                    reader,
+                    router_root,
+                    label,
+                    &ClaudeOAuthLoginFlow::new(),
+                    claude_secret_store_override,
+                ),
+            },
         },
         AccountCommand::List { router_root } => list_accounts(stdout, router_root),
         AccountCommand::SetStatus {
@@ -496,7 +545,7 @@ fn collect_openai_oauth_tokens(
 fn collect_claude_oauth_bundle(
     stdout: &mut impl Write,
     reader: &mut impl BufRead,
-    flow: &impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin>,
+    flow: &(impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin> + ?Sized),
 ) -> Result<codex_router_secret_store::credential_bundle::CredentialBundle, AccountCommandError> {
     let pending = flow.begin_login()?;
     let authorization_url = flow.authorization_url(&pending)?;
@@ -525,7 +574,8 @@ fn login_with_claude_oauth(
     reader: &mut impl BufRead,
     router_root: PathBuf,
     label: String,
-    flow: &impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin>,
+    flow: &(impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin> + ?Sized),
+    secret_store_override: Option<EncryptedCredentialStore>,
 ) -> Result<(), AccountCommandError> {
     let label = normalize_label(&label)?;
     ensure_account_label_available_at_router_root(&router_root, &label, Provider::Claude)?;
@@ -538,11 +588,14 @@ fn login_with_claude_oauth(
         &router_root.join("state.sqlite"),
     ))?;
     ensure_account_label_available(&state, &label, Provider::Claude, &runtime)?;
-    let secret_store = runtime
-        .block_on(crate::secret_store_factory::open_cli_secret_store_async(
-            router_root.join("secrets"),
-        ))
-        .map_err(|_| AccountCommandError::CredentialStoreInitialization)?;
+    let secret_store = match secret_store_override {
+        Some(secret_store) => secret_store,
+        None => runtime
+            .block_on(crate::secret_store_factory::open_cli_secret_store_async(
+                router_root.join("secrets"),
+            ))
+            .map_err(|_| AccountCommandError::CredentialStoreInitialization)?,
+    };
     let activation_request = CredentialActivationRequest::new(
         Provider::Claude,
         account_id.clone(),
