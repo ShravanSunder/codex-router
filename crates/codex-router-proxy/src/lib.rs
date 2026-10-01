@@ -2463,8 +2463,10 @@ mod tests {
             "beta",
             AccountStatus::Enabled,
         );
-        let secrets = FileSecretStore::open(temp_dir.path().join("secrets"))
-            .expect("affinity credential store should open");
+        let secrets = codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &temp_dir.path().join("secrets"),
+        )
+        .expect("affinity credential store should open");
         let now_unix_seconds = test_unix_seconds();
         persist_credit_backed_account_with_token_async(
             &database_path,
@@ -6401,7 +6403,9 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("state store should open: {error}"),
         };
-        let secrets = match FileSecretStore::open(&secret_path) {
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
             Ok(secrets) => secrets,
             Err(error) => panic!("secret store should open: {error}"),
         };
@@ -6471,7 +6475,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = LoopbackRouterRuntime::start(config)
+        let runtime = LoopbackRouterRuntime::start(config, secrets.clone())
             .unwrap_or_else(|error| panic!("credit proxy runtime should start: {error}"));
         let router_address = runtime.local_addr();
         let client_thread = thread::spawn(move || {
@@ -9982,7 +9986,7 @@ mod tests {
 
     fn persist_credit_backed_account_with_token(
         database_path: &Path,
-        secrets: &FileSecretStore,
+        secrets: &EncryptedCredentialStore,
         account: &AccountRecord,
         upstream_token: &str,
         observed_unix_seconds: u64,
@@ -10004,7 +10008,7 @@ mod tests {
 
     async fn persist_credit_backed_account_with_token_async(
         database_path: &Path,
-        secrets: &FileSecretStore,
+        secrets: &EncryptedCredentialStore,
         account: &AccountRecord,
         upstream_token: &str,
         observed_unix_seconds: u64,
@@ -10116,7 +10120,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("credit state should close: {error}"));
 
-        let token_key = account_credential_bundle_key(account.account_id(), 1)
+        let token_key = openai_account_credential_bundle_key(account.account_id(), 1)
             .unwrap_or_else(|error| panic!("credit token key should build: {error}"));
         let bundle = AccountCredentialBundle::imported_codex_auth(
             upstream_token,
