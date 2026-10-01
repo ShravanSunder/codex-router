@@ -53,6 +53,7 @@ use crate::repositories::AffinityRepository;
 use crate::repositories::QuotaSnapshotRepository;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 use crate::repositories::SelectorQuotaRepository;
+use crate::session_account_affinity::PinObservation;
 use crate::session_account_affinity::SessionAccountAffinity;
 
 const CURRENT_SCHEMA_VERSION: i64 = 13;
@@ -1350,7 +1351,7 @@ impl AsyncSqliteStateStore {
         Ok(())
     }
 
-    /// Inserts or replaces the account affinity for one Codex session.
+    /// Inserts or replaces the account affinity for one provider session.
     pub async fn upsert_session_account_affinity(
         &self,
         affinity: &SessionAccountAffinity,
@@ -1375,7 +1376,100 @@ impl AsyncSqliteStateStore {
         Ok(())
     }
 
-    /// Loads the account affinity for one Codex session.
+    /// Compare-and-sets one session pin from its observed account and version.
+    ///
+    /// `affinity.last_seen_unix_seconds()` is the publication time used to decide
+    /// whether the observed pin is still active. An inactive observation may claim
+    /// only a missing, released, or expired row; an active observation may renew
+    /// only the same account while it remains active at publication time.
+    pub async fn compare_and_set_session_account_affinity(
+        &self,
+        observation: &PinObservation,
+        affinity: &SessionAccountAffinity,
+        pin_ttl_seconds: u64,
+    ) -> Result<bool, StateStoreError> {
+        let expected_version = observation.version();
+        let next_version = expected_version.checked_add(1);
+        let desired_version = affinity.pin_version();
+        let valid_transition = match (observation.active_account(), affinity.account_id()) {
+            (None, Some(_)) => next_version == Some(desired_version),
+            (Some(observed), Some(replacement)) => {
+                observed == replacement && desired_version == expected_version
+            }
+            (Some(_), None) => next_version == Some(desired_version),
+            (None, None) => false,
+        };
+        if !valid_transition {
+            return Ok(false);
+        }
+
+        let expected_version = u64_to_i64(expected_version)?;
+        let desired_version = u64_to_i64(desired_version)?;
+        let publication_time = u64_to_i64(affinity.last_seen_unix_seconds())?;
+        let pin_ttl_seconds = u64_to_i64(pin_ttl_seconds)?;
+        let observed_account_id = observation.active_account().map(AccountId::as_str);
+        let replacement_account_id = affinity.account_id().map(AccountId::as_str);
+        let result = sqlx::query!(
+            "INSERT INTO session_account_affinities (
+                 provider, session_id, account_id, last_seen_unix_seconds, pin_version
+             )
+             SELECT ?1, ?2, ?3, ?4, ?5
+              WHERE (
+                    (?6 = 0 AND ?7 IS NULL
+                        AND NOT EXISTS (
+                            SELECT 1 FROM session_account_affinities
+                             WHERE provider = ?1 AND session_id = ?2
+                        ))
+                    OR EXISTS (
+                        SELECT 1 FROM session_account_affinities AS observed
+                         WHERE observed.provider = ?1 AND observed.session_id = ?2
+                           AND observed.pin_version = ?6
+                           AND (
+                               (?7 IS NULL AND (
+                                   observed.account_id IS NULL
+                                   OR (?4 >= ?8 AND observed.last_seen_unix_seconds <= ?4 - ?8)
+                               ))
+                               OR (?7 IS NOT NULL AND observed.account_id = ?7
+                                   AND (?4 < ?8 OR observed.last_seen_unix_seconds > ?4 - ?8))
+                           )
+                    )
+              )
+             ON CONFLICT(provider, session_id) DO UPDATE SET
+                 account_id = excluded.account_id,
+                 last_seen_unix_seconds = MAX(
+                     session_account_affinities.last_seen_unix_seconds,
+                     excluded.last_seen_unix_seconds
+                 ),
+                 pin_version = excluded.pin_version
+             WHERE session_account_affinities.pin_version = ?6
+               AND (
+                   (?7 IS NULL AND (
+                       session_account_affinities.account_id IS NULL
+                       OR (?4 >= ?8
+                           AND session_account_affinities.last_seen_unix_seconds <= ?4 - ?8)
+                   ))
+                   OR (?7 IS NOT NULL
+                       AND session_account_affinities.account_id = ?7
+                       AND (?4 < ?8
+                           OR session_account_affinities.last_seen_unix_seconds > ?4 - ?8))
+               )",
+            affinity.provider().as_str(),
+            affinity.session_id(),
+            replacement_account_id,
+            publication_time,
+            desired_version,
+            expected_version,
+            observed_account_id,
+            pin_ttl_seconds,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Loads the account affinity for one provider session.
     pub async fn load_session_account_affinity(
         &self,
         provider: Provider,
@@ -2892,13 +2986,21 @@ impl AsyncQuotaExhaustionRepository for AsyncSqliteStateStore {
     }
 }
 
-/// Async Codex session account-affinity repository.
+/// Async provider session account-affinity repository.
 pub trait AsyncSessionAccountAffinityRepository {
     /// Inserts or replaces one session account affinity.
     fn upsert_session_account_affinity<'a>(
         &'a self,
         affinity: &'a SessionAccountAffinity,
     ) -> BoxFuture<'a, Result<(), StateStoreError>>;
+
+    /// Compare-and-sets one pin if its observed account, version, and TTL are current.
+    fn compare_and_set_session_account_affinity<'a>(
+        &'a self,
+        observation: &'a PinObservation,
+        affinity: &'a SessionAccountAffinity,
+        pin_ttl_seconds: u64,
+    ) -> BoxFuture<'a, Result<bool, StateStoreError>>;
 
     /// Loads one session account affinity.
     fn load_session_account_affinity<'a>(
@@ -2914,6 +3016,18 @@ impl AsyncSessionAccountAffinityRepository for AsyncSqliteStateStore {
         affinity: &'a SessionAccountAffinity,
     ) -> BoxFuture<'a, Result<(), StateStoreError>> {
         Box::pin(async move { self.upsert_session_account_affinity(affinity).await })
+    }
+
+    fn compare_and_set_session_account_affinity<'a>(
+        &'a self,
+        observation: &'a PinObservation,
+        affinity: &'a SessionAccountAffinity,
+        pin_ttl_seconds: u64,
+    ) -> BoxFuture<'a, Result<bool, StateStoreError>> {
+        Box::pin(async move {
+            self.compare_and_set_session_account_affinity(observation, affinity, pin_ttl_seconds)
+                .await
+        })
     }
 
     fn load_session_account_affinity<'a>(

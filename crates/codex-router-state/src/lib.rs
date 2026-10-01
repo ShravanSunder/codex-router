@@ -67,6 +67,7 @@ mod tests {
     use crate::repositories::SelectorQuotaRepository;
     use crate::selection_projection::project_route_band_selection_inputs;
     use crate::selection_projection::project_route_band_selection_inputs_with_active_counts;
+    use crate::session_account_affinity::PinObservation;
     use crate::session_account_affinity::SessionAccountAffinity;
     use crate::sqlite::AsyncAffinityRepository;
     use crate::sqlite::AsyncQuotaExhaustionRepository;
@@ -852,6 +853,185 @@ mod tests {
             .await,
             Ok(Some(replacement))
         );
+    }
+
+    #[tokio::test]
+    async fn session_account_affinity_cas_allows_one_writer_for_the_same_observation() {
+        let temp_dir = TestTempDir::new("session_account_affinity_cas_race");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let first_store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("first state store should open");
+        let second_store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("second state store should open");
+        let observation = PinObservation::new(None, 0);
+        let first_writer = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "racing-session",
+            Some(account_id("acct_first_writer")),
+            1,
+            10_000,
+        );
+        let second_writer = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "racing-session",
+            Some(account_id("acct_second_writer")),
+            1,
+            10_000,
+        );
+
+        let (first_result, second_result) = tokio::join!(
+            AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &first_store,
+                &observation,
+                &first_writer,
+                4_500,
+            ),
+            AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &second_store,
+                &observation,
+                &second_writer,
+                4_500,
+            ),
+        );
+        let first_won = first_result.expect("first writer should reach the compare-and-set");
+        let second_won = second_result.expect("second writer should reach the compare-and-set");
+
+        assert_ne!(first_won, second_won);
+        let stored_affinity = AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+            &first_store,
+            Provider::Claude,
+            "racing-session",
+        )
+        .await
+        .expect("winning affinity should load")
+        .expect("one writer should create the affinity");
+        let winning_account = if first_won {
+            first_writer.account_id()
+        } else {
+            second_writer.account_id()
+        };
+        assert_eq!(stored_affinity.account_id(), winning_account);
+        assert_eq!(stored_affinity.pin_version(), 1);
+
+        first_store.close().await.expect("first store should close");
+        second_store
+            .close()
+            .await
+            .expect("second store should close");
+    }
+
+    #[tokio::test]
+    async fn session_account_affinity_cas_rejects_late_writes_after_expiry_and_release() {
+        let temp_dir = TestTempDir::new("session_account_affinity_cas_expiry_release");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state store should open");
+        let expired_account = account_id("acct_expired");
+        let initial_pin = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            Some(expired_account.clone()),
+            7,
+            1_000,
+        );
+        AsyncSessionAccountAffinityRepository::upsert_session_account_affinity(
+            &store,
+            &initial_pin,
+        )
+        .await
+        .expect("initial pin should persist");
+
+        let stale_active_observation = PinObservation::new(Some(expired_account.clone()), 7);
+        let late_renewal = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            Some(expired_account),
+            7,
+            5_501,
+        );
+        assert!(
+            !AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &store,
+                &stale_active_observation,
+                &late_renewal,
+                4_500,
+            )
+            .await
+            .expect("late renewal should be rejected without a storage error")
+        );
+
+        let expired_observation = PinObservation::new(None, 7);
+        let replacement_account = account_id("acct_replacement");
+        let replacement_pin = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            Some(replacement_account.clone()),
+            8,
+            5_501,
+        );
+        assert!(
+            AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &store,
+                &expired_observation,
+                &replacement_pin,
+                4_500,
+            )
+            .await
+            .expect("fresh observation should claim the expired pin")
+        );
+
+        let active_replacement_observation =
+            PinObservation::new(Some(replacement_account.clone()), 8);
+        let released_pin = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            None,
+            9,
+            5_502,
+        );
+        assert!(
+            AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &store,
+                &active_replacement_observation,
+                &released_pin,
+                4_500,
+            )
+            .await
+            .expect("release should compare-and-set the active pin")
+        );
+
+        let late_success_after_release = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            Some(replacement_account),
+            8,
+            5_503,
+        );
+        assert!(
+            !AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &store,
+                &active_replacement_observation,
+                &late_success_after_release,
+                4_500,
+            )
+            .await
+            .expect("stale success should be rejected without a storage error")
+        );
+
+        let stored_pin = AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+            &store,
+            Provider::Claude,
+            "expiry-session",
+        )
+        .await
+        .expect("released pin should load")
+        .expect("released pin row should remain persisted");
+        assert_eq!(stored_pin.account_id(), None);
+        assert_eq!(stored_pin.pin_version(), 9);
+        store.close().await.expect("state store should close");
     }
 
     #[tokio::test]

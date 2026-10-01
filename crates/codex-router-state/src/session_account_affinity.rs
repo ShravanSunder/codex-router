@@ -1,7 +1,37 @@
-//! Durable Codex session-to-account affinity.
+//! Durable provider session-to-account affinity.
 
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
+
+/// The active pin state and persisted version observed before a routing attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinObservation {
+    active_account: Option<AccountId>,
+    version: u64,
+}
+
+impl PinObservation {
+    /// Creates an observed pin state for one routing attempt.
+    #[must_use]
+    pub fn new(active_account: Option<AccountId>, version: u64) -> Self {
+        Self {
+            active_account,
+            version,
+        }
+    }
+
+    /// Returns the active account at observation time, if one existed.
+    #[must_use]
+    pub fn active_account(&self) -> Option<&AccountId> {
+        self.active_account.as_ref()
+    }
+
+    /// Returns the persisted version used to guard the observation.
+    #[must_use]
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+}
 
 /// The persisted pin state for one provider session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,7 +85,7 @@ impl SessionAccountAffinity {
         self.provider
     }
 
-    /// Returns the Codex session id.
+    /// Returns the provider session identifier.
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id

@@ -4369,12 +4369,13 @@ mod tests {
         in_flight_selector_reads: Arc<std::sync::atomic::AtomicUsize>,
         max_concurrent_selector_reads: Arc<std::sync::atomic::AtomicUsize>,
         affinity_read: Option<Arc<BlockingAffinityRead>>,
+        persisted_affinities:
+            Arc<Mutex<Vec<codex_router_state::session_account_affinity::SessionAccountAffinity>>>,
     }
 
     struct BlockingAffinityRead {
         entered: tokio::sync::Notify,
         release: tokio::sync::Notify,
-        persisted: codex_router_state::session_account_affinity::SessionAccountAffinity,
     }
 
     #[derive(Default)]
@@ -4427,6 +4428,7 @@ mod tests {
                 in_flight_selector_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 max_concurrent_selector_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 affinity_read: None,
+                persisted_affinities: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -4435,10 +4437,10 @@ mod tests {
             persisted: codex_router_state::session_account_affinity::SessionAccountAffinity,
         ) -> Self {
             let mut repository = Self::new_with_accounts(account_ids);
+            repository.persisted_affinities = Arc::new(Mutex::new(vec![persisted]));
             repository.affinity_read = Some(Arc::new(BlockingAffinityRead {
                 entered: tokio::sync::Notify::new(),
                 release: tokio::sync::Notify::new(),
-                persisted,
             }));
             repository
         }
@@ -4654,18 +4656,120 @@ mod tests {
     {
         fn upsert_session_account_affinity<'a>(
             &'a self,
-            _affinity: &'a codex_router_state::session_account_affinity::SessionAccountAffinity,
+            affinity: &'a codex_router_state::session_account_affinity::SessionAccountAffinity,
         ) -> futures_util::future::BoxFuture<
             'a,
             Result<(), codex_router_state::sqlite::StateStoreError>,
         > {
-            Box::pin(async { Ok(()) })
+            Box::pin(async move {
+                let mut persisted_affinities = self
+                    .persisted_affinities
+                    .lock()
+                    .expect("test affinity store lock should not be poisoned");
+                if let Some(existing) = persisted_affinities.iter_mut().find(|existing| {
+                    existing.provider() == affinity.provider()
+                        && existing.session_id() == affinity.session_id()
+                }) {
+                    *existing = affinity.clone();
+                } else {
+                    persisted_affinities.push(affinity.clone());
+                }
+                Ok(())
+            })
+        }
+
+        fn compare_and_set_session_account_affinity<'a>(
+            &'a self,
+            observation: &'a codex_router_state::session_account_affinity::PinObservation,
+            affinity: &'a codex_router_state::session_account_affinity::SessionAccountAffinity,
+            pin_ttl_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<bool, codex_router_state::sqlite::StateStoreError>,
+        > {
+            Box::pin(async move {
+                let expected_version = observation.version();
+                let next_version = expected_version.checked_add(1);
+                let desired_version = affinity.pin_version();
+                let valid_transition = match (observation.active_account(), affinity.account_id()) {
+                    (None, Some(_)) => next_version == Some(desired_version),
+                    (Some(observed), Some(replacement)) => {
+                        observed == replacement && desired_version == expected_version
+                    }
+                    (Some(_), None) => next_version == Some(desired_version),
+                    (None, None) => false,
+                };
+                if !valid_transition {
+                    return Ok(false);
+                }
+
+                let mut persisted_affinities = self
+                    .persisted_affinities
+                    .lock()
+                    .expect("test affinity store lock should not be poisoned");
+                let existing_index = persisted_affinities.iter().position(|existing| {
+                    existing.provider() == affinity.provider()
+                        && existing.session_id() == affinity.session_id()
+                });
+                let publication_time = affinity.last_seen_unix_seconds();
+                let current_state_matches = match existing_index {
+                    None => expected_version == 0 && observation.active_account().is_none(),
+                    Some(index) => {
+                        let existing = &persisted_affinities[index];
+                        if existing.pin_version() != expected_version {
+                            false
+                        } else {
+                            match observation.active_account() {
+                                None => {
+                                    existing.account_id().is_none()
+                                        || (!fake_pin_is_active_at(
+                                            existing.last_seen_unix_seconds(),
+                                            publication_time,
+                                            pin_ttl_seconds,
+                                        ) && existing.account_id().is_some())
+                                }
+                                Some(observed_account) => {
+                                    existing.account_id() == Some(observed_account)
+                                        && fake_pin_is_active_at(
+                                            existing.last_seen_unix_seconds(),
+                                            publication_time,
+                                            pin_ttl_seconds,
+                                        )
+                                }
+                            }
+                        }
+                    }
+                };
+                if !current_state_matches {
+                    return Ok(false);
+                }
+
+                let stored_last_seen = existing_index.map_or(publication_time, |index| {
+                    persisted_affinities[index]
+                        .last_seen_unix_seconds()
+                        .max(publication_time)
+                });
+                let replacement =
+                    codex_router_state::session_account_affinity::SessionAccountAffinity::with_pin_state(
+                        affinity.provider(),
+                        affinity.session_id(),
+                        affinity.account_id().cloned(),
+                        desired_version,
+                        stored_last_seen,
+                    );
+                if let Some(index) = existing_index {
+                    persisted_affinities[index] = replacement;
+                } else {
+                    persisted_affinities.push(replacement);
+                }
+                Ok(true)
+            })
         }
 
         fn load_session_account_affinity<'a>(
             &'a self,
-            _provider: Provider,
-            _session_id: &'a str,
+            provider: Provider,
+            session_id: &'a str,
         ) -> futures_util::future::BoxFuture<
             'a,
             Result<
@@ -4674,14 +4778,31 @@ mod tests {
             >,
         > {
             Box::pin(async move {
-                let Some(affinity_read) = &self.affinity_read else {
-                    return Ok(None);
-                };
-                affinity_read.entered.notify_one();
-                affinity_read.release.notified().await;
-                Ok(Some(affinity_read.persisted.clone()))
+                if let Some(affinity_read) = &self.affinity_read {
+                    affinity_read.entered.notify_one();
+                    affinity_read.release.notified().await;
+                }
+                let persisted_affinities = self
+                    .persisted_affinities
+                    .lock()
+                    .expect("test affinity store lock should not be poisoned");
+                Ok(persisted_affinities
+                    .iter()
+                    .find(|affinity| {
+                        affinity.provider() == provider && affinity.session_id() == session_id
+                    })
+                    .cloned())
             })
         }
+    }
+
+    fn fake_pin_is_active_at(
+        last_seen_unix_seconds: u64,
+        publication_unix_seconds: u64,
+        pin_ttl_seconds: u64,
+    ) -> bool {
+        publication_unix_seconds < pin_ttl_seconds
+            || last_seen_unix_seconds > publication_unix_seconds - pin_ttl_seconds
     }
 
     fn account_input_for_runtime_exhaustion_test(
