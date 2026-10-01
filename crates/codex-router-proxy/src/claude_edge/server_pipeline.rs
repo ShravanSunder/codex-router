@@ -175,6 +175,7 @@ impl ClaudeServerRuntime {
             first_attempt,
             buffered_body,
             &classify_claude_outcome,
+            self.affinity_record_tasks.clone(),
         )
         .await
         {

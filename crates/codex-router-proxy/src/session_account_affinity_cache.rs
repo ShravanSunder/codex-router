@@ -600,17 +600,9 @@ mod tests;
 mod pin_authority_tests {
     use super::*;
     use codex_router_state::sqlite::AsyncSqliteStateStore;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
 
-    static NEXT_DATABASE: AtomicUsize = AtomicUsize::new(0);
-
-    async fn pin_store() -> AsyncSqliteStateStore {
-        let database_path = std::env::temp_dir().join(format!(
-            "codex-router-p6s-pin-{}-{}.sqlite",
-            std::process::id(),
-            NEXT_DATABASE.fetch_add(1, Ordering::Relaxed),
-        ));
+    async fn pin_store(temporary_directory: &tempfile::TempDir) -> AsyncSqliteStateStore {
+        let database_path = temporary_directory.path().join("router.sqlite");
         AsyncSqliteStateStore::open(&database_path)
             .await
             .unwrap_or_else(|error| panic!("test pin store should open: {error}"))
@@ -622,7 +614,9 @@ mod pin_authority_tests {
 
     #[tokio::test]
     async fn observation_preserves_stored_version_for_active_expired_released_and_missing_pins() {
-        let store = pin_store().await;
+        let temporary_directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("pin observation temporary directory: {error}"));
+        let store = pin_store(&temporary_directory).await;
         let cache = SessionAccountAffinityCache::shared(Duration::from_secs(10));
         let account = account_id("acct_observed");
         let pin = SessionAccountAffinity::with_pin_state(
@@ -669,7 +663,9 @@ mod pin_authority_tests {
 
     #[tokio::test]
     async fn concurrent_releases_have_one_winner_and_late_success_cannot_resurrect_the_pin() {
-        let store = pin_store().await;
+        let temporary_directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("pin release temporary directory: {error}"));
+        let store = pin_store(&temporary_directory).await;
         let cache = SessionAccountAffinityCache::shared(Duration::from_secs(10));
         let account = account_id("acct_released");
         store
@@ -757,7 +753,9 @@ mod pin_authority_tests {
 
     #[tokio::test]
     async fn losing_release_returns_the_new_active_owner_and_its_version() {
-        let store = pin_store().await;
+        let temporary_directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("pin ownership temporary directory: {error}"));
+        let store = pin_store(&temporary_directory).await;
         let cache = SessionAccountAffinityCache::shared(Duration::from_secs(10));
         let old_account = account_id("acct_old");
         let new_account = account_id("acct_new");

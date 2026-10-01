@@ -21,7 +21,7 @@ use super::ClaudeEdge;
 use super::ClaudeRequestBodyError;
 use super::ErrorBodyEvidence;
 use super::buffer_request_body;
-use super::inspect_response;
+use super::inspect_response as inspect_response_with_task_tracker;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::http_sse::AsyncHttpBodyError;
@@ -32,6 +32,17 @@ use crate::routes::RouteKind;
 use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
+use tokio_util::task::TaskTracker;
+
+async fn inspect_response<TClassifier>(
+    response: AsyncStreamingHttpProxyResponse,
+    classifier: &TClassifier,
+) -> super::PreparedClaudeResponse
+where
+    TClassifier: Fn(u16, &HeaderCollection, ErrorBodyEvidence<'_>) -> AttemptOutcome,
+{
+    inspect_response_with_task_tracker(response, classifier, TaskTracker::new()).await
+}
 
 fn credential() -> ResolvedProviderCredential {
     ResolvedProviderCredential::new(

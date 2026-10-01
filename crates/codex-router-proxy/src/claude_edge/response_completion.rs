@@ -17,6 +17,7 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio_util::task::TaskTracker;
 
 use super::content_encoding::decoder_for_chunks;
 use super::content_encoding::response_content_encodings;
@@ -38,6 +39,7 @@ pub(crate) enum ClaudeResponseCompletion {
 /// Observes completion without collecting the response body or changing its frames.
 pub(crate) fn observe_completion(
     response: AsyncStreamingHttpProxyResponse,
+    task_tracker: TaskTracker,
 ) -> (
     AsyncStreamingHttpProxyResponse,
     oneshot::Receiver<ClaudeResponseCompletion>,
@@ -69,7 +71,7 @@ pub(crate) fn observe_completion(
                 let (compressed_sender, compressed_receiver) = mpsc::channel(1);
                 let (completion_sender, completion_receiver) = oneshot::channel();
                 let decoder = decoder_for_chunks(compressed_receiver, &encodings);
-                tokio::spawn(async move {
+                task_tracker.spawn(async move {
                     let _result =
                         completion_sender.send(observe_decoded_sse_completion(decoder).await);
                 });

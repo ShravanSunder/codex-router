@@ -4,6 +4,7 @@ use bytes::Bytes;
 use codex_router_core::attempt_outcome::AttemptOutcome;
 use codex_router_core::attempt_outcome::TransportFailure;
 use futures_util::future::BoxFuture;
+use tokio_util::task::TaskTracker;
 
 use super::forward::BufferedClaudeRequestBody;
 use super::forward::ErrorBodyEvidence;
@@ -55,6 +56,7 @@ pub(crate) async fn run_at_most_two<TPipeline, TClassifier>(
     first_attempt: TPipeline::Attempt,
     buffered_body: BufferedClaudeRequestBody,
     classifier: &TClassifier,
+    task_tracker: TaskTracker,
 ) -> Result<ClaudeAttemptResult<TPipeline::Attempt>, HttpProxyError>
 where
     TPipeline: ClaudeAttemptPipeline,
@@ -62,7 +64,7 @@ where
 {
     let buffered_body = buffered_body.into_bytes();
     let response = match pipeline.send(&first_attempt, buffered_body.clone()).await {
-        Ok(response) => inspect_response(response, classifier).await,
+        Ok(response) => inspect_response(response, classifier, task_tracker.clone()).await,
         Err(reason) => {
             return Ok(ClaudeAttemptResult {
                 attempt: first_attempt,
@@ -87,7 +89,7 @@ where
         .recover_first(&first_attempt, &first_outcome)
         .await?;
     let response = match pipeline.send(&second_attempt, buffered_body).await {
-        Ok(response) => inspect_response(response, classifier).await,
+        Ok(response) => inspect_response(response, classifier, task_tracker).await,
         Err(reason) => {
             return Ok(ClaudeAttemptResult {
                 attempt: second_attempt,

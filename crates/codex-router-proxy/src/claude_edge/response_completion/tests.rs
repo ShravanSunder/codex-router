@@ -7,11 +7,21 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use super::ClaudeResponseCompletion;
-use super::observe_completion;
+use super::observe_completion as observe_completion_with_task_tracker;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;
 use crate::http_sse::AsyncHttpBodyError;
 use crate::http_sse::AsyncStreamingHttpProxyResponse;
+use tokio_util::task::TaskTracker;
+
+fn observe_completion(
+    response: AsyncStreamingHttpProxyResponse,
+) -> (
+    AsyncStreamingHttpProxyResponse,
+    tokio::sync::oneshot::Receiver<ClaudeResponseCompletion>,
+) {
+    observe_completion_with_task_tracker(response, TaskTracker::new())
+}
 
 fn response(
     sse: bool,
@@ -236,17 +246,21 @@ async fn claude_completion_tracks_compressed_sse_and_forwards_original_bytes() {
         Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
     for encoding in ["gzip", "deflate", "br", "zstd"] {
         let compressed = compress_body(encoding, plaintext.clone()).await;
-        let (response, completion) = observe_completion(AsyncStreamingHttpProxyResponse::new(
-            200,
-            HeaderCollection::new(vec![
-                Header::new("content-type", "text/event-stream"),
-                Header::new("content-encoding", encoding),
-                Header::new("content-length", compressed.len().to_string()),
-            ]),
-            Full::new(compressed.clone())
-                .map_err(|never| -> AsyncHttpBodyError { match never {} })
-                .boxed(),
-        ));
+        let task_tracker = TaskTracker::new();
+        let (response, completion) = observe_completion_with_task_tracker(
+            AsyncStreamingHttpProxyResponse::new(
+                200,
+                HeaderCollection::new(vec![
+                    Header::new("content-type", "text/event-stream"),
+                    Header::new("content-encoding", encoding),
+                    Header::new("content-length", compressed.len().to_string()),
+                ]),
+                Full::new(compressed.clone())
+                    .map_err(|never| -> AsyncHttpBodyError { match never {} })
+                    .boxed(),
+            ),
+            task_tracker.clone(),
+        );
         let (status, headers, body) = response.into_parts();
 
         assert_eq!(status, 200);
@@ -265,6 +279,8 @@ async fn claude_completion_tracks_compressed_sse_and_forwards_original_bytes() {
             ClaudeResponseCompletion::Success,
             "{encoding} response completion"
         );
+        task_tracker.close();
+        task_tracker.wait().await;
     }
 }
 

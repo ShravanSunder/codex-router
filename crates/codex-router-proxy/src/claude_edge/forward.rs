@@ -19,6 +19,7 @@ use hyper::body::Body;
 use hyper::body::Frame;
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tokio_util::task::TaskTracker;
 
 use super::content_encoding::decode_bounded_error_evidence;
 use super::content_encoding::response_content_encodings;
@@ -251,12 +252,13 @@ pub(crate) async fn buffer_request_body(
 pub async fn inspect_response<TClassifier>(
     response: AsyncStreamingHttpProxyResponse,
     classifier: &TClassifier,
+    task_tracker: TaskTracker,
 ) -> PreparedClaudeResponse
 where
     TClassifier: Fn(u16, &HeaderCollection, ErrorBodyEvidence<'_>) -> AttemptOutcome,
 {
     if (200..300).contains(&response.status()) {
-        let (response, completion) = observe_completion(response);
+        let (response, completion) = observe_completion(response, task_tracker);
         return PreparedClaudeResponse {
             response,
             outcome: AttemptOutcome::Success,

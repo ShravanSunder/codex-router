@@ -11,12 +11,35 @@ use http_body_util::BodyExt;
 use http_body_util::Full;
 
 use super::super::forward::BufferedClaudeRequestBody;
+use super::super::forward::ErrorBodyEvidence;
 use super::ClaudeAttemptPipeline;
-use super::run_at_most_two;
+use super::ClaudeAttemptResult;
+use super::run_at_most_two as run_at_most_two_with_task_tracker;
 use crate::headers::HeaderCollection;
 use crate::http_sse::AsyncHttpBodyError;
 use crate::http_sse::AsyncStreamingHttpProxyResponse;
 use crate::http_sse::HttpProxyError;
+use tokio_util::task::TaskTracker;
+
+async fn run_at_most_two<TPipeline, TClassifier>(
+    pipeline: &TPipeline,
+    first_attempt: TPipeline::Attempt,
+    buffered_body: BufferedClaudeRequestBody,
+    classifier: &TClassifier,
+) -> Result<ClaudeAttemptResult<TPipeline::Attempt>, HttpProxyError>
+where
+    TPipeline: ClaudeAttemptPipeline,
+    TClassifier: Fn(u16, &HeaderCollection, ErrorBodyEvidence<'_>) -> AttemptOutcome,
+{
+    run_at_most_two_with_task_tracker(
+        pipeline,
+        first_attempt,
+        buffered_body,
+        classifier,
+        TaskTracker::new(),
+    )
+    .await
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AttemptAuthority {
