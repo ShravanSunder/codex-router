@@ -34,25 +34,31 @@ struct NativeQueueObservation {
 }
 
 #[tokio::test]
-async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResult<()> {
-    let root = tempfile::tempdir_in("/tmp")?;
+async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() {
+    let root = tempfile::tempdir_in("/tmp").expect("fixture temp directory");
     let database = root.path().join("automation.sqlite");
     let store = Arc::new(tokio::sync::Mutex::new(
-        AutomationStore::open(&database).await?,
+        AutomationStore::open(&database)
+            .await
+            .expect("open automation store"),
     ));
     let socket_path = root.path().join("native.sock");
-    let listener = tokio::net::UnixListener::bind(&socket_path)?;
-    let service_identity: UuidIdentity = SERVICE_ID.to_owned().try_into()?;
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind native socket");
+    let service_identity: UuidIdentity = SERVICE_ID
+        .to_owned()
+        .try_into()
+        .expect("valid service identity");
     let generation: CodexGeneration = serde_json::from_value(json!({
         "serviceEpoch": SERVICE_ID,
         "generation": 1
-    }))?;
+    }))
+    .expect("valid Codex generation");
     let target = SessionRef {
         endpoint: EndpointRef {
             service_id: service_identity.clone(),
-            endpoint_id: EndpointId::try_from("codex-local".to_owned())?,
+            endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("valid endpoint id"),
         },
-        session_id: SessionId::try_from(SESSION_ID.to_owned())?,
+        session_id: SessionId::try_from(SESSION_ID.to_owned()).expect("valid session id"),
     };
 
     let mut definitions = serde_json::Map::new();
@@ -72,11 +78,14 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
     }
     let bundle = codex_native_integration::NativeSchemaBundle::from_documents(BTreeMap::from([(
         "codex_app_server_protocol.schemas.json".to_owned(),
-        serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))?,
-    )]))?;
-    let schemas = Arc::new(codex_native_integration::NativePayloadSchemas::from_bundle(
-        &bundle,
-    )?);
+        serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))
+            .expect("serialize native schema bundle"),
+    )]))
+    .expect("build native schema bundle");
+    let schemas = Arc::new(
+        codex_native_integration::NativePayloadSchemas::from_bundle(&bundle)
+            .expect("validate native schemas"),
+    );
     let endpoint_observed_at =
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let description: EndpointDescription = serde_json::from_value(json!({
@@ -90,9 +99,11 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
             "schemaDigest": schemas.schema_digest(),
             "generation": generation
         }]
-    }))?;
+    }))
+    .expect("valid endpoint description");
     let gate = NativeGenerationGate::default();
-    gate.activate(generation, socket_path, Some(schemas))?;
+    gate.activate(generation, socket_path, Some(schemas))
+        .expect("activate native generation");
     let native_backend = NativeControlBackend {
         endpoint: target.endpoint.clone(),
         gate,
@@ -102,7 +113,7 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
     let anchor = chrono::Utc::now();
     let expiry = anchor
         .checked_add_signed(chrono::Duration::seconds(6))
-        .ok_or("wake expiry is out of range")?;
+        .expect("wake expiry is in range");
     let message: SavedMessage = serde_json::from_value(json!({
         "target": target,
         "content": {
@@ -112,7 +123,8 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
         },
         "delivery":"queue",
         "generationGuard":null
-    }))?;
+    }))
+    .expect("valid saved wake message");
     let wake = store
         .lock()
         .await
@@ -123,20 +135,25 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
             expiry: ExpiryRule::At { at: expiry },
             now_ms: anchor.timestamp_millis(),
         })
-        .await?;
+        .await
+        .expect("create recurring wake");
 
     let identity = ServiceIdentity::new(
         SERVICE_ID,
         SERVICE_ID,
         &format!("sha256:{}", "a".repeat(64)),
-    )?
-    .with_machine_identity(MachineIdentity::new(
-        service_identity.clone(),
-        Some("wake-repeating-fixture"),
-    )?)?
-    .with_endpoints(vec![description])?
+    )
+    .expect("create service identity")
+    .with_machine_identity(
+        MachineIdentity::new(service_identity.clone(), Some("wake-repeating-fixture"))
+            .expect("create machine identity"),
+    )
+    .expect("attach machine identity")
+    .with_endpoints(vec![description])
+    .expect("add native endpoint")
     .with_automation_store(Arc::clone(&store))
-    .with_native_backend(native_backend.clone())?;
+    .with_native_backend(native_backend.clone())
+    .expect("add native backend");
     let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
         service_identity,
         identity.endpoint_directory(),
@@ -156,13 +173,21 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
     let shutdown = tokio_util::sync::CancellationToken::new();
     let wake_worker = identity
         .wake_timing_worker()
-        .ok_or("wake timing worker is unavailable")?;
+        .expect("wake timing worker is available");
     let worker = tokio::spawn(wake_worker.run(shutdown.clone()));
     drop(identity);
 
-    let first_delivery = next_native_queue_delivery(&mut observation_receiver).await?;
-    let second_delivery = next_native_queue_delivery(&mut observation_receiver).await?;
-    tokio::time::timeout(Duration::from_secs(2), native_server).await???;
+    let first_delivery = next_native_queue_delivery(&mut observation_receiver)
+        .await
+        .expect("first native queue delivery arrives");
+    let second_delivery = next_native_queue_delivery(&mut observation_receiver)
+        .await
+        .expect("second native queue delivery arrives");
+    tokio::time::timeout(Duration::from_secs(2), native_server)
+        .await
+        .expect("native server exits")
+        .expect("native server task succeeds")
+        .expect("native server handles both deliveries");
 
     let (first_push_id, first_origin) = load_and_validate_stored_wake_push(
         &store,
@@ -170,14 +195,16 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
         &target,
         &wake.definition.wakeup_id,
     )
-    .await?;
+    .await
+    .expect("first push is stored with its wake occurrence");
     let (second_push_id, second_origin) = load_and_validate_stored_wake_push(
         &store,
         &second_delivery,
         &target,
         &wake.definition.wakeup_id,
     )
-    .await?;
+    .await
+    .expect("second push is stored with its wake occurrence");
     assert_ne!(
         first_push_id, second_push_id,
         "each firing needs a fresh PushId"
@@ -197,7 +224,7 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
         },
     ) = (&first_origin, &second_origin)
     else {
-        return Err("stored push did not retain typed Wake origin facts".into());
+        panic!("stored push did not retain typed Wake origin facts");
     };
     assert_ne!(
         first_occurrence, second_occurrence,
@@ -207,13 +234,15 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
     let mut connection = sqlx::SqliteConnection::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new().filename(&database),
     )
-    .await?;
+    .await
+    .expect("open mailbox database for verification");
     let stored_occurrences: Vec<String> = sqlx::query_scalar(
         "SELECT occurrence_id FROM mailbox_deliveries WHERE wakeup_id=? ORDER BY due_at_ms,occurrence_id",
     )
     .bind(wake.definition.wakeup_id.as_str())
     .fetch_all(&mut connection)
-    .await?;
+    .await
+    .expect("load stored wake occurrences");
     let observed_occurrences = HashSet::from([
         String::from(first_occurrence.clone()),
         String::from(second_occurrence.clone()),
@@ -224,14 +253,21 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() -> TestResul
         observed_occurrences,
         "each stored mailbox occurrence must have its own delivered push"
     );
-    connection.close().await?;
+    connection.close().await.expect("close mailbox database");
 
     shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(2), worker).await??;
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .expect("wake worker shuts down")
+        .expect("wake worker task succeeds");
     let owned_store = Arc::try_unwrap(store)
-        .map_err(|_| std::io::Error::other("wake store remained shared after worker shutdown"))?;
-    owned_store.into_inner().close().await?;
-    Ok(())
+        .map_err(|_| std::io::Error::other("wake store remained shared after worker shutdown"))
+        .expect("release wake store after worker shutdown");
+    owned_store
+        .into_inner()
+        .close()
+        .await
+        .expect("close automation store");
 }
 
 async fn next_native_queue_delivery(

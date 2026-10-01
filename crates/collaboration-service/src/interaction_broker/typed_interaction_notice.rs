@@ -428,15 +428,15 @@ fn append_question_field(body: &mut String, field: &QuestionField) {
     if let Some(description) = description {
         body.push_str(&format!("\n  {description}"));
     }
-    if let QuestionField::MultiChoice { min, max, .. } = field {
-        if min.is_some() || max.is_some() {
-            body.push_str("\n  Selection bounds:");
-            if let Some(minimum) = min {
-                body.push_str(&format!(" at least {minimum}"));
-            }
-            if let Some(maximum) = max {
-                body.push_str(&format!(" at most {maximum}"));
-            }
+    if let QuestionField::MultiChoice { min, max, .. } = field
+        && (min.is_some() || max.is_some())
+    {
+        body.push_str("\n  Selection bounds:");
+        if let Some(minimum) = min {
+            body.push_str(&format!(" at least {minimum}"));
+        }
+        if let Some(maximum) = max {
+            body.push_str(&format!(" at most {maximum}"));
         }
     }
     match field {

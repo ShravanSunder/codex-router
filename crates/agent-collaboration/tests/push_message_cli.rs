@@ -20,14 +20,18 @@ const NOTICE_LINE: &str =
 type TestResult<TValue> = Result<TValue, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
-async fn root_show_fetches_a_push_by_link_using_the_harness_identity() -> TestResult<()> {
+async fn root_show_fetches_a_push_by_link_using_the_harness_identity() {
     let (output, request) = invoke_with_reply(
         vec!["show".into(), PUSH_LINK.into(), "--json".into()],
         MockReply::Result(show_result()),
     )
-    .await?;
+    .await
+    .expect("show command completes against the Control fixture");
 
-    assert_eq!(request["method"], "router/show");
+    assert_eq!(
+        request.get("method").and_then(Value::as_str),
+        Some("router/show")
+    );
     assert_eq!(
         request.pointer("/params/reference"),
         Some(&json!(PUSH_LINK))
@@ -43,7 +47,7 @@ async fn root_show_fetches_a_push_by_link_using_the_harness_identity() -> TestRe
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let response: Value = serde_json::from_slice(&output.stdout)?;
+    let response: Value = serde_json::from_slice(&output.stdout).expect("valid show JSON output");
     assert_eq!(
         response.pointer("/result/record/body"),
         Some(&json!("stored body"))
@@ -53,11 +57,10 @@ async fn root_show_fetches_a_push_by_link_using_the_harness_identity() -> TestRe
         Some(&serde_json::Value::Null)
     );
     assert_eq!(response.pointer("/result/link"), Some(&json!(PUSH_LINK)));
-    Ok(())
 }
 
 #[tokio::test]
-async fn show_preserves_a_not_permitted_service_error() -> TestResult<()> {
+async fn show_preserves_a_not_permitted_service_error() {
     let error = json!({
         "code": -32050,
         "message": "Push show rejected",
@@ -71,9 +74,13 @@ async fn show_preserves_a_not_permitted_service_error() -> TestResult<()> {
         vec!["show".into(), PUSH_ID.into(), "--json".into()],
         MockReply::Error(error),
     )
-    .await?;
+    .await
+    .expect("show command completes against the Control fixture");
 
-    assert_eq!(request["method"], "router/show");
+    assert_eq!(
+        request.get("method").and_then(Value::as_str),
+        Some("router/show")
+    );
     assert_eq!(
         request.pointer("/params/caller/sessionId"),
         Some(&json!(CALLER_SESSION_ID))
@@ -85,7 +92,7 @@ async fn show_preserves_a_not_permitted_service_error() -> TestResult<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let response: Value = serde_json::from_slice(&output.stdout)?;
+    let response: Value = serde_json::from_slice(&output.stdout).expect("valid show error JSON");
     assert_eq!(
         response.pointer("/error/serviceKind"),
         Some(&json!("notPermitted"))
@@ -94,26 +101,31 @@ async fn show_preserves_a_not_permitted_service_error() -> TestResult<()> {
         response.pointer("/error/data/kind"),
         Some(&json!("notPermitted"))
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn message_send_reports_the_stored_push_and_uses_the_harness_sender() -> TestResult<()> {
+async fn message_send_reports_the_stored_push_and_uses_the_harness_sender() {
     let target = session_ref(TARGET_SESSION_ID, "claude-local");
     let (output, request) = invoke_with_reply(
         vec![
             "message".into(),
             "send".into(),
             "--to".into(),
-            serde_json::to_string(&target)?.into(),
+            serde_json::to_string(&target)
+                .expect("serialize target SessionRef")
+                .into(),
             "--text".into(),
             "hello recipient".into(),
         ],
         MockReply::Result(send_result(target)),
     )
-    .await?;
+    .await
+    .expect("message send completes against the Control fixture");
 
-    assert_eq!(request["method"], "message/send");
+    assert_eq!(
+        request.get("method").and_then(Value::as_str),
+        Some("message/send")
+    );
     assert_eq!(
         request.pointer("/params/message/sender"),
         Some(&session_ref(CALLER_SESSION_ID, "codex-local"))
@@ -123,67 +135,75 @@ async fn message_send_reports_the_stored_push_and_uses_the_harness_sender() -> T
         Some(&json!("hello recipient"))
     );
     assert_eq!(output.status.code(), Some(0));
-    let stdout = String::from_utf8(output.stdout)?;
+    let stdout = String::from_utf8(output.stdout).expect("CLI stdout is UTF-8");
     for expected in [PUSH_ID, PUSH_LINK, "peer message written", "Claude target"] {
         assert!(stdout.contains(expected), "missing {expected}: {stdout}");
     }
-    Ok(())
 }
 
 #[tokio::test]
-async fn message_inbox_prints_only_the_notice_line() -> TestResult<()> {
+async fn message_inbox_prints_only_the_notice_line() {
     let (output, request) = invoke_with_reply(
         vec!["message".into(), "inbox".into()],
         MockReply::Result(notice_list()),
     )
-    .await?;
+    .await
+    .expect("message inbox completes against the Control fixture");
 
-    assert_eq!(request["method"], "message/inbox");
+    assert_eq!(
+        request.get("method").and_then(Value::as_str),
+        Some("message/inbox")
+    );
     assert_eq!(
         request.pointer("/params/caller"),
         Some(&session_ref(CALLER_SESSION_ID, "codex-local"))
     );
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
-        String::from_utf8(output.stdout)?,
+        String::from_utf8(output.stdout).expect("CLI stdout is UTF-8"),
         format!("{NOTICE_LINE}\n")
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn message_history_uses_the_explicit_session_and_returns_notice_records() -> TestResult<()> {
+async fn message_history_uses_the_explicit_session_and_returns_notice_records() {
     let other_session = session_ref(SENDER_SESSION_ID, "claude-local");
     let (output, request) = invoke_with_reply(
         vec![
             "message".into(),
             "history".into(),
             "--with".into(),
-            serde_json::to_string(&other_session)?.into(),
+            serde_json::to_string(&other_session)
+                .expect("serialize requested SessionRef")
+                .into(),
             "--json".into(),
         ],
         MockReply::Result(notice_list()),
     )
-    .await?;
+    .await
+    .expect("message history completes against the Control fixture");
 
-    assert_eq!(request["method"], "message/history");
+    assert_eq!(
+        request.get("method").and_then(Value::as_str),
+        Some("message/history")
+    );
     assert_eq!(request.pointer("/params/with"), Some(&other_session));
     assert_eq!(
         request.pointer("/params/caller/sessionId"),
         Some(&json!(CALLER_SESSION_ID))
     );
     assert_eq!(output.status.code(), Some(0));
-    let response: Value = serde_json::from_slice(&output.stdout)?;
+    let response: Value =
+        serde_json::from_slice(&output.stdout).expect("valid history JSON output");
     assert_eq!(
         response.pointer("/result/page/records/0/line"),
         Some(&json!(NOTICE_LINE))
     );
     assert!(response.pointer("/result/page/records/0/body").is_none());
-    Ok(())
 }
 
 #[tokio::test]
-async fn message_reply_uses_an_explicit_push_id_and_reports_the_recipient() -> TestResult<()> {
+async fn message_reply_uses_an_explicit_push_id_and_reports_the_recipient() {
     let (output, request) = invoke_with_reply(
         vec![
             "message".into(),
@@ -194,9 +214,13 @@ async fn message_reply_uses_an_explicit_push_id_and_reports_the_recipient() -> T
         ],
         MockReply::Result(reply_result()),
     )
-    .await?;
+    .await
+    .expect("message reply completes against the Control fixture");
 
-    assert_eq!(request["method"], "message/reply");
+    assert_eq!(
+        request.get("method").and_then(Value::as_str),
+        Some("message/reply")
+    );
     assert_eq!(request.pointer("/params/reference"), Some(&json!(PUSH_ID)));
     assert_eq!(request.pointer("/params/text"), Some(&json!("answer text")));
     assert_eq!(
@@ -204,7 +228,7 @@ async fn message_reply_uses_an_explicit_push_id_and_reports_the_recipient() -> T
         Some(&session_ref(CALLER_SESSION_ID, "codex-local"))
     );
     assert_eq!(output.status.code(), Some(0));
-    let response: Value = serde_json::from_slice(&output.stdout)?;
+    let response: Value = serde_json::from_slice(&output.stdout).expect("valid reply JSON output");
     assert_eq!(
         response.pointer("/result/record/pushId"),
         Some(&json!(PUSH_ID))
@@ -217,11 +241,10 @@ async fn message_reply_uses_an_explicit_push_id_and_reports_the_recipient() -> T
         response.pointer("/result/record/targetIdentity"),
         Some(&json!("Claude sender"))
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn message_reply_accepts_a_router_link_reference() -> TestResult<()> {
+async fn message_reply_accepts_a_router_link_reference() {
     let (output, request) = invoke_with_reply(
         vec![
             "message".into(),
@@ -231,28 +254,29 @@ async fn message_reply_accepts_a_router_link_reference() -> TestResult<()> {
         ],
         MockReply::Result(reply_result()),
     )
-    .await?;
+    .await
+    .expect("message reply completes against the Control fixture");
 
     assert_eq!(
         request.pointer("/params/reference"),
         Some(&json!(PUSH_LINK))
     );
     assert_eq!(output.status.code(), Some(0));
-    let stdout = String::from_utf8(output.stdout)?;
+    let stdout = String::from_utf8(output.stdout).expect("CLI stdout is UTF-8");
     assert!(stdout.contains("Claude sender"));
     assert!(stdout.contains(PUSH_ID));
     assert!(stdout.contains(PUSH_LINK));
-    Ok(())
 }
 
 #[test]
-fn message_reply_without_a_reference_returns_syntax_guidance() -> TestResult<()> {
+fn message_reply_without_a_reference_returns_syntax_guidance() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["message", "reply", "--json"])
-        .output()?;
+        .output()
+        .expect("run message reply syntax check");
 
     assert_eq!(output.status.code(), Some(2));
-    let response: Value = serde_json::from_slice(&output.stdout)?;
+    let response: Value = serde_json::from_slice(&output.stdout).expect("valid syntax error JSON");
     assert_eq!(
         response.pointer("/error/kind"),
         Some(&json!("invalidField"))
@@ -274,17 +298,17 @@ fn message_reply_without_a_reference_returns_syntax_guidance() -> TestResult<()>
         message.contains("PUSH_ID_OR_LINK"),
         "missing required syntax: {message}"
     );
-    Ok(())
 }
 
 #[test]
-fn message_history_rejects_an_invalid_session_reference_with_field_guidance() -> TestResult<()> {
+fn message_history_rejects_an_invalid_session_reference_with_field_guidance() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["message", "history", "--with", "not-json", "--json"])
-        .output()?;
+        .output()
+        .expect("run message history argument validation");
 
     assert_eq!(output.status.code(), Some(2));
-    let response: Value = serde_json::from_slice(&output.stdout)?;
+    let response: Value = serde_json::from_slice(&output.stdout).expect("valid history error JSON");
     assert_eq!(
         response.pointer("/error/kind"),
         Some(&json!("invalidField"))
@@ -300,32 +324,32 @@ fn message_history_rejects_an_invalid_session_reference_with_field_guidance() ->
         response.pointer("/error/nextAction"),
         Some(&json!("correctRequest"))
     );
-    Ok(())
 }
 
 #[test]
-fn root_show_help_exposes_the_push_reference_argument() -> TestResult<()> {
+fn root_show_help_exposes_the_push_reference_argument() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["show", "--help"])
-        .output()?;
+        .output()
+        .expect("run show help");
 
     assert!(output.status.success());
-    let help = String::from_utf8(output.stdout)?;
+    let help = String::from_utf8(output.stdout).expect("show help is UTF-8");
     assert!(
         help.contains("PUSH_ID_OR_LINK"),
         "missing push syntax: {help}"
     );
-    Ok(())
 }
 
 #[test]
-fn root_show_without_a_reference_returns_required_syntax() -> TestResult<()> {
+fn root_show_without_a_reference_returns_required_syntax() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["show", "--json"])
-        .output()?;
+        .output()
+        .expect("run show argument validation");
 
     assert_eq!(output.status.code(), Some(2));
-    let response: Value = serde_json::from_slice(&output.stdout)?;
+    let response: Value = serde_json::from_slice(&output.stdout).expect("valid show error JSON");
     assert_eq!(
         response.pointer("/error/kind"),
         Some(&json!("invalidField"))
@@ -339,7 +363,6 @@ fn root_show_without_a_reference_returns_required_syntax() -> TestResult<()> {
         message.contains("PUSH_ID_OR_LINK"),
         "missing required syntax: {message}"
     );
-    Ok(())
 }
 
 #[test]
@@ -408,7 +431,10 @@ async fn serve_control_request(listener: UnixListener, reply: MockReply) -> Test
     let (stream, _) = listener.accept().await?;
     let mut stream = BufReader::new(stream);
     let initialize = read_request(&mut stream).await?;
-    assert_eq!(initialize["method"], "control/initialize");
+    assert_eq!(
+        initialize.get("method").and_then(Value::as_str),
+        Some("control/initialize")
+    );
     let initialize_id = initialize
         .get("id")
         .cloned()

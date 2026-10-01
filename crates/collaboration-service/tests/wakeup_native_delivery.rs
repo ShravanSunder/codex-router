@@ -314,15 +314,20 @@ async fn exercise_delivery(
                     .find(" @")
                     .ok_or("fixture wake line has no machine label")?
                     + 2;
-                let label_end = queued_line[label_start..]
+                let queued_label_suffix = queued_line
+                    .get(label_start..)
+                    .ok_or("fixture wake label starts outside a UTF-8 boundary")?;
+                let label_end = queued_label_suffix
                     .find(" · ")
                     .ok_or("fixture wake line has no label separator")?
                     + label_start;
-                let changed_label = format!(
-                    "{}renamed-machine{}",
-                    &queued_line[..label_start],
-                    &queued_line[label_end..]
-                );
+                let line_prefix = queued_line
+                    .get(..label_start)
+                    .ok_or("fixture wake label prefix ends outside a UTF-8 boundary")?;
+                let line_suffix = queued_line
+                    .get(label_end..)
+                    .ok_or("fixture wake label suffix starts outside a UTF-8 boundary")?;
+                let changed_label = format!("{line_prefix}renamed-machine{line_suffix}");
                 *item
                     .pointer_mut("/input/0/text")
                     .ok_or("fixture input text missing")? = json!(changed_label);

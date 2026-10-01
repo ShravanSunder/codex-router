@@ -68,6 +68,7 @@ pub use native_stdio_bridge::run_native_command;
 mod native_session_commands;
 pub use native_session_commands::run_native_session_command;
 
+#[cfg(test)]
 mod failure_line;
 mod message_commands;
 pub use message_commands::{run_message_command, run_push_record_show_command};

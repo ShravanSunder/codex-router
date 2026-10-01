@@ -36,7 +36,7 @@ impl DurableMessage for Message {
     }
 }
 
-fn saved_message() -> SavedMessage {
+fn saved_message() -> Result<SavedMessage, serde_json::Error> {
     serde_json::from_value(serde_json::json!({
         "target": {
             "endpoint": {
@@ -48,7 +48,6 @@ fn saved_message() -> SavedMessage {
         "content": {"kind":"humanUser", "text":"Check the durable job"},
         "delivery": "queue"
     }))
-    .expect("valid saved message")
 }
 
 fn wake_push_draft(
@@ -194,7 +193,7 @@ async fn wake_push_and_mailbox_commit_atomically_and_recover_the_same_push_after
     let wake = store
         .create_wakeup(&WakeCreate {
             operation_id: OperationId::generate(),
-            message: saved_message(),
+            message: saved_message()?,
             timing: TimingRule::After { seconds: 1 },
             expiry: ExpiryRule::None,
             now_ms: 0,
@@ -250,7 +249,7 @@ async fn failed_wake_push_insert_rolls_back_mailbox_and_firing_state()
     let wake = store
         .create_wakeup(&WakeCreate {
             operation_id: OperationId::generate(),
-            message: saved_message(),
+            message: saved_message()?,
             timing: TimingRule::After { seconds: 1 },
             expiry: ExpiryRule::None,
             now_ms: 0,
@@ -311,7 +310,7 @@ async fn a_later_firing_of_the_same_wake_definition_gets_a_new_push()
     let wake = store
         .create_wakeup(&WakeCreate {
             operation_id: OperationId::generate(),
-            message: saved_message(),
+            message: saved_message()?,
             timing: TimingRule::Interval { seconds: 60 },
             expiry: ExpiryRule::None,
             now_ms: 0,

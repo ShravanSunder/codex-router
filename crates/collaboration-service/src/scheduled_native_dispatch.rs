@@ -130,7 +130,7 @@ pub(crate) async fn dispatch(
     }
     effects.generation = Some(admission.generation().clone());
     effects.submission = SubmissionEffect::Dispatching;
-    effects.client_user_message_id = Some(client_user_message_id.clone().into());
+    effects.client_user_message_id = Some(client_user_message_id.clone());
     effects.cessation = CessationEvidence::Unconfirmed;
     let timing = match sink
         .record(RouteEffectEvidence::CodexAppServer(effects.clone()))

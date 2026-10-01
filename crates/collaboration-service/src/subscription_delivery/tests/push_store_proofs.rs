@@ -176,7 +176,7 @@ async fn successive_selected_activity_batches_store_distinct_canonical_origin_re
             .await
             .select_subscription_notice(
                 &fixture.reader,
-                &[fixture.root.clone()],
+                std::slice::from_ref(&fixture.root),
                 fixture.clock.now(),
             )
             .await

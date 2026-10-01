@@ -44,12 +44,15 @@ type StoredRun = agent_automation::RunRecord<
     crate::stored_run_receipt::StoredRunReceipt,
 >;
 
+type SchedulePushReceipt = (PushDeliveryState, DeliveryReceipt);
+type SchedulePushSettlementContext = Option<(PushId, RouterOriginRef, Option<SchedulePushReceipt>)>;
+
 enum SchedulePushPreparation {
     Ready {
         prepared: crate::layer_zero::PreparedPush,
         origin_router_ref: RouterOriginRef,
     },
-    Recover(PushRecord),
+    Recover(Box<PushRecord>),
 }
 
 #[derive(Clone)]
@@ -267,7 +270,7 @@ impl ScheduledRunWorker {
             record.schedule_id.clone(),
             Some(recorded.clone()),
         );
-        let mut schedule_push_identity = None;
+        let mut schedule_push_identity: SchedulePushSettlementContext = None;
         let payload = match &inputs.execution_configuration.destination {
             ExecutionDestination::OwnedThread { .. } => {
                 let schedule_push = self
@@ -289,7 +292,7 @@ impl ScheduledRunWorker {
                     }
                     SchedulePushPreparation::Recover(push) => {
                         if push.delivery_state == PushDeliveryState::Attempted {
-                            self.recover_schedule_push_attempt(&record, push).await?;
+                            self.recover_schedule_push_attempt(&record, *push).await?;
                         }
                         return Ok(());
                     }
@@ -394,7 +397,7 @@ impl ScheduledRunWorker {
                 return Err(StorageError::InvalidRecord);
             }
             if existing.delivery_state != PushDeliveryState::Pending {
-                return Ok(SchedulePushPreparation::Recover(existing));
+                return Ok(SchedulePushPreparation::Recover(Box::new(existing)));
             }
             let prepared = self.prepared_schedule_push(&existing)?;
             return Ok(SchedulePushPreparation::Ready {
@@ -596,11 +599,7 @@ impl ScheduledRunWorker {
         id: RunId,
         effects: RouteEffectEvidence<SessionRef, CodexGeneration>,
         submission: RunSubmission,
-        schedule_push: Option<(
-            PushId,
-            RouterOriginRef,
-            Option<(PushDeliveryState, DeliveryReceipt)>,
-        )>,
+        schedule_push: SchedulePushSettlementContext,
     ) -> Result<(), StorageError> {
         let (outcome, push_receipt, push_state) = match submission {
             RunSubmission::NotStartedBusy => {

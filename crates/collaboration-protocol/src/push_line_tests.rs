@@ -245,8 +245,8 @@ fn schedule_header_uses_short_typed_ids_without_instruction_text() {
         rendered,
         format!(
             "🗓 Router schedule {} @machine · run {} · \"Inspect the confidential quarterly plan\" · {}",
-            &schedule_id.as_str()[..8],
-            &run_id.as_str()[..8],
+            schedule_id.as_str().chars().take(8).collect::<String>(),
+            run_id.as_str().chars().take(8).collect::<String>(),
             request.link,
         )
     );
@@ -255,8 +255,8 @@ fn schedule_header_uses_short_typed_ids_without_instruction_text() {
         header.title,
         format!(
             "🗓 Router schedule {} @machine · run {}",
-            &schedule_id.as_str()[..8],
-            &run_id.as_str()[..8],
+            schedule_id.as_str().chars().take(8).collect::<String>(),
+            run_id.as_str().chars().take(8).collect::<String>(),
         )
     );
     assert!(!header.title.contains("confidential"));
