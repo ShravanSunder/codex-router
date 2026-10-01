@@ -135,9 +135,13 @@ fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
     let token_store = must_ok(FileSecretStore::open(&secret_root));
     let token_service = LocalRouterTokenService::new(token_store);
     let token_a = must_ok(token_service.load_current());
-    let missing_claude_token_response = send_claude_messages_request(router_port, None);
-    let valid_initial_claude_token_response =
-        send_claude_messages_request(router_port, Some(token_a.token().expose_secret()));
+    let missing_claude_token_response =
+        send_claude_messages_request(router_port, None, "missing-token request");
+    let valid_initial_claude_token_response = send_claude_messages_request(
+        router_port,
+        Some(token_a.token().expose_secret()),
+        "initial-token request",
+    );
 
     let rotate_output = run_cli(
         [
@@ -151,10 +155,21 @@ fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
     );
     let token_b = must_ok(token_service.load_current());
     let reload_observation = token_reload_receiver.recv_timeout(Duration::from_secs(2));
-    let stale_claude_token_response =
-        send_claude_messages_request(router_port, Some(token_a.token().expose_secret()));
-    let rotated_claude_token_response =
-        send_claude_messages_request(router_port, Some(token_b.token().expose_secret()));
+    assert_eq!(
+        reload_observation,
+        Ok(token_b.generation()),
+        "wait for the bounded token-reload event before checking either token"
+    );
+    let stale_claude_token_response = send_claude_messages_request(
+        router_port,
+        Some(token_a.token().expose_secret()),
+        "stale-token request after reload",
+    );
+    let rotated_claude_token_response = send_claude_messages_request(
+        router_port,
+        Some(token_b.token().expose_secret()),
+        "rotated-token request after reload",
+    );
     let codex_response = send_tokenless_loopback_request_with_retry(
         router_port,
         br#"{"model":"gpt-5","serve":true}"#,
@@ -182,7 +197,6 @@ fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
     assert_eq!(rotate_output.stdout, "generation: 2\n");
     assert!(rotate_output.stderr.is_empty());
     assert_eq!(token_b.generation().as_u64(), 2);
-    assert_eq!(reload_observation, Ok(token_b.generation()));
     assert!(
         missing_claude_token_response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
         "Claude admission should require a token: {missing_claude_token_response}"
@@ -414,7 +428,7 @@ fn serve_command_reloads_token_rotation_without_restart() {
     }
 }
 
-fn send_claude_messages_request(port: u16, token: Option<&str>) -> String {
+fn send_claude_messages_request(port: u16, token: Option<&str>, request_case: &str) -> String {
     let body = br#"{"model":"claude-3-5-sonnet","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}"#;
     let mut stream =
         must_ok(TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string()));
@@ -431,19 +445,74 @@ fn send_claude_messages_request(port: u16, token: Option<&str>) -> String {
             .map_err(|error| error.to_string()),
     );
     must_ok(stream.write_all(body).map_err(|error| error.to_string()));
-    must_ok(read_http_response_with_progress(&mut stream))
+    match read_http_response_with_progress(&mut stream) {
+        Ok(response) => response,
+        Err(error) => panic!("Claude {request_case} failed: {error}"),
+    }
 }
 
-fn read_http_response_with_progress(stream: &mut TcpStream) -> Result<String, String> {
+fn read_http_response_with_progress(
+    response_reader: &mut impl std::io::Read,
+) -> Result<String, String> {
     let mut response_bytes = Vec::new();
-    match stream.read_to_end(&mut response_bytes) {
-        Ok(_bytes_read) => String::from_utf8(response_bytes)
-            .map_err(|error| format!("HTTP response should be UTF-8: {error}")),
-        Err(error) => Err(format!(
-            "HTTP response read failed: {error}; {}",
-            describe_http_response_progress(&response_bytes)
-        )),
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match response_reader.read(&mut buffer) {
+            Ok(0) => {
+                if let Some((received_body_bytes, declared_body_bytes)) =
+                    declared_http_response_body_progress(&response_bytes)
+                    && received_body_bytes < declared_body_bytes
+                {
+                    return Err(format!(
+                        "HTTP response ended before its declared body completed; expected {declared_body_bytes} bytes, received {received_body_bytes}; {}",
+                        describe_http_response_progress(&response_bytes)
+                    ));
+                }
+                return response_bytes_to_string(response_bytes);
+            }
+            Ok(read_bytes) => {
+                response_bytes.extend_from_slice(&buffer[..read_bytes]);
+                if declared_http_response_body_is_complete(&response_bytes) {
+                    return response_bytes_to_string(response_bytes);
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "HTTP response read failed: {error}; {}",
+                    describe_http_response_progress(&response_bytes)
+                ));
+            }
+        }
     }
+}
+
+fn response_bytes_to_string(response_bytes: Vec<u8>) -> Result<String, String> {
+    String::from_utf8(response_bytes)
+        .map_err(|error| format!("HTTP response should be UTF-8: {error}"))
+}
+
+fn declared_http_response_body_is_complete(response_bytes: &[u8]) -> bool {
+    declared_http_response_body_progress(response_bytes).is_some_and(
+        |(received_body_bytes, declared_body_bytes)| received_body_bytes >= declared_body_bytes,
+    )
+}
+
+fn declared_http_response_body_progress(response_bytes: &[u8]) -> Option<(usize, usize)> {
+    let header_separator = response_bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?;
+    let headers = String::from_utf8_lossy(&response_bytes[..header_separator]);
+    let declared_body_bytes = headers.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("Content-Length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    })?;
+    let body_start = header_separator + 4;
+    Some((
+        response_bytes.len().saturating_sub(body_start),
+        declared_body_bytes,
+    ))
 }
 
 fn describe_http_response_progress(response_bytes: &[u8]) -> String {
@@ -492,3 +561,7 @@ fn describe_http_response_progress(response_bytes: &[u8]) -> String {
         "status_line={status_line:?}; headers_complete={headers_complete}; declared_body_bytes={declared_body_bytes:?}; received_body_bytes={received_body_bytes}; body_complete={body_complete:?}; response_text={response_text:?}; response_bytes_hex={response_bytes_hex}"
     )
 }
+
+#[cfg(test)]
+#[path = "token_rotation_tests/response_reader_tests.rs"]
+mod response_reader_tests;
