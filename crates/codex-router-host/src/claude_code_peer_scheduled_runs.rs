@@ -4,8 +4,7 @@ use agent_automation::{PeerWriteEffect, RouteEffectEvidence};
 use claude_code_peer_messaging::{PeerSessionLookup, PeerSocketWriteOutcome};
 use collaboration_protocol::{
     CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
-    DeliveryRejection, DeliveryRejectionReason, MessageContent, RunExecution, ScheduleFailureKind,
-    SessionRef,
+    DeliveryRejection, DeliveryRejectionReason, RunExecution, ScheduleFailureKind, SessionRef,
 };
 use collaboration_service::{
     DeliveryContractError, DeliveryFuture, DeliveryPrecondition, FreshSessionRequest,
@@ -13,7 +12,8 @@ use collaboration_service::{
     RunEvidenceSink, RunObservationContext, RunReconciliation, RunSettlement, RunSubmission,
     RunSummarySource, ScheduleCapability, ScheduleDestination, SchedulePreparationFailure,
     SchedulePreparationOutcome, SchedulePreparationRequest, ScheduleSupport, ScheduledRunExecution,
-    ScheduledRunRoute, ScheduledRunSubmission, SettlementEvidence, StopRequestOutcome,
+    ScheduledRunPayload, ScheduledRunRoute, ScheduledRunSubmission, SettlementEvidence,
+    StopRequestOutcome,
 };
 
 impl ClaudeCodePeerDeliveryRoute {
@@ -157,6 +157,12 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, RunSubmission> {
         Box::pin(async move {
+            let prepared = match run.payload {
+                ScheduledRunPayload::Existing { prepared } => prepared,
+                ScheduledRunPayload::Fresh { .. } => {
+                    return Err(DeliveryContractError::ClientOperation);
+                }
+            };
             let RouteEffectEvidence::ClaudeCodePeer(recorded) = &run.recorded else {
                 return Err(DeliveryContractError::InvalidEvidence);
             };
@@ -187,10 +193,6 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
                     ));
                 }
             };
-            let message = MessageContent::Router { text: run.message };
-            let header_context =
-                self.header_context_for_delivery(&run.target, &message, &run.header_context);
-            let rendered = Self::render_peer_message(&run.target, &message, &header_context)?;
             let dispatch = Self::evidence(&peer, PeerWriteEffect::Dispatching)?;
             if matches!(
                 sink.record(dispatch).await?,
@@ -198,7 +200,7 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
             ) {
                 return Ok(RunSubmission::NotStartedBusy);
             }
-            let outcome = self.write_peer_message(&peer, &rendered).await;
+            let outcome = self.write_peer_message(&peer, prepared.line.as_str()).await;
             let (write, result) = match outcome {
                 PeerSocketWriteOutcome::Written => {
                     let written_at = chrono::Utc::now()

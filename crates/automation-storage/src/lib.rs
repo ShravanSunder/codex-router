@@ -66,7 +66,9 @@ mod run_dispatch_state;
 mod run_inspection;
 pub use run_dispatch_state::RunDispatchIntent;
 mod run_submission_outcomes;
-pub use run_submission_outcomes::{RunSubmissionOutcome, RunSubmissionResult};
+pub use run_submission_outcomes::{
+    RunSubmissionOutcome, RunSubmissionResult, ScheduleRunPushUpdate,
+};
 mod run_completion_state;
 pub use run_completion_state::RunCompletion;
 

@@ -3,18 +3,20 @@ use super::ProviderAcpScheduledRuns;
 use crate::provider_acp_session_loading::{
     ProviderSessionLoadOutcome, ensure_provider_session_loaded,
 };
-use crate::{ProviderSessionActivity, external_provider_supervisor::ProviderPromptDispatch};
+use crate::{
+    ProviderSessionActivity,
+    external_provider_supervisor::{ProviderPromptContentsRequest, ProviderPromptDispatch},
+};
 use agent_automation::{RouteEffectEvidence, SubmissionEffect};
 use collaboration_protocol::{
-    ConversationCancelRequest, ConversationPromptRequest, DeliveryClientReceipt,
-    DeliveryNextAction, DeliveryOutcome, DeliveryReceipt, DeliveryRejection,
-    DeliveryRejectionReason, MessageContent, OperationId, ProviderOperationEffect,
-    ProviderOperationStage, RunExecution, SessionReachability, render_message_with_context,
+    ConversationCancelRequest, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome,
+    DeliveryReceipt, DeliveryRejection, DeliveryRejectionReason, OperationId,
+    ProviderOperationEffect, ProviderOperationStage, RunExecution, SessionReachability,
 };
 use collaboration_service::{
     DeliveryContractError, DeliveryPrecondition, LoadPolicy, ProviderConversationBackend,
     RunAcceptance, RunEvidenceDisposition, RunEvidenceSink, RunObservationContext, RunSubmission,
-    ScheduledRunSubmission, StopRequestOutcome,
+    ScheduledRunPayload, ScheduledRunSubmission, StopRequestOutcome,
 };
 
 impl ProviderAcpScheduledRuns {
@@ -25,6 +27,14 @@ impl ProviderAcpScheduledRuns {
     ) -> Result<RunSubmission, DeliveryContractError> {
         let RouteEffectEvidence::ProviderAcp(mut effect) = run.recorded else {
             return Err(DeliveryContractError::InvalidEvidence);
+        };
+        let (prepared_push, task_input, load_policy) = match run.payload {
+            ScheduledRunPayload::Existing { prepared } => {
+                (Some(prepared.clone()), None, prepared.load_policy)
+            }
+            ScheduledRunPayload::Fresh { task_input } => {
+                (None, Some(task_input), LoadPolicy::MayLoad)
+            }
         };
         if effect.target != run.target || run.target.endpoint.service_id != self.service_id {
             return Err(DeliveryContractError::InvalidEvidence);
@@ -66,7 +76,7 @@ impl ProviderAcpScheduledRuns {
                         &self.store,
                         self.ownership.as_ref(),
                         &run.target,
-                        LoadPolicy::MayLoad,
+                        load_policy,
                     )
                     .await,
                     ProviderSessionLoadOutcome::Ready | ProviderSessionLoadOutcome::AlreadyLoaded
@@ -91,9 +101,6 @@ impl ProviderAcpScheduledRuns {
             .await
             .map_err(|_| DeliveryContractError::ClientOperation)?
             .ok_or(DeliveryContractError::ClientOperation)?;
-        let message = MessageContent::Router { text: run.message };
-        render_message_with_context(&run.target, &message, &run.header_context)
-            .map_err(|_| DeliveryContractError::ClientOperation)?;
         let operation_id = Self::operation_id(&effect)?;
         effect.submission = SubmissionEffect::Dispatching;
         let timing = match sink
@@ -108,20 +115,38 @@ impl ProviderAcpScheduledRuns {
             }
             RunEvidenceDisposition::AdmissionRefused => return Ok(RunSubmission::NotStartedBusy),
         };
+        let input_id = match prepared_push.as_ref() {
+            Some(prepared) => {
+                session_event_model::InputId::try_from(prepared.push_id.as_str().to_owned())
+                    .map_err(|_| DeliveryContractError::InvalidEvidence)?
+            }
+            None => session_event_model::InputId::generate(),
+        };
+        let contents = match (prepared_push, task_input) {
+            (Some(prepared), None) => ProviderPromptContentsRequest::from_prepared_push(
+                operation_id.clone(),
+                input_id,
+                run.target.clone(),
+                record.created_by,
+                record.approver,
+                &prepared.line,
+            )?,
+            (None, Some(task_input)) => ProviderPromptContentsRequest {
+                operation_id: operation_id.clone(),
+                input_id,
+                target: run.target.clone(),
+                requested_by: record.created_by,
+                approver: record.approver,
+                contents: vec![
+                    session_event_model::PromptContent::text(task_input.as_str().to_owned())
+                        .map_err(|_| DeliveryContractError::ClientOperation)?,
+                ],
+            },
+            _ => return Err(DeliveryContractError::InvalidEvidence),
+        };
         let submitted = self
             .supervisor
-            .submit_delivery_prompt_with_header_context(
-                ConversationPromptRequest {
-                    input_id: None,
-                    operation_id: operation_id.clone(),
-                    target: run.target.clone(),
-                    generation: Some(binding.generation),
-                    requested_by: record.created_by,
-                    approver: record.approver,
-                    prompt: message,
-                },
-                &run.header_context,
-            )
+            .submit_delivery_prompt_contents(contents)
             .await;
         let result = match submitted {
             Ok(ProviderPromptDispatch::Submitted) => {

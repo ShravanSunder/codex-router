@@ -8,15 +8,16 @@ use codex_router_host::{
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     AutomationConfigureRequest, CodexGeneration, DeliveryOutcome, EndpointId, EndpointRef,
-    InstructionCreateParams, InstructionText, MessageText, OperationId, RunExecution,
+    InstructionCreateParams, InstructionText, MessageText, OperationId, PushId, RunExecution,
     RunShowRequest, RunState, ScheduleCreateRequest, ScheduleEnableRequest, SchedulePrepareRequest,
     SessionId, SessionRef, UuidIdentity, WorkerOutcome,
 };
 use collaboration_service::{
-    DeliveryFuture, DeliveryPrecondition, RunEvidenceDisposition, RunEvidenceSink,
+    DeliveryFuture, DeliveryPrecondition, LoadPolicy, RunEvidenceDisposition, RunEvidenceSink,
     RunObservationContext, RunReconciliation, RunSettlement, RunSubmission, ScheduleCapability,
-    ScheduleDestination, ScheduleSupport, ScheduledRunExecution, ScheduledRunSubmission,
-    SessionDeliveryRoute, SessionDeliveryRouter, SettlementEvidence, StopRequestOutcome,
+    ScheduleDestination, ScheduleSupport, ScheduledRunExecution, ScheduledRunPayload,
+    ScheduledRunSubmission, SessionDeliveryRoute, SessionDeliveryRouter, SettlementEvidence,
+    StopRequestOutcome, layer_zero::PreparedPush,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -167,8 +168,15 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
             ScheduledRunSubmission {
                 run_id: run_id.clone(),
                 target: target.clone(),
-                message: MessageText::try_from("scheduled peer input".to_owned()).expect("input"),
-                header_context: collaboration_protocol::MessageHeaderContext::default(),
+                payload: ScheduledRunPayload::Existing {
+                    prepared: PreparedPush {
+                        push_id: PushId::try_from(uuid::Uuid::now_v7().to_string())
+                            .expect("push id"),
+                        line: MessageText::try_from("scheduled peer input".to_owned())
+                            .expect("input"),
+                        load_policy: LoadPolicy::MayLoad,
+                    },
+                },
                 precondition: DeliveryPrecondition::Unpinned,
                 inputs: inputs.clone(),
                 recorded: initial,

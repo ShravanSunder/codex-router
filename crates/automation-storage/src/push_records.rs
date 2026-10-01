@@ -125,6 +125,24 @@ impl AutomationStore {
             .ok_or(StorageError::PushNotFound)
     }
 
+    pub async fn restore_push_pending_after_not_started(
+        &mut self,
+        push_id: &PushId,
+    ) -> Result<PushRecord, StorageError> {
+        let result = sqlx::query!(
+            "UPDATE router_pushes SET delivery_state='pending',last_outcome_json=NULL,settled_at=NULL WHERE push_id=? AND delivery_state='attempted'",
+            push_id.as_str()
+        )
+        .execute(&mut self.connection)
+        .await?;
+        if result.rows_affected() != 1 {
+            return self.push_transition_error(push_id).await;
+        }
+        self.get_push_record(push_id)
+            .await?
+            .ok_or(StorageError::PushNotFound)
+    }
+
     pub async fn hold_push_record(
         &mut self,
         push_id: &PushId,
@@ -193,6 +211,26 @@ impl AutomationStore {
         .fetch_optional(&mut self.connection)
         .await?;
         row.map(push_record_rows::PushRecordRow::into_record)
+            .transpose()
+    }
+
+    pub async fn get_push_record_by_router_ref(
+        &mut self,
+        origin_router_ref: &str,
+    ) -> Result<Option<PushRecord>, StorageError> {
+        let rows = sqlx::query_as!(
+            push_record_rows::PushRecordRow,
+            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE origin_kind='router' AND origin_router_ref=? ORDER BY created_at,push_id",
+            origin_router_ref
+        )
+        .fetch_all(&mut self.connection)
+        .await?;
+        if rows.len() > 1 {
+            return Err(StorageError::InvalidRecord);
+        }
+        rows.into_iter()
+            .next()
+            .map(push_record_rows::PushRecordRow::into_record)
             .transpose()
     }
 

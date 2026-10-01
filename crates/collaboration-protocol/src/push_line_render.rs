@@ -5,7 +5,6 @@ use crate::session_identity;
 struct DisplayLimits {
     machine_label: usize,
     name: Option<usize>,
-    schedule_name: Option<usize>,
     preview: Option<usize>,
     preview_initial: Option<usize>,
 }
@@ -17,19 +16,16 @@ impl DisplayLimits {
             .body
             .as_ref()
             .map(|_| body_scalars.min(PREVIEW_MAX_SCALARS));
-        let (name, schedule_name) = match (&input.header_facts, &input.origin) {
+        let name = match (&input.header_facts, &input.origin) {
             (
                 PushHeaderFacts::DirectMessage {
                     sender_display_name,
                 },
                 PushOrigin::Session(sender),
-            ) => (
-                Some(
-                    session_identity(sender, sender_display_name.as_ref())
-                        .chars()
-                        .count(),
-                ),
-                None,
+            ) => Some(
+                session_identity(sender, sender_display_name.as_ref())
+                    .chars()
+                    .count(),
             ),
             (
                 PushHeaderFacts::Approval {
@@ -44,23 +40,16 @@ impl DisplayLimits {
                     requester_display_name,
                 },
                 _,
-            ) => (
-                Some(
-                    session_identity(requester, requester_display_name.as_ref())
-                        .chars()
-                        .count(),
-                ),
-                None,
+            ) => Some(
+                session_identity(requester, requester_display_name.as_ref())
+                    .chars()
+                    .count(),
             ),
-            (PushHeaderFacts::ScheduleRun { schedule_name, .. }, _) => {
-                (None, Some(schedule_name.chars().count()))
-            }
-            _ => (None, None),
+            _ => None,
         };
         Self {
             machine_label: machine_label(input).chars().count(),
             name,
-            schedule_name,
             preview,
             preview_initial: preview,
         }
@@ -102,19 +91,14 @@ impl DisplayLimits {
             }
             (
                 PushHeaderFacts::ScheduleRun {
-                    schedule_name,
+                    schedule_id,
                     run_id,
                 },
                 PushOrigin::Router(PushKind::ScheduleRun),
             ) => {
-                let visible_schedule_name = self.schedule_name.unwrap_or_default();
-                let schedule_name = escaped_prefix(
-                    schedule_name,
-                    visible_schedule_name,
-                    visible_schedule_name < schedule_name.chars().count(),
-                );
-                let run_prefix: String = run_id.chars().take(8).collect();
-                format!("🗓 Router schedule \"{schedule_name}\" @{machine_label} · run {run_prefix}")
+                let schedule_prefix: String = schedule_id.as_str().chars().take(8).collect();
+                let run_prefix: String = run_id.as_str().chars().take(8).collect();
+                format!("🗓 Router schedule {schedule_prefix} @{machine_label} · run {run_prefix}")
             }
             (
                 PushHeaderFacts::Approval {
@@ -203,7 +187,6 @@ impl DisplayLimits {
         match field {
             DisplayField::MachineLabel => Some(&mut self.machine_label),
             DisplayField::Name => self.name.as_mut(),
-            DisplayField::ScheduleName => self.schedule_name.as_mut(),
             DisplayField::Preview => self.preview.as_mut(),
         }
     }
@@ -213,7 +196,6 @@ impl DisplayLimits {
 enum DisplayField {
     MachineLabel,
     Name,
-    ScheduleName,
     Preview,
 }
 
@@ -285,12 +267,6 @@ fn validate_input(input: &PushLineInput) -> Result<(), PushLineError> {
     }
 
     match &input.header_facts {
-        PushHeaderFacts::ScheduleRun {
-            schedule_name,
-            run_id,
-        } if schedule_name.trim().is_empty() || UuidIdentity::try_from(run_id.clone()).is_err() => {
-            return Err(PushLineError::InvalidHeaderFacts);
-        }
         PushHeaderFacts::SubscriptionActivity {
             root_count,
             held_since,
@@ -357,7 +333,6 @@ pub fn render_push_line(input: &PushLineInput) -> Result<String, PushLineError> 
     for field in [
         DisplayField::MachineLabel,
         DisplayField::Name,
-        DisplayField::ScheduleName,
         DisplayField::Preview,
     ] {
         if line.len() <= MAX_PUSH_LINE_BYTES {

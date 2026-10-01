@@ -1,12 +1,12 @@
 use agent_automation::{RouteEffectEvidence, SubmissionEffect};
 use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageContent,
-    MessageDelivery, MessageHeaderContext, SessionRef, UuidIdentity,
+    MessageDelivery, MessageHeaderContext, MessageText, PushId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, CodexAppServerDeliveryRoute, DeliveryClientReceipt, DeliveryFuture,
-    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, NativeControlBackend,
-    NativeGenerationGate, SessionDeliveryRoute,
+    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, LoadPolicy, NativeControlBackend,
+    NativeGenerationGate, ScheduledRunPayload, SessionDeliveryRoute, layer_zero::PreparedPush,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -452,8 +452,13 @@ async fn exercise_held_empty_thread(
                 collaboration_service::ScheduledRunSubmission {
                     run_id,
                     target: target.clone(),
-                    message: "scheduled hello".to_owned().try_into()?,
-                    header_context: collaboration_protocol::MessageHeaderContext::default(),
+                    payload: ScheduledRunPayload::Existing {
+                        prepared: PreparedPush {
+                            push_id: PushId::try_from(uuid::Uuid::now_v7().to_string())?,
+                            line: MessageText::try_from("scheduled hello".to_owned())?,
+                            load_policy: LoadPolicy::MayLoad,
+                        },
+                    },
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs,
                     recorded: prepared.evidence,

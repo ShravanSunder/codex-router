@@ -5,6 +5,7 @@ use crate::{
         PushLineInput, PushOrigin, RouterLink, parse_push_line_header, render_push_line,
     },
 };
+use agent_automation::{RunId, ScheduleId};
 
 const MACHINE_ID: &str = "018f47d2-24d5-7a68-b9ec-6f759c39458f";
 const PUSH_ID: &str = "018f47d2-24d5-7a68-b9ec-6f759c39458f";
@@ -169,8 +170,8 @@ fn every_push_kind_renders_as_one_bounded_line_with_a_complete_link() {
         line_input(
             PushOrigin::Router(PushKind::ScheduleRun),
             PushHeaderFacts::ScheduleRun {
-                schedule_name: "Daily review".to_owned(),
-                run_id: "018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned(),
+                schedule_id: ScheduleId::generate(),
+                run_id: RunId::generate(),
             },
             Some("schedule instruction".to_owned()),
             "machine",
@@ -221,6 +222,44 @@ fn every_push_kind_renders_as_one_bounded_line_with_a_complete_link() {
         assert_eq!(rendered.lines().count(), 1);
         assert!(rendered.ends_with(&request.link.to_string()));
     }
+}
+
+#[test]
+fn schedule_header_uses_short_typed_ids_without_instruction_text() {
+    let schedule_id = ScheduleId::generate();
+    let run_id = RunId::generate();
+    let request = line_input(
+        PushOrigin::Router(PushKind::ScheduleRun),
+        PushHeaderFacts::ScheduleRun {
+            schedule_id: schedule_id.clone(),
+            run_id: run_id.clone(),
+        },
+        Some("Inspect the confidential quarterly plan".to_owned()),
+        "machine",
+    );
+
+    let rendered = render_push_line(&request).expect("scheduled push line");
+    let header = parse_push_line_header(&rendered).expect("scheduled push title");
+
+    assert_eq!(
+        rendered,
+        format!(
+            "🗓 Router schedule {} @machine · run {} · \"Inspect the confidential quarterly plan\" · {}",
+            &schedule_id.as_str()[..8],
+            &run_id.as_str()[..8],
+            request.link,
+        )
+    );
+    assert_eq!(header.kind, PushKind::ScheduleRun);
+    assert_eq!(
+        header.title,
+        format!(
+            "🗓 Router schedule {} @machine · run {}",
+            &schedule_id.as_str()[..8],
+            &run_id.as_str()[..8],
+        )
+    );
+    assert!(!header.title.contains("confidential"));
 }
 
 #[test]

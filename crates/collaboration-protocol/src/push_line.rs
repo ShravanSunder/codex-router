@@ -1,6 +1,7 @@
 //! Stored push identities and the one-line Router delivery format.
 
 use crate::{SessionDisplayName, SessionRef, UuidIdentity};
+use agent_automation::{RunId, ScheduleId};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, fmt};
@@ -212,8 +213,8 @@ pub enum PushHeaderFacts {
     },
     Wake,
     ScheduleRun {
-        schedule_name: String,
-        run_id: String,
+        schedule_id: ScheduleId,
+        run_id: RunId,
     },
     Approval {
         requester: SessionRef,

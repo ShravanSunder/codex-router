@@ -17,6 +17,7 @@ impl ScheduleTimingWorker {
         backend: Option<crate::NativeControlBackend>,
         configuration: crate::AutomationConfigurationHandle,
         display_names: crate::SessionDisplayNameCache,
+        machine_identity: crate::MachineIdentity,
     ) -> Self {
         Self {
             store: Arc::clone(&store),
@@ -26,6 +27,7 @@ impl ScheduleTimingWorker {
                 backend,
                 configuration,
                 display_names,
+                machine_identity,
             },
         }
     }

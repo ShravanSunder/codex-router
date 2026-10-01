@@ -176,6 +176,33 @@ async fn exercise_delivery(
             &sqlx::sqlite::SqliteConnectOptions::new().filename(&backend_database),
         )
         .await?;
+        let stored_push: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT push_id,body FROM router_pushes WHERE target_service_id=? AND target_endpoint_id=? AND target_session_id=?",
+        )
+        .bind(service_id)
+        .bind("codex-local")
+        .bind("fixture-new-target")
+        .fetch_optional(&mut evidence_connection)
+        .await?;
+        let Some((push_id, Some(body))) = stored_push else {
+            return Err("old wake firing reached native delivery without a stored push".into());
+        };
+        let delivered_line = queued
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str)
+            .ok_or("wake delivery line missing")?;
+        let expected_link = format!("router://{service_id}/push/{push_id}");
+        if body != "A durable finding"
+            || queued
+                .pointer("/params/clientUserMessageId")
+                .and_then(Value::as_str)
+                != Some(push_id.as_str())
+            || !delivered_line.starts_with("⏰ Router wake @")
+            || delivered_line.contains('\n')
+            || !delivered_line.contains(&expected_link)
+        {
+            return Err("wake did not deliver the stored Router push id and line".into());
+        }
         let evidence:String=sqlx::query_scalar("SELECT latest_attempt_json FROM mailbox_deliveries WHERE delivery_status='dispatching'").fetch_one(&mut evidence_connection).await?;
         let evidence: Value = serde_json::from_str(&evidence)?;
         if evidence

@@ -1,5 +1,6 @@
 //! A fake execution route drives provider and peer runs through stored Control inspection.
 use super::*;
+use crate::scheduled_run_contract::ScheduledRunPayload;
 use crate::{
     DeliveryFuture, FreshSessionRequest, PreparationEvidenceSink, PreparedTarget, RunAcceptance,
     RunEvidenceDisposition, RunEvidenceSink, RunReconciliation, RunSettlement, RunSubmission,
@@ -16,7 +17,8 @@ use automation_storage::ScheduleCreate;
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt, DeliveryRejection,
-    DeliveryRejectionReason, DeliveryRouteEvidence, RunShowRequest, SessionReachability,
+    DeliveryRejectionReason, DeliveryRouteEvidence, PushDeliveryState, PushKind, RunShowRequest,
+    SessionReachability, parse_push_line_header,
 };
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,6 +35,7 @@ enum FakeRouteKind {
 enum FakeSubmissionPlan {
     Accept,
     Reject,
+    RejectOnceThenAccept,
     Unknown,
 }
 
@@ -48,6 +51,8 @@ enum FakeSettlementPlan {
 struct FakeScheduledExecution {
     kind: FakeRouteKind,
     target: SessionRef,
+    store: Arc<Mutex<AutomationStore>>,
+    observed_push_ids: Arc<std::sync::Mutex<Vec<PushId>>>,
     generation: CodexGeneration,
     attempt_id: AttemptId,
     submissions: AtomicUsize,
@@ -198,7 +203,47 @@ impl ScheduledRunExecution for FakeScheduledExecution {
             if run.target != self.target {
                 return Err(DeliveryContractError::InvalidEvidence);
             }
-            if self.submissions.fetch_add(1, Ordering::SeqCst) == 0 {
+            let ScheduledRunPayload::Existing { prepared } = run.payload else {
+                return Err(DeliveryContractError::InvalidEvidence);
+            };
+            if prepared.push_id.as_str() == run.run_id.as_str()
+                || parse_push_line_header(prepared.line.as_str())
+                    .is_none_or(|header| header.kind != PushKind::ScheduleRun)
+            {
+                return Err(DeliveryContractError::InvalidEvidence);
+            }
+            let stored_schedule_push = self
+                .store
+                .lock()
+                .await
+                .get_push_record(&prepared.push_id)
+                .await
+                .map_err(|_| DeliveryContractError::EvidencePersistence)?
+                .ok_or(DeliveryContractError::InvalidEvidence)?;
+            if stored_schedule_push.kind != PushKind::ScheduleRun
+                || stored_schedule_push.target != run.target
+                || stored_schedule_push.delivery_state != PushDeliveryState::Attempted
+                || stored_schedule_push.origin_router_ref.is_none()
+                || stored_schedule_push.body.as_deref()
+                    != Some(run.inputs.instruction_text.as_str())
+            {
+                return Err(DeliveryContractError::InvalidEvidence);
+            }
+            {
+                let mut observed_push_ids = self
+                    .observed_push_ids
+                    .lock()
+                    .map_err(|_| DeliveryContractError::InvalidEvidence)?;
+                if observed_push_ids
+                    .first()
+                    .is_some_and(|first_push_id| first_push_id != &prepared.push_id)
+                {
+                    return Err(DeliveryContractError::InvalidEvidence);
+                }
+                observed_push_ids.push(prepared.push_id.clone());
+            }
+            let submission_attempt = self.submissions.fetch_add(1, Ordering::SeqCst);
+            if submission_attempt == 0 {
                 return Ok(RunSubmission::NotStartedBusy);
             }
             let mut evidence = run.recorded;
@@ -217,8 +262,8 @@ impl ScheduledRunExecution for FakeScheduledExecution {
                 } => timing,
                 _ => return Err(DeliveryContractError::InvalidEvidence),
             };
-            match self.submission_plan {
-                FakeSubmissionPlan::Reject => {
+            match (self.submission_plan, submission_attempt) {
+                (FakeSubmissionPlan::Reject, _) | (FakeSubmissionPlan::RejectOnceThenAccept, 1) => {
                     if let RouteEffectEvidence::ProviderAcp(provider) = &mut evidence {
                         provider.submission = SubmissionEffect::Rejected;
                     }
@@ -230,14 +275,15 @@ impl ScheduledRunExecution for FakeScheduledExecution {
                         detail: Some("fixture rejection".into()),
                     }));
                 }
-                FakeSubmissionPlan::Unknown => {
+                (FakeSubmissionPlan::Unknown, _) => {
                     if let RouteEffectEvidence::ProviderAcp(provider) = &mut evidence {
                         provider.submission = SubmissionEffect::Unknown;
                     }
                     sink.record(evidence).await?;
                     return Ok(RunSubmission::Unknown);
                 }
-                FakeSubmissionPlan::Accept => {}
+                (FakeSubmissionPlan::Accept, _) | (FakeSubmissionPlan::RejectOnceThenAccept, _) => {
+                }
             }
             let started_at = crate::wakeup_projection::timestamp(timing.dispatch_started_at_ms)
                 .map_err(|_| DeliveryContractError::InvalidEvidence)?;
@@ -336,6 +382,7 @@ async fn provider_worker_fixture(
     Arc<Mutex<AutomationStore>>,
     ScheduledRunWorker,
     RunId,
+    Arc<std::sync::Mutex<Vec<PushId>>>,
 )> {
     let root = std::env::temp_dir().join(format!(
         "provider-worker-{}",
@@ -352,9 +399,12 @@ async fn provider_worker_fixture(
     }))?;
     let generation: CodexGeneration =
         serde_json::from_value(json!({"serviceEpoch":service,"generation":1}))?;
+    let observed_push_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
     let fake: Arc<dyn ScheduledRunExecution> = Arc::new(FakeScheduledExecution {
         kind: FakeRouteKind::Provider,
         target: target.clone(),
+        store: Arc::clone(&store),
+        observed_push_ids: Arc::clone(&observed_push_ids),
         generation,
         attempt_id: AttemptId::generate(),
         submissions: AtomicUsize::new(0),
@@ -408,8 +458,12 @@ async fn provider_worker_fixture(
         backend: None,
         configuration: crate::AutomationConfigurationHandle::default(),
         display_names: crate::SessionDisplayNameCache::default(),
+        machine_identity: crate::MachineIdentity::new(
+            service.to_owned().try_into()?,
+            Some("Schedule Fixture"),
+        )?,
     };
-    Ok((root, store, worker, run_id))
+    Ok((root, store, worker, run_id, observed_push_ids))
 }
 
 #[tokio::test]
@@ -453,7 +507,8 @@ async fn fake_provider_submission_and_settlement_variants_preserve_run_state() -
         ),
     ];
     for (submission, settlement, expected_phase, expected_error) in cases {
-        let (root, store, worker, run_id) = provider_worker_fixture(submission, settlement).await?;
+        let (root, store, worker, run_id, observed_push_ids) =
+            provider_worker_fixture(submission, settlement).await?;
         worker.step(run_id.clone()).await?;
         worker.step(run_id.clone()).await?;
         let busy = store
@@ -486,6 +541,46 @@ async fn fake_provider_submission_and_settlement_variants_preserve_run_state() -
                 settled.phase
             )
             .into());
+        }
+        let observed_push_ids = observed_push_ids
+            .lock()
+            .map_err(|_| "scheduled push id observation lock poisoned")?
+            .clone();
+        if observed_push_ids.len() != 2 || observed_push_ids[0] != observed_push_ids[1] {
+            return Err("schedule retry did not reuse the same push id".into());
+        }
+        let push = store
+            .lock()
+            .await
+            .get_push_record(&observed_push_ids[0])
+            .await?
+            .ok_or("scheduled push record missing")?;
+        let (expected_push_state, expected_push_outcome) = match submission {
+            FakeSubmissionPlan::Reject => (
+                PushDeliveryState::Pending,
+                Some(DeliveryOutcome::Rejected(DeliveryRejection {
+                    reason: DeliveryRejectionReason::Busy,
+                    next_action: DeliveryNextAction::RetryLater,
+                    client_code: None,
+                    detail: Some("fixture rejection".into()),
+                })),
+            ),
+            FakeSubmissionPlan::Unknown => (
+                PushDeliveryState::OutcomeUnknown,
+                Some(DeliveryOutcome::Unknown),
+            ),
+            FakeSubmissionPlan::Accept | FakeSubmissionPlan::RejectOnceThenAccept => {
+                (PushDeliveryState::Delivered, Some(DeliveryOutcome::Started))
+            }
+        };
+        if push.delivery_state != expected_push_state
+            || push
+                .last_outcome
+                .as_ref()
+                .map(|receipt| receipt.outcome.clone())
+                != expected_push_outcome
+        {
+            return Err("scheduled push outcome did not match the run submission".into());
         }
         if matches!(submission, FakeSubmissionPlan::Reject) && settled.evidence.timing.is_some() {
             return Err("known rejection retained an execution budget".into());
@@ -521,6 +616,90 @@ async fn fake_provider_submission_and_settlement_variants_preserve_run_state() -
 }
 
 #[tokio::test]
+async fn rejected_schedule_push_retries_on_the_same_id_before_delivery() -> TestResult<()> {
+    let (root, store, worker, run_id, observed_push_ids) = provider_worker_fixture(
+        FakeSubmissionPlan::RejectOnceThenAccept,
+        FakeSettlementPlan::Pending,
+    )
+    .await?;
+    worker.step(run_id.clone()).await?;
+    worker.step(run_id.clone()).await?;
+    worker.step(run_id.clone()).await?;
+
+    let first_attempt_ids = observed_push_ids
+        .lock()
+        .map_err(|_| "scheduled push id observation lock poisoned")?
+        .clone();
+    if first_attempt_ids.len() != 2 || first_attempt_ids[0] != first_attempt_ids[1] {
+        return Err("known rejection did not retain its original schedule push id".into());
+    }
+    let rejected_push = store
+        .lock()
+        .await
+        .get_push_record(&first_attempt_ids[0])
+        .await?
+        .ok_or("rejected schedule push missing")?;
+    if rejected_push.delivery_state != PushDeliveryState::Pending
+        || !matches!(
+            rejected_push
+                .last_outcome
+                .as_ref()
+                .map(|receipt| &receipt.outcome),
+            Some(DeliveryOutcome::Rejected(_))
+        )
+        || rejected_push.settled_at.is_none()
+    {
+        return Err("known rejection was not retained on a retryable pending push".into());
+    }
+
+    worker.step(run_id.clone()).await?;
+    let accepted_run = store
+        .lock()
+        .await
+        .read_run::<SessionRef, EndpointRef, CodexGeneration, crate::stored_run_receipt::StoredRunReceipt>(&run_id)
+        .await?;
+    if accepted_run.phase != RunPhase::Executing {
+        return Err("known rejection retry did not advance the Run after acceptance".into());
+    }
+    let all_attempt_ids = observed_push_ids
+        .lock()
+        .map_err(|_| "scheduled push id observation lock poisoned")?
+        .clone();
+    if all_attempt_ids.len() != 3
+        || all_attempt_ids
+            .iter()
+            .any(|push_id| push_id != &first_attempt_ids[0])
+    {
+        return Err("schedule retry created or dispatched a second push id".into());
+    }
+    let delivered_push = store
+        .lock()
+        .await
+        .get_push_record(&first_attempt_ids[0])
+        .await?
+        .ok_or("delivered schedule push missing")?;
+    if delivered_push.delivery_state != PushDeliveryState::Delivered
+        || !matches!(
+            delivered_push
+                .last_outcome
+                .as_ref()
+                .map(|receipt| &receipt.outcome),
+            Some(DeliveryOutcome::Started)
+        )
+    {
+        return Err("schedule push did not settle delivered after its retry".into());
+    }
+    drop(worker);
+    let store = Arc::try_unwrap(store).map_err(|_| "store still referenced")?;
+    store.into_inner().close().await?;
+    for entry in std::fs::read_dir(&root)? {
+        std::fs::remove_file(entry?.path())?;
+    }
+    std::fs::remove_dir(root)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_and_peer_routes_drive_run_show_without_native_turns() -> TestResult<()> {
     for kind in [FakeRouteKind::Provider, FakeRouteKind::Peer] {
         let route_name = match kind {
@@ -545,6 +724,8 @@ async fn provider_and_peer_routes_drive_run_show_without_native_turns() -> TestR
         let fake: Arc<dyn ScheduledRunExecution> = Arc::new(FakeScheduledExecution {
             kind,
             target: target.clone(),
+            store: Arc::clone(&store),
+            observed_push_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
             generation,
             attempt_id: AttemptId::generate(),
             submissions: AtomicUsize::new(0),
@@ -598,6 +779,10 @@ async fn provider_and_peer_routes_drive_run_show_without_native_turns() -> TestR
             backend: None,
             configuration: crate::AutomationConfigurationHandle::default(),
             display_names: crate::SessionDisplayNameCache::default(),
+            machine_identity: crate::MachineIdentity::new(
+                target.endpoint.service_id.clone(),
+                Some("Schedule Fixture"),
+            )?,
         };
         for stage in 0..3 {
             if let Err(error) = worker.step(run_id.clone()).await {
@@ -680,6 +865,8 @@ async fn provider_existing_preparation_is_inspectable_and_fresh_activation_is_re
     let fake: Arc<dyn ScheduledRunExecution> = Arc::new(FakeScheduledExecution {
         kind: FakeRouteKind::Provider,
         target: target.clone(),
+        store: Arc::clone(&store),
+        observed_push_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
         generation,
         attempt_id: AttemptId::generate(),
         submissions: AtomicUsize::new(0),

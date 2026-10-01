@@ -97,8 +97,8 @@ pub use scheduled_run_contract::{
     RunEvidenceDisposition, RunEvidenceSink, RunObservationContext, RunReconciliation,
     RunSettlement, RunSubmission, RunSummarySource, ScheduleCapability, ScheduleDestination,
     SchedulePreparationFailure, SchedulePreparationOutcome, SchedulePreparationRequest,
-    ScheduleSupport, ScheduledRunExecution, ScheduledRunRoute, ScheduledRunSubmission,
-    SettlementEvidence, StopRequestOutcome,
+    ScheduleSupport, ScheduledRunExecution, ScheduledRunPayload, ScheduledRunRoute,
+    ScheduledRunSubmission, SettlementEvidence, StopRequestOutcome,
 };
 pub use session_command_port::{
     CommandContent, CommandFailure, CommandFuture, CreateSessionCommand, PromptSessionCommand,

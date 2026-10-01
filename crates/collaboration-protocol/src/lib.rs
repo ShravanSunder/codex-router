@@ -94,6 +94,7 @@ mod push_line;
 #[path = "push_line_tests.rs"]
 mod push_line_tests;
 mod push_record;
+mod router_origin_ref;
 mod session_delivery_outcome;
 pub use delivery_rejection::{DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason};
 mod session_delivery_receipt;
@@ -138,6 +139,7 @@ pub use push_record::{
     PushRecordListResult, PushRecordNotice, PushRecordShowParams, PushRecordShowResult,
     PushRecordValidationError,
 };
+pub use router_origin_ref::{InteractionId, InteractionPresentationId, RouterOriginRef};
 mod control_initialization;
 mod endpoint_inventory;
 pub use control_initialization::{

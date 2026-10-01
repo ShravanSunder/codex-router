@@ -16,16 +16,17 @@ use collaboration_protocol::{
     PositiveSeconds, ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities,
     ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy, ProviderRuntimeIdentity,
-    ProviderTransport, ProviderWorkingDirectory, RouterAccess, RunExecution, SessionId, SessionRef,
-    UuidIdentity,
+    ProviderTransport, ProviderWorkingDirectory, PushId, RouterAccess, RunExecution, SessionId,
+    SessionRef, UuidIdentity,
 };
 use collaboration_service::{
-    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, EndpointDirectory,
+    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, EndpointDirectory, LoadPolicy,
     PreparationEvidenceSink, PreparedTarget, ProviderConversationBackend, ProviderOperationStore,
     ProviderSessionRecord, RunEvidenceDisposition, RunEvidenceSink, RunObservationContext,
     RunReconciliation, RunSettlement, RunSubmission, ScheduleCapability, ScheduleDestination,
     SchedulePreparationOutcome, SchedulePreparationRequest, ScheduleSupport, ScheduledRunExecution,
-    ScheduledRunSubmission, SessionDeliveryRoute, SessionDeliveryRouter, SettlementEvidence,
+    ScheduledRunPayload, ScheduledRunSubmission, SessionDeliveryRoute, SessionDeliveryRouter,
+    SettlementEvidence, layer_zero::PreparedPush,
 };
 use serde_json::json;
 use std::{
@@ -102,7 +103,10 @@ impl PreparationEvidenceSink for RecordedPreparationIntent {
     }
 }
 
-fn fixture_launch(event_socket: &Path) -> ExternalProviderLaunch {
+fn fixture_launch(
+    event_socket: &Path,
+    expected_scheduled_input_id: &str,
+) -> ExternalProviderLaunch {
     let script = format!(
         r#"
 import json,socket,sys
@@ -120,6 +124,7 @@ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
 print(json.dumps({{'jsonrpc':'2.0','id':active['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 scheduled=json.loads(sys.stdin.readline())
 assert scheduled['method']=='session/prompt'
+assert scheduled['params']['inputId']=={:?}
 print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'scheduled-session','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'provider summary text'}}}}}}}})); sys.stdout.flush()
 print(json.dumps({{'jsonrpc':'2.0','id':scheduled['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 cancelled=json.loads(sys.stdin.readline())
@@ -140,7 +145,8 @@ cancel=json.loads(sys.stdin.readline())
 assert cancel['method']=='session/cancel'
 sys.stdin.read()
 "#,
-        event_socket.display().to_string()
+        event_socket.display().to_string(),
+        expected_scheduled_input_id
     );
     ExternalProviderLaunch {
         persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
@@ -154,6 +160,7 @@ sys.stdin.read()
 async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     let root = tempfile::tempdir().expect("fixture root");
     let event_socket = root.path().join("active.sock");
+    let push_id = PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("scheduled push");
     let listener = tokio::net::UnixListener::bind(&event_socket).expect("active event listener");
     let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())
         .expect("service ID");
@@ -200,9 +207,10 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
         generation: generation.clone(),
         capabilities: capabilities.clone(),
     };
-    let runtime = ExternalProviderRuntime::initialize(fixture_launch(&event_socket))
-        .await
-        .expect("runtime");
+    let runtime =
+        ExternalProviderRuntime::initialize(fixture_launch(&event_socket, push_id.as_str()))
+            .await
+            .expect("runtime");
     runtime
         .create_session(PathBuf::from("/tmp"))
         .await
@@ -364,8 +372,13 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     let run = ScheduledRunSubmission {
         run_id: run_id.clone(),
         target: target.clone(),
-        message: MessageText::try_from("scheduled input".to_owned()).expect("message"),
-        header_context: collaboration_protocol::MessageHeaderContext::default(),
+        payload: ScheduledRunPayload::Existing {
+            prepared: PreparedPush {
+                push_id: push_id.clone(),
+                line: MessageText::try_from("scheduled input".to_owned()).expect("message"),
+                load_policy: LoadPolicy::MayLoad,
+            },
+        },
         precondition: DeliveryPrecondition::Unpinned,
         inputs: inputs.clone(),
         recorded: prepared.evidence,
@@ -511,9 +524,15 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
             ScheduledRunSubmission {
                 run_id: stop_run_id.clone(),
                 target: target.clone(),
-                message: MessageText::try_from("cancel scheduled input".to_owned())
-                    .expect("cancel input"),
-                header_context: collaboration_protocol::MessageHeaderContext::default(),
+                payload: ScheduledRunPayload::Existing {
+                    prepared: PreparedPush {
+                        push_id: PushId::try_from(uuid::Uuid::now_v7().to_string())
+                            .expect("push id"),
+                        line: MessageText::try_from("cancel scheduled input".to_owned())
+                            .expect("cancel input"),
+                        load_policy: LoadPolicy::MayLoad,
+                    },
+                },
                 precondition: DeliveryPrecondition::Unpinned,
                 inputs: next_inputs.clone(),
                 recorded: prepared_stop.evidence,
@@ -570,9 +589,15 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
                 ScheduledRunSubmission {
                     run_id: refused_run_id.clone(),
                     target: target.clone(),
-                    message: MessageText::try_from("refuse scheduled input".to_owned())
-                        .expect("refusal input"),
-                    header_context: collaboration_protocol::MessageHeaderContext::default(),
+                    payload: ScheduledRunPayload::Existing {
+                        prepared: PreparedPush {
+                            push_id: PushId::try_from(uuid::Uuid::now_v7().to_string())
+                                .expect("push id"),
+                            line: MessageText::try_from("refuse scheduled input".to_owned())
+                                .expect("refusal input"),
+                            load_policy: LoadPolicy::MayLoad,
+                        },
+                    },
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs: next_inputs.clone(),
                     recorded: prepared_refused.evidence,
@@ -657,9 +682,15 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
                 ScheduledRunSubmission {
                     run_id: pending_run_id.clone(),
                     target,
-                    message: MessageText::try_from("never settled".to_owned())
-                        .expect("pending input"),
-                    header_context: collaboration_protocol::MessageHeaderContext::default(),
+                    payload: ScheduledRunPayload::Existing {
+                        prepared: PreparedPush {
+                            push_id: PushId::try_from(uuid::Uuid::now_v7().to_string())
+                                .expect("push id"),
+                            line: MessageText::try_from("never settled".to_owned())
+                                .expect("pending input"),
+                            load_policy: LoadPolicy::MayLoad,
+                        },
+                    },
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs: pending_inputs.clone(),
                     recorded: prepared_pending.evidence,

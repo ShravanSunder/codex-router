@@ -244,19 +244,31 @@ impl PushRecord {
         if read_at.is_some() && record.kind != PushKind::DirectMessage {
             return Err(PushRecordValidationError::InvalidReadState);
         }
-        let is_settled = matches!(
-            delivery_state,
+        let valid_state_fields = match delivery_state {
+            PushDeliveryState::Pending => match (&last_outcome, &settled_at) {
+                (None, None) => true,
+                (Some(outcome), Some(_)) => {
+                    matches!(outcome.outcome, DeliveryOutcome::Rejected(_))
+                }
+                _ => false,
+            },
+            PushDeliveryState::Attempted => last_outcome.is_none() && settled_at.is_none(),
+            PushDeliveryState::Held => {
+                last_outcome.as_ref().is_some_and(|outcome| {
+                    matches!(
+                        outcome.outcome,
+                        DeliveryOutcome::NotSubmitted {
+                            retryable: true,
+                            ..
+                        }
+                    )
+                }) && settled_at.is_none()
+            }
             PushDeliveryState::Delivered
-                | PushDeliveryState::OutcomeUnknown
-                | PushDeliveryState::Rejected
-        );
-        if is_settled != (last_outcome.is_some() && settled_at.is_some())
-            || (delivery_state == PushDeliveryState::Pending
-                && (last_outcome.is_some() || settled_at.is_some()))
-            || (delivery_state == PushDeliveryState::Attempted
-                && (last_outcome.is_some() || settled_at.is_some()))
-            || (delivery_state == PushDeliveryState::Held && settled_at.is_some())
-        {
+            | PushDeliveryState::OutcomeUnknown
+            | PushDeliveryState::Rejected => last_outcome.is_some() && settled_at.is_some(),
+        };
+        if !valid_state_fields {
             return Err(PushRecordValidationError::InvalidDeliveryState);
         }
         if let Some(outcome) = last_outcome.as_ref() {
@@ -278,7 +290,10 @@ impl PushRecord {
                     outcome.outcome,
                     DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_)
                 ),
-                PushDeliveryState::Pending | PushDeliveryState::Attempted => false,
+                PushDeliveryState::Pending => {
+                    matches!(outcome.outcome, DeliveryOutcome::Rejected(_))
+                }
+                PushDeliveryState::Attempted => false,
             };
             if !outcome_matches_state {
                 return Err(PushRecordValidationError::InvalidDeliveryState);

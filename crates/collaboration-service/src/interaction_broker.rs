@@ -165,6 +165,7 @@ pub struct ServiceInteractionBroker {
     backend: NativeControlBackend,
     session_delivery: OnceLock<Arc<dyn SessionMessageDelivery>>,
     display_names: OnceLock<crate::SessionDisplayNameCache>,
+    push_context: OnceLock<InteractionPushContext>,
     routes_path: PathBuf,
     routes: Mutex<BTreeMap<String, ApprovalRoute>>,
     pending: Arc<Mutex<BTreeMap<String, PendingApproval>>>,
@@ -178,6 +179,12 @@ pub struct ServiceInteractionBroker {
     typed_after_record: Mutex<Option<TypedAdmissionPause>>,
     #[cfg(test)]
     question_before_send: Mutex<Option<TypedAdmissionPause>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct InteractionPushContext {
+    pub store: Arc<Mutex<automation_storage::AutomationStore>>,
+    pub machine_identity: crate::MachineIdentity,
 }
 
 struct TypedPendingApproval {
@@ -303,6 +310,7 @@ impl ServiceInteractionBroker {
             backend,
             session_delivery: OnceLock::new(),
             display_names: OnceLock::new(),
+            push_context: OnceLock::new(),
             routes_path,
             routes: Mutex::new(routes),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
@@ -330,6 +338,21 @@ impl ServiceInteractionBroker {
 
     pub(crate) fn install_display_names(&self, display_names: crate::SessionDisplayNameCache) {
         let _already_installed = self.display_names.set(display_names);
+    }
+
+    pub(crate) fn install_push_context(
+        &self,
+        store: Arc<Mutex<automation_storage::AutomationStore>>,
+        machine_identity: crate::MachineIdentity,
+    ) {
+        if machine_identity.service_id() != &self.service_id {
+            tracing::error!("approval push identity belongs to another service");
+            return;
+        }
+        let _already_installed = self.push_context.set(InteractionPushContext {
+            store,
+            machine_identity,
+        });
     }
 
     async fn persist_routes(&self) -> Result<(), ApprovalBrokerError> {
