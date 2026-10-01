@@ -13,6 +13,7 @@ use portable_pty::MasterPty;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
 
+use super::isolated_fixture_test::FORBIDDEN_TERMINAL_CANARIES;
 use super::isolated_fixture_test::TestResult;
 
 const INITIAL_SIZE: PtySize = PtySize {
@@ -103,11 +104,23 @@ impl TerminalDriver {
 
     pub(super) fn safe_semantic_diagnostics(&mut self, start: usize) -> String {
         self.drain_pending_output();
-        let child_running = self.child_is_running().ok();
         let tail = self.transcript.get(start..).unwrap_or_default();
         let terminal_bytes = String::from_utf8_lossy(tail);
+        let child_state = match self.child.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(Some(status)) => format!("exited({})", status.exit_code()),
+                Ok(None) => "running".to_owned(),
+                Err(error) => format!("status-unavailable({error})"),
+            },
+            None => "released".to_owned(),
+        };
+        let reader_finished = self
+            .reader_thread
+            .as_ref()
+            .is_some_and(thread::JoinHandle::is_finished);
+        let tail_preview = safe_terminal_tail(tail);
         format!(
-            "tail_bytes={} fullscreen_entered={} keyboard_probe={} device_attributes_probe={} mouse_capture_enabled={} synchronized_update_started={} inspecting_footer={} browse_footer={} reset_title={} eof={} child_running={:?}",
+            "tail_bytes={} fullscreen_entered={} keyboard_probe={} device_attributes_probe={} mouse_capture_enabled={} synchronized_update_started={} inspecting_footer={} browse_footer={} reset_title={} eof={} child_state={} reader_finished={} tail_preview={tail_preview:?}",
             tail.len(),
             terminal_bytes.contains("\u{1b}[?1049h"),
             terminal_bytes.contains("\u{1b}[?u"),
@@ -118,7 +131,8 @@ impl TerminalDriver {
             terminal_bytes.contains("ctrl-r account options"),
             terminal_bytes.contains("Reset credit"),
             self.reached_eof,
-            child_running,
+            child_state,
+            reader_finished,
         )
     }
 
@@ -170,7 +184,13 @@ impl TerminalDriver {
     }
 
     pub(super) fn finish(mut self, timeout: Duration) -> TestResult<Vec<u8>> {
-        self.wait_for_eof(timeout)?;
+        if let Err(error) = self.wait_for_eof(timeout) {
+            let diagnostics = self.safe_semantic_diagnostics(0);
+            return Err(std::io::Error::other(format!(
+                "PTY EOF wait failed: {error}; {diagnostics}"
+            ))
+            .into());
+        }
         let status = self
             .child
             .as_mut()
@@ -276,6 +296,25 @@ impl TerminalDriver {
             }
         }
     }
+}
+
+fn safe_terminal_tail(transcript: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(transcript).into_owned();
+    for canary in FORBIDDEN_TERMINAL_CANARIES {
+        text = text.replace(canary, "[redacted]");
+    }
+    let visible = text
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    visible
+        .chars()
+        .rev()
+        .take(240)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 fn contains_completed_synchronized_frame_after_text(transcript: &[u8], expected: &[u8]) -> bool {

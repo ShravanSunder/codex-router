@@ -77,9 +77,10 @@ async fn compiled_credit_refresh_reports_focused_responses_failure_despite_parti
         ))
         .into());
     }
+    let browse_frame_start = terminal.transcript_len();
     terminal.send(b"\x1b")?;
     stage(
-        terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
+        terminal.wait_for_text_after("ctrl-r account options", browse_frame_start, SEMANTIC_WAIT),
         "partial-refresh account-options close",
     )?;
     terminal.send(b"q")?;

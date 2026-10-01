@@ -552,13 +552,11 @@ fn sessions_sql_boundary_uses_sqlx_without_rusqlite() {
         .parent()
         .and_then(Path::parent)
         .unwrap_or_else(|| panic!("cli crate should have workspace root parent"));
-    let committed_diff = git_diff_text(
+    let effective_diff = git_diff_text(
         workspace_root,
-        &["diff", "--unified=0", "origin/main...HEAD", "--", "crates"],
+        &["diff", "--unified=0", "origin/main", "--", "crates"],
     );
-    let worktree_diff = git_diff_text(workspace_root, &["diff", "--unified=0", "--", "crates"]);
-    let diff_text = format!("{committed_diff}\n{worktree_diff}");
-    let added_rusqlite_lines = diff_text
+    let added_rusqlite_lines = effective_diff
         .lines()
         .filter(|line| {
             line.starts_with('+')

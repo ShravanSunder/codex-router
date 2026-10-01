@@ -10,6 +10,10 @@ use codex_router_core::credit_usage::CreditSpendControl;
 use codex_router_core::credit_usage::CreditUsagePolicy;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
+use sqlx::Connection as _;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqliteConnection;
+use sqlx::sqlite::SqliteJournalMode;
 
 use crate::account::AccountRecord;
 use crate::account::AccountStatus;
@@ -256,11 +260,21 @@ async fn credit_policy_mutation_never_migrates_a_missing_native_table() {
         .await
         .expect("state should close before schema fixture edit");
 
-    let connection = rusqlite::Connection::open(&database_path).expect("test database should open");
-    connection
-        .execute("DROP TABLE account_credit_policies", [])
+    let options = SqliteConnectOptions::new()
+        .filename(&database_path)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal);
+    let mut connection = SqliteConnection::connect_with(&options)
+        .await
+        .expect("test database should open");
+    sqlx::query("DROP TABLE account_credit_policies")
+        .execute(&mut connection)
+        .await
         .expect("test should remove only the credit policy table");
-    drop(connection);
+    connection
+        .close()
+        .await
+        .expect("test database should close after fixture edit");
 
     assert_eq!(
         AsyncCreditUsagePolicyMutationStore::open(&database_path)
@@ -268,16 +282,20 @@ async fn credit_policy_mutation_never_migrates_a_missing_native_table() {
             .expect_err("interactive save must not run migrations"),
         StateStoreError::CreditUsagePolicySchemaUpgradeRequired
     );
-    let connection =
-        rusqlite::Connection::open(&database_path).expect("test database should reopen");
-    let table_count: i64 = connection
-        .query_row(
+    let mut connection = SqliteConnection::connect_with(&options)
+        .await
+        .expect("test database should reopen");
+    let table_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'account_credit_policies'",
-            [],
-            |row| row.get(0),
         )
+        .fetch_one(&mut connection)
+        .await
         .expect("table existence should read");
     assert_eq!(table_count, 0);
+    connection
+        .close()
+        .await
+        .expect("test database should close after fixture read");
 }
 
 #[tokio::test]
