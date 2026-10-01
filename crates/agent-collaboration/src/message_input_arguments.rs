@@ -128,7 +128,7 @@ fn prepare_message_input(
         let _: collaboration_client::protocol::CodexGeneration = serde_json::from_value(
             json!({"serviceEpoch":epoch,"generation":options.expected_generation}),
         )
-        .map_err(|_| "Invalid expected generation")?;
+        .map_err(|_| "--expected-service-epoch must be a service UUID and --expected-generation must be positive; for example --expected-service-epoch 00000000-0000-4000-8000-000000000002 --expected-generation 1")?;
     }
     let text = if let Some(text) = options.text {
         text.to_owned()
@@ -167,10 +167,10 @@ fn prepare_message_input(
     let generation_guard = match (options.expected_service_epoch, options.expected_generation) {
         (Some(epoch), Some(generation)) => Some(
             serde_json::from_value(json!({"serviceEpoch":epoch,"generation":generation}))
-                .map_err(|_| "Invalid expected generation")?,
+                .map_err(|_| "--expected-service-epoch must be a service UUID and --expected-generation must be positive; for example --expected-service-epoch 00000000-0000-4000-8000-000000000002 --expected-generation 1")?,
         ),
         (None, None) => None,
-        _ => return Err("Provide both expected service epoch and generation".into()),
+        _ => return Err("Provide both --expected-service-epoch and --expected-generation; for example --expected-service-epoch 00000000-0000-4000-8000-000000000002 --expected-generation 1".into()),
     };
     let directory = crate::endpoint_commands::resolve_directory(
         options.service_directory.map(std::path::Path::to_path_buf),
@@ -192,7 +192,7 @@ fn prepare_message_input(
 
 pub(crate) fn session_ref_guidance(field: &str) -> String {
     format!(
-        "{field} must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId. nativeThreadId is a lifecycle address, not a SessionRef. Copy .target from sessions list --json."
+        "{field} must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId; for example {field} '{{\"endpoint\":{{\"serviceId\":\"00000000-0000-4000-8000-000000000001\",\"endpointId\":\"codex-local\"}},\"sessionId\":\"target-session\"}}'. nativeThreadId is a lifecycle address, not a SessionRef. Copy .target from sessions list --json."
     )
 }
 

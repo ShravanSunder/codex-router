@@ -38,13 +38,16 @@ pub(super) fn prepare_subscribe(
         .map(|value| parse_subscription_duration(value, "--cap", true))
         .transpose()?;
     if quiet_seconds.is_some_and(|seconds| seconds > MAX_SUBSCRIPTION_QUIET_SECONDS) {
-        return Err("--quiet must be between 0 seconds and 30 minutes".into());
+        return Err("--quiet must be at most 30 minutes; for example --quiet 2m".into());
     }
     if cap_seconds.is_some_and(|seconds| seconds > MAX_SUBSCRIPTION_CAP_SECONDS) {
-        return Err("--cap must be at most 60 minutes".into());
+        return Err("--cap must be at most 60 minutes; for example --cap 10m".into());
     }
     if let (Some(quiet_seconds), Some(cap_seconds)) = (quiet_seconds, cap_seconds) {
-        BatchTiming::new(quiet_seconds, cap_seconds).map_err(|error| error.to_string())?;
+        BatchTiming::new(quiet_seconds, cap_seconds).map_err(|_| {
+            "--cap must be at least --quiet and at most 60 minutes; for example --quiet 2m --cap 10m"
+                .to_owned()
+        })?;
     }
     let lifetime_seconds = arguments
         .for_duration
@@ -52,7 +55,9 @@ pub(super) fn prepare_subscribe(
         .map(|value| parse_subscription_duration(value, "--for", false))
         .transpose()?;
     if let Some(seconds) = lifetime_seconds {
-        SubscriptionLifetime::new(seconds).map_err(|error| error.to_string())?;
+        SubscriptionLifetime::new(seconds).map_err(|_| {
+            "--for must be between 10 minutes and 7 days; for example --for 24h".to_owned()
+        })?;
     }
     let request = ThreadSubscribeRequest {
         actor: placeholder_actor(&actor)?,
@@ -150,7 +155,14 @@ fn require_json(enabled: bool, command: &str) -> Result<(), String> {
 }
 
 fn parse_subscription_duration(value: &str, flag: &str, allow_zero: bool) -> Result<u64, String> {
-    let error = || format!("{flag} requires an integer followed by s, m, h, or d");
+    let example = match flag {
+        "--quiet" => "--quiet 2m",
+        "--cap" => "--cap 10m",
+        "--for" => "--for 24h",
+        _ => "--for 24h",
+    };
+    let error =
+        || format!("{flag} requires an integer followed by s, m, h, or d; for example {example}");
     let (number, multiplier) = if let Some(number) = value.strip_suffix('s') {
         (number, 1_u64)
     } else if let Some(number) = value.strip_suffix('m') {
@@ -168,7 +180,36 @@ fn parse_subscription_duration(value: &str, flag: &str, allow_zero: bool) -> Res
         .checked_mul(multiplier)
         .ok_or_else(error)?;
     if !allow_zero && seconds == 0 {
-        return Err(format!("{flag} must be greater than zero"));
+        return Err(format!(
+            "{flag} must be greater than zero; for example {example}"
+        ));
     }
     Ok(seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_subscription_duration;
+
+    #[test]
+    fn subscription_duration_errors_show_flag_specific_examples() {
+        let invalid_duration_cases: [(&str, &str, bool, &str); 3] = [
+            ("--quiet", "not-a-duration", true, "--quiet 2m"),
+            ("--cap", "not-a-duration", true, "--cap 10m"),
+            ("--for", "not-a-duration", false, "--for 24h"),
+        ];
+
+        for (flag, value, allow_zero, example) in invalid_duration_cases {
+            let Err(error) = parse_subscription_duration(value, flag, allow_zero) else {
+                panic!("expected an error for {flag} {value}");
+            };
+            assert!(error.contains(&format!("for example {example}")), "{error}");
+        }
+
+        let Err(positive_duration_error) = parse_subscription_duration("0s", "--for", false) else {
+            panic!("expected --for to reject zero duration");
+        };
+        assert!(positive_duration_error.contains("--for must be greater than zero"));
+        assert!(positive_duration_error.contains("for example --for 24h"));
+    }
 }

@@ -93,22 +93,22 @@ pub(crate) async fn inspect_delivery(request: WakeRequest<'_>) -> Value {
             LocalMutationState::None,
         );
     };
-    let params =
-        match serde_json::from_value::<collaboration_protocol::DeliveryShowRequest>(request.params)
-        {
-            Ok(params) => params,
-            Err(_) => {
-                return failure(
+    let params = match serde_json::from_value::<collaboration_protocol::DeliveryShowRequest>(
+        request.params,
+    ) {
+        Ok(params) => params,
+        Err(_) => {
+            return failure(
                     request.id,
                     context,
                     WakeFailureReason::InvalidField {
                         field: "deliveryId".into(),
-                        constraint: "Provide exact UUIDv7 deliveryId only.".into(),
+                        constraint: "deliveryId must be a canonical lowercase RFC UUIDv7, for example 019f0000-0000-7000-8000-000000000001.".into(),
                     },
                     LocalMutationState::None,
                 );
-            }
-        };
+        }
+    };
     let result = store.lock().await.read_delivery(&params.delivery_id).await;
     match result {
         Ok(record) => match crate::delivery_projection::snapshot(record) {
@@ -120,12 +120,27 @@ pub(crate) async fn inspect_delivery(request: WakeRequest<'_>) -> Value {
                 LocalMutationState::None,
             ),
         },
-        Err(_) => failure(
-            request.id,
-            context,
-            WakeFailureReason::ResourceNotFound,
-            LocalMutationState::None,
-        ),
+        Err(_) => {
+            let mut response = failure(
+                request.id,
+                context,
+                WakeFailureReason::ResourceNotFound,
+                LocalMutationState::None,
+            );
+            if let Some(data) = response
+                .pointer_mut("/error/data")
+                .and_then(Value::as_object_mut)
+            {
+                data.insert(
+                    "message".to_owned(),
+                    json!(format!(
+                    "Delivery {} was not found; for a push record, run agent-collaboration show <link>.",
+                    params.delivery_id.as_str()
+                    )),
+                );
+            }
+            response
+        }
     }
 }
 
@@ -149,4 +164,48 @@ pub(crate) fn project_mutation(
         discarded_delivery_ids: result.discarded,
         dispatched_deliveries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WakeRequest, inspect_delivery};
+    use automation_storage::AutomationStore;
+    use collaboration_protocol::UuidIdentity;
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn missing_delivery_show_names_the_id_and_push_show_command() {
+        let directory = tempfile::tempdir().expect("isolated automation store");
+        let store = Arc::new(Mutex::new(
+            AutomationStore::open(&directory.path().join("automation.sqlite"))
+                .await
+                .expect("automation store"),
+        ));
+        let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
+            .expect("service id");
+        let delivery_id = agent_automation::DeliveryId::generate();
+
+        let response = inspect_delivery(WakeRequest {
+            id: json!(1),
+            method: "delivery/show",
+            params: json!({"deliveryId": delivery_id.as_str()}),
+            service_id: &service_id,
+            store: Some(&store),
+        })
+        .await;
+
+        let message = response
+            .pointer("/error/data/message")
+            .and_then(Value::as_str)
+            .expect("delivery not-found message");
+        assert_eq!(
+            message,
+            format!(
+                "Delivery {} was not found; for a push record, run agent-collaboration show <link>.",
+                delivery_id.as_str()
+            )
+        );
+    }
 }

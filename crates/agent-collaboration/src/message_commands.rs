@@ -1,9 +1,13 @@
 //! CLI commands for direct messages and stored Router push records.
+use crate::failure_line::{
+    render_failure_line, render_held_line, render_rejection_line, render_unknown_line,
+};
 use crate::message_input_arguments::{MessageSendArguments, prepare_message_send};
 use clap::{Parser, Subcommand};
 use collaboration_client::protocol::{
-    DeliveryOutcome, MessageText, PushRecordHistoryParams, PushRecordListParams,
-    PushRecordListResult, PushRecordShowParams, PushRecordShowResult, SessionRef,
+    DeliveryOutcome, MessageText, PushDeliveryState, PushId, PushRecordHistoryParams,
+    PushRecordListParams, PushRecordListResult, PushRecordShowParams, PushRecordShowResult,
+    RouterLink, SessionRef,
 };
 use collaboration_client::{
     ClientError, ControlClient, MessageReplyError, MessageReplyRequest, MessageSendError,
@@ -128,6 +132,9 @@ pub fn run_push_record_show_command(arguments: Vec<OsString>) -> i32 {
         Ok(value) => value,
         Err(code) => return code,
     };
+    if let Err(message) = validate_push_reference(&args.reference) {
+        return report_message_failure("invalidField", &message, 2, args.json);
+    }
     run_push_record_query(
         args.service_directory,
         args.json,
@@ -141,7 +148,7 @@ fn run_message_send(args: MessageSendArguments) -> i32 {
     let (directory, prepared) = match prepared {
         Ok(value) => value,
         Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
+            return report_message_failure("invalidField", &message, 2, machine);
         }
     };
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -150,12 +157,7 @@ fn run_message_send(args: MessageSendArguments) -> i32 {
     {
         Ok(value) => value,
         Err(_) => {
-            return crate::endpoint_commands::report_failure(
-                "unavailable",
-                "Client runtime unavailable",
-                3,
-                machine,
-            );
+            return report_message_failure("unavailable", "Client runtime unavailable", 3, machine);
         }
     };
     let outcome = runtime.block_on(async {
@@ -198,9 +200,9 @@ fn run_message_history(args: HistoryArguments) -> i32 {
     let with = match serde_json::from_str::<SessionRef>(&args.other_session) {
         Ok(value) => value,
         Err(_) => {
-            return crate::endpoint_commands::report_failure(
+            return report_message_failure(
                 "invalidField",
-                "--with must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId",
+                "--with must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId; for example --with '{\"endpoint\":{\"serviceId\":\"00000000-0000-4000-8000-000000000001\",\"endpointId\":\"codex-local\"},\"sessionId\":\"target-session\"}'",
                 2,
                 args.json,
             );
@@ -224,7 +226,7 @@ fn run_push_record_query(
     let harness_identity = match crate::current_session_identity::read_harness_session_identity() {
         Ok(identity) => identity,
         Err(error) => {
-            return crate::endpoint_commands::report_failure(
+            return report_message_failure(
                 "currentSessionUnavailable",
                 &format!("{error}; run agent-collaboration whoami --json"),
                 2,
@@ -235,7 +237,7 @@ fn run_push_record_query(
     let directory = match crate::endpoint_commands::resolve_directory(service_directory) {
         Ok(directory) => directory,
         Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
+            return report_message_failure("invalidField", &message, 2, machine);
         }
     };
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -244,12 +246,7 @@ fn run_push_record_query(
     {
         Ok(runtime) => runtime,
         Err(_) => {
-            return crate::endpoint_commands::report_failure(
-                "unavailable",
-                "Client runtime unavailable",
-                3,
-                machine,
-            );
+            return report_message_failure("unavailable", "Client runtime unavailable", 3, machine);
         }
     };
     let outcome = runtime.block_on(async {
@@ -337,16 +334,12 @@ fn report_push_record_read(
         Err(error) => {
             let failure = operation_failure_from_client_error(error, OperationEffect::None);
             let exit_code = operation_failure_exit(&failure);
+            let human_failure = operation_failure_line(&failure, None);
             let record = json!({"kind":"error","error":failure});
             let written = if machine {
                 writeln!(io::stdout(), "{record}")
             } else {
-                writeln!(
-                    io::stdout(),
-                    "{}",
-                    serde_json::to_string_pretty(&record)
-                        .unwrap_or_else(|_| "Output unavailable".to_owned())
-                )
+                writeln!(io::stderr(), "{human_failure}")
             };
             if written.is_ok() { exit_code } else { 5 }
         }
@@ -370,16 +363,19 @@ fn push_record_show_envelope(show: PushRecordShowResult) -> serde_json::Value {
 fn run_message_reply(args: ReplyArguments) -> i32 {
     let machine = args.json;
     let reference = args.reference.clone();
+    if let Err(message) = validate_push_reference(&reference) {
+        return report_message_failure("invalidField", &message, 2, machine);
+    }
     let reply_text = match read_reply_text(&args) {
         Ok(text) => text,
         Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
+            return report_message_failure("invalidField", &message, 2, machine);
         }
     };
     let harness_identity = match crate::current_session_identity::read_harness_session_identity() {
         Ok(identity) => identity,
         Err(error) => {
-            return crate::endpoint_commands::report_failure(
+            return report_message_failure(
                 "currentSessionUnavailable",
                 &format!("{error}; run agent-collaboration whoami --json"),
                 2,
@@ -390,7 +386,7 @@ fn run_message_reply(args: ReplyArguments) -> i32 {
     let directory = match crate::endpoint_commands::resolve_directory(args.service_directory) {
         Ok(directory) => directory,
         Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
+            return report_message_failure("invalidField", &message, 2, machine);
         }
     };
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -399,12 +395,7 @@ fn run_message_reply(args: ReplyArguments) -> i32 {
     {
         Ok(runtime) => runtime,
         Err(_) => {
-            return crate::endpoint_commands::report_failure(
-                "unavailable",
-                "Client runtime unavailable",
-                3,
-                machine,
-            );
+            return report_message_failure("unavailable", "Client runtime unavailable", 3, machine);
         }
     };
     let outcome = runtime.block_on(async {
@@ -457,36 +448,54 @@ fn read_reply_text(args: &ReplyArguments) -> Result<MessageText, String> {
         .map_err(|_| "Invalid or oversized message text".to_owned())
 }
 
+fn validate_push_reference(reference: &str) -> Result<(), String> {
+    if PushId::try_from(reference.to_owned()).is_ok() || RouterLink::parse(reference).is_ok() {
+        return Ok(());
+    }
+    Err("PUSH_ID_OR_LINK must be a UUIDv7 push id or router://<machine-id>/push/<push-id>; for example 019f0000-0000-7000-8000-000000000101 or router://00000000-0000-4000-8000-000000000001/push/019f0000-0000-7000-8000-000000000101".to_owned())
+}
+
 fn report_reply(
     result: Result<collaboration_client::protocol::SessionMessageReplyResult, MessageReplyError>,
     machine: bool,
 ) -> i32 {
-    let (record, exit_code, confirmation) = match result {
+    let (record, exit_code, confirmation, failure_line, write_failure_code) = match result {
         Ok(reply) => {
-            let exit_code = receipt_exit_status(&reply.receipt.outcome);
-            let target_line = if exit_code == 0 {
-                reply_confirmation_line(&reply)
-            } else {
-                reply_target_line(&reply)
-            };
+            let exit_code = receipt_exit_status(reply.delivery_state);
+            let failure_line = receipt_failure_line(
+                reply.delivery_state,
+                &reply.target_identity,
+                &reply.link,
+                &reply.receipt.outcome,
+            );
+            let confirmation = failure_line
+                .is_none()
+                .then(|| reply_confirmation_line(&reply));
             (
                 crate::endpoint_commands::result_envelope(serde_json::json!(reply)),
                 exit_code,
-                Some(target_line),
+                confirmation,
+                failure_line,
+                5,
             )
         }
         Err(error) => {
             let (failure, caller) = error.into_operation_failure_and_caller();
             let exit_code = operation_failure_exit(&failure);
+            let failure_line = operation_failure_line(&failure, None);
             (
                 serde_json::json!({"kind":"error","caller":caller,"error":failure}),
                 exit_code,
                 None,
+                Some(failure_line),
+                if exit_code == 5 { 5 } else { 3 },
             )
         }
     };
     let written = if machine {
         writeln!(io::stdout(), "{record}")
+    } else if let Some(failure_line) = failure_line {
+        writeln!(io::stderr(), "{failure_line}")
     } else if let Some(confirmation) = confirmation {
         writeln!(io::stdout(), "{confirmation}")
     } else {
@@ -497,7 +506,11 @@ fn report_reply(
                 .unwrap_or_else(|_| "Output unavailable".to_owned())
         )
     };
-    if written.is_err() { 5 } else { exit_code }
+    if written.is_err() {
+        write_failure_code
+    } else {
+        exit_code
+    }
 }
 
 fn reply_confirmation_line(
@@ -505,17 +518,6 @@ fn reply_confirmation_line(
 ) -> String {
     format!(
         "replied to {} {} (push {} {}): {}",
-        reply.target_identity,
-        session_ref_text(reply),
-        reply.push_id.as_str(),
-        reply.link,
-        delivery_outcome_label(&reply.receipt.outcome)
-    )
-}
-
-fn reply_target_line(reply: &collaboration_client::protocol::SessionMessageReplyResult) -> String {
-    format!(
-        "reply target: {} {} (push {} {}): {}",
         reply.target_identity,
         session_ref_text(reply),
         reply.push_id.as_str(),
@@ -541,16 +543,25 @@ fn report(
     {
         return code;
     }
-    let (record, code, confirmation, write_failure_code) = match result {
+    let (record, code, confirmation, failure_line, write_failure_code) = match result {
         Ok(push) => {
-            let exit = receipt_exit_status(&push.receipt.outcome);
-            let confirmation = send_confirmation_line(&push);
+            let exit = receipt_exit_status(push.delivery_state);
+            let failure_line = receipt_failure_line(
+                push.delivery_state,
+                &push.target_identity,
+                &push.link,
+                &push.receipt.outcome,
+            );
+            let confirmation = failure_line
+                .is_none()
+                .then(|| send_confirmation_line(&push));
             let record = crate::endpoint_commands::result_envelope(json!(push));
-            (record, exit, Some(confirmation), 5)
+            (record, exit, confirmation, failure_line, 5)
         }
         Err(error) => {
             let (failure, target) = error.into_operation_failure_and_target();
             let exit = operation_failure_exit(&failure);
+            let human_failure = operation_failure_line(&failure, target.as_ref());
             let write_failure = if failure.effect == OperationEffect::Unknown {
                 5
             } else {
@@ -560,12 +571,15 @@ fn report(
                 json!({"kind":"error","target":target,"error":failure}),
                 exit,
                 None,
+                Some(human_failure),
                 write_failure,
             )
         }
     };
     let written = if machine {
         writeln!(io::stdout(), "{record}")
+    } else if let Some(failure_line) = failure_line {
+        writeln!(io::stderr(), "{failure_line}")
     } else if let Some(confirmation) = confirmation {
         writeln!(io::stdout(), "{confirmation}")
     } else {
@@ -610,22 +624,99 @@ fn delivery_outcome_label(outcome: &DeliveryOutcome) -> String {
     }
 }
 
-fn receipt_exit_status(outcome: &DeliveryOutcome) -> i32 {
-    match outcome {
-        DeliveryOutcome::NotSubmitted {
-            retryable: true, ..
-        } => 3,
-        DeliveryOutcome::NotSubmitted {
-            retryable: false, ..
-        }
-        | DeliveryOutcome::Rejected(_) => 4,
-        DeliveryOutcome::Unknown => 5,
-        DeliveryOutcome::Started
-        | DeliveryOutcome::Steered
-        | DeliveryOutcome::StartedOrSteered
-        | DeliveryOutcome::Queued
-        | DeliveryOutcome::PeerMessageWritten => 0,
+fn receipt_exit_status(delivery_state: PushDeliveryState) -> i32 {
+    match delivery_state {
+        PushDeliveryState::Delivered | PushDeliveryState::Held => 0,
+        PushDeliveryState::Rejected => 4,
+        PushDeliveryState::OutcomeUnknown
+        | PushDeliveryState::Pending
+        | PushDeliveryState::Attempted => 5,
     }
+}
+
+fn receipt_failure_line(
+    delivery_state: PushDeliveryState,
+    target: &str,
+    push_link: &str,
+    outcome: &DeliveryOutcome,
+) -> Option<String> {
+    match delivery_state {
+        PushDeliveryState::Held => Some(render_held_line(push_link, target)),
+        PushDeliveryState::Rejected => match outcome {
+            DeliveryOutcome::Rejected(rejection) => {
+                Some(render_rejection_line(rejection, target, push_link))
+            }
+            DeliveryOutcome::NotSubmitted { reason, .. } => Some(render_failure_line(
+                &format!("Delivery to {target} was rejected: {reason}"),
+                "correct the message or target and try again",
+            )),
+            _ => Some(render_failure_line(
+                &format!("Delivery to {target} was rejected"),
+                "run agent-collaboration show <link> to inspect the stored outcome",
+            )),
+        },
+        PushDeliveryState::OutcomeUnknown
+        | PushDeliveryState::Pending
+        | PushDeliveryState::Attempted => Some(render_unknown_line(target, push_link)),
+        PushDeliveryState::Delivered => None,
+    }
+}
+
+fn report_message_failure(kind: &str, message: &str, exit_code: i32, machine: bool) -> i32 {
+    if machine {
+        return crate::endpoint_commands::report_failure(kind, message, exit_code, true);
+    }
+    let next_step = match kind {
+        "invalidField" | "invalidUsage" => "correct the named argument and try again",
+        "currentSessionUnavailable" | "identityUnavailable" => {
+            "run agent-collaboration whoami --json"
+        }
+        "unavailable" => "check Router availability and retry",
+        _ => "run agent-collaboration message --help",
+    };
+    let line = render_failure_line(message, next_step);
+    if writeln!(io::stderr(), "{line}").is_err() {
+        5
+    } else {
+        exit_code
+    }
+}
+
+fn operation_failure_line(failure: &OperationFailure, target: Option<&SessionRef>) -> String {
+    let explanation = target.map_or_else(
+        || failure.message.clone(),
+        |target| {
+            format!(
+                "Delivery to {}: {}",
+                String::from(target.session_id.clone()),
+                failure.message
+            )
+        },
+    );
+    let next_step = if failure.effect == OperationEffect::Unknown
+        || failure.service_kind.as_deref() == Some("outcomeUnknown")
+    {
+        "inspect the target before retrying"
+    } else if failure.service_kind.as_deref() == Some("notFound") {
+        "check whether the Router link is expired or belongs to another machine"
+    } else if failure.service_kind.as_deref() == Some("notPermitted") {
+        "run show as the push sender or target session"
+    } else if failure.service_kind.as_deref() == Some("invalidField") {
+        "use a UUIDv7 push id or a router:// machine/push/id link"
+    } else {
+        match failure.kind {
+            OperationFailureKind::UnsupportedCapability => {
+                "run agent-collaboration message send --help for supported delivery modes"
+            }
+            OperationFailureKind::Unavailable | OperationFailureKind::Timeout => {
+                "check Router availability, then retry"
+            }
+            OperationFailureKind::ProtocolViolation | OperationFailureKind::Rejected => {
+                "correct the message request and try again"
+            }
+        }
+    };
+    render_failure_line(&explanation, next_step)
 }
 
 fn operation_failure_exit(failure: &OperationFailure) -> i32 {
@@ -800,7 +891,10 @@ mod tests {
                 "reachability":"codexAppServer","client":null
             }))
             .expect("typed receipt");
-        assert_eq!(receipt_exit_status(&receipt.outcome), 4);
+        assert_eq!(
+            receipt_exit_status(collaboration_client::protocol::PushDeliveryState::Rejected),
+            4
+        );
         let output = crate::endpoint_commands::result_envelope(serde_json::json!(receipt));
         assert_eq!(
             output["result"]["record"]["outcome"]["reason"],

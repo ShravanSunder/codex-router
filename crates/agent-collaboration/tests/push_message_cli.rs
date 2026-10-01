@@ -142,6 +142,141 @@ async fn message_send_reports_the_stored_push_and_uses_the_harness_sender() {
 }
 
 #[tokio::test]
+async fn held_message_send_prints_the_delivery_condition_and_exits_zero() {
+    let target = session_ref(TARGET_SESSION_ID, "claude-local");
+    let mut result = send_result(target.clone());
+    result["deliveryState"] = json!("held");
+    result["receipt"]["outcome"] = json!({"kind":"unknown"});
+    result["receipt"]["client"] = Value::Null;
+    let (output, _) = invoke_with_reply(
+        vec![
+            "message".into(),
+            "send".into(),
+            "--to".into(),
+            serde_json::to_string(&target)
+                .expect("serialize target SessionRef")
+                .into(),
+            "--text".into(),
+            "hello recipient".into(),
+        ],
+        MockReply::Result(result),
+    )
+    .await
+    .expect("message send completes against the Control fixture");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("CLI stderr is UTF-8"),
+        format!("held: {PUSH_LINK} — delivered when Claude target is next running\n")
+    );
+}
+
+#[tokio::test]
+async fn rejected_message_send_prints_one_actionable_line_and_exit_four() {
+    let target = session_ref(TARGET_SESSION_ID, "claude-local");
+    let mut result = send_result(target.clone());
+    result["deliveryState"] = json!("rejected");
+    result["receipt"]["outcome"] = json!({
+        "kind":"rejected",
+        "reason":"busy",
+        "nextAction":"retryLater",
+        "clientCode":null,
+        "detail":"target is busy"
+    });
+    result["receipt"]["client"] = Value::Null;
+    let (output, _) = invoke_with_reply(
+        vec![
+            "message".into(),
+            "send".into(),
+            "--to".into(),
+            serde_json::to_string(&target)
+                .expect("serialize target SessionRef")
+                .into(),
+            "--text".into(),
+            "hello recipient".into(),
+        ],
+        MockReply::Result(result),
+    )
+    .await
+    .expect("message send completes against the Control fixture");
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("CLI stderr is UTF-8"),
+        "error: Delivery to Claude target was rejected: target is busy — retry later\n"
+    );
+}
+
+#[tokio::test]
+async fn unknown_message_send_points_to_show_before_retrying_and_exits_five() {
+    let target = session_ref(TARGET_SESSION_ID, "claude-local");
+    let mut result = send_result(target.clone());
+    result["deliveryState"] = json!("outcome-unknown");
+    result["receipt"]["outcome"] = json!({"kind":"unknown"});
+    result["receipt"]["client"] = Value::Null;
+    let (output, _) = invoke_with_reply(
+        vec![
+            "message".into(),
+            "send".into(),
+            "--to".into(),
+            serde_json::to_string(&target)
+                .expect("serialize target SessionRef")
+                .into(),
+            "--text".into(),
+            "hello recipient".into(),
+        ],
+        MockReply::Result(result),
+    )
+    .await
+    .expect("message send completes against the Control fixture");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("CLI stderr is UTF-8"),
+        format!(
+            "error: Delivery outcome for Claude target is unknown — run agent-collaboration show {PUSH_LINK} before retrying\n"
+        )
+    );
+}
+
+#[test]
+fn invalid_message_target_prints_one_line_with_a_session_ref_example() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["message", "send", "--to", "not-json", "--text", "hello"])
+        .output()
+        .expect("run invalid message target validation");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let message = String::from_utf8(output.stderr).expect("CLI stderr is UTF-8");
+    assert_eq!(message.lines().count(), 1);
+    assert!(message.starts_with("error: --to must be compact SessionRef JSON"));
+    assert!(message.contains("serviceId"));
+    assert!(message.contains("sessionId"));
+    assert!(message.ends_with(" — correct the named argument and try again\n"));
+}
+
+#[test]
+fn invalid_show_reference_names_the_uuidv7_or_router_link_form() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["show", "not-a-push-reference"])
+        .output()
+        .expect("run invalid push reference validation");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let message = String::from_utf8(output.stderr).expect("CLI stderr is UTF-8");
+    assert_eq!(message.lines().count(), 1);
+    assert!(message.starts_with("error: PUSH_ID_OR_LINK must be a UUIDv7 push id"));
+    assert!(message.contains("router://<machine-id>/push/<push-id>"));
+    assert!(message.contains("019f0000-0000-7000-8000-000000000101"));
+    assert!(message.ends_with(" — correct the named argument and try again\n"));
+}
+
+#[tokio::test]
 async fn message_inbox_prints_only_the_notice_line() {
     let (output, request) = invoke_with_reply(
         vec!["message".into(), "inbox".into()],
@@ -317,7 +452,7 @@ fn message_history_rejects_an_invalid_session_reference_with_field_guidance() {
     assert_eq!(
         response.pointer("/error/constraint"),
         Some(&json!(
-            "--with must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId"
+            "--with must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId; for example --with '{\"endpoint\":{\"serviceId\":\"00000000-0000-4000-8000-000000000001\",\"endpointId\":\"codex-local\"},\"sessionId\":\"target-session\"}'"
         ))
     );
     assert_eq!(
