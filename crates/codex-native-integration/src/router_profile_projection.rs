@@ -24,6 +24,7 @@ impl CodexRouterProfile {
     pub fn render(self) -> String {
         format!(
             r#"model_provider = "codex-router"
+sandbox_mode = "workspace-write"
 
 [model_providers.codex-router]
 name = "codex-router"
@@ -61,9 +62,12 @@ supports_websockets = true
 ///
 /// Codex refuses to start an app-server that defines permission profiles without a
 /// default, so Router supplies `sandbox_mode="workspace-write"` itself rather than
-/// relying on the owner's home configuration. It is only the default: Router's own
-/// threads select a profile, and a client that asks for another sandbox on start
-/// (for example `--yolo`, which requests `danger-full-access`) still gets it.
+/// relying on the owner's home configuration. As the highest config layer it decides
+/// the sandbox for any thread request that selects none, overriding home and project
+/// `sandbox_mode` or `default_permissions`; Router's own threads select a profile, and
+/// a client that asks for another sandbox on start (for example `--yolo`, which
+/// requests `danger-full-access`) still gets it. Clients compute their own request
+/// from their config, so the rendered profile file carries the same default.
 ///
 /// Both profiles get direct network access. The managed network proxy is switched
 /// off explicitly so a home or project setting cannot reinstate it: behind it,

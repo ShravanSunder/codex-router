@@ -48,7 +48,8 @@ fn router_profile_has_one_rendering_and_root_override_projection() {
     assert_eq!(
         profile.render(),
         concat!(
-            "model_provider = \"codex-router\"\n\n",
+            "model_provider = \"codex-router\"\n",
+            "sandbox_mode = \"workspace-write\"\n\n",
             "[model_providers.codex-router]\n",
             "name = \"codex-router\"\n",
             "base_url = \"http://127.0.0.1:8787/v1\"\n",
