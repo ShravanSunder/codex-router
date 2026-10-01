@@ -60,7 +60,7 @@ jobs:
       - name: Test Homebrew release automation
         id: homebrew_release_automation
         background: true
-        run: python3 -m unittest scripts.tests.test_update_homebrew_formula -v
+        run: python3 -m unittest scripts.tests.test_update_homebrew_formula scripts.tests.test_publish_homebrew_tap_local -v
       - name: Enforce dependency policy
         id: dependency_policy
         background: true
