@@ -6,15 +6,12 @@ use std::path::PathBuf;
 
 use crate::CodexPaths;
 use crate::CodexRouterProfile;
-use crate::RouterControlSocketPath;
 
 /// Exact executable and arguments for one managed app-server child.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppServerCommandSpec {
     executable: PathBuf,
     root_overrides: Vec<String>,
-    /// Router's permission profiles, kept separately so a debug launch retains them.
-    permission_overrides: Vec<String>,
     app_server_socket: PathBuf,
     remote_control: bool,
 }
@@ -22,26 +19,20 @@ pub struct AppServerCommandSpec {
 impl AppServerCommandSpec {
     /// Builds the native app-server command from the shared router projection.
     #[must_use]
-    pub fn new(
-        paths: &CodexPaths,
-        profile: &CodexRouterProfile,
-        control_socket: &RouterControlSocketPath,
-        app_server_socket: &Path,
-    ) -> Self {
+    pub fn new(paths: &CodexPaths, profile: &CodexRouterProfile, app_server_socket: &Path) -> Self {
         Self {
             executable: paths.managed_executable(),
-            root_overrides: profile.root_overrides(control_socket),
-            permission_overrides: crate::router_permission_profile_overrides(control_socket),
+            root_overrides: profile.root_overrides(),
             app_server_socket: app_server_socket.to_owned(),
             remote_control: true,
         }
     }
+    #[must_use]
     /// Replaces the production model routing with the debug profile, keeping Router's
     /// permission profiles so debug sessions pass the same access validation. A debug
     /// profile's own `permissions` or `features` tables come later and take precedence.
-    #[must_use]
     pub fn with_debug_profile(mut self, profile: &crate::DebugCodexProfile) -> Self {
-        self.root_overrides = self.permission_overrides.clone();
+        self.root_overrides = crate::router_permission_profile_overrides();
         self.root_overrides.extend(profile.root_overrides());
         self.remote_control = false;
         self

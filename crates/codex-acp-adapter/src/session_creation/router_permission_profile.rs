@@ -3,65 +3,16 @@
 //! Router launches its managed app-server with the network half of both profiles
 //! (`router_profile_projection.rs` in codex-native-integration). Each start, fork and
 //! resume adds the parent profile and filesystem grants here, with dotted keys so
-//! they merge into that network table instead of replacing it.
+//! they merge into that network table instead of replacing it. The tool locations
+//! themselves live in `router_tool_locations.rs`, shared with the Host that creates them.
 use super::SessionSetupError;
+use codex_native_integration::{
+    READ_ONLY_INSIDE_TOOL_LOCATIONS, RESTRICTED_TOOL_LOCATIONS, WORKSPACE_TOOL_LOCATIONS,
+};
 use collaboration_protocol::RouterAccess;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-
-/// Per-user tool locations every Router session may write, relative to the host's home.
-///
-/// Package managers, toolchains and build systems keep shared caches, stores and
-/// toolchain state here; without them `pnpm install`, Cargo, SwiftPM and Xcode fail
-/// outside the working directory. These are shared tool state, not only caches: a
-/// write here can affect later runs in other sessions and the owner's own builds.
-/// Router creates any that are missing before the session starts: a grant covers
-/// only its own subtree, so a sandboxed first install cannot create missing parents.
-const TOOL_LOCATIONS_UNDER_HOME: [&str; 20] = [
-    // Platform and XDG caches: SwiftPM, Xcode, clang modules, Go builds, Homebrew, pip, uv.
-    "Library/Caches",
-    ".cache",
-    // JavaScript package managers, their stores and self-managed versions.
-    "Library/pnpm",
-    ".local/share/pnpm",
-    ".local/state/pnpm",
-    ".pnpm-store",
-    ".npm",
-    ".yarn",
-    ".bun/install/cache",
-    // Rust toolchains and Cargo's registry, git checkouts and package-cache lock.
-    ".cargo",
-    ".rustup",
-    // Go modules and JVM dependency caches.
-    "go/pkg",
-    ".gradle",
-    ".m2",
-    // Swift package state and Xcode derived data and simulators.
-    "Library/org.swift.swiftpm",
-    ".swiftpm",
-    "Library/Developer",
-    // Python and polyglot tool installs.
-    ".local/share/uv",
-    ".local/share/mise",
-    ".local/state/mise",
-];
-
-/// Paths inside the tool locations that stay read-only: executables on the owner's
-/// `PATH` and files the owner's shells source or tools load as configuration or
-/// credentials. A session writing these could run code in the owner's next
-/// unsandboxed shell or build. Native does not report these exceptions back.
-const READ_ONLY_INSIDE_TOOL_LOCATIONS: [&str; 9] = [
-    "Library/pnpm/bin",
-    ".cargo/bin",
-    ".cargo/env",
-    ".cargo/config",
-    ".cargo/config.toml",
-    ".cargo/credentials",
-    ".cargo/credentials.toml",
-    ".gradle/init.d",
-    ".gradle/gradle.properties",
-];
 
 const fn profile_name(access: RouterAccess) -> &'static str {
     match access {
@@ -95,75 +46,105 @@ pub(super) struct RouterSessionProfile {
 /// Host locations a profile's grants are resolved against.
 struct HostLocations {
     home: PathBuf,
-    /// Canonical system temporary directories: `$TMPDIR` and `/tmp`.
+    /// Canonical system temporary directories (`$TMPDIR`, `/tmp`), resolved only for
+    /// `write-restricted`, whose `:read-only` parent grants none.
     temporary_directories: Vec<PathBuf>,
+    /// Tool locations with a symlinked component below `home`. Codex refuses a whole
+    /// sandbox that grants a symlinked writable root, so these are not granted.
+    symlinked_locations: BTreeSet<&'static str>,
 }
 
 impl HostLocations {
-    /// Reads the host's `HOME` and resolves its temporary directories, as the
-    /// managed app-server inherits both from this process.
-    async fn resolve() -> Result<Self, SessionSetupError> {
+    /// Reads the host's `HOME` and, for `write-restricted`, its temporary directories,
+    /// as the managed app-server inherits both from this process. Writes nothing: the
+    /// Host creates missing tool locations at startup.
+    async fn resolve(access: RouterAccess) -> Result<Self, SessionSetupError> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|home| home.is_absolute())
-            .ok_or(SessionSetupError::HostLocationsUnavailable)?;
+            .ok_or_else(|| SessionSetupError::HostLocationsUnavailable {
+                location: "HOME".to_owned(),
+            })?;
         let mut temporary_directories = Vec::new();
-        let candidates = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .into_iter()
-            .chain([PathBuf::from("/tmp")])
-            .filter(|path| path.is_absolute());
-        for candidate in candidates {
-            // Seatbelt matches canonical paths, so `/tmp` is granted as `/private/tmp`.
-            // An unresolvable directory fails setup rather than silently losing a grant.
-            let canonical = tokio::fs::canonicalize(&candidate)
-                .await
-                .map_err(|_| SessionSetupError::HostLocationsUnavailable)?;
-            temporary_directories.push(canonical);
+        if access == RouterAccess::WriteRestricted {
+            let candidates = std::env::var_os("TMPDIR")
+                .map(PathBuf::from)
+                .into_iter()
+                .chain([PathBuf::from("/tmp")])
+                .filter(|path| path.is_absolute());
+            for candidate in candidates {
+                // Seatbelt matches canonical paths, so `/tmp` is granted as `/private/tmp`.
+                // An unresolvable directory fails setup rather than silently losing a grant.
+                let canonical = tokio::fs::canonicalize(&candidate).await.map_err(|_| {
+                    SessionSetupError::HostLocationsUnavailable {
+                        location: candidate.to_string_lossy().into_owned(),
+                    }
+                })?;
+                temporary_directories.push(canonical);
+            }
+        }
+        let mut symlinked_locations = BTreeSet::new();
+        for location in tool_locations(access) {
+            if has_symlinked_component(&home, location).await {
+                symlinked_locations.insert(*location);
+            }
         }
         Ok(Self {
             home,
             temporary_directories,
+            symlinked_locations,
         })
-    }
-
-    /// Creates missing tool locations outside the sandbox so first use can write them.
-    async fn prepare_tool_locations(&self) -> Result<(), SessionSetupError> {
-        for location in TOOL_LOCATIONS_UNDER_HOME {
-            tokio::fs::create_dir_all(self.home.join(location))
-                .await
-                .map_err(|_| SessionSetupError::HostLocationsUnavailable)?;
-        }
-        Ok(())
     }
 }
 
+/// The tool locations an access mode may write.
+fn tool_locations(access: RouterAccess) -> &'static [&'static str] {
+    match access {
+        RouterAccess::WorkspaceWrite => &WORKSPACE_TOOL_LOCATIONS,
+        RouterAccess::WriteRestricted => &RESTRICTED_TOOL_LOCATIONS,
+    }
+}
+
+/// Whether any existing component of `location` below `home` is a symlink.
+async fn has_symlinked_component(home: &Path, location: &str) -> bool {
+    let mut path = home.to_path_buf();
+    for component in Path::new(location).components() {
+        path.push(component);
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            // A missing component cannot be a symlink, nor can anything below it.
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 impl RouterSessionProfile {
-    /// Resolves the profile for a session against the host's home and temporary
-    /// directories, creating missing tool locations first.
+    /// Resolves the profile for a session against the host's home and temporary directories.
     pub(super) async fn for_session(
         access: RouterAccess,
         cwd: &Path,
         scratch: &Path,
     ) -> Result<Self, SessionSetupError> {
-        let host = HostLocations::resolve().await?;
-        host.prepare_tool_locations().await?;
+        let host = HostLocations::resolve(access).await?;
         Ok(Self::with_host(access, cwd, scratch, &host))
     }
 
     fn with_host(access: RouterAccess, cwd: &Path, scratch: &Path, host: &HostLocations) -> Self {
         let mut writable_roots = BTreeSet::from([scratch.to_string_lossy().into_owned()]);
         writable_roots.extend(
-            TOOL_LOCATIONS_UNDER_HOME
+            tool_locations(access)
                 .iter()
+                .filter(|location| !host.symlinked_locations.contains(*location))
                 .map(|location| host.home.join(location).to_string_lossy().into_owned()),
         );
         if access == RouterAccess::WriteRestricted {
             writable_roots.insert(cwd.join("tmp").to_string_lossy().into_owned());
             writable_roots.insert(cwd.join("docs/wip").to_string_lossy().into_owned());
-            // `:read-only` grants no temporary directory, yet git signing, pnpm and
-            // SwiftPM write there. Explicit paths keep native's report exact, where
-            // the `:tmpdir` token would come back as roots Router cannot predict.
+            // `:read-only` grants no temporary directory, yet git, pnpm and SwiftPM
+            // write there. Explicit paths keep native's report exact, where the
+            // `:tmpdir` token would come back as roots Router cannot predict.
             writable_roots.extend(
                 host.temporary_directories
                     .iter()
@@ -186,10 +167,6 @@ impl RouterSessionProfile {
     }
 
     /// Native `config` entries selecting this profile on start, fork or resume.
-    ///
-    /// Write-restricted sessions switch on the managed network proxy Router's root
-    /// configuration defines but leaves off, so their network stays proxied with only
-    /// the Control socket; workspace-write sessions keep direct network.
     pub(super) fn native_config(&self) -> Map<String, Value> {
         let profile = self.name();
         let filesystem = self
@@ -202,7 +179,7 @@ impl RouterSessionProfile {
                     .map(|path| (path.clone(), json!("read"))),
             )
             .collect::<Map<_, _>>();
-        let mut config = Map::from_iter([
+        Map::from_iter([
             ("default_permissions".to_owned(), json!(profile)),
             (
                 format!("permissions.{profile}.extends"),
@@ -212,11 +189,7 @@ impl RouterSessionProfile {
                 format!("permissions.{profile}.filesystem"),
                 Value::Object(filesystem),
             ),
-        ]);
-        if self.access == RouterAccess::WriteRestricted {
-            config.insert("features.network_proxy.enabled".to_owned(), json!(true));
-        }
-        config
+        ])
     }
 
     /// Refuses a native start, fork or resume whose effective settings differ from this profile.
@@ -240,9 +213,8 @@ impl RouterSessionProfile {
         let network_access = response
             .pointer("/sandbox/networkAccess")
             .and_then(Value::as_bool);
-        // Both profiles surface as a writable-roots sandbox with network enabled.
-        // Whether it is direct or proxied is not visible here; the root projection
-        // and the per-session proxy switch carry that.
+        // Both profiles surface as a writable-roots sandbox with direct network; a
+        // proxy would not be visible here, so the root projection guards it.
         // Temporary-directory flags are not compared: both profiles write them.
         if profile_id != self.name()
             || sandbox_type != Some("workspaceWrite")
@@ -268,20 +240,25 @@ mod tests {
     const SCRATCH: &str = "/owner/scratch/root";
     const TEMPORARY_DIRECTORIES: [&str; 2] = ["/private/var/folders/xy/T", "/private/tmp"];
 
+    fn host(symlinked_locations: BTreeSet<&'static str>) -> HostLocations {
+        HostLocations {
+            home: PathBuf::from(HOME),
+            temporary_directories: TEMPORARY_DIRECTORIES.map(PathBuf::from).to_vec(),
+            symlinked_locations,
+        }
+    }
+
     fn profile(access: RouterAccess) -> RouterSessionProfile {
         RouterSessionProfile::with_host(
             access,
             Path::new("/repo"),
             Path::new(SCRATCH),
-            &HostLocations {
-                home: PathBuf::from(HOME),
-                temporary_directories: TEMPORARY_DIRECTORIES.map(PathBuf::from).to_vec(),
-            },
+            &host(BTreeSet::new()),
         )
     }
 
-    fn tool_roots() -> Vec<String> {
-        TOOL_LOCATIONS_UNDER_HOME
+    fn under_home(locations: &[&str]) -> Vec<String> {
+        locations
             .iter()
             .map(|location| format!("{HOME}/{location}"))
             .collect()
@@ -300,52 +277,48 @@ mod tests {
         })
     }
 
+    fn filesystem(config: &Map<String, Value>, name: &str) -> Map<String, Value> {
+        config[&format!("permissions.{name}.filesystem")]
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
     #[test]
-    fn both_profiles_grant_scratch_and_every_tool_location() {
+    fn each_mode_grants_scratch_and_its_own_tool_locations() {
         // Arrange
-        let workspace = profile(RouterAccess::WorkspaceWrite);
-        let restricted = profile(RouterAccess::WriteRestricted);
+        let workspace = profile(RouterAccess::WorkspaceWrite).native_config();
+        let restricted = profile(RouterAccess::WriteRestricted).native_config();
 
         // Act
-        let workspace_config = workspace.native_config();
-        let restricted_config = restricted.native_config();
+        let workspace_filesystem = filesystem(&workspace, "router-workspace-write");
+        let restricted_filesystem = filesystem(&restricted, "router-write-restricted");
 
-        // Assert: pnpm, Cargo and SwiftPM stores are writable in both access modes.
-        for (config, name) in [
-            (&workspace_config, "router-workspace-write"),
-            (&restricted_config, "router-write-restricted"),
-        ] {
-            let filesystem = config[&format!("permissions.{name}.filesystem")]
-                .as_object()
-                .unwrap();
-            assert_eq!(filesystem[SCRATCH], "write");
-            for root in tool_roots() {
-                assert_eq!(filesystem[&root], "write", "{name} misses {root}");
-            }
-            assert_eq!(config["default_permissions"], name);
+        // Assert: workspace-write writes toolchain homes; write-restricted only caches and stores.
+        for root in under_home(&WORKSPACE_TOOL_LOCATIONS) {
+            assert_eq!(workspace_filesystem[&root], "write", "{root}");
         }
-        assert_eq!(
-            workspace_config["permissions.router-workspace-write.extends"],
-            ":workspace"
-        );
-        assert_eq!(
-            restricted_config["permissions.router-write-restricted.extends"],
-            ":read-only"
-        );
-        // Assert: only write-restricted switches on the managed proxy; workspace-write
-        // keeps direct network.
-        assert_eq!(restricted_config["features.network_proxy.enabled"], true);
-        assert!(!workspace_config.contains_key("features.network_proxy.enabled"));
+        for root in under_home(&RESTRICTED_TOOL_LOCATIONS) {
+            assert_eq!(restricted_filesystem[&root], "write", "{root}");
+        }
+        for toolchain in under_home(&[".rustup", ".cargo", "Library/pnpm"]) {
+            assert!(
+                !restricted_filesystem.contains_key(&toolchain),
+                "{toolchain}"
+            );
+        }
+        for (config, name, parent) in [
+            (&workspace, "router-workspace-write", ":workspace"),
+            (&restricted, "router-write-restricted", ":read-only"),
+        ] {
+            assert_eq!(config["default_permissions"], name);
+            assert_eq!(config[&format!("permissions.{name}.extends")], parent);
+            assert_eq!(filesystem(config, name)[SCRATCH], "write");
+            // Assert: no proxy switch; both modes keep the root's direct network.
+            assert!(!config.contains_key("features.network_proxy.enabled"));
+        }
         // Assert: only write-restricted adds the repository's tmp and docs/wip and the
         // system temporary directories that `:workspace` already grants natively.
-        let restricted_filesystem =
-            restricted_config["permissions.router-write-restricted.filesystem"]
-                .as_object()
-                .unwrap();
-        let workspace_filesystem =
-            workspace_config["permissions.router-workspace-write.filesystem"]
-                .as_object()
-                .unwrap();
         for root in ["/repo/tmp", "/repo/docs/wip"]
             .into_iter()
             .chain(TEMPORARY_DIRECTORIES)
@@ -355,40 +328,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn missing_tool_locations_and_their_parents_are_created_before_the_session() {
-        // Arrange: an empty home, so every location and parent (`.bun`, `go`, `.local`) is absent.
-        let home = std::env::temp_dir().join(format!(
-            "router-tool-locations-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&home).unwrap();
-        let host = HostLocations {
-            home: home.clone(),
-            temporary_directories: Vec::new(),
-        };
-
-        // Act
-        host.prepare_tool_locations().await.unwrap();
-
-        // Assert
-        for location in TOOL_LOCATIONS_UNDER_HOME {
-            assert!(home.join(location).is_dir(), "{location} was not created");
-        }
-        std::fs::remove_dir_all(home).unwrap();
-    }
-
     #[test]
-    fn executables_and_startup_files_inside_tool_locations_stay_read_only() {
+    fn executables_and_startup_files_stay_read_only_and_are_not_expected_back() {
         // Arrange
         let workspace = profile(RouterAccess::WorkspaceWrite);
 
         // Act
-        let config = workspace.native_config();
-        let filesystem = config["permissions.router-workspace-write.filesystem"]
-            .as_object()
-            .unwrap();
+        let filesystem = filesystem(&workspace.native_config(), "router-workspace-write");
 
         // Assert: PATH entries and sourced files are read-only inside writable parents.
         for path in [
@@ -400,9 +346,6 @@ mod tests {
             assert_eq!(filesystem[&format!("{HOME}/{path}")], "read", "{path}");
         }
         assert_eq!(filesystem[&format!("{HOME}/.cargo")], "write");
-        // Assert: fnm's per-shell PATH links are not granted at all.
-        assert!(!filesystem.contains_key(&format!("{HOME}/.local/state/fnm_multishells")));
-        // Assert: the exceptions are not expected back as writable roots.
         assert!(
             !workspace
                 .writable_roots
@@ -411,13 +354,52 @@ mod tests {
     }
 
     #[test]
+    fn symlinked_tool_locations_are_not_granted() {
+        // Arrange: a cache moved to another volume through a symlink.
+        let profile = RouterSessionProfile::with_host(
+            RouterAccess::WorkspaceWrite,
+            Path::new("/repo"),
+            Path::new(SCRATCH),
+            &host(BTreeSet::from([".cache"])),
+        );
+
+        // Act
+        let filesystem = filesystem(&profile.native_config(), "router-workspace-write");
+
+        // Assert: Codex refuses a whole sandbox with a symlinked writable root.
+        assert!(!filesystem.contains_key(&format!("{HOME}/.cache")));
+        assert_eq!(filesystem[&format!("{HOME}/Library/Caches")], "write");
+    }
+
+    #[tokio::test]
+    async fn symlinked_components_below_home_are_detected() {
+        // Arrange
+        let home = std::env::temp_dir().join(format!(
+            "router-symlink-home-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let elsewhere = home.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.join(".cache")).unwrap();
+
+        // Act & assert
+        assert!(has_symlinked_component(&home, ".cache/uv").await);
+        assert!(!has_symlinked_component(&home, "elsewhere").await);
+        assert!(!has_symlinked_component(&home, ".missing/child").await);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn native_settings_must_match_the_requested_profile_with_network() {
         // Arrange
         let workspace = profile(RouterAccess::WorkspaceWrite);
-        let mut granted = tool_roots();
+        let mut granted = under_home(&WORKSPACE_TOOL_LOCATIONS);
         granted.push(SCRATCH.to_owned());
         let mut with_unexpected_root = granted.clone();
         with_unexpected_root.push("/other/write-root".to_owned());
+        let mut unsandboxed = native_response("router-workspace-write", &granted, true);
+        unsandboxed["sandbox"]["type"] = json!("dangerFullAccess");
 
         // Act & assert: exact profile, roots and network access are accepted.
         assert!(
@@ -425,7 +407,8 @@ mod tests {
                 .validate_observed(&native_response("router-workspace-write", &granted, true))
                 .is_ok()
         );
-        // Assert: missing settings, extra roots, missing network or the wrong profile are refused.
+        // Assert: missing settings, extra roots, missing network, another sandbox or
+        // the wrong profile are refused.
         assert!(workspace.validate_observed(&json!({})).is_err());
         assert!(
             workspace
@@ -441,21 +424,19 @@ mod tests {
                 .validate_observed(&native_response("router-workspace-write", &granted, false))
                 .is_err()
         );
+        assert!(workspace.validate_observed(&unsandboxed).is_err());
         assert!(
             workspace
                 .validate_observed(&native_response("router-write-restricted", &granted, true))
                 .is_err()
         );
-        let mut unsandboxed = native_response("router-workspace-write", &granted, true);
-        unsandboxed["sandbox"]["type"] = json!("dangerFullAccess");
-        assert!(workspace.validate_observed(&unsandboxed).is_err());
     }
 
     #[test]
-    fn write_restricted_expects_its_work_areas_and_temporary_directories() {
-        // Arrange: native folds explicit temporary directories into its own temp flags.
+    fn write_restricted_expects_its_stores_work_areas_and_temporary_directories() {
+        // Arrange
         let restricted = profile(RouterAccess::WriteRestricted);
-        let mut granted = tool_roots();
+        let mut granted = under_home(&RESTRICTED_TOOL_LOCATIONS);
         granted.extend(
             [SCRATCH, "/repo/tmp", "/repo/docs/wip"]
                 .into_iter()
@@ -468,7 +449,7 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
 
-        // Act & assert: the full grant set is accepted; a report missing temp is refused.
+        // Act & assert
         assert!(
             restricted
                 .validate_observed(&native_response("router-write-restricted", &granted, true))

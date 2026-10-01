@@ -310,10 +310,10 @@ fn setup_error(id: Value, failure: &crate::SessionSetupError) -> Value {
                 "kind":"accessMismatch","requested":requested,"effective":effective
             }}
         }),
-        crate::SessionSetupError::HostLocationsUnavailable => json!({
+        crate::SessionSetupError::HostLocationsUnavailable { location } => json!({
             "jsonrpc":"2.0","id":id,
             "error":{"code":code,"message":"Router session setup rejected","data":{
-                "kind":"hostLocationsUnavailable"
+                "kind":"hostLocationsUnavailable","location":location
             }}
         }),
         _ => error(id, code, "Native session setup rejected"),

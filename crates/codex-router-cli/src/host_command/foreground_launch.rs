@@ -12,7 +12,6 @@ use codex_native_integration::AppServerCommandSpec;
 use codex_native_integration::CodexPaths;
 use codex_native_integration::CodexRouterProfile;
 use codex_native_integration::DesktopLaunchPolicyCommand;
-use codex_native_integration::RouterControlSocketPath;
 use codex_router_host::AppServerLaunchPlan;
 use codex_router_host::ChildCommandSpec;
 use codex_router_host::ChildOutput;
@@ -88,11 +87,8 @@ pub(super) async fn run_foreground_host(
         crate::app_server_socket_or_default(context, &codex_paths, isolated_debug)
             .map_err(|message| HostCommandError::AppServerSocket(message.to_owned()))?;
     let collaboration_directory = router_root.join("agent-communication");
-    let control_socket =
-        RouterControlSocketPath::in_collaboration_directory(&collaboration_directory)?;
     let profile = CodexRouterProfile::new(port);
-    let app_server_spec =
-        AppServerCommandSpec::new(&codex_paths, &profile, &control_socket, &app_server_socket);
+    let app_server_spec = AppServerCommandSpec::new(&codex_paths, &profile, &app_server_socket);
     let app_server_spec = match debug_profile.as_ref() {
         Some(profile) => app_server_spec.with_debug_profile(profile),
         None => app_server_spec,
@@ -100,6 +96,11 @@ pub(super) async fn run_foreground_host(
     codex_router_host::record_debug_readiness_timing("profileAndSpec", launch_started_at);
     // Validate the native destination before touching state or launch policy.
     tokio::fs::create_dir_all(&router_root).await?;
+    // Sessions may write shared tool locations; create missing ones here, outside any
+    // sandbox, so a first install can populate them. The app-server inherits this HOME.
+    if let Some(home) = context.env_var("HOME") {
+        codex_native_integration::prepare_router_tool_locations(Path::new(home)).await;
+    }
     codex_router_host::record_debug_readiness_timing("routerRootReady", launch_started_at);
     apply_launch_policy(launch_mode, context).await?;
     let inherited_marker = std::env::var_os(codex_router_host::inherited_lock_environment());

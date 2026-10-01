@@ -44,8 +44,8 @@ pub enum SessionSetupError {
     Unavailable,
     #[error("session schema unavailable")]
     SchemaUnavailable,
-    #[error("Router host home, temporary or tool directory is unavailable for session grants")]
-    HostLocationsUnavailable,
+    #[error("Router host location {location} is unavailable for session grants")]
+    HostLocationsUnavailable { location: String },
 }
 mod router_permission_profile;
 /// Retains one connection and a receipt minted only by successful fresh thread/start.

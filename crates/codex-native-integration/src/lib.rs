@@ -20,6 +20,7 @@ mod native_session_launch;
 mod native_state_paths;
 mod remote_control_observation;
 mod router_profile_projection;
+mod router_tool_locations;
 mod stored_repository_identity;
 
 pub use app_server_launch::AppServerCommandSpec;
@@ -47,9 +48,11 @@ pub use native_session_launch::caller_overrides;
 pub use native_state_paths::CodexPaths;
 pub use remote_control_observation::RemoteControlObservation;
 pub use router_profile_projection::CodexRouterProfile;
-pub use router_profile_projection::RouterControlSocketError;
-pub use router_profile_projection::RouterControlSocketPath;
 pub use router_profile_projection::router_permission_profile_overrides;
+pub use router_tool_locations::{
+    READ_ONLY_INSIDE_TOOL_LOCATIONS, RESTRICTED_TOOL_LOCATIONS, WORKSPACE_TOOL_LOCATIONS,
+    prepare_router_tool_locations,
+};
 pub use stored_repository_identity::{
     RepositoryIdentity, non_empty_trimmed, normalize_git_origin_url, normalize_path,
     normalized_paths_resolve_to_same_location, path_identity_candidates,
