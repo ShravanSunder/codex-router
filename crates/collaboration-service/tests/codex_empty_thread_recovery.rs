@@ -1,13 +1,14 @@
 //! A missing Codex thread has no replayable native input and no persisted holder identity.
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
-    CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageContent,
-    MessageDelivery, SessionRef, UuidIdentity,
+    CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageDelivery,
+    MessageText, PushId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, CodexAppServerDeliveryRoute, DeliveryFuture, DeliveryPrecondition,
-    DeliveryRequest, EndpointDirectory, NativeControlBackend, NativeGenerationGate,
-    SessionDeliveryRoute, UnmaterializedThreadHolder,
+    EndpointDirectory, NativeControlBackend, NativeGenerationGate, SessionDeliveryRoute,
+    UnmaterializedThreadHolder,
+    layer_zero::{DeliveryRequest, PreparedPush},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -102,18 +103,25 @@ async fn missing_thread_without_holder_is_known_not_submitted()
         }
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
+    let push_id = PushId::try_from(agent_automation::AttemptId::generate().as_str().to_owned())?;
+    let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())?;
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"hello\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))?;
     let receipt = route
         .deliver(
             DeliveryRequest {
-                target,
-                message: MessageContent::Router {
-                    text: "hello".to_owned().try_into()?,
+                payload: PreparedPush {
+                    push_id,
+                    line,
+                    load_policy: collaboration_service::LoadPolicy::MayLoad,
                 },
-                header_context: collaboration_protocol::MessageHeaderContext::default(),
+                target,
                 mode: MessageDelivery::Auto,
-                load_policy: collaboration_service::LoadPolicy::MayLoad,
                 precondition: DeliveryPrecondition::Unpinned,
-                correlation: DeliveryCorrelationId::generate(),
+                correlation,
                 attempt: agent_automation::AttemptId::generate(),
             },
             &DiscardEvidence,

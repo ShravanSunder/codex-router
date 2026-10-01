@@ -237,36 +237,44 @@ fn grade_round_trip(
         return Err("Sender did not demonstrate reading the skill and messaging reference".into());
     }
     trace_evidence::require_terminal(recipient_turns, "Recipient")?;
-    if !trace_evidence::used_messaging_cli(sender_turns)
-        || !trace_evidence::successful_cli_receipts(sender_turns)
-            .iter()
-            .any(|receipt| receipt.target == proof_state.recipient)
-    {
+    let sender_result = trace_evidence::successful_cli_receipts(sender_turns)
+        .into_iter()
+        .find(|result| result.target == proof_state.recipient);
+    if !trace_evidence::used_messaging_cli(sender_turns) {
         return Err(
             "Sender produced no successful real CLI request to the discovered recipient".into(),
         );
     }
+    let Some(sender_result) = sender_result else {
+        return Err(
+            "Sender produced no successful real CLI request to the discovered recipient".into(),
+        );
+    };
     if !trace_evidence::has_incoming_message_followed_by_agent_text(
         recipient_turns,
         sender,
         &proof_state.recipient,
+        &sender_result,
         &proof_state.message_marker,
     ) {
         return Err(
             "Recipient history lacks the actual correctly addressed incoming request".into(),
         );
     }
-    if !trace_evidence::used_messaging_cli(recipient_turns)
-        || !trace_evidence::successful_cli_receipts(recipient_turns)
-            .iter()
-            .any(|receipt| receipt.target == *sender)
-    {
+    let recipient_result = trace_evidence::successful_cli_receipts(recipient_turns)
+        .into_iter()
+        .find(|result| result.target == *sender);
+    if !trace_evidence::used_messaging_cli(recipient_turns) {
         return Err("Recipient produced no successful real CLI reply request to the sender".into());
     }
+    let Some(recipient_result) = recipient_result else {
+        return Err("Recipient produced no successful real CLI reply request to the sender".into());
+    };
     if !trace_evidence::has_incoming_message_followed_by_agent_text(
         sender_turns,
         &proof_state.recipient,
         sender,
+        &recipient_result,
         &proof_state.reply_marker,
     ) {
         return Err(

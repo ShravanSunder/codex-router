@@ -50,7 +50,7 @@ struct AcceptedTypedNoticeDelivery;
 impl collaboration_service::SessionMessageDelivery for AcceptedTypedNoticeDelivery {
     fn deliver<'a>(
         &'a self,
-        _: collaboration_service::DeliveryRequest,
+        _: collaboration_service::layer_zero::DeliveryRequest,
         _: &'a dyn collaboration_service::AttemptEvidenceSink,
     ) -> collaboration_service::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
         Box::pin(async {

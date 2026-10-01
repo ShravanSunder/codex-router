@@ -403,15 +403,6 @@ impl crate::SessionDeliveryRoute for LiveElsewhereRoute {
     }
     fn deliver<'a>(
         &'a self,
-        _: crate::DeliveryRequest,
-        _: &'a dyn crate::AttemptEvidenceSink,
-    ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
-        self.effects
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Box::pin(async { Err(crate::DeliveryContractError::InvalidEvidence) })
-    }
-    fn deliver_prepared<'a>(
-        &'a self,
         _: crate::layer_zero::DeliveryRequest,
         _: &'a dyn crate::AttemptEvidenceSink,
     ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {

@@ -25,10 +25,9 @@ use agent_automation::{
     RouteEffectEvidence, SubmissionEffect,
 };
 use collaboration_protocol::{
-    CodexGeneration, ConversationPromptRequest, DeliveryClientReceipt, DeliveryNextAction,
-    DeliveryOutcome, DeliveryReceipt, DeliveryRejection, DeliveryRejectionReason, MessageContent,
-    MessageDelivery, OperationId, ProviderIdentity, ProviderOperationEffect, SessionReachability,
-    SessionRef, UuidIdentity,
+    CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
+    DeliveryRejection, DeliveryRejectionReason, MessageDelivery, OperationId, ProviderIdentity,
+    ProviderOperationEffect, SessionReachability, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, DeliveryContractError, DeliveryPrecondition, EndpointDirectory,
@@ -334,27 +333,6 @@ impl ProviderAcpDeliveryRoute {
         }
         if capabilities.supports_steering {
             let prompt_text = match &request.content {
-                ProviderDeliveryContent::Message {
-                    message,
-                    header_context,
-                } => match collaboration_protocol::render_message_with_context(
-                    &request.target,
-                    message,
-                    header_context,
-                ) {
-                    Ok(prompt) => prompt.text,
-                    Err(_) => {
-                        return self
-                            .finish_known_none(
-                                &request,
-                                sink,
-                                &mut effect,
-                                "provider prompt exceeds the frame limit",
-                                false,
-                            )
-                            .await;
-                    }
-                },
                 ProviderDeliveryContent::PreparedPush { line, .. } => line.as_str().to_owned(),
             };
             match runtime
@@ -432,33 +410,9 @@ impl ProviderAcpDeliveryRoute {
             Err(_) => return self.finish_unknown(sink, &mut effect).await,
         };
         let requested_by = match &request.content {
-            ProviderDeliveryContent::Message {
-                message: MessageContent::Agent { sender, .. },
-                ..
-            } => sender.clone().into(),
-            ProviderDeliveryContent::Message { .. }
-            | ProviderDeliveryContent::PreparedPush { .. } => record.created_by.clone(),
+            ProviderDeliveryContent::PreparedPush { .. } => record.created_by.clone(),
         };
         let dispatch = match &request.content {
-            ProviderDeliveryContent::Message {
-                message,
-                header_context,
-            } => {
-                self.supervisor
-                    .submit_delivery_prompt_with_header_context(
-                        ConversationPromptRequest {
-                            operation_id: operation_id.clone(),
-                            input_id: Some(input_id),
-                            target: request.target.clone(),
-                            generation: Some(binding.generation.clone()),
-                            requested_by,
-                            approver: record.approver,
-                            prompt: message.clone(),
-                        },
-                        header_context,
-                    )
-                    .await
-            }
             ProviderDeliveryContent::PreparedPush { line, .. } => {
                 let contents_request = ProviderPromptContentsRequest::from_prepared_push(
                     operation_id.clone(),

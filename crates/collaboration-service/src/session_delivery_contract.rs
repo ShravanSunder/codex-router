@@ -1,8 +1,7 @@
 //! The feature-facing delivery seam and the route-facing client contract.
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
-    AttemptId, CodexGeneration, DeliveryCorrelationId, DeliveryReceipt, MessageContent,
-    MessageDelivery, MessageHeaderContext, PushId, SessionReachability, SessionRef,
+    CodexGeneration, DeliveryReceipt, MessageDelivery, PushId, SessionReachability, SessionRef,
 };
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -24,18 +23,6 @@ pub enum DeliveryContractError {
     PreparationOwnershipConflict,
     #[error("schedule changed during preparation")]
     PreparationChangeConflict,
-}
-
-#[derive(Clone, Debug)]
-pub struct DeliveryRequest {
-    pub target: SessionRef,
-    pub message: MessageContent,
-    pub header_context: MessageHeaderContext,
-    pub mode: MessageDelivery,
-    pub load_policy: LoadPolicy,
-    pub precondition: DeliveryPrecondition,
-    pub correlation: DeliveryCorrelationId,
-    pub attempt: AttemptId,
 }
 
 /// Layer-0 contract introduced before all existing callers move to prepared pushes.
@@ -61,23 +48,6 @@ pub mod layer_zero {
         pub precondition: DeliveryPrecondition,
         pub correlation: DeliveryCorrelationId,
         pub attempt: AttemptId,
-    }
-
-    impl DeliveryRequest {
-        pub(crate) fn into_legacy_request(self) -> super::DeliveryRequest {
-            super::DeliveryRequest {
-                target: self.target,
-                message: collaboration_protocol::MessageContent::Router {
-                    text: self.payload.line,
-                },
-                header_context: collaboration_protocol::MessageHeaderContext::default(),
-                mode: self.mode,
-                load_policy: self.payload.load_policy,
-                precondition: self.precondition,
-                correlation: self.correlation,
-                attempt: self.attempt,
-            }
-        }
     }
 }
 
@@ -112,8 +82,7 @@ pub enum DeliveryPrecondition {
 
 pub struct AttemptReconciliationContext {
     pub target: SessionRef,
-    pub message: MessageContent,
-    pub prepared_push_id: Option<PushId>,
+    pub prepared_push_id: PushId,
     pub mode: MessageDelivery,
     pub recorded: RouteEffectEvidence<SessionRef, CodexGeneration>,
 }
@@ -169,17 +138,9 @@ impl AttemptEvidenceSink for UnstoredAttemptEvidenceSink {
 pub trait SessionMessageDelivery: Send + Sync {
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
-        evidence: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt>;
-
-    fn deliver_prepared<'a>(
-        &'a self,
         request: layer_zero::DeliveryRequest,
         evidence: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        self.deliver(request.into_legacy_request(), evidence)
-    }
+    ) -> DeliveryFuture<'a, DeliveryReceipt>;
 
     fn reconcile_attempt(
         &self,
@@ -197,16 +158,9 @@ pub trait SessionDeliveryRoute: Send + Sync {
     fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, RoutePresence>;
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
-        evidence: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt>;
-    fn deliver_prepared<'a>(
-        &'a self,
         request: layer_zero::DeliveryRequest,
         evidence: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        self.deliver(request.into_legacy_request(), evidence)
-    }
+    ) -> DeliveryFuture<'a, DeliveryReceipt>;
     fn reconcile_attempt(
         &self,
         context: AttemptReconciliationContext,

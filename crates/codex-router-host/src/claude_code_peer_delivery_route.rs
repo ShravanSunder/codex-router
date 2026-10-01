@@ -9,13 +9,13 @@ use claude_code_peer_messaging::{
 };
 use collaboration_protocol::{
     CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
-    DeliveryRejection, DeliveryRejectionReason, EndpointRef, MessageContent, MessageDelivery,
-    MessageHeaderContext, SessionReachability, SessionRef, render_message_with_context,
+    DeliveryRejection, DeliveryRejectionReason, EndpointRef, MessageDelivery, SessionReachability,
+    SessionRef,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, RouteClaim,
-    RoutePresence, SessionDeliveryRoute,
+    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, RouteClaim, RoutePresence,
+    SessionDeliveryRoute,
 };
 use std::sync::Arc;
 
@@ -24,7 +24,6 @@ pub struct ClaudeCodePeerDeliveryRoute {
     endpoint: EndpointRef,
     registry: Arc<ClaudeCodeSessionRegistry>,
     socket: Arc<ClaudeCodePeerSocket>,
-    display_names: collaboration_service::SessionDisplayNameCache,
 }
 
 enum PeerDeliveryPreparation {
@@ -46,16 +45,7 @@ impl ClaudeCodePeerDeliveryRoute {
             endpoint,
             registry,
             socket,
-            display_names: collaboration_service::SessionDisplayNameCache::default(),
         }
-    }
-
-    pub(crate) fn with_display_names(
-        mut self,
-        display_names: collaboration_service::SessionDisplayNameCache,
-    ) -> Self {
-        self.display_names = display_names;
-        self
     }
 
     pub(crate) fn serves(&self, target: &SessionRef) -> bool {
@@ -65,7 +55,7 @@ impl ClaudeCodePeerDeliveryRoute {
     pub(crate) async fn lookup(&self, target: &SessionRef) -> PeerSessionLookup {
         let registry = Arc::clone(&self.registry);
         let session_id = target.session_id.clone();
-        let lookup = match tokio::task::spawn_blocking(move || registry.lookup(&session_id)).await {
+        match tokio::task::spawn_blocking(move || registry.lookup(&session_id)).await {
             Ok(Ok(lookup)) => lookup,
             Ok(Err(error)) => PeerSessionLookup::LiveUnsupported {
                 reason: error.to_string(),
@@ -73,15 +63,7 @@ impl ClaudeCodePeerDeliveryRoute {
             Err(error) => PeerSessionLookup::LiveUnsupported {
                 reason: format!("Claude Code registry lookup task failed: {error}"),
             },
-        };
-        if let PeerSessionLookup::Writable(peer) = &lookup {
-            if let Some(name) = peer.name.as_deref() {
-                self.display_names.remember(target.clone(), name);
-            } else {
-                self.display_names.forget(target.clone());
-            }
         }
-        lookup
     }
 
     pub(crate) fn evidence(
@@ -99,54 +81,12 @@ impl ClaudeCodePeerDeliveryRoute {
         ))
     }
 
-    pub(crate) fn render_peer_message(
-        target: &SessionRef,
-        message: &MessageContent,
-        header_context: &MessageHeaderContext,
-    ) -> Result<String, DeliveryContractError> {
-        let rendered = render_message_with_context(target, message, header_context)
-            .map_err(|_| DeliveryContractError::ClientOperation)?;
-        match message {
-            MessageContent::Agent { .. } => Ok(format!(
-                "{}\n\nReply with `agent-collaboration message reply --text <TEXT>` as this Claude session.",
-                rendered.text,
-            )),
-            MessageContent::HumanUser { .. } => Ok(format!(
-                "Origin: human user\n\n{}\n\nFor follow-up messages, use `agent-collaboration message send --human-user --to <SessionRef> --text <TEXT>` as this Claude session.",
-                rendered.text,
-            )),
-            MessageContent::Router { .. } => Ok(format!(
-                "{}\n\nFor follow-up messages, use `agent-collaboration message send --to <SessionRef> --from <SessionRef> --text <TEXT>` as this Claude session.",
-                rendered.text,
-            )),
-        }
-    }
-
-    pub(crate) fn header_context_for_delivery(
-        &self,
-        target: &SessionRef,
-        message: &MessageContent,
-        current: &MessageHeaderContext,
-    ) -> MessageHeaderContext {
-        let cached =
-            MessageHeaderContext::resolve(target, message, &self.display_names, current.origin);
-        MessageHeaderContext {
-            sender_display_name: cached
-                .sender_display_name
-                .or_else(|| current.sender_display_name.clone()),
-            recipient_display_name: cached
-                .recipient_display_name
-                .or_else(|| current.recipient_display_name.clone()),
-            origin: current.origin,
-        }
-    }
-
     pub(crate) async fn write_peer_message(
         &self,
         peer: &PeerSessionRecord,
-        message: &str,
+        prepared_line: &str,
     ) -> PeerSocketWriteOutcome {
-        self.socket.write_user_message(peer, message).await
+        self.socket.write_user_message(peer, prepared_line).await
     }
 
     async fn prepare_peer_delivery(
@@ -206,7 +146,7 @@ impl ClaudeCodePeerDeliveryRoute {
         evidence
             .record(Self::evidence(peer, PeerWriteEffect::Dispatching)?)
             .await?;
-        match self.write_peer_message(peer, text).await {
+        match self.socket.write_user_message(peer, text).await {
             PeerSocketWriteOutcome::Written => {
                 if evidence
                     .record(Self::evidence(peer, PeerWriteEffect::Written)?)
@@ -344,30 +284,6 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
 
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
-        evidence: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move {
-            let peer = match self
-                .prepare_peer_delivery(&request.target, &request.precondition, request.mode)
-                .await?
-            {
-                PeerDeliveryPreparation::Ready(peer) => peer,
-                PeerDeliveryPreparation::Finished(receipt) => return Ok(receipt),
-            };
-            let header_context = self.header_context_for_delivery(
-                &request.target,
-                &request.message,
-                &request.header_context,
-            );
-            let text =
-                Self::render_peer_message(&request.target, &request.message, &header_context)?;
-            self.write_peer_delivery(&peer, &text, evidence).await
-        })
-    }
-
-    fn deliver_prepared<'a>(
-        &'a self,
         request: collaboration_service::layer_zero::DeliveryRequest,
         evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
@@ -413,59 +329,5 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
                 }
             })
         })
-    }
-}
-
-#[cfg(test)]
-mod peer_reply_guidance_tests {
-    use super::ClaudeCodePeerDeliveryRoute;
-    use collaboration_protocol::{
-        EndpointId, EndpointRef, MessageContent, MessageHeaderContext, MessageText, SessionId,
-        SessionRef, UuidIdentity,
-    };
-
-    fn target() -> SessionRef {
-        SessionRef {
-            endpoint: EndpointRef {
-                service_id: UuidIdentity::try_from(
-                    "018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned(),
-                )
-                .expect("service id"),
-                endpoint_id: EndpointId::try_from("claude-local".to_owned()).expect("endpoint id"),
-            },
-            session_id: SessionId::try_from("peer-session".to_owned()).expect("session id"),
-        }
-    }
-
-    #[test]
-    fn reply_shortcut_is_suggested_only_for_agent_messages() {
-        let target = target();
-        let agent = MessageContent::Agent {
-            sender: target.clone(),
-            text: MessageText::try_from("Agent message".to_owned()).expect("message text"),
-        };
-        let human = MessageContent::HumanUser {
-            text: MessageText::try_from("Human message".to_owned()).expect("message text"),
-        };
-        let router = MessageContent::Router {
-            text: MessageText::try_from("Router notice".to_owned()).expect("message text"),
-        };
-        let context = MessageHeaderContext::default();
-
-        let agent_text =
-            ClaudeCodePeerDeliveryRoute::render_peer_message(&target, &agent, &context)
-                .expect("Agent peer message");
-        let human_text =
-            ClaudeCodePeerDeliveryRoute::render_peer_message(&target, &human, &context)
-                .expect("human peer message");
-        let router_text =
-            ClaudeCodePeerDeliveryRoute::render_peer_message(&target, &router, &context)
-                .expect("Router peer message");
-
-        assert!(agent_text.contains("message reply --text <TEXT>"));
-        assert!(human_text.contains("message send --human-user"));
-        assert!(!human_text.contains("message reply"));
-        assert!(router_text.contains("message send --to <SessionRef>"));
-        assert!(!router_text.contains("message reply"));
     }
 }

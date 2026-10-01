@@ -8,8 +8,8 @@ use automation_storage::{
     AutomationStore, DeliveryCompletion, DeliveryRecord, DeliveryResult, StorageError,
 };
 use collaboration_protocol::{
-    CodexGeneration, DeliveryClientReceipt, DeliveryOutcome, MessageContent, MessageDelivery,
-    NativeSendAcceptance, PushKind, PushOrigin, RouterOriginRef, SessionReachability, SessionRef,
+    CodexGeneration, DeliveryClientReceipt, DeliveryOutcome, MessageDelivery, NativeSendAcceptance,
+    PushKind, PushOrigin, RouterOriginRef, SessionReachability, SessionRef,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -34,20 +34,16 @@ pub(crate) async fn reconcile(
         "steer" => MessageDelivery::Steer,
         _ => return Err(StorageError::InvalidRecord),
     };
-    let (message, push) = {
+    let push = {
         let mut storage = store.lock().await;
-        let message = storage
-            .read_delivery_content::<MessageContent>(&record.delivery_id)
-            .await?;
         let origin = RouterOriginRef::Wake {
             wakeup_id: record.wakeup_id.clone(),
             occurrence_id: record.occurrence_id.clone(),
         };
-        let push = storage
+        storage
             .get_push_record_by_origin_reference(&origin)
             .await?
-            .ok_or(StorageError::PushNotFound)?;
-        (message, push)
+            .ok_or(StorageError::PushNotFound)?
     };
     if push.kind != PushKind::Wake
         || push.origin != PushOrigin::Router(PushKind::Wake)
@@ -57,8 +53,7 @@ pub(crate) async fn reconcile(
     }
     let context = AttemptReconciliationContext {
         target: record.target,
-        message,
-        prepared_push_id: Some(push.push_id),
+        prepared_push_id: push.push_id,
         mode,
         recorded: effects.clone(),
     };

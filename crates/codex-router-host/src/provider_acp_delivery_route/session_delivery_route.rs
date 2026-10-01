@@ -9,8 +9,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryRequest, RouteClaim, RoutePresence,
-    SessionDeliveryRoute,
+    DeliveryContractError, DeliveryFuture, RouteClaim, RoutePresence, SessionDeliveryRoute,
 };
 use std::sync::Arc;
 
@@ -84,14 +83,6 @@ impl SessionDeliveryRoute for ProviderAcpDeliveryRoute {
     }
 
     fn deliver<'a>(
-        &'a self,
-        request: DeliveryRequest,
-        sink: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move { self.deliver_provider(request.into(), sink).await })
-    }
-
-    fn deliver_prepared<'a>(
         &'a self,
         request: collaboration_service::layer_zero::DeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,

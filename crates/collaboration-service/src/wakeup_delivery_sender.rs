@@ -156,7 +156,7 @@ impl WakeDeliverySender {
         };
         let receipt = self
             .delivery
-            .deliver_prepared(request, &sink)
+            .deliver(request, &sink)
             .await
             .map_err(|_| StorageError::InvalidRecord)?;
         #[cfg(test)]

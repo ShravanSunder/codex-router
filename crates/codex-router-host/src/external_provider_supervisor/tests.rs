@@ -1,15 +1,54 @@
 use super::*;
 use crate::ExternalProviderLaunch;
 use collaboration_protocol::{
-    CodexGeneration, ConversationCreateRequest, ConversationPromptRequest, EndpointId,
-    GenerationNumber, MessageContent, MessageText, PositiveSeconds, ProviderBindingId,
-    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
-    ProviderCapabilityStatus, ProviderKind, ProviderPromptStopReason, ProviderRequestedPolicy,
-    ProviderRuntimeIdentity, ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId,
-    UuidIdentity,
+    CodexGeneration, ConversationCreateRequest, EndpointId, GenerationNumber, MessageText,
+    PositiveSeconds, ProviderBindingId, ProviderCapabilities, ProviderCapability,
+    ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
+    ProviderPromptStopReason, ProviderRequestedPolicy, ProviderRuntimeIdentity, ProviderTransport,
+    ProviderWorkingDirectory, PushId, RouterAccess, SessionId, UuidIdentity,
 };
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex as StdMutex};
+
+struct PreparedPromptFixture {
+    operation_id: OperationId,
+    input_id: session_event_model::InputId,
+    target: SessionRef,
+    preview: String,
+}
+
+fn prepared_prompt_request(fixture: PreparedPromptFixture) -> ProviderPromptContentsRequest {
+    let push_id = PushId::try_from(agent_automation::AttemptId::generate().as_str().to_owned())
+        .expect("UUIDv7 push id");
+    let line = MessageText::try_from(
+        collaboration_protocol::render_push_line(&collaboration_protocol::PushLineInput {
+            link: collaboration_protocol::RouterLink::new(
+                collaboration_protocol::MachineId::from(fixture.target.endpoint.service_id.clone()),
+                push_id,
+            ),
+            machine_label: collaboration_protocol::MachineLabel::try_from(
+                "fixture-host".to_owned(),
+            )
+            .expect("machine label"),
+            origin: collaboration_protocol::PushOrigin::Session(fixture.target.clone()),
+            header_facts: collaboration_protocol::PushHeaderFacts::DirectMessage {
+                sender_display_name: None,
+            },
+            body: Some(fixture.preview),
+        })
+        .expect("prepared push line"),
+    )
+    .expect("valid push text");
+    ProviderPromptContentsRequest::from_prepared_push(
+        fixture.operation_id,
+        fixture.input_id,
+        fixture.target.clone(),
+        fixture.target.clone().into(),
+        fixture.target.into(),
+        &line,
+    )
+    .expect("provider prompt contents")
+}
 
 #[derive(Clone, Default)]
 struct CapturedProviderTrace(Arc<StdMutex<Vec<u8>>>);
@@ -103,10 +142,14 @@ print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'sessionId':'fi
 for expected in ('first','second'):
  request=json.loads(sys.stdin.readline())
  assert request['method']=='session/prompt'
- assert request['params']['prompt'][0]['text'].endswith(expected)
+ text=request['params']['prompt'][0]['text']
+ assert text.startswith(f'✉️ sender · "{{expected}}" · router://')
+ machine_and_push_id=text.split('router://',1)[1]
+ machine_id,separator,push_id=machine_and_push_id.partition('/push/')
+ assert separator and machine_id and push_id
  with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
   event.connect({:?})
-  event.sendall(expected.encode())
+  event.sendall(text.encode())
  print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 sys.stdin.read()
 "#,
@@ -202,17 +245,12 @@ async fn delivery_prompt_reports_submission_before_turn_settles() {
     };
 
     let dispatch = backend
-        .submit_delivery_prompt(ConversationPromptRequest {
-            input_id: None,
+        .submit_delivery_prompt_contents(prepared_prompt_request(PreparedPromptFixture {
             operation_id: operation_id.clone(),
+            input_id: session_event_model::InputId::generate(),
             target: target.clone(),
-            generation: Some(generation()),
-            requested_by: (requester()).into(),
-            approver: (requester()).into(),
-            prompt: MessageContent::Router {
-                text: MessageText::try_from("start work".to_owned()).expect("message"),
-            },
-        })
+            preview: "start work".to_owned(),
+        }))
         .await
         .expect("delivery prompt admission");
 
@@ -247,20 +285,15 @@ async fn delivery_prompt_without_loaded_session_is_known_not_submitted() {
     .expect("supervisor");
 
     let dispatch = backend
-        .submit_delivery_prompt(ConversationPromptRequest {
-            input_id: None,
+        .submit_delivery_prompt_contents(prepared_prompt_request(PreparedPromptFixture {
             operation_id: OperationId::generate(),
+            input_id: session_event_model::InputId::generate(),
             target: SessionRef {
                 endpoint: endpoint(),
                 session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
             },
-            generation: Some(generation()),
-            requested_by: (requester()).into(),
-            approver: (requester()).into(),
-            prompt: MessageContent::Router {
-                text: MessageText::try_from("start work".to_owned()).expect("message"),
-            },
-        })
+            preview: "start work".to_owned(),
+        }))
         .await
         .expect("delivery prompt admission");
 
@@ -320,39 +353,47 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
         session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
     };
     let mut queued_input_ids = Vec::new();
+    let mut expected_lines = Vec::new();
     for text in ["first", "second"] {
         let permit = queue.reserve(&target).expect("queue capacity");
         let operation_id = OperationId::generate();
         let input_id = session_event_model::InputId::generate();
         queued_input_ids.push(input_id.clone());
-        let prompt = MessageContent::Router {
-            text: MessageText::try_from(text.to_owned()).expect("prompt text"),
-        };
-        backend.queued_operation_registry().record_queued(
+        let push_id = PushId::try_from(agent_automation::AttemptId::generate().as_str().to_owned())
+            .expect("UUIDv7 push id");
+        let prompt = MessageText::try_from(format!(
+            "✉️ sender · \"{text}\" · router://{}/push/{}",
+            String::from(target.endpoint.service_id.clone()),
+            push_id.as_str()
+        ))
+        .expect("prepared push line");
+        let contents =
+            crate::external_provider_supervisor::ProviderPromptContentsRequest::from_prepared_push(
+                operation_id.clone(),
+                input_id.clone(),
+                target.clone(),
+                (requester()).into(),
+                (requester()).into(),
+                &prompt,
+            )
+            .expect("queued prepared contents");
+        expected_lines.push(prompt.as_str().to_owned());
+        backend.queued_operation_registry().record_queued_contents(
             operation_id.clone(),
             target.clone(),
             binding(),
             input_id.clone(),
-            &prompt,
+            &contents.contents,
         );
         permit.send(
-            crate::provider_acp_message_fifo::ProviderQueuedPrompt::MessageWithHeader {
-                request: ConversationPromptRequest {
-                    input_id: Some(input_id),
-                    operation_id,
-                    target: target.clone(),
-                    generation: Some(generation()),
-                    requested_by: (requester()).into(),
-                    approver: (requester()).into(),
-                    prompt,
-                },
-                header_context: collaboration_protocol::MessageHeaderContext::default(),
+            crate::provider_acp_message_fifo::ProviderQueuedPrompt::Contents {
+                request: contents,
                 load_policy: collaboration_service::LoadPolicy::MayLoad,
             },
         );
     }
 
-    for expected in ["first", "second"] {
+    for expected in expected_lines {
         let (mut stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
             .await
             .expect("prompt event deadline")
@@ -413,17 +454,12 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
         session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
     };
     let active = backend
-        .submit_delivery_prompt(ConversationPromptRequest {
-            input_id: None,
+        .submit_delivery_prompt_contents(prepared_prompt_request(PreparedPromptFixture {
             operation_id: OperationId::generate(),
+            input_id: session_event_model::InputId::generate(),
             target: target.clone(),
-            generation: Some(generation()),
-            requested_by: (requester()).into(),
-            approver: (requester()).into(),
-            prompt: MessageContent::Router {
-                text: MessageText::try_from("active".to_owned()).expect("message"),
-            },
-        })
+            preview: "active".to_owned(),
+        }))
         .await
         .expect("active prompt");
     assert_eq!(
@@ -437,28 +473,35 @@ async fn router_queue_shutdown_drops_an_unstarted_prompt() {
     );
     let queued_id = OperationId::generate();
     let queued_input = session_event_model::InputId::generate();
-    let queued_prompt = MessageContent::Router {
-        text: MessageText::try_from("never started".to_owned()).expect("message"),
-    };
-    backend.queued_operation_registry().record_queued(
+    let queued_id_push =
+        PushId::try_from(agent_automation::AttemptId::generate().as_str().to_owned())
+            .expect("UUIDv7 push id");
+    let queued_prompt = MessageText::try_from(format!(
+        "✉️ sender · \"never started\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        queued_id_push.as_str()
+    ))
+    .expect("prepared push line");
+    let queued_contents =
+        crate::external_provider_supervisor::ProviderPromptContentsRequest::from_prepared_push(
+            queued_id.clone(),
+            queued_input.clone(),
+            target.clone(),
+            (requester()).into(),
+            (requester()).into(),
+            &queued_prompt,
+        )
+        .expect("queued prepared contents");
+    backend.queued_operation_registry().record_queued_contents(
         queued_id.clone(),
         target.clone(),
         binding(),
         queued_input.clone(),
-        &queued_prompt,
+        &queued_contents.contents,
     );
     queue.reserve(&target).expect("queue capacity").send(
-        crate::provider_acp_message_fifo::ProviderQueuedPrompt::MessageWithHeader {
-            request: ConversationPromptRequest {
-                input_id: Some(queued_input),
-                operation_id: queued_id.clone(),
-                target,
-                generation: Some(generation()),
-                requested_by: (requester()).into(),
-                approver: (requester()).into(),
-                prompt: queued_prompt,
-            },
-            header_context: collaboration_protocol::MessageHeaderContext::default(),
+        crate::provider_acp_message_fifo::ProviderQueuedPrompt::Contents {
+            request: queued_contents,
             load_policy: collaboration_service::LoadPolicy::MayLoad,
         },
     );
@@ -510,17 +553,12 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
     };
     assert_eq!(
         backend
-            .submit_delivery_prompt(ConversationPromptRequest {
-                input_id: None,
+            .submit_delivery_prompt_contents(prepared_prompt_request(PreparedPromptFixture {
                 operation_id: OperationId::generate(),
+                input_id: session_event_model::InputId::generate(),
                 target: target.clone(),
-                generation: Some(generation()),
-                requested_by: (requester()).into(),
-                approver: (requester()).into(),
-                prompt: MessageContent::Router {
-                    text: MessageText::try_from("active".to_owned()).expect("message"),
-                },
-            })
+                preview: "active".to_owned(),
+            }))
             .await
             .expect("active prompt"),
         provider_delivery_submission::ProviderPromptDispatch::Submitted
@@ -533,29 +571,34 @@ async fn provider_retirement_settles_queued_input_without_resubmission() {
     let queued_id = OperationId::generate();
     let queued_input_id = session_event_model::InputId::generate();
     let permit = queue.reserve(&target).expect("queue capacity");
-    backend.queued_operation_registry().record_queued(
+    let push_id = PushId::try_from(agent_automation::AttemptId::generate().as_str().to_owned())
+        .expect("UUIDv7 push id");
+    let queued_line = MessageText::try_from(format!(
+        "✉️ sender · \"queued work\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))
+    .expect("prepared push line");
+    let queued_contents =
+        crate::external_provider_supervisor::ProviderPromptContentsRequest::from_prepared_push(
+            queued_id.clone(),
+            queued_input_id.clone(),
+            target.clone(),
+            (requester()).into(),
+            (requester()).into(),
+            &queued_line,
+        )
+        .expect("queued prepared contents");
+    backend.queued_operation_registry().record_queued_contents(
         queued_id.clone(),
         target.clone(),
         binding(),
         queued_input_id.clone(),
-        &MessageContent::Router {
-            text: MessageText::try_from("queued work".to_owned()).expect("message"),
-        },
+        &queued_contents.contents,
     );
     permit.send(
-        crate::provider_acp_message_fifo::ProviderQueuedPrompt::MessageWithHeader {
-            request: ConversationPromptRequest {
-                input_id: Some(queued_input_id.clone()),
-                operation_id: queued_id.clone(),
-                target,
-                generation: Some(generation()),
-                requested_by: (requester()).into(),
-                approver: (requester()).into(),
-                prompt: MessageContent::Router {
-                    text: MessageText::try_from("queued".to_owned()).expect("message"),
-                },
-            },
-            header_context: collaboration_protocol::MessageHeaderContext::default(),
+        crate::provider_acp_message_fifo::ProviderQueuedPrompt::Contents {
+            request: queued_contents,
             load_policy: collaboration_service::LoadPolicy::MayLoad,
         },
     );
@@ -993,20 +1036,15 @@ async fn unknown_agent_stop_reason_settles_with_typed_value() {
     let operation_id = OperationId::generate();
     assert_eq!(
         backend
-            .submit_delivery_prompt(ConversationPromptRequest {
-                input_id: None,
+            .submit_delivery_prompt_contents(prepared_prompt_request(PreparedPromptFixture {
                 operation_id: operation_id.clone(),
+                input_id: session_event_model::InputId::generate(),
                 target: SessionRef {
                     endpoint: endpoint(),
                     session_id: SessionId::try_from("fixture-session".to_owned()).expect("session"),
                 },
-                generation: Some(generation()),
-                requested_by: (requester()).into(),
-                approver: (requester()).into(),
-                prompt: MessageContent::Router {
-                    text: MessageText::try_from("continue".to_owned()).expect("message"),
-                },
-            })
+                preview: "continue".to_owned(),
+            }))
             .await
             .expect("prompt submitted"),
         provider_delivery_submission::ProviderPromptDispatch::Submitted

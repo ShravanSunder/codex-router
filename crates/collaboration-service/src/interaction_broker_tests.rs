@@ -4,7 +4,7 @@ use collaboration_protocol::{CodexGeneration, EndpointId, EndpointRef};
 struct FakeApprovalDelivery(DeliveryOutcome);
 
 struct CapturingInteractionDelivery {
-    notices: Arc<Mutex<Vec<crate::DeliveryRequest>>>,
+    notices: Arc<Mutex<Vec<crate::layer_zero::DeliveryRequest>>>,
     delivered: Arc<tokio::sync::Notify>,
     push_store: Option<Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>>,
     prepared_pushes_at_delivery: Arc<Mutex<Vec<CapturedInteractionPush>>>,
@@ -18,24 +18,8 @@ struct CapturedInteractionPush {
 impl crate::SessionMessageDelivery for CapturingInteractionDelivery {
     fn deliver<'a>(
         &'a self,
-        request: crate::DeliveryRequest,
-        _: &'a dyn crate::AttemptEvidenceSink,
-    ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
-        Box::pin(async move {
-            self.notices.lock().await.push(request);
-            self.delivered.notify_one();
-            Ok(collaboration_protocol::DeliveryReceipt {
-                outcome: DeliveryOutcome::Started,
-                reachability: Some(collaboration_protocol::SessionReachability::CodexAppServer),
-                client: None,
-            })
-        })
-    }
-
-    fn deliver_prepared<'a>(
-        &'a self,
         request: crate::layer_zero::DeliveryRequest,
-        evidence: &'a dyn crate::AttemptEvidenceSink,
+        _: &'a dyn crate::AttemptEvidenceSink,
     ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
         Box::pin(async move {
             let record_at_delivery = match &self.push_store {
@@ -55,7 +39,13 @@ impl crate::SessionMessageDelivery for CapturingInteractionDelivery {
                     request: request.clone(),
                     record_at_delivery,
                 });
-            self.deliver(request.into_legacy_request(), evidence).await
+            self.notices.lock().await.push(request);
+            self.delivered.notify_one();
+            Ok(collaboration_protocol::DeliveryReceipt {
+                outcome: DeliveryOutcome::Started,
+                reachability: Some(collaboration_protocol::SessionReachability::CodexAppServer),
+                client: None,
+            })
         })
     }
 
@@ -241,22 +231,14 @@ async fn typed_approval_and_question_notify_their_session_approver() {
             .expect("push record stored before delivery");
         let notice = notices
             .iter()
-            .find(|notice| {
-                matches!(
-                    &notice.message,
-                    collaboration_protocol::MessageContent::Router { text }
-                        if text.as_str() == prepared.payload.line.as_str()
-                )
-            })
+            .find(|notice| notice.payload.line.as_str() == prepared.payload.line.as_str())
             .expect("prepared line passed to delivery");
         assert_eq!(
             String::from(notice.target.session_id.clone()),
             "approver-session"
         );
         assert_eq!(notice.mode, collaboration_protocol::MessageDelivery::Auto);
-        let collaboration_protocol::MessageContent::Router { text } = &notice.message else {
-            panic!("interaction notice must deliver a Router-authored push line");
-        };
+        let text = &notice.payload.line;
         assert_eq!(text.as_str(), prepared.payload.line.as_str());
         let expected_kind = match record.kind {
             collaboration_protocol::PushKind::Approval => "❓ Router approval @",
@@ -519,7 +501,7 @@ async fn unreachable_approver_cancellation_keeps_its_typed_state_in_both_lists()
 impl crate::SessionMessageDelivery for FakeApprovalDelivery {
     fn deliver<'a>(
         &'a self,
-        _: crate::DeliveryRequest,
+        _: crate::layer_zero::DeliveryRequest,
         _: &'a dyn crate::AttemptEvidenceSink,
     ) -> crate::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
         Box::pin(async move {

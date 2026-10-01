@@ -399,7 +399,6 @@ impl CollaborationRuntime {
                     provider_supervisor: external_provider_supervisor.clone(),
                     provider_store: provider_store.clone(),
                     peer_registry_directory,
-                    display_names: identity.session_display_name_cache(),
                 },
             )?;
         let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
@@ -431,7 +430,6 @@ impl CollaborationRuntime {
             )
         });
         if let Some(supervisor) = &external_provider_supervisor {
-            supervisor.install_display_names(identity.session_display_name_cache());
             supervisor
                 .install_approval_broker(std::sync::Arc::clone(&approval_broker))
                 .await;

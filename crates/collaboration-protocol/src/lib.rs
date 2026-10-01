@@ -123,11 +123,8 @@ mod native_session_catalog;
 pub use message_content::{
     AcceptedResumeEffect, MessageContent, MessageDelivery, MessageHeaderContext,
     MessageHeaderOrigin, MessageInputKind, MessageRepresentation, MessageText, MessageTextError,
-    ParsedAgentMessageEnvelope, ParsedRouterMessageEnvelope, RenderedMessage, RouterNoticeKind,
-    SessionDisplayName, SessionDisplayNameError, SessionDisplayNameLookup,
-    SessionDisplayNameLookupError, parse_agent_message_envelope, parse_router_message_envelope,
-    queued_message_matches_content, render_message, render_message_with_context,
-    render_message_with_lookup, session_identity, title_from_agent_message_envelope,
+    RenderedMessage, RouterNoticeKind, SessionDisplayName, SessionDisplayNameError,
+    SessionDisplayNameLookup, SessionDisplayNameLookupError, session_identity,
 };
 pub use native_control_contract::{
     NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,

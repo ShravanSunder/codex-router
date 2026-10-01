@@ -4,9 +4,9 @@ mod tests {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use collaboration_client::{ClientError, ControlClient, JournalStatus};
     use collaboration_protocol::{
-        MessageContent, MessageText, NativeSessionListParams, NativeSessionScope,
-        NativeSessionSource, NativeSessionView, RouterNoticeKind, SessionDisplayNameLookup,
-        render_message_with_lookup,
+        MachineId, MachineLabel, NativeSessionListParams, NativeSessionScope, NativeSessionSource,
+        NativeSessionView, PushHeaderFacts, PushId, PushLineInput, PushOrigin, RouterLink,
+        SessionDisplayNameLookup, parse_push_line_header, render_push_line, session_identity,
     };
     use collaboration_service::{
         LocalControlService, ManifestPublication, NativeControlBackend, NativeGenerationGate,
@@ -122,20 +122,25 @@ mod tests {
             collaboration_protocol::SessionDisplayName::try_from(session.title.clone()).is_ok()
         );
         assert_eq!(display_names.display_name_for(&session.target), Ok(None));
-        let rendered = render_message_with_lookup(
-            &session.target,
-            &MessageContent::Agent {
-                sender: session.target.clone(),
-                text: MessageText::try_from("stored display fallback proof".to_owned()).unwrap(),
+        let push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned()).unwrap();
+        let line = render_push_line(&PushLineInput {
+            link: RouterLink::new(
+                MachineId::from(session.target.endpoint.service_id.clone()),
+                push_id,
+            ),
+            machine_label: MachineLabel::try_from("fixture-host".to_owned()).unwrap(),
+            origin: PushOrigin::Session(session.target.clone()),
+            header_facts: PushHeaderFacts::DirectMessage {
+                sender_display_name: None,
             },
-            &display_names,
-            RouterNoticeKind::Other,
-        )
+            body: Some("stored display fallback proof".to_owned()),
+        })
         .unwrap();
-        assert!(
-            rendered
-                .text
-                .starts_with("🤖 codex-local/stored-t ← 🤖 codex-local/stored-t\n")
+        let fallback_name = session_identity(&session.target, None);
+        assert!(line.starts_with(&format!("✉️ {fallback_name} @fixture-host → you · ")));
+        assert_eq!(
+            parse_push_line_header(&line).map(|header| header.kind),
+            Some(collaboration_protocol::PushKind::DirectMessage)
         );
     }
 

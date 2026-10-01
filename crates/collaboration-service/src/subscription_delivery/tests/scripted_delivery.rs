@@ -17,17 +17,10 @@ impl crate::SessionDeliveryRoute for PreparedRecordingRoute {
     }
     fn deliver<'a>(
         &'a self,
-        _: DeliveryRequest,
-        _: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async { Err(DeliveryContractError::InvalidEvidence) })
-    }
-    fn deliver_prepared<'a>(
-        &'a self,
         request: crate::layer_zero::DeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        self.delivery.deliver_prepared(request, sink)
+        self.delivery.deliver(request, sink)
     }
     fn reconcile_attempt(
         &self,
@@ -47,13 +40,6 @@ pub(super) struct ScriptedDelivery {
 }
 impl SessionMessageDelivery for ScriptedDelivery {
     fn deliver<'a>(
-        &'a self,
-        _: DeliveryRequest,
-        _: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async { Err(DeliveryContractError::InvalidEvidence) })
-    }
-    fn deliver_prepared<'a>(
         &'a self,
         request: crate::layer_zero::DeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,

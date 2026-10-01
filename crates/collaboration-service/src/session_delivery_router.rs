@@ -1,9 +1,8 @@
 //! Selects one injected client route for an attempt, then keeps that choice fixed.
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryReceipt, DeliveryRequest, RouteClaim,
-    RoutePresence, SessionDeliveryRoute, SessionMessageDelivery, TargetPresence,
-    TargetPresenceProbe,
+    DeliveryContractError, DeliveryFuture, DeliveryReceipt, RouteClaim, RoutePresence,
+    SessionDeliveryRoute, SessionMessageDelivery, TargetPresence, TargetPresenceProbe,
 };
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
@@ -30,25 +29,11 @@ impl SessionDeliveryRouter {
 
     async fn deliver_once(
         &self,
-        request: DeliveryRequest,
-        evidence: &dyn AttemptEvidenceSink,
-    ) -> Result<DeliveryReceipt, DeliveryContractError> {
-        match self.select_route(&request.target).await? {
-            RouteDecision::Selected(index) => self.deliver_through(index, request, evidence).await,
-            RouteDecision::Complete(receipt) => Ok(*receipt),
-        }
-    }
-
-    async fn deliver_prepared_once(
-        &self,
         request: crate::layer_zero::DeliveryRequest,
         evidence: &dyn AttemptEvidenceSink,
     ) -> Result<DeliveryReceipt, DeliveryContractError> {
         match self.select_route(&request.target).await? {
-            RouteDecision::Selected(index) => {
-                self.deliver_prepared_through(index, request, evidence)
-                    .await
-            }
+            RouteDecision::Selected(index) => self.deliver_through(index, request, evidence).await,
             RouteDecision::Complete(receipt) => Ok(*receipt),
         }
     }
@@ -157,7 +142,7 @@ impl SessionDeliveryRouter {
     async fn deliver_through(
         &self,
         index: usize,
-        request: DeliveryRequest,
+        request: crate::layer_zero::DeliveryRequest,
         evidence: &dyn AttemptEvidenceSink,
     ) -> Result<DeliveryReceipt, DeliveryContractError> {
         let route = self
@@ -168,38 +153,15 @@ impl SessionDeliveryRouter {
         receipt.reachability = Some(route.reachability());
         Ok(receipt)
     }
-
-    async fn deliver_prepared_through(
-        &self,
-        index: usize,
-        request: crate::layer_zero::DeliveryRequest,
-        evidence: &dyn AttemptEvidenceSink,
-    ) -> Result<DeliveryReceipt, DeliveryContractError> {
-        let route = self
-            .routes
-            .get(index)
-            .ok_or(DeliveryContractError::InvalidEvidence)?;
-        let mut receipt = route.deliver_prepared(request, evidence).await?;
-        receipt.reachability = Some(route.reachability());
-        Ok(receipt)
-    }
 }
 
 impl SessionMessageDelivery for SessionDeliveryRouter {
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
-        evidence: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move { self.deliver_once(request, evidence).await })
-    }
-
-    fn deliver_prepared<'a>(
-        &'a self,
         request: crate::layer_zero::DeliveryRequest,
         evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move { self.deliver_prepared_once(request, evidence).await })
+        Box::pin(async move { self.deliver_once(request, evidence).await })
     }
 
     fn reconcile_attempt(
@@ -290,23 +252,22 @@ mod tests {
     use super::SessionDeliveryRouter;
     use crate::{
         AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-        DeliveryPrecondition, DeliveryReceipt, DeliveryRequest as LegacyDeliveryRequest,
-        LoadPolicy, RouteClaim, RoutePresence, SessionDeliveryRoute, SessionMessageDelivery,
+        DeliveryPrecondition, DeliveryReceipt, LoadPolicy, RouteClaim, RoutePresence,
+        SessionDeliveryRoute, SessionMessageDelivery,
     };
     use agent_automation::AttemptId;
     use collaboration_protocol::{
-        DeliveryCorrelationId, DeliveryOutcome, MessageContent, MessageDelivery,
-        MessageHeaderContext, MessageText, PushId, SessionReachability, SessionRef,
+        DeliveryCorrelationId, DeliveryOutcome, MessageDelivery, MessageText, PushId,
+        SessionReachability, SessionRef,
     };
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
-    struct CapturingLegacyRoute {
-        requests: Mutex<Vec<LegacyDeliveryRequest>>,
-        prepared_requests: Mutex<Vec<crate::layer_zero::DeliveryRequest>>,
+    struct CapturingRoute {
+        requests: Mutex<Vec<crate::layer_zero::DeliveryRequest>>,
     }
 
-    impl SessionDeliveryRoute for CapturingLegacyRoute {
+    impl SessionDeliveryRoute for CapturingRoute {
         fn reachability(&self) -> SessionReachability {
             SessionReachability::ClaudeCodePeer
         }
@@ -321,7 +282,7 @@ mod tests {
 
         fn deliver<'a>(
             &'a self,
-            request: LegacyDeliveryRequest,
+            request: crate::layer_zero::DeliveryRequest,
             _: &'a dyn AttemptEvidenceSink,
         ) -> DeliveryFuture<'a, DeliveryReceipt> {
             self.requests
@@ -337,19 +298,6 @@ mod tests {
             })
         }
 
-        fn deliver_prepared<'a>(
-            &'a self,
-            request: crate::layer_zero::DeliveryRequest,
-            evidence: &'a dyn AttemptEvidenceSink,
-        ) -> DeliveryFuture<'a, DeliveryReceipt> {
-            let legacy_request = request.clone().into_legacy_request();
-            self.prepared_requests
-                .lock()
-                .expect("captured prepared requests")
-                .push(request);
-            self.deliver(legacy_request, evidence)
-        }
-
         fn reconcile_attempt(
             &self,
             _: AttemptReconciliationContext,
@@ -359,7 +307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepared_push_uses_the_legacy_route_stand_in_without_changing_its_line_or_policy() {
+    async fn prepared_push_uses_the_selected_route_without_changing_its_line_or_policy() {
         let push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned())
             .expect("UUIDv7 push id");
         let expected_push_id = push_id.clone();
@@ -376,11 +324,11 @@ mod tests {
         .expect("target session");
         let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())
             .expect("push id correlation");
-        let route = Arc::new(CapturingLegacyRoute::default());
+        let route = Arc::new(CapturingRoute::default());
         let router = SessionDeliveryRouter::new(vec![route.clone()]);
 
         let receipt = router
-            .deliver_prepared(
+            .deliver(
                 crate::layer_zero::DeliveryRequest {
                     payload: crate::layer_zero::PreparedPush {
                         push_id,
@@ -403,35 +351,17 @@ mod tests {
             receipt.reachability,
             Some(SessionReachability::ClaudeCodePeer)
         );
-        let prepared_requests = route
-            .prepared_requests
-            .lock()
-            .expect("captured prepared requests");
-        assert_eq!(prepared_requests.len(), 1);
-        assert_eq!(prepared_requests[0].payload.push_id, expected_push_id);
-        assert_eq!(prepared_requests[0].payload.line.as_str(), line.as_str());
-        assert_eq!(
-            prepared_requests[0].payload.load_policy,
-            LoadPolicy::LoadedOnly
-        );
-        assert_eq!(prepared_requests[0].target, target);
-        assert_eq!(prepared_requests[0].mode, MessageDelivery::Queue);
-        assert_eq!(prepared_requests[0].correlation, correlation);
         let requests = route.requests.lock().expect("captured requests");
         assert_eq!(requests.len(), 1);
-        let delivered = &requests[0];
-        assert_eq!(delivered.target, target);
-        assert_eq!(delivered.mode, MessageDelivery::Queue);
-        assert_eq!(delivered.load_policy, LoadPolicy::LoadedOnly);
-        assert_eq!(delivered.correlation, correlation);
+        assert_eq!(requests[0].payload.push_id, expected_push_id);
+        assert_eq!(requests[0].payload.line.as_str(), line.as_str());
+        assert_eq!(requests[0].payload.load_policy, LoadPolicy::LoadedOnly);
+        assert_eq!(requests[0].target, target);
+        assert_eq!(requests[0].mode, MessageDelivery::Queue);
+        assert_eq!(requests[0].correlation, correlation);
         assert!(matches!(
-            &delivered.precondition,
+            &requests[0].precondition,
             DeliveryPrecondition::Unpinned
         ));
-        assert_eq!(delivered.header_context, MessageHeaderContext::default());
-        let MessageContent::Router { text } = &delivered.message else {
-            panic!("a prepared push must remain Router-authored through the stand-in");
-        };
-        assert_eq!(text.as_str(), line.as_str());
     }
 }

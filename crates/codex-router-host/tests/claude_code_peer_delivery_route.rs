@@ -9,13 +9,12 @@ use claude_code_peer_messaging::{ClaudeCodePeerSocket, ClaudeCodeSessionRegistry
 use codex_router_host::ClaudeCodePeerDeliveryRoute;
 use collaboration_protocol::{
     AttemptId, CodexGeneration, DeliveryClientReceipt, DeliveryCorrelationId, DeliveryOutcome,
-    DeliveryRejectionReason, EndpointId, EndpointRef, MessageContent, MessageDelivery, MessageText,
-    PushId, SessionId, SessionReachability, SessionRef, UuidIdentity,
+    DeliveryRejectionReason, EndpointId, EndpointRef, MessageDelivery, MessageText, PushId,
+    SessionId, SessionReachability, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliationContext, DeliveryFuture, DeliveryPrecondition,
-    DeliveryRequest, RouteClaim, RoutePresence, SessionDeliveryRoute, SessionDeliveryRouter,
-    SessionMessageDelivery,
+    RouteClaim, RoutePresence, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
     layer_zero::{DeliveryRequest as PreparedDeliveryRequest, PreparedPush},
 };
 use serde_json::{Value, json};
@@ -75,83 +74,30 @@ fn publish_peer(root: &Path, status: Option<&str>) -> std::path::PathBuf {
     socket_path
 }
 
-fn delivery(mode: MessageDelivery) -> DeliveryRequest {
-    DeliveryRequest {
-        target: target(),
-        message: MessageContent::HumanUser {
-            text: MessageText::try_from("hello Claude".to_owned()).expect("message text"),
+fn delivery(mode: MessageDelivery) -> PreparedDeliveryRequest {
+    let target = target();
+    let push_id =
+        PushId::try_from(AttemptId::generate().as_str().to_owned()).expect("UUIDv7 push id");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"hello Claude\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))
+    .expect("prepared push line");
+    PreparedDeliveryRequest {
+        payload: PreparedPush {
+            push_id,
+            line,
+            load_policy: collaboration_service::LoadPolicy::MayLoad,
         },
-        header_context: collaboration_protocol::MessageHeaderContext::default(),
+        target,
         mode,
-        load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::try_from("peer-test-correlation".to_owned())
-            .expect("correlation"),
+        correlation,
         attempt: AttemptId::generate(),
     }
-}
-
-#[tokio::test]
-async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
-    let root = tempfile::tempdir().expect("registry root");
-    let socket_path = publish_peer(root.path(), Some("busy"));
-    let listener = tokio::net::UnixListener::bind(&socket_path).expect("peer listener");
-    let receiver = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accepted peer");
-        let mut lines = BufReader::new(stream).lines();
-        let _auth: Value =
-            serde_json::from_str(&lines.next_line().await.expect("auth line").expect("auth"))
-                .expect("auth JSON");
-        let user: Value =
-            serde_json::from_str(&lines.next_line().await.expect("user line").expect("user"))
-                .expect("user JSON");
-        user
-    });
-    let route = ClaudeCodePeerDeliveryRoute::new(
-        target().endpoint,
-        Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
-        Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
-    );
-    let evidence = RecordedPeerEvidence(tokio::sync::Mutex::new(Vec::new()));
-    assert!(matches!(
-        route.claim(&target()).await.expect("peer claim"),
-        RouteClaim::Holds
-    ));
-    assert_eq!(
-        route.presence(&target()).await.expect("peer presence"),
-        RoutePresence::Running
-    );
-    let mut request = delivery(MessageDelivery::Auto);
-    let mut sender = target();
-    sender.endpoint.endpoint_id =
-        EndpointId::try_from("codex-local".to_owned()).expect("sender endpoint");
-    sender.session_id = SessionId::try_from("sender-session".to_owned()).expect("sender session");
-    request.message = MessageContent::Agent {
-        sender: sender.clone(),
-        text: MessageText::try_from("hello Claude".to_owned()).expect("message"),
-    };
-
-    let outcome = route.deliver(request, &evidence).await.expect("delivery");
-
-    assert_eq!(outcome.outcome, DeliveryOutcome::PeerMessageWritten);
-    assert!(matches!(
-        outcome.client,
-        Some(DeliveryClientReceipt::ClaudeCodePeer)
-    ));
-    let user = receiver.await.expect("receiver");
-    let content = user["message"]["content"]
-        .as_str()
-        .expect("peer message content");
-    assert!(content.contains(&serde_json::to_string(&sender).expect("sender JSON")));
-    assert!(content.contains("message reply --text <TEXT>"));
-    let records = evidence.0.lock().await;
-    assert_eq!(records.len(), 2);
-    assert!(
-        matches!(&records[0], RouteEffectEvidence::ClaudeCodePeer(peer) if peer.write == PeerWriteEffect::Dispatching)
-    );
-    assert!(
-        matches!(&records[1], RouteEffectEvidence::ClaudeCodePeer(peer) if peer.write == PeerWriteEffect::Written)
-    );
 }
 
 #[tokio::test]
@@ -199,7 +145,7 @@ async fn prepared_push_reaches_peer_route_as_the_exact_router_line() {
     };
 
     let receipt = router
-        .deliver_prepared(request, &evidence)
+        .deliver(request, &evidence)
         .await
         .expect("prepared push delivery");
 
@@ -294,7 +240,7 @@ async fn live_unknown_peer_protocol_reports_live_elsewhere() {
         claim,
         RouteClaim::LiveElsewhere {
             writable: false,
-            detail: Some(reason)
+            detail: Some(reason),
         } if reason.contains("protocol 99")
     ));
     assert!(matches!(
@@ -393,8 +339,8 @@ async fn peer_reconciliation_rejects_evidence_for_another_session() {
     let outcome = route
         .reconcile_attempt(AttemptReconciliationContext {
             target: target(),
-            message: delivery(MessageDelivery::Auto).message,
-            prepared_push_id: None,
+            prepared_push_id: PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned())
+                .expect("UUIDv7 push id"),
             mode: MessageDelivery::Auto,
             recorded,
         })

@@ -197,7 +197,7 @@ async fn deliver_interaction_push_record(
     let evidence = UnstoredAttemptEvidenceSink;
     let receipt = match tokio::time::timeout(
         super::APPROVAL_TIMEOUT,
-        delivery.deliver_prepared(request, &evidence),
+        delivery.deliver(request, &evidence),
     )
     .await
     {

@@ -4,7 +4,7 @@
 use super::WakeDeliverySender;
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    AutomationConfigurationHandle, DeliveryFuture, DeliveryRequest, SessionMessageDelivery,
+    AutomationConfigurationHandle, DeliveryFuture, SessionMessageDelivery,
 };
 use agent_automation::{ExpiryRule, OperationId, TimingRule};
 use automation_storage::{AutomationStore, WakeCreate, WakeEvaluation};
@@ -21,7 +21,7 @@ struct ProviderSessionNotFound;
 impl SessionMessageDelivery for ProviderSessionNotFound {
     fn deliver<'a>(
         &'a self,
-        _request: DeliveryRequest,
+        _request: crate::layer_zero::DeliveryRequest,
         _evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
         Box::pin(async {
@@ -31,7 +31,8 @@ impl SessionMessageDelivery for ProviderSessionNotFound {
                     next_action: DeliveryNextAction::CorrectRequest,
                     client_code: Some(-32002),
                     detail: Some("this session never started a turn and did not survive the provider restart; create a new conversation".to_owned()),
-                }),
+
+                    }),
                 reachability: Some(SessionReachability::ProviderAcp),
                 client: None,
             })

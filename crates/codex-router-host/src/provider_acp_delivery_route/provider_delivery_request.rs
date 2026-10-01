@@ -1,22 +1,12 @@
 //! Provider route input without collapsing prepared push content into a legacy message.
 
 use collaboration_protocol::{
-    DeliveryCorrelationId, MessageContent, MessageDelivery, MessageHeaderContext, MessageText,
-    PushId, SessionRef,
+    DeliveryCorrelationId, MessageDelivery, MessageText, PushId, SessionRef,
 };
-use collaboration_service::{
-    DeliveryContractError, DeliveryPrecondition, DeliveryRequest, LoadPolicy,
-};
+use collaboration_service::{DeliveryContractError, DeliveryPrecondition, LoadPolicy};
 
 pub(super) enum ProviderDeliveryContent {
-    Message {
-        message: MessageContent,
-        header_context: MessageHeaderContext,
-    },
-    PreparedPush {
-        push_id: PushId,
-        line: MessageText,
-    },
+    PreparedPush { push_id: PushId, line: MessageText },
 }
 
 pub(super) struct ProviderDeliveryRequest {
@@ -27,23 +17,6 @@ pub(super) struct ProviderDeliveryRequest {
     pub precondition: DeliveryPrecondition,
     pub correlation: DeliveryCorrelationId,
     pub attempt: agent_automation::AttemptId,
-}
-
-impl From<DeliveryRequest> for ProviderDeliveryRequest {
-    fn from(request: DeliveryRequest) -> Self {
-        Self {
-            target: request.target,
-            content: ProviderDeliveryContent::Message {
-                message: request.message,
-                header_context: request.header_context,
-            },
-            mode: request.mode,
-            load_policy: request.load_policy,
-            precondition: request.precondition,
-            correlation: request.correlation,
-            attempt: request.attempt,
-        }
-    }
 }
 
 impl From<collaboration_service::layer_zero::DeliveryRequest> for ProviderDeliveryRequest {
@@ -75,14 +48,9 @@ impl ProviderDeliveryRequest {
     }
 
     pub(super) fn input_id(&self) -> Result<session_event_model::InputId, DeliveryContractError> {
-        match &self.content {
-            ProviderDeliveryContent::Message { .. } => Ok(session_event_model::InputId::generate()),
-            ProviderDeliveryContent::PreparedPush { .. } => {
-                self.validate_push_correlation()?;
-                // ACP tracks accepted provider input with its Host-assigned InputId.
-                session_event_model::InputId::try_from(self.correlation.as_str().to_owned())
-                    .map_err(|_| DeliveryContractError::InvalidEvidence)
-            }
-        }
+        self.validate_push_correlation()?;
+        // ACP tracks accepted provider input with its Host-assigned InputId.
+        session_event_model::InputId::try_from(self.correlation.as_str().to_owned())
+            .map_err(|_| DeliveryContractError::InvalidEvidence)
     }
 }

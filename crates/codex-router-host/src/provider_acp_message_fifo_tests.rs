@@ -12,16 +12,17 @@ use collaboration_protocol::{
     ConversationOperationSettlement, ConversationOperationShowRequest,
     ConversationOperationWaitOutput, ConversationOperationWaitRequest, DeliveryCorrelationId,
     DeliveryOutcome, EndpointAvailability, EndpointDescription, EndpointId, EndpointRef,
-    GenerationNumber, MessageContent, MessageDelivery, MessageText, NonEmptyText,
-    ObservationTimestamp, OperationId, PositiveSeconds, ProviderBindingId, ProviderBindingIdentity,
-    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    GenerationNumber, MessageDelivery, MessageText, NonEmptyText, ObservationTimestamp,
+    OperationId, PositiveSeconds, ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities,
+    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy, ProviderRuntimeIdentity,
-    ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId,
+    ProviderTransport, ProviderWorkingDirectory, PushId, RouterAccess, SessionId,
 };
 use collaboration_service::{
     AttemptEvidenceSink, DeliveryContractError, DeliveryFuture, DeliveryPrecondition,
-    DeliveryRequest, EndpointDirectory, LoadPolicy, ProviderConversationBackend,
-    ProviderOperationStore, ProviderSessionRecord, SessionDeliveryRoute,
+    EndpointDirectory, LoadPolicy, ProviderConversationBackend, ProviderOperationStore,
+    ProviderSessionRecord, SessionDeliveryRoute,
+    layer_zero::{DeliveryRequest, PreparedPush},
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -171,29 +172,30 @@ async fn queued_loaded_only_item_not_submitted_if_close_happens_before_fifo_drai
 
     let operation_id = OperationId::generate();
     let input_id = session_event_model::InputId::generate();
-    let prompt = MessageContent::Router {
-        text: MessageText::try_from("held batch".to_owned()).expect("prompt"),
-    };
-    supervisor.queued_operation_registry().record_queued(
-        operation_id.clone(),
-        target.clone(),
-        binding.clone(),
-        input_id.clone(),
-        &prompt,
-    );
+    let prompt = MessageText::try_from("held batch".to_owned()).expect("prompt line");
+    let contents =
+        crate::external_provider_supervisor::ProviderPromptContentsRequest::from_prepared_push(
+            operation_id.clone(),
+            input_id.clone(),
+            target.clone(),
+            target.clone().into(),
+            target.clone().into(),
+            &prompt,
+        )
+        .expect("prepared prompt contents");
+    supervisor
+        .queued_operation_registry()
+        .record_queued_contents(
+            operation_id.clone(),
+            target.clone(),
+            binding.clone(),
+            input_id.clone(),
+            &contents.contents,
+        );
     let (sender, receiver) = mpsc::channel(1);
     sender
-        .send(ProviderQueuedPrompt::MessageWithHeader {
-            request: ConversationPromptRequest {
-                operation_id: operation_id.clone(),
-                input_id: Some(input_id),
-                target: target.clone(),
-                generation: Some(binding.generation.clone()),
-                requested_by: target.clone().into(),
-                approver: target.clone().into(),
-                prompt,
-            },
-            header_context: collaboration_protocol::MessageHeaderContext::default(),
+        .send(ProviderQueuedPrompt::Contents {
+            request: contents,
             load_policy: LoadPolicy::LoadedOnly,
         })
         .await
@@ -378,16 +380,25 @@ async fn route_queue_loaded_only_delivery_refuses_after_close_before_fifo_submis
     let attempt_id = agent_automation::AttemptId::generate();
     let operation_id =
         OperationId::try_from(attempt_id.as_str().to_owned()).expect("queue operation ID");
+    let push_id = PushId::try_from(attempt_id.as_str().to_owned()).expect("UUIDv7 push id");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"held batch\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))
+    .expect("prepared push line");
     let request = DeliveryRequest {
-        target: target.clone(),
-        message: MessageContent::Router {
-            text: MessageText::try_from("held batch".to_owned()).expect("message"),
+        payload: PreparedPush {
+            push_id,
+            line,
+            load_policy: LoadPolicy::LoadedOnly,
         },
-        header_context: collaboration_protocol::MessageHeaderContext::default(),
+        target: target.clone(),
         mode: MessageDelivery::Queue,
-        load_policy: LoadPolicy::LoadedOnly,
         precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::generate(),
+        correlation,
         attempt: attempt_id,
     };
     let receipt = route

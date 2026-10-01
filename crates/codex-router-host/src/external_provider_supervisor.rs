@@ -65,7 +65,6 @@ struct SupervisorInner {
     hub: Option<Arc<collaboration_service::ProviderSessionEventHub>>,
     history_unavailable: Mutex<HashSet<SessionRef>>,
     settings_catalogs: Arc<Mutex<HashMap<SessionRef, acp_client_runtime::ProviderSettingsCatalog>>>,
-    display_names: std::sync::OnceLock<collaboration_service::SessionDisplayNameCache>,
     model_catalogs:
         HashMap<EndpointRef, watch::Sender<Vec<collaboration_service::ProviderModelEntry>>>,
     catalog_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -213,7 +212,6 @@ impl ExternalProviderSupervisor {
                 hub,
                 history_unavailable: Mutex::new(HashSet::new()),
                 settings_catalogs,
-                display_names: std::sync::OnceLock::new(),
                 model_catalogs,
                 catalog_tasks: Mutex::new(catalog_tasks),
                 started_at_ms: now_ms(),
@@ -233,13 +231,6 @@ impl ExternalProviderSupervisor {
                 .install_approval_broker(Arc::clone(&broker))
                 .await;
         }
-    }
-
-    pub(crate) fn install_display_names(
-        &self,
-        display_names: collaboration_service::SessionDisplayNameCache,
-    ) {
-        let _already_installed = self.inner.display_names.set(display_names);
     }
 
     #[allow(clippy::result_large_err)]

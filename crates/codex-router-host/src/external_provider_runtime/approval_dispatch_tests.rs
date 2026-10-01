@@ -8,8 +8,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryRequest, NativeControlBackend, NativeGenerationGate, ServiceInteractionBroker,
-    SessionMessageDelivery,
+    NativeControlBackend, NativeGenerationGate, ServiceInteractionBroker, SessionMessageDelivery,
 };
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 use tokio::io::AsyncWriteExt as _;
@@ -30,7 +29,7 @@ struct AcceptedApprovalNoticeDelivery(Arc<Notify>);
 impl SessionMessageDelivery for AcceptedApprovalNoticeDelivery {
     fn deliver<'a>(
         &'a self,
-        _: DeliveryRequest,
+        _: collaboration_service::layer_zero::DeliveryRequest,
         _: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
         let notice_delivered = Arc::clone(&self.0);

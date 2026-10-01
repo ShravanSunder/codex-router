@@ -6,8 +6,8 @@ use crate::native_message_dispatch::{
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryClientReceipt, DeliveryContractError, DeliveryFuture, DeliveryPrecondition,
-    DeliveryReceipt, DeliveryRequest, EndpointDirectory, LoadPolicy, NOT_LOADED_REASON,
-    NativeControlBackend, RouteClaim, RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
+    DeliveryReceipt, EndpointDirectory, LoadPolicy, NOT_LOADED_REASON, NativeControlBackend,
+    RouteClaim, RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
 };
 use agent_automation::{
     CessationEvidence, NativeEffectEvidence, PreparationEffect, RouteEffectEvidence,
@@ -17,8 +17,8 @@ use codex_acp_adapter::{HeldBindingCheckout, UnmaterializedBindingStore};
 use codex_native_integration::NativeProtocolConnection;
 use collaboration_protocol::{
     AcceptedResumeEffect, ChannelDescription, CodexGeneration, DeliveryCorrelationId,
-    DeliveryNextAction, DeliveryOutcome, DeliveryRejection, DeliveryRejectionReason,
-    MessageDelivery, MessageHeaderContext, NativeSendAcceptance, SessionReachability, SessionRef,
+    DeliveryNextAction, DeliveryOutcome, DeliveryRejection, DeliveryRejectionReason, MachineId,
+    MessageDelivery, NativeSendAcceptance, RouterLink, SessionReachability, SessionRef,
     UuidIdentity,
 };
 use serde_json::{Value, json};
@@ -29,33 +29,16 @@ pub struct CodexAppServerDeliveryRoute {
     endpoints: EndpointDirectory,
     backend: NativeControlBackend,
     holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
-    display_names: crate::SessionDisplayNameCache,
 }
 
 struct NativeRouteDeliveryRequest {
     target: SessionRef,
     body: NativeMessageBody,
-    header_context: MessageHeaderContext,
     mode: MessageDelivery,
     load_policy: LoadPolicy,
     precondition: DeliveryPrecondition,
     correlation: DeliveryCorrelationId,
     attempt: agent_automation::AttemptId,
-}
-
-impl From<DeliveryRequest> for NativeRouteDeliveryRequest {
-    fn from(request: DeliveryRequest) -> Self {
-        Self {
-            target: request.target,
-            body: NativeMessageBody::Content(request.message),
-            header_context: request.header_context,
-            mode: request.mode,
-            load_policy: request.load_policy,
-            precondition: request.precondition,
-            correlation: request.correlation,
-            attempt: request.attempt,
-        }
-    }
 }
 
 impl CodexAppServerDeliveryRoute {
@@ -71,14 +54,7 @@ impl CodexAppServerDeliveryRoute {
             endpoints,
             backend,
             holder,
-            display_names: crate::SessionDisplayNameCache::default(),
         }
-    }
-
-    #[must_use]
-    pub fn with_display_names(mut self, display_names: crate::SessionDisplayNameCache) -> Self {
-        self.display_names = display_names;
-        self
     }
 
     async fn deliver_native(
@@ -95,7 +71,6 @@ impl CodexAppServerDeliveryRoute {
             return Ok(not_submitted("staleGeneration", false));
         }
         let generation = admission.generation().clone();
-        let header_context = request.header_context.clone();
         let mut effects = NativeEffectEvidence {
             target: Some(request.target.clone()),
             generation: Some(generation.clone()),
@@ -159,8 +134,6 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
-                        header_context: header_context.clone(),
-                        display_names: &self.display_names,
                         held_connection: Some(binding.connection_mut()),
                         load_policy,
                     },
@@ -206,8 +179,6 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
-                        header_context,
-                        display_names: &self.display_names,
                         held_connection: None,
                         load_policy,
                     },
@@ -376,32 +347,31 @@ impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
 
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
-        sink: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move { self.deliver_native(request.into(), sink).await })
-    }
-
-    fn deliver_prepared<'a>(
-        &'a self,
         request: crate::layer_zero::DeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
         Box::pin(async move {
             let push_id = &request.payload.push_id;
-            let line_push_id = crate::codex_queue_reconciliation::prepared_push_id_from_line(
-                &request.payload.line,
-            );
-            if request.correlation.as_str() != push_id.as_str()
-                || line_push_id.as_ref() != Some(push_id)
-            {
+            let expected_link =
+                RouterLink::new(MachineId::from(self.service_id.clone()), push_id.clone())
+                    .to_string();
+            let prepared_header = request
+                .payload
+                .line
+                .as_str()
+                .lines()
+                .next()
+                .unwrap_or_default();
+            let line_has_expected_link = prepared_header
+                .rsplit_once(" · ")
+                .is_some_and(|(_, link)| link == expected_link);
+            if request.correlation.as_str() != push_id.as_str() || !line_has_expected_link {
                 return Err(DeliveryContractError::InvalidEvidence);
             }
             self.deliver_native(
                 NativeRouteDeliveryRequest {
                     target: request.target,
                     body: NativeMessageBody::PreparedPush(request.payload.line),
-                    header_context: MessageHeaderContext::default(),
                     mode: request.mode,
                     load_policy: request.payload.load_policy,
                     precondition: request.precondition,

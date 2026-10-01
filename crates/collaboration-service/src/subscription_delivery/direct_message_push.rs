@@ -144,7 +144,7 @@ impl SubscriptionPushStore {
         self.mark_attempted(&prepared).await?;
         let receipt = tokio::select! {
             () = self.shutdown.cancelled() => return Err(BoardError::board_unavailable()),
-            receipt = self.delivery.deliver_prepared(request, &UnstoredAttemptEvidenceSink) => receipt.unwrap_or(DeliveryReceipt { outcome: DeliveryOutcome::Unknown, reachability: None, client: None }),
+            receipt = self.delivery.deliver(request, &UnstoredAttemptEvidenceSink) => receipt.unwrap_or(DeliveryReceipt { outcome: DeliveryOutcome::Unknown, reachability: None, client: None }),
         };
         let allow_hold = mode != MessageDelivery::Steer && record.guard.is_none();
         self.record_receipt(&prepared, &receipt, allow_hold).await?;

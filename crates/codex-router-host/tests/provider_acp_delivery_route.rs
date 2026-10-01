@@ -13,8 +13,8 @@ use codex_router_host::{
 use collaboration_protocol::{
     AttemptId, ChannelDescription, CodexGeneration, DeliveryClientReceipt, DeliveryCorrelationId,
     DeliveryOutcome, DeliveryRejectionReason, EndpointAvailability, EndpointDescription,
-    EndpointId, EndpointRef, GenerationNumber, MessageContent, MessageDelivery, MessageText,
-    NonEmptyText, ObservationTimestamp, OperationId, ProviderBindingId, ProviderBindingIdentity,
+    EndpointId, EndpointRef, GenerationNumber, MessageDelivery, MessageText, NonEmptyText,
+    ObservationTimestamp, OperationId, ProviderBindingId, ProviderBindingIdentity,
     ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationKind,
     ProviderReconciliationState, ProviderRequestedPolicy, ProviderRuntimeIdentity,
@@ -23,7 +23,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, LoadPolicy, NOT_LOADED_REASON,
+    DeliveryPrecondition, EndpointDirectory, LoadPolicy, NOT_LOADED_REASON,
     ProviderOperationAdmission, ProviderOperationStore, ProviderSessionRecord, RouteClaim,
     RoutePresence, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
     layer_zero::{DeliveryRequest as PreparedDeliveryRequest, PreparedPush},
@@ -83,18 +83,10 @@ impl SessionDeliveryRoute for StaleRunningClaimRoute {
 
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
-        evidence: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
-        self.0.deliver(request, evidence)
-    }
-
-    fn deliver_prepared<'a>(
-        &'a self,
         request: PreparedDeliveryRequest,
         evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
-        self.0.deliver_prepared(request, evidence)
+        self.0.deliver(request, evidence)
     }
 
     fn reconcile_attempt(
@@ -270,17 +262,27 @@ sys.exit(0)
     }
 }
 
-fn request(target: SessionRef, text: &str) -> DeliveryRequest {
-    DeliveryRequest {
-        target,
-        message: MessageContent::HumanUser {
-            text: MessageText::try_from(text.to_owned()).expect("message"),
+fn request(target: SessionRef, text: &str) -> PreparedDeliveryRequest {
+    let push_id =
+        PushId::try_from(AttemptId::generate().as_str().to_owned()).expect("UUIDv7 push id");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"{text}\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))
+    .expect("prepared push line");
+    PreparedDeliveryRequest {
+        payload: PreparedPush {
+            push_id,
+            line,
+            load_policy: LoadPolicy::MayLoad,
         },
-        header_context: collaboration_protocol::MessageHeaderContext::default(),
+        target,
         mode: MessageDelivery::Auto,
-        load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::generate(),
+        correlation,
         attempt: AttemptId::generate(),
     }
 }
@@ -338,22 +340,10 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
 
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
 
+    let mut request = request(target, "hello");
+    request.mode = MessageDelivery::Steer;
     let receipt = route
-        .deliver(
-            DeliveryRequest {
-                target,
-                message: MessageContent::HumanUser {
-                    text: MessageText::try_from("hello".to_owned()).expect("message"),
-                },
-                header_context: collaboration_protocol::MessageHeaderContext::default(),
-                mode: MessageDelivery::Steer,
-                load_policy: collaboration_service::LoadPolicy::MayLoad,
-                precondition: DeliveryPrecondition::Unpinned,
-                correlation: DeliveryCorrelationId::generate(),
-                attempt: AttemptId::generate(),
-            },
-            &evidence,
-        )
+        .deliver(request, &evidence)
         .await
         .expect("delivery refusal");
 
@@ -468,7 +458,7 @@ async fn cursor_auto_queues_a_prepared_push_with_exact_line_and_push_id() {
     assert_eq!(correlation.as_str(), push_id.as_str());
     let attempt = AttemptId::generate();
     let second = router
-        .deliver_prepared(
+        .deliver(
             PreparedDeliveryRequest {
                 payload: PreparedPush {
                     push_id: push_id.clone(),
@@ -571,10 +561,8 @@ async fn router_queued_reconciliation_uses_only_the_operation_store() {
     });
     let context = || AttemptReconciliationContext {
         target: target.clone(),
-        message: MessageContent::HumanUser {
-            text: MessageText::try_from("queued".to_owned()).expect("message"),
-        },
-        prepared_push_id: None,
+        prepared_push_id: PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c394599".to_owned())
+            .expect("UUIDv7 push id"),
         mode: MessageDelivery::Queue,
         recorded: evidence.clone(),
     };
@@ -712,7 +700,7 @@ async fn provider_load_auth_rejection_is_typed_without_session_new() {
     };
     let loaded_only_evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
     let loaded_only_receipt = stale_router
-        .deliver_prepared(loaded_only_request, &loaded_only_evidence)
+        .deliver(loaded_only_request, &loaded_only_evidence)
         .await
         .expect("loaded-only stale-claim refusal");
     assert!(matches!(

@@ -5,14 +5,13 @@ use agent_automation::{
 #[path = "../../codex-acp-adapter/tests/support/native_permission_echo.rs"]
 mod native_permission_echo;
 use collaboration_protocol::{
-    CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageContent,
-    MessageDelivery, MessageHeaderContext, MessageInputKind, MessageRepresentation, MessageText,
-    PushId, SessionRef, UuidIdentity,
+    CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageDelivery,
+    MessageInputKind, MessageRepresentation, MessageText, PushId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     CodexAppServerDeliveryRoute, DeliveryClientReceipt, DeliveryContractError, DeliveryFuture,
-    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, LoadPolicy, NativeControlBackend,
+    DeliveryPrecondition, EndpointDirectory, LoadPolicy, NativeControlBackend,
     NativeGenerationGate, ScheduledRunPayload, SessionDeliveryRoute, SessionDeliveryRouter,
     SessionMessageDelivery,
     layer_zero::{DeliveryRequest as PreparedDeliveryRequest, PreparedPush},
@@ -90,9 +89,35 @@ impl AttemptEvidenceSink for RecordingEvidenceSink {
     }
 }
 
+fn prepared_request(
+    target: SessionRef,
+    body: &str,
+    mode: MessageDelivery,
+) -> Result<PreparedDeliveryRequest, Box<dyn std::error::Error + Send + Sync>> {
+    let push_id = PushId::try_from(agent_automation::AttemptId::generate().as_str().to_owned())?;
+    let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())?;
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"{body}\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))?;
+    Ok(PreparedDeliveryRequest {
+        payload: PreparedPush {
+            push_id,
+            line,
+            load_policy: LoadPolicy::MayLoad,
+        },
+        target,
+        mode,
+        precondition: DeliveryPrecondition::Unpinned,
+        correlation,
+        attempt: agent_automation::AttemptId::generate(),
+    })
+}
+
 #[tokio::test]
 async fn stale_strict_generation_stops_before_evidence_or_native_io()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())?;
     let target: SessionRef = serde_json::from_value(serde_json::json!({
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
@@ -121,18 +146,8 @@ async fn stale_strict_generation_stops_before_evidence_or_native_io()
         std::sync::Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
     );
     let sink = Arc::new(CountingEvidenceSink(AtomicUsize::new(0)));
-    let request = DeliveryRequest {
-        target,
-        message: MessageContent::Router {
-            text: "hello".to_owned().try_into()?,
-        },
-        header_context: collaboration_protocol::MessageHeaderContext::default(),
-        mode: MessageDelivery::Auto,
-        load_policy: collaboration_service::LoadPolicy::MayLoad,
-        precondition: DeliveryPrecondition::EndpointGeneration { expected: stale },
-        correlation: DeliveryCorrelationId::generate(),
-        attempt: agent_automation::AttemptId::generate(),
-    };
+    let mut request = prepared_request(target, "hello", MessageDelivery::Auto)?;
+    request.precondition = DeliveryPrecondition::EndpointGeneration { expected: stale };
     let receipt = route.deliver(request, sink.as_ref()).await?;
     if !matches!(
         receipt.outcome,
@@ -192,7 +207,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
     };
     if !matches!(
         mismatched_request_route
-            .deliver_prepared(mismatched_request, &mismatched_sink)
+            .deliver(mismatched_request, &mismatched_sink)
             .await,
         Err(DeliveryContractError::InvalidEvidence)
     ) || !mismatched_sink
@@ -429,7 +444,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
         SessionDeliveryRouter::new(vec![Arc::new(route) as Arc<dyn SessionDeliveryRoute>]);
     let receipt = tokio::time::timeout(
         Duration::from_secs(5),
-        delivery.deliver_prepared(
+        delivery.deliver(
             PreparedDeliveryRequest {
                 payload: PreparedPush {
                     push_id: push_id.clone(),
@@ -468,8 +483,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
     let accepted = delivery
         .reconcile_attempt(AttemptReconciliationContext {
             target: target.clone(),
-            message: MessageContent::Router { text: line.clone() },
-            prepared_push_id: Some(push_id.clone()),
+            prepared_push_id: push_id.clone(),
             mode: MessageDelivery::Queue,
             recorded: recorded.clone(),
         })
@@ -492,8 +506,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
         delivery
             .reconcile_attempt(AttemptReconciliationContext {
                 target: target.clone(),
-                message: MessageContent::Router { text: line.clone() },
-                prepared_push_id: Some(push_id.clone()),
+                prepared_push_id: push_id.clone(),
                 mode: MessageDelivery::Queue,
                 recorded: mismatched_id_evidence,
             })
@@ -511,8 +524,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
         delivery
             .reconcile_attempt(AttemptReconciliationContext {
                 target: mismatched_target,
-                message: MessageContent::Router { text: line.clone() },
-                prepared_push_id: Some(push_id.clone()),
+                prepared_push_id: push_id.clone(),
                 mode: MessageDelivery::Queue,
                 recorded: recorded.clone(),
             })
@@ -531,8 +543,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
         delivery
             .reconcile_attempt(AttemptReconciliationContext {
                 target: target.clone(),
-                message: MessageContent::Router { text: line },
-                prepared_push_id: Some(push_id.clone()),
+                prepared_push_id: push_id.clone(),
                 mode: MessageDelivery::Queue,
                 recorded: mismatched_route,
             })
@@ -646,18 +657,8 @@ async fn retiring_during_thread_read_returns_retryable_unavailable()
             .map_err(|_| std::io::Error::other("test did not release native fixture"))?;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
-    let request = DeliveryRequest {
-        target,
-        message: MessageContent::Router {
-            text: "held batch".to_owned().try_into()?,
-        },
-        header_context: MessageHeaderContext::default(),
-        mode: MessageDelivery::Auto,
-        load_policy: collaboration_service::LoadPolicy::LoadedOnly,
-        precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::generate(),
-        attempt: agent_automation::AttemptId::generate(),
-    };
+    let mut request = prepared_request(target, "held batch", MessageDelivery::Auto)?;
+    request.payload.load_policy = LoadPolicy::LoadedOnly;
     let sink = Arc::new(CountingEvidenceSink(AtomicUsize::new(0)));
     let delivery = tokio::spawn({
         let route = Arc::clone(&route);
@@ -812,7 +813,8 @@ async fn exercise_held_empty_thread(
     let evidence = Arc::new(RecordingEvidenceSink(Mutex::new(Vec::new())));
     let observed = Arc::clone(&evidence);
     let run_id = agent_automation::RunId::generate();
-    let expected_run_id = run_id.clone();
+    let scheduled_push_id = PushId::try_from(uuid::Uuid::now_v7().to_string())?;
+    let expected_scheduled_push_id = scheduled_push_id.clone();
     let backend = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut wire = tokio_tungstenite::accept_async(stream).await?;
@@ -851,9 +853,11 @@ async fn exercise_held_empty_thread(
                     if request
                         .pointer("/params/clientUserMessageId")
                         .and_then(Value::as_str)
-                        != Some(expected_run_id.as_str())
+                        != Some(expected_scheduled_push_id.as_str())
                     {
-                        return Err("scheduled run omitted run ID correlation".into());
+                        return Err(
+                            "Codex clientUserMessageId did not match the scheduled push ID".into(),
+                        );
                     }
                 } else {
                     let effects = observed.0.lock().map_err(|_| "evidence lock")?;
@@ -1022,7 +1026,7 @@ async fn exercise_held_empty_thread(
                     target: target.clone(),
                     payload: ScheduledRunPayload::Existing {
                         prepared: PreparedPush {
-                            push_id: PushId::try_from(uuid::Uuid::now_v7().to_string())?,
+                            push_id: scheduled_push_id,
                             line: MessageText::try_from("scheduled hello".to_owned())?,
                             load_policy: LoadPolicy::MayLoad,
                         },
@@ -1086,21 +1090,9 @@ async fn exercise_held_empty_thread(
         std::fs::remove_dir(root)?;
         return Ok(());
     }
-    let message_text: collaboration_protocol::MessageText = "hello".to_owned().try_into()?;
-    let make_request = |mode| DeliveryRequest {
-        target: target.clone(),
-        message: MessageContent::Router {
-            text: message_text.clone(),
-        },
-        header_context: collaboration_protocol::MessageHeaderContext::default(),
-        mode,
-        load_policy: collaboration_service::LoadPolicy::MayLoad,
-        precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::generate(),
-        attempt: agent_automation::AttemptId::generate(),
-    };
+    let make_request = |mode| prepared_request(target.clone(), "hello", mode);
     let steer = route
-        .deliver(make_request(MessageDelivery::Steer), evidence.as_ref())
+        .deliver(make_request(MessageDelivery::Steer)?, evidence.as_ref())
         .await?;
     if !matches!(steer.outcome, DeliveryOutcome::NotSubmitted { .. })
         || !holder.contains("empty-thread")
@@ -1108,19 +1100,34 @@ async fn exercise_held_empty_thread(
         return Err("steer consumed the unmaterialized binding".into());
     }
     let queued = route
-        .deliver(make_request(MessageDelivery::Queue), evidence.as_ref())
+        .deliver(make_request(MessageDelivery::Queue)?, evidence.as_ref())
         .await?;
     if !matches!(queued.outcome, DeliveryOutcome::Queued) || !holder.contains("empty-thread") {
         return Err("queue did not use and retain the held native connection".into());
     }
     let routed: Arc<dyn SessionDeliveryRoute> = route;
-    let delivery: Arc<dyn collaboration_service::SessionMessageDelivery> =
-        Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
-            routed,
-        ]));
+    let delivery_router = Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
+        routed,
+    ]));
+    let delivery: Arc<dyn collaboration_service::SessionMessageDelivery> = delivery_router.clone();
+    let presence: Arc<dyn collaboration_service::TargetPresenceProbe> = delivery_router;
     let automation_store = Arc::new(tokio::sync::Mutex::new(
         automation_storage::AutomationStore::open(&root.join("automation.sqlite")).await?,
     ));
+    let subscription_delivery = collaboration_service::SubscriptionDeliveryService::new(
+        collaboration_service::SubscriptionDeliveryServiceProps {
+            board_availability: collaboration_service::BoardAvailability::Unavailable,
+            push_store: Arc::clone(&automation_store),
+            delivery: Arc::clone(&delivery),
+            presence: Arc::clone(&presence),
+            machine_identity: collaboration_service::MachineIdentity::new(
+                service_id.clone(),
+                Some("held-thread-route-test"),
+            )?,
+            clock: Arc::new(collaboration_service::SystemSubscriptionClock),
+        },
+    );
+    subscription_delivery.start().await?;
     let identity = collaboration_service::ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000001",
@@ -1130,7 +1137,8 @@ async fn exercise_held_empty_thread(
     .with_automation_store(Arc::clone(&automation_store))
     .with_endpoints(vec![description])
     .map_err(std::io::Error::other)?
-    .with_session_delivery(delivery);
+    .with_session_delivery(delivery)
+    .with_subscription_delivery_service(subscription_delivery.clone(), presence);
     let (control_socket, control_server) = tokio::net::UnixStream::pair()?;
     let control_task = tokio::spawn(collaboration_service::serve_control_connection(
         control_server,
@@ -1160,6 +1168,8 @@ async fn exercise_held_empty_thread(
     }
     control.close().await?;
     control_task.await??;
+    subscription_delivery.shutdown().await;
+    drop(subscription_delivery);
     backend.await??;
     let automation_store = Arc::try_unwrap(automation_store)
         .map_err(|_| std::io::Error::other("service retained automation store"))?

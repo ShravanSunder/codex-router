@@ -9,7 +9,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, ServiceIdentity,
+    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, ServiceIdentity,
     SessionMessageDelivery, serve_control_connection,
 };
 use serde_json::{Value, json};
@@ -30,8 +30,7 @@ use tokio::{
 const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 struct RecordingDelivery {
-    requests: Mutex<Vec<DeliveryRequest>>,
-    prepared_requests: Mutex<Vec<collaboration_service::layer_zero::DeliveryRequest>>,
+    requests: Mutex<Vec<collaboration_service::layer_zero::DeliveryRequest>>,
     store: Arc<TokioMutex<AutomationStore>>,
     stored_before_delivery: AtomicBool,
     planned_outcome: Mutex<Option<DeliveryOutcome>>,
@@ -41,7 +40,6 @@ impl RecordingDelivery {
     fn new(store: Arc<TokioMutex<AutomationStore>>) -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
-            prepared_requests: Mutex::new(Vec::new()),
             store,
             stored_before_delivery: AtomicBool::new(false),
             planned_outcome: Mutex::new(None),
@@ -55,44 +53,6 @@ impl RecordingDelivery {
 
 impl SessionMessageDelivery for RecordingDelivery {
     fn deliver<'a>(
-        &'a self,
-        request: DeliveryRequest,
-        _: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move {
-            if let MessageContent::Router { text } = &request.message
-                && let Some(link_text) = text
-                    .as_str()
-                    .split_whitespace()
-                    .find(|part| part.starts_with("router://"))
-                && let Ok(link) = collaboration_protocol::RouterLink::parse(link_text)
-            {
-                let record = self
-                    .store
-                    .lock()
-                    .await
-                    .get_push_record(link.push_id())
-                    .await
-                    .map_err(|_| DeliveryContractError::ClientOperation)?;
-                if record
-                    .is_some_and(|record| record.delivery_state == PushDeliveryState::Attempted)
-                {
-                    self.stored_before_delivery.store(true, Ordering::SeqCst);
-                }
-            }
-            self.requests
-                .lock()
-                .map_err(|_| DeliveryContractError::ClientOperation)?
-                .push(request);
-            Ok(DeliveryReceipt {
-                outcome: DeliveryOutcome::PeerMessageWritten,
-                reachability: Some(collaboration_protocol::SessionReachability::ClaudeCodePeer),
-                client: Some(DeliveryClientReceipt::ClaudeCodePeer),
-            })
-        })
-    }
-
-    fn deliver_prepared<'a>(
         &'a self,
         request: collaboration_service::layer_zero::DeliveryRequest,
         _: &'a dyn AttemptEvidenceSink,
@@ -108,7 +68,7 @@ impl SessionMessageDelivery for RecordingDelivery {
             if record.is_some_and(|record| record.delivery_state == PushDeliveryState::Attempted) {
                 self.stored_before_delivery.store(true, Ordering::SeqCst);
             }
-            self.prepared_requests
+            self.requests
                 .lock()
                 .map_err(|_| DeliveryContractError::ClientOperation)?
                 .push(request);
@@ -344,7 +304,7 @@ async fn message_send_persists_before_delivery_and_submits_one_linked_line() {
 
     {
         let requests = delivery
-            .prepared_requests
+            .requests
             .lock()
             .expect("prepared delivery requests");
         assert_eq!(requests.len(), 1);
@@ -366,14 +326,6 @@ async fn message_send_persists_before_delivery_and_submits_one_linked_line() {
         assert!(!text.as_str().contains("Agent communication"));
         assert!(!text.as_str().contains("Self-declared sender:"));
     }
-    assert!(
-        delivery
-            .requests
-            .lock()
-            .expect("legacy delivery requests")
-            .is_empty(),
-        "stored DM should use the prepared-push route"
-    );
     control.close().await;
 }
 
@@ -599,7 +551,7 @@ async fn unverified_owner_message_is_compact_and_has_no_owner_show_bypass() {
     assert_eq!(result["receipt"]["outcome"]["kind"], "peerMessageWritten");
     {
         let requests = delivery
-            .prepared_requests
+            .requests
             .lock()
             .expect("prepared delivery requests");
         let delivered = &requests[0];
@@ -620,14 +572,6 @@ async fn unverified_owner_message_is_compact_and_has_no_owner_show_bypass() {
         );
         assert!(!text.as_str().contains("Self-declared sender:"));
     }
-    assert!(
-        delivery
-            .requests
-            .lock()
-            .expect("legacy delivery requests")
-            .is_empty(),
-        "owner push should use the prepared-push route"
-    );
 
     let denied = control
         .call(
@@ -797,7 +741,7 @@ async fn reply_uses_the_selected_message_id_after_a_later_dm_arrives() {
     assert_eq!(stored_reply.origin, PushOrigin::Session(target));
     {
         let requests = delivery
-            .prepared_requests
+            .requests
             .lock()
             .expect("prepared delivery requests");
         assert_eq!(requests.len(), 3);
@@ -806,14 +750,6 @@ async fn reply_uses_the_selected_message_id_after_a_later_dm_arrives() {
         let text = &requests[2].payload.line;
         assert!(text.as_str().contains("reply to first"));
     }
-    assert!(
-        delivery
-            .requests
-            .lock()
-            .expect("legacy delivery requests")
-            .is_empty(),
-        "reply push should use the prepared-push route"
-    );
     control.close().await;
 }
 

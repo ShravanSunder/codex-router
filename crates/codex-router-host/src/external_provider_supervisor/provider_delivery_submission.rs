@@ -14,61 +14,6 @@ pub(crate) enum ProviderPromptDispatch {
 }
 
 impl ExternalProviderSupervisor {
-    #[cfg(test)]
-    pub(crate) async fn submit_delivery_prompt(
-        &self,
-        request: ConversationPromptRequest,
-    ) -> Result<ProviderPromptDispatch, Box<ConversationOperationFailure>> {
-        let header_context = collaboration_protocol::MessageHeaderContext::default();
-        self.submit_delivery_prompt_with_header_context(request, &header_context)
-            .await
-    }
-
-    pub(crate) async fn submit_delivery_prompt_with_header_context(
-        &self,
-        request: ConversationPromptRequest,
-        header_context: &collaboration_protocol::MessageHeaderContext,
-    ) -> Result<ProviderPromptDispatch, Box<ConversationOperationFailure>> {
-        let operation_id = request.operation_id.clone();
-        let target = request.target.clone();
-        let rendered = collaboration_protocol::render_message_with_context(
-            &target,
-            &request.prompt,
-            header_context,
-        )
-        .map_err(|_| {
-            Box::new(failure(
-                ConversationOperationFailureKind::InvalidRequest,
-                ConversationOperationFailureStage::Validation,
-                ProviderOperationEffect::None,
-                "provider delivery prompt could not be rendered",
-                operation_id.clone(),
-                Some(target.clone()),
-            ))
-        })?;
-        let content = session_event_model::PromptContent::text(rendered.text).map_err(|_| {
-            Box::new(failure(
-                ConversationOperationFailureKind::InvalidRequest,
-                ConversationOperationFailureStage::Validation,
-                ProviderOperationEffect::None,
-                "provider delivery prompt text is invalid",
-                operation_id.clone(),
-                Some(target.clone()),
-            ))
-        })?;
-        self.submit_delivery_prompt_contents(ProviderPromptContentsRequest {
-            operation_id: request.operation_id,
-            input_id: request
-                .input_id
-                .unwrap_or_else(session_event_model::InputId::generate),
-            target: request.target,
-            requested_by: request.requested_by,
-            approver: request.approver,
-            contents: vec![content],
-        })
-        .await
-    }
-
     /// Submits caller-projected content blocks without passing through message rendering.
     pub(crate) async fn submit_delivery_prompt_contents(
         &self,

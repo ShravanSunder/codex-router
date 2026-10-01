@@ -2,9 +2,8 @@
 mod scripted_delivery;
 use super::super::*;
 use crate::{
-    AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryRequest, SessionMessageDelivery, TargetPresence,
-    TargetPresenceProbe,
+    AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
+    SessionMessageDelivery, TargetPresence, TargetPresenceProbe,
 };
 use chrono::{DateTime, Utc};
 use collaboration_protocol::{DeliveryOutcome, DeliveryReceipt, SessionRef};

@@ -9,9 +9,9 @@ use agent_automation::{AttemptId, RouteEffectEvidence};
 use automation_storage::AutomationStore;
 use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, DeliveryReceipt, MachineId,
-    MessageContent, MessageDelivery, MessageText, PushActivityRange, PushActivitySnapshot,
-    PushHeaderFacts, PushId, PushKind, PushLineInput, PushOrigin, PushRecordDraft, RouterLink,
-    RouterOriginRef, SessionReachability, SessionRef, render_push_line,
+    MessageDelivery, MessageText, PushActivityRange, PushActivitySnapshot, PushHeaderFacts, PushId,
+    PushKind, PushLineInput, PushOrigin, PushRecordDraft, RouterLink, RouterOriginRef,
+    SessionReachability, SessionRef, render_push_line,
 };
 use message_board::{
     BoardError, Identity, SubscriptionBatch, SubscriptionGeneration, SubscriptionScope,
@@ -238,7 +238,7 @@ impl SubscriptionPushStore {
         let sink = CapturedAttemptEvidence::default();
         let mut receipt = tokio::select! {
             () = self.shutdown.cancelled() => return Err(BoardError::board_unavailable()),
-            receipt = self.delivery.deliver_prepared(request, &sink) => receipt.unwrap_or_else(|_| unknown_receipt()),
+            receipt = self.delivery.deliver(request, &sink) => receipt.unwrap_or_else(|_| unknown_receipt()),
         };
         if prepared.load_policy == LoadPolicy::LoadedOnly
             && receipt.reachability == Some(SessionReachability::ProviderAcp)
@@ -262,10 +262,7 @@ impl SubscriptionPushStore {
         };
         let context = AttemptReconciliationContext {
             target: target.clone(),
-            message: MessageContent::Router {
-                text: prepared.line.clone(),
-            },
-            prepared_push_id: Some(prepared.push_id.clone()),
+            prepared_push_id: prepared.push_id.clone(),
             mode: MessageDelivery::Auto,
             recorded,
         };
