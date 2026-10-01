@@ -4,8 +4,8 @@ use automation_storage::{AutomationStore, PushDeliveryState};
 use collaboration_protocol::{
     DeliveryClientReceipt, DeliveryOutcome, DeliveryReceipt, EndpointId, EndpointRef,
     MessageContent, MessageDelivery, PushActivityRange, PushActivitySnapshot, PushHeaderFacts,
-    PushId, PushKind, PushOrigin, PushRecordDraft, SessionId, SessionMessageSendParams, SessionRef,
-    UuidIdentity,
+    PushId, PushKind, PushOrigin, PushRecordDraft, RouterOriginRef, SessionId,
+    SessionMessageSendParams, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
@@ -552,7 +552,14 @@ async fn reply_rejects_missing_reference_and_non_dm_records() {
         push_id: PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("push id"),
         kind: PushKind::SubscriptionActivity,
         origin: PushOrigin::Router(PushKind::SubscriptionActivity),
-        origin_router_ref: Some("test-batch".to_owned()),
+        origin_router_ref: Some(
+            RouterOriginRef::SubscriptionActivity {
+                target: target.clone(),
+                batch_id: message_board::BatchId::generate(),
+            }
+            .canonical_string()
+            .expect("canonical subscription batch origin"),
+        ),
         target: target.clone(),
         reply_to_push_id: None,
         header_facts: PushHeaderFacts::SubscriptionActivity {
