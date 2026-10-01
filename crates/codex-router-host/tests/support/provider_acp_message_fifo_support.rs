@@ -150,8 +150,7 @@ request=json.loads(sys.stdin.readline())
 assert request['method']=='session/prompt'
 assert len(request['params']['prompt'])==1, request['params']['prompt']
 assert request['params']['prompt'][0]['type']=='text'
-assert request['params']['prompt'][0]['text'].startswith('▶️ cursor-local/fixture- ← 🔔 Router notice\nRouter delivery\nIntended recipient: ')
-assert request['params']['prompt'][0]['text'].endswith('\n\nfirst')
+assert request['params']['prompt'][0]['text']=='first', request['params']['prompt']
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({:?})
  event.sendall(b'first')
